@@ -64,7 +64,9 @@ export class BasicMemory implements MemoryPlugin {
       role: String(f.role ?? f.slot ?? "raw.text"),
       filler: String(f.filler ?? f.value ?? ""),
       space_id: opts.spaceId,
-      key: opts.key,
+      // A per-fact key versions its own (entity, role) slot; fall back to the
+      // step-level key. This keeps a multi-fact absorb from superseding itself.
+      key: (f.key as string | undefined) ?? opts.key,
       is_current: true,
       speaker: opts.speaker,
       tick,
@@ -109,10 +111,19 @@ export class BasicMemory implements MemoryPlugin {
     this.store.cache.put(key, output, opts);
   }
 
-  cascade(): { short: number; mid: number; long: number } {
-    // Basic tier: report the recorded turn count as the "short" tier; no
-    // model summaries (mid) and no lattice absorb (long) without the premium
-    // consolidation engine.
-    return { short: this.store.turns().length, mid: 0, long: 0 };
+  /**
+   * Short → mid → long consolidation (§7.18), deterministic over recorded turns.
+   * The `span` most-recent turns are the hot **short** tier; older turns
+   * consolidate into the **mid** tier by de-duplication (distinct summaries); the
+   * duplicates that collapse away are the **long**-tier absorb count. A model
+   * summarizer is the premium swap-in; this keeps it pure and replay-safe.
+   */
+  cascade(span = 8): { short: number; mid: number; long: number } {
+    const turns = this.store.turns();
+    const window = Math.max(0, span);
+    const short = Math.min(turns.length, window);
+    const older = turns.slice(0, Math.max(0, turns.length - window));
+    const distinctOlder = new Set(older).size;
+    return { short, mid: distinctOlder, long: older.length - distinctOlder };
   }
 }

@@ -24,8 +24,13 @@ export const writeHandler: StepHandler = {
     let facts: Array<Record<string, unknown>>;
     if (Array.isArray(input.facts)) {
       facts = input.facts as Array<Record<string, unknown>>;
+    } else if (input.text !== undefined && cfg.mode === "absorb") {
+      // Deterministic NL enricher (§7.4 absorb): extract structured (entity, role,
+      // filler) triples from free text; fall back to a raw.text slot if nothing
+      // matches. A model enricher is the premium swap-in.
+      facts = absorbText(String(input.text), cfg.key);
     } else if (input.text !== undefined) {
-      // Basic tier has no NL enricher: store the raw text under the key's entity.
+      // raw mode: store the text verbatim under the key's entity.
       facts = [{ entity: cfg.key ?? "unknown", role: "raw.text", filler: String(input.text) }];
     } else {
       facts = [];
@@ -44,6 +49,35 @@ export const writeHandler: StepHandler = {
     };
   },
 };
+
+/**
+ * Deterministic NL → (entity, role, filler) extractor for `write` absorb mode.
+ * Pure pattern matching over sentences — no model — so absorbed facts are
+ * replay-safe. Recognized shapes: `X's R is Z`, `X lives in Y`, `X has Y`,
+ * `X is Y`. Unmatched text falls back to a single `raw.text` slot.
+ */
+function absorbText(text: string, key?: string): Array<Record<string, unknown>> {
+  const facts: Array<Record<string, unknown>> = [];
+  for (const raw of text.split(/[.;\n]+/)) {
+    const s = raw.trim();
+    if (!s) continue;
+    let m: RegExpExecArray | null;
+    const add = (entity: string, role: string, filler: string) =>
+      // A distinct per-slot key so multiple absorbed facts never supersede one another.
+      facts.push({ entity, role, filler, key: `${entity.toLowerCase()}:${role.toLowerCase()}` });
+    if ((m = /^(.+?)'s ([\w. ]+?) (?:is|are|was|were) (.+)$/i.exec(s))) {
+      add(m[1].trim(), m[2].trim(), m[3].trim());
+    } else if ((m = /^(.+?) (?:lives?|lived|resides?) in (.+)$/i.exec(s))) {
+      add(m[1].trim(), "rel.city", m[2].trim());
+    } else if ((m = /^(.+?) has (?:an? |the )?(.+)$/i.exec(s))) {
+      add(m[1].trim(), "rel.has", m[2].trim());
+    } else if ((m = /^(.+?) (?:is|are|was|were) (?:an? |the )?(.+)$/i.exec(s))) {
+      add(m[1].trim(), "attr.is", m[2].trim());
+    }
+  }
+  if (facts.length === 0) facts.push({ entity: key ?? "unknown", role: "raw.text", filler: text });
+  return facts;
+}
 
 export const retrieveSqlHandler: StepHandler = {
   type: "retrieve.sql",
@@ -165,9 +199,9 @@ export const hdcMapHandler: StepHandler = {
 export const cascadeHandler: StepHandler = {
   type: "cascade",
   async execute({ step, plugins }: HandlerArgs): Promise<StepResult> {
-    const _cfg = (step.config ?? {}) as CascadeConfig;
-    const counts = plugins.memory.cascade();
-    const frames: Frame[] = [{ type: "done", data: counts }];
+    const cfg = (step.config ?? {}) as CascadeConfig;
+    const counts = plugins.memory.cascade(cfg.span);
+    const frames: Frame[] = [{ type: "delta", data: counts }, { type: "done", data: counts }];
     return { output: { consolidated: counts }, frames, status: "ok" };
   },
 };

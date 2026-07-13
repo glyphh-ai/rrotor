@@ -93,8 +93,8 @@ export interface MemoryPlugin extends Capability {
   cacheGet(key: string, tick: number): Row | undefined;
   cachePut(key: string, output: Row, opts: { ttlTicks?: number; scope?: string }): void;
 
-  /** short → mid → long consolidation (§7.18). Basic: counts, no summaries. */
-  cascade(): { short: number; mid: number; long: number };
+  /** short → mid → long consolidation (§7.18) over the `span`-recent window. */
+  cascade(span?: number): { short: number; mid: number; long: number };
 }
 
 // ── §3.3 models / inference lanes ───────────────────────────────────────────

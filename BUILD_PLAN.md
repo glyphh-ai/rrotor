@@ -45,7 +45,7 @@ not "done" until its acceptance tests are green in CI.
 | 7 | wait/interrupt resume + approval | ✅ | L2 |
 | 8 | Run-pinning / patch gates / replay divergence | ✅ | L3 |
 | 9 | Gateway translation + prompt cache + model frontier/micro-rotor | ✅ | L3 |
-| 10 | Secondary handler completeness | ⬜ | L3 |
+| 10 | Secondary handler completeness | ✅ | L3 |
 | 11 | Pooling (hot/warm/cold) + affinity | ⬜ | L3 |
 
 Legend: ⬜ not started · 🟡 in progress · ✅ done
@@ -521,21 +521,41 @@ frontier lane (`ROTOR_FRONTIER_URL`), `PromptCacheResult` interface. Tests:
 
 ---
 
-## Phase 10 — Secondary handler completeness  ⬜
+## Phase 10 — Secondary handler completeness  ✅
 
 **Why:** gap #11 — remaining partial handlers: `retrieve.kb` graph/neighbors (done
-in P6 if reached), `cascade` consolidation, `write` NL absorb enricher, `plan`
-typed-enum decode, and most `tool.app`/substrate tools.
+in P6), `cascade` consolidation, `write` NL absorb enricher, `plan` typed-enum
+decode, and most `tool.app`/substrate tools.
 
 ### Tasks
-- [ ] `cascade` short→mid→long consolidation with summaries/absorb.
-- [ ] `write` `mode: absorb` NL enricher (beyond single `raw.text` slot).
-- [ ] `plan` typed-enum constrained decode.
-- [ ] Flesh out substrate + `tool.app` methods (currently ~6 seeded, app methods
-      no-op).
+- [x] `cascade` short→mid→long consolidation (`memory.cascade(span)`): the
+      `span`-recent turns are the hot **short** tier, older turns consolidate into
+      the **mid** tier by de-duplication, the collapsed duplicates are the
+      **long**-tier absorb count. Deterministic (pure over turns).
+- [x] `write mode: absorb` NL enricher: a deterministic pattern extractor
+      (`X lives in Y`, `X's R is Z`, `X has Y`, `X is Y`) → distinct
+      `(entity, role, filler)` facts, each with a per-slot supersession key; falls
+      back to `raw.text`. Fixed `memory.write` to honor a per-fact key so a
+      multi-fact absorb doesn't supersede itself.
+- [x] `plan` typed-enum decode: `models.classify` upgraded to **embedding
+      nearest-prototype** (was lexical overlap) — pick the closest in-schema op by
+      cosine, `OUT_OF_SCHEMA` below the confidence floor; `on_out_of_schema: refuse`
+      honored.
+- [x] Fleshed out the tool substrate: deterministic `compute` (a closed
+      `+ - * / ( )` arithmetic evaluator, no `eval`) and `concat`; `tool.app`
+      methods are now **loopback** (`applied: true`, §7.16 — never dialing out).
 
 ### Acceptance
-- [ ] Per-handler unit tests; conformance fixtures for each step type pass.
+- [x] `test/integration/handlers.test.ts`: absorb extracts 3 distinct facts (and
+      raw.text fallback); cascade tiers `{short, mid, long}`; `plan`/`classify`
+      picks the nearest op and returns `OUT_OF_SCHEMA` on an empty set; `compute`
+      evaluates with precedence + parens; app methods are loopback; unknown tool →
+      typed `E_NO_TOOL`. All reference-rotor conformance still green.
+
+**Landed:** `handlers/memory.ts` (`absorbText`, cascade span), `plugins/memory.ts`
+(`cascade(span)`, per-fact key), `plugins/models.ts` (embedding `classify`),
+`plugins/connections.ts` (`compute`/`concat`, loopback app methods). Test:
+`handlers`. **150 tests green**, coverage floor raised to ~79%.
 
 ---
 
