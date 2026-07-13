@@ -10,32 +10,47 @@ see [deploy.md](deploy.md). For *what a runtime is*, see [runtime.md](runtime.md
 
 ---
 
-## 1. The deployable unit is a spec, not a service
+## 1. The hostable unit is a session, not a service
 
-The mental model is **Claude Code**, inverted onto infrastructure.
+The mental model is **this very session** — a remote developer session, à la Claude
+Code on the web.
 
-With Claude Code you hand an agent three things — a **git repo**, the **loop it
-should run**, and the **models** it may call — and it executes against your code in
-your environment. OpenRotor is the same shape, except the "environment" is itself a
-**declared, deployable spec**:
+Here, a developer picked a **git repo**; a remote environment spun up loaded with
+that repo and an agent runtime; and the developer now interacts with a **tool loop**
+running against the code, under a **model** and a **permission mode**. OpenRotor is
+exactly that shape, generalized:
 
-| Claude Code gives the agent… | OpenRotor deploys… |
+- A developer opens a **remote session** and picks a **git repo** — same concept as
+  handing this session a repo.
+- The environment spins up loaded with that repo **and the OpenRotor runtime**.
+- Inside the session, the user's **rotors, models, and permissions are selectable
+  options** — the way this session has a loop, a model, and a permission mode.
+- **The tool loop that drives the session *is* a rotor.** Swap the rotor and you
+  change how the loop behaves.
+
+| This Claude Code session | An OpenRotor session |
 | --- | --- |
-| a git repo | the **git repo** the rotor and its runtime config live in |
-| a loop / task | the **rotor** — a versioned RotorSpec document (yours) |
-| a set of models | the **model(s)** bound behind `ROTOR_LOCAL_MODEL_URL` |
+| the git repo you gave me | the **git repo** the developer picks |
+| my agent / tool loop | the **rotor** — the session's loop, swappable |
+| my model | the **model(s)** the session may call |
+| my permission mode | the **permissions / grants** the session runs under |
 
-That is the whole product surface: **pick a repo, pick a rotor, pick the models.**
-The unit you deploy is not a bespoke server — it is the RotorSpec document plus the
-runtime that interprets it. This is why the runtime is stateless and the spec is
-typed: the spec *is* the deployable, and the type definition is what makes it
-portable across the vendors below without rewriting anything.
+So the unit you host is an **ephemeral session environment**, not a standing
+microservice. A rotor is not a thing you deploy once and leave running — it is the
+**control loop of an interactive agentic session**, chosen (and swappable) *within*
+the session. Because the loop is itself a selectable, typed artifact, one session
+environment supports **complex and diverse interactive workflows**: a different rotor
+is a different loop is a different agent behavior, all over the same repo. That is
+why the runtime is stateless and the rotor is a typed spec — the loop has to be
+portable across the vendors below and interchangeable mid-session.
 
 > **Open-source stance: OpenRotor hosts nothing for anyone.** This repo is the
-> runtime and the spec. What we ship is a runtime that is *trivial to push* to Fly
-> or any other vendor — a Dockerfile, a Kustomize set, and the env contract in §6.
-> The developer owns the account, the bill, and the box. The managed, curated
-> version is glyphh's (§8), and it is a separate offering, not this repo.
+> runtime and the spec. What we ship is a runtime that is *trivial to spin up* as a
+> session environment on Fly or any other vendor — a Dockerfile, a Kustomize set,
+> and the env contract in §6. Self-hosted, the developer picks their own repo,
+> rotors, models, and permissions, **unbounded**, and owns the box and the bill. The
+> managed, curated version — where glyphh runs the sessions and curates the options —
+> is a separate offering (§8), not this repo.
 
 ---
 
@@ -59,17 +74,22 @@ the cheap stateless plane and the expensive GPU plane on the terms that suit eac
 
 ## 3. Primary target: Fly.io
 
-Fly is the recommended first target for the rotor runtime, and the design already
-assumes it: the pool plugin (`runtime.md §3.7`, `§5.3`) names **"Fly Machine
-suspend/resume"** as its mechanism. Three properties line up exactly:
+Fly is the recommended first target, and it is the same infrastructure pattern that
+backs remote developer sessions like Claude Code on the web: **an ephemeral,
+repo-cloned microVM per session.** The design already assumes it — the pool plugin
+(`runtime.md §3.7`, `§5.3`) names **"Fly Machine suspend/resume"** as its mechanism.
+Three properties line up exactly with the session model in §1:
 
-- **Machines are fast-booting Firecracker microVMs.** Start one per session,
-  **suspend when idle, resume on demand** — a direct fit for `spec.pool`
-  (`minHot` / `maxHot` / `coldStart.budget_ms`) and scale-to-zero economics.
-- **microVM isolation per session** — the right boundary when the runtime is
-  loading a *user's* git repo and a *user's* model (untrusted code + weights).
-- **GPU Machines exist** (A10 / L40S / A100), so the model lane (§5) can run on the
-  same platform when you want it there.
+- **A Machine is the session environment.** Fast-booting Firecracker microVMs:
+  spin one up when a developer opens a session, clone their repo into it, load the
+  runtime, **suspend it when the session goes idle, resume on the next turn** — a
+  direct fit for `spec.pool` (`minHot` / `maxHot` / `coldStart.budget_ms`) and
+  scale-to-zero economics. One Machine, one session.
+- **microVM isolation per session** — the right boundary when the environment is
+  loaded with a *user's* git repo and calling a *user's* model (untrusted code +
+  weights), just as remote dev sessions isolate each developer's container.
+- **GPU Machines exist** (A10 / L40S / A100), so the model lane the session calls
+  (§5) can run on the same platform when you want it there.
 
 ### 3.1 Push it
 
@@ -196,22 +216,26 @@ The jump between them is **config only** — the runtime was stateless the whole
 - **Self-hosting the open runtime for yourself?** → **Fly** (start), graduate to
   **GKE/EKS** at scale. Point the model URL at a **serverless-GPU** endpoint.
 - **Just want it running to try?** → **Railway / Render**, or `docker compose up`.
-- **Want someone to host it, curated and bounded?** → that's **glyphh** (§8).
+- **Want someone to run your sessions, curated and bounded?** → that's **glyphh** (§8).
 
 ---
 
 ## 8. glyphh managed: the same three choices, bounded
 
-When we productionize this runtime as **glyphh**, the hosting is ours and the model
-set is **curated, not unbound.** The user still makes the same three choices from §1 —
+When we productionize this runtime as **glyphh**, the sessions are ours to run and
+the options are **curated, not unbounded.** A developer still opens a session and
+makes the same picks from §1 —
 
 - **their git repo,**
 - **their rotor,**
-- **their model(s)** —
+- **their model(s),**
+- **their permissions / grants** —
 
-but the third is chosen from a **curated, supported list**, not an arbitrary URL. We
-restrict and govern which models run, on which lanes, at which cost. This is the
-premium side of the plugin seams the open runtime leaves open:
+but the rotors and models are chosen from a **curated, supported list**, not an
+arbitrary artifact or URL. We restrict and govern which loops run, which models they
+call, on which lanes, at which cost. Same session shape as the open runtime; bounded
+options and a managed pool behind it. This is the premium side of the plugin seams
+the open runtime leaves open:
 
 | Concern | Open runtime (this repo) | glyphh managed |
 | --- | --- | --- |
@@ -223,6 +247,6 @@ premium side of the plugin seams the open runtime leaves open:
 
 Nothing about the **document** changes across that line — the same `.rotor` runs on
 both, and capability negotiation ([runtime.md §3.8](runtime.md)) reconciles the
-difference. Self-hosted, you get the full unbounded runtime and own the box.
-Managed, glyphh curates the models and runs the pool — you keep the three choices,
-we keep them safe and bounded.
+difference. Self-hosted, you spin up your own sessions, unbounded, and own the box.
+Managed, glyphh runs the sessions and curates the rotors and models — you keep the
+picks, we keep them safe and bounded.
