@@ -96,6 +96,36 @@ route the governance layer's `spec.access` redaction through the same point.)
 | **File** | `ROTOR_DRAIN_FILE` | append NDJSON (sidecar tailing) |
 | **None** | neither set | `NoopDrain` — a ready seam that forwards nowhere |
 
+## 3a. Trace context & OpenTelemetry
+
+Every drain envelope carries **W3C Trace Context** (`trace_id`, `span_id`,
+`traceparent`), and each `RunResult` carries its `trace_id`. The run is the trace;
+each `(step_id, attempt)` is a span. Source: `src/obs/trace.ts`.
+
+**These ids are derived from the run identity via sha256, not generated.** That is
+deliberate and buys two things at once:
+
+- **Determinism-safe.** No RNG, no wall-clock — so turning tracing on cannot perturb
+  replay. The ids live only on logs/drain/OTLP, never in the tape or a control
+  decision.
+- **Replay-stable correlation.** A replayed run reproduces the *same* `trace_id` and
+  per-step `span_id`s, so a support engineer can line a replay up against the
+  original trace span for span.
+
+**OpenTelemetry export.** `src/obs/otel.ts` → `toOtlpSpan(envelope)` maps a drain
+envelope to an **OTLP/JSON span** using OTel semantic conventions (`service.name`,
+`error.type`, `enduser.id`) plus a `rotor.*` namespace (`rotor.run_id`,
+`rotor.step_id`, `rotor.status`, `rotor.usage.*`, `rotor.error.category`). Run status
+maps to OTel span status (`ok`→OK, `failed`→ERROR with the taxonomy code as
+`error.type`; `refused`/`escalated`/`interrupted`→UNSET, since those are control
+outcomes, not errors). This is the **dependency-light** default — any OTLP collector
+(Jaeger, Tempo, Honeycomb, Datadog, …) ingests it with no `@opentelemetry/*` SDK in
+the runtime. A deployment that wants the full SDK drops an exporter behind the drain
+seam.
+
+To trace a run: grab the `trace_id` from the `RunResult` (or the `code` + `trace_id`
+from a failing step's drain event / log line), then pivot in your OTLP backend.
+
 ## 4. Configuration
 
 Non-secret settings live in `deploy/k8s/configmap.yaml`; the drain **token** lives

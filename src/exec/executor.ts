@@ -61,6 +61,7 @@ import {
 } from "../handlers/index.js";
 import { AttentionMeter, type BudgetOutcome } from "./budget.js";
 import { RotorError } from "../errors.js";
+import { traceId } from "../obs/trace.js";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Public surface.
@@ -92,6 +93,10 @@ export interface ExecuteOptions {
 
 export interface RunResult {
   run_id: string;
+  /** The run's W3C trace id (src/obs/trace.ts) — the single correlation handle a
+   *  user or dev-ops agent grabs to trace the run across logs/drain/OTLP. Derived
+   *  from `run_id`, so it is deterministic and stable across replay. */
+  trace_id: string;
   status: StepStatus;
   /** The terminal reached: `end` | `__fail__` | `__budget__` | a terminal step id. */
   terminal: string;
@@ -298,6 +303,7 @@ class RunSession {
     const outputs = this.projectOutputs();
     return {
       run_id: this.runId,
+      trace_id: traceId(this.runId),
       status: runStatus,
       terminal,
       outputs,
@@ -586,6 +592,7 @@ class RunSession {
       // Unresolved reference is a hard failure, not a fake success (§7.19).
       return {
         run_id: `${this.runId}::${ref}`,
+        trace_id: traceId(`${this.runId}::${ref}`),
         status: "failed",
         terminal: "__fail__",
         outputs: {},
@@ -603,6 +610,7 @@ class RunSession {
     if (exceeded.length > 0) {
       return {
         run_id: `${this.runId}::${ref}`,
+        trace_id: traceId(`${this.runId}::${ref}`),
         status: "refused",
         terminal: "__attenuation__",
         outputs: { refused: "E_SCOPE_EXCEEDED", scopes: exceeded },

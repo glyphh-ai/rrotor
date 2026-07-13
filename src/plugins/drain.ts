@@ -25,6 +25,7 @@ import type { CapabilityStatus } from "../runtime/registry.js";
 import type { DrainEnvelope, DrainPlugin } from "./interfaces.js";
 import { loggerFromEnv, type Logger } from "../obs/logger.js";
 import { describe, RotorError } from "../errors.js";
+import { spanContext } from "../obs/trace.js";
 
 const ENVELOPE_TYPE = "com.openrotor.step.v0";
 const REDACTED = "[redacted]";
@@ -35,6 +36,7 @@ const REDACTED = "[redacted]";
  * all) by the sink, so the envelope content is reproducible.
  */
 export function toEnvelope(rec: StepRecord, redact?: ReadonlySet<string>): DrainEnvelope {
+  const ctx = spanContext(rec.run_id, rec.step_id, rec.attempt);
   const env: DrainEnvelope = {
     type: ENVELOPE_TYPE,
     run_id: rec.run_id,
@@ -42,6 +44,9 @@ export function toEnvelope(rec: StepRecord, redact?: ReadonlySet<string>): Drain
     attempt: rec.attempt,
     logical_tick: rec.logical_tick,
     status: rec.status,
+    trace_id: ctx.trace_id,
+    span_id: ctx.span_id,
+    traceparent: ctx.traceparent,
   };
   if (rec.space_id !== undefined) env.space_id = rec.space_id;
   if (rec.principal) {

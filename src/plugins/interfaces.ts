@@ -259,6 +259,11 @@ export interface DrainEnvelope {
   attempt: number;
   logical_tick: number;
   status: string;
+  /** W3C trace context (src/obs/trace.ts), derived from the run/step identity so it
+   *  is deterministic and replay-stable. Telemetry only — never in the tape. */
+  trace_id?: string;
+  span_id?: string;
+  traceparent?: string;
   space_id?: string;
   principal?: { id: string; kind: string; scopes?: string[] };
   agent?: { ref: string; run_id: string };

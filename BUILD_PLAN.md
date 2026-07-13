@@ -829,13 +829,30 @@ Deferred (not step-path failures): construction-time guards (`createStator`
 pgvector misuse) and the HTTP body-size limit stay plain — they surface to the
 operator directly, never through the run tape.
 
-### E3 — Observability / OpenTelemetry  ⏳
+### E3 — Observability / OpenTelemetry  ✅
 
-W3C trace context (`trace_id`/`span_id`) threaded as telemetry (never in the tape),
-per-step spans, OTel-semantic-convention structured logs, OTLP-shaped drain.
-Decision: dependency-light OTLP-compatible core + an **optional** `@opentelemetry/*`
-exporter behind the drain seam (so OTel and other tools consume natively without
-bloating the runtime hot path).
+W3C trace context + OTLP export, dependency-light. The elegant part: trace/span ids
+are **derived from the run identity via sha256**, so tracing is deterministic and
+**replay-stable** (a replay reproduces the same trace) while remaining strictly
+telemetry — never in the tape or a control decision.
+
+- [x] `src/obs/trace.ts` — `traceId(runId)` (32 hex), `spanId(runId, stepId,
+      attempt)` (16 hex), `traceparent`, `spanContext`. The run is the trace; each
+      `(step_id, attempt)` is a span.
+- [x] `DrainEnvelope` gains `trace_id`/`span_id`/`traceparent` (populated in
+      `toEnvelope`); `RunResult` gains `trace_id` — the single correlation handle a
+      user/agent grabs.
+- [x] `src/obs/otel.ts` — `toOtlpSpan(envelope)`: OTLP/JSON spans with OTel semantic
+      conventions (`service.name`, `error.type`, `enduser.id`) + a `rotor.*`
+      namespace; run status → OTel span status (`failed`→ERROR carrying the taxonomy
+      code). Zero `@opentelemetry/*` dependency in the hot path; the SDK is an
+      optional exporter behind the drain seam.
+- [x] docs/observability.md §3a documents the trace model + OTLP export.
+
+**Acceptance (`test/unit/trace.test.ts`, 6 tests):** ids are well-formed + derived +
+replay-stable + distinct per run/step/attempt; one trace per run, one span per step;
+envelope carries the context; OTLP span shape + OK/ERROR status mapping with the
+taxonomy code as `error.type`. **210 total green.**
 
 ### E4 — Traceability & supportability  ⏳
 
