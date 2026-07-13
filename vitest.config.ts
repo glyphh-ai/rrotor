@@ -17,12 +17,12 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/banner.ts", "src/version.ts", "src/index.ts"],
       thresholds: {
-        // Ratcheting floor. Phase 7: measured ~79% lines / ~72% branches / ~85%
+        // Ratcheting floor. Phase 8: measured ~79% lines / ~72% branches / ~85%
         // funcs. Raise these as later phases add targeted tests.
-        lines: 76,
-        functions: 83,
-        branches: 70,
-        statements: 76,
+        lines: 77,
+        functions: 84,
+        branches: 71,
+        statements: 77,
       },
     },
   },

@@ -98,6 +98,10 @@ export interface RotorSpecBody {
   assurance?: AssuranceConfig;
   /** Document-level default cross-run result-cache policy (§5.7). */
   cache?: CacheConfig;
+  /** Prior `metadata.version`s this document is replay-compatible with (§16.3
+   *  patch gates). A run recorded on a listed version replays cleanly against this
+   *  edited document; an unlisted version fails with `E_REPLAY_DIVERGENCE`. */
+  patch?: string[];
   /** Warm-pool intent — runtime-optional (§17.3). */
   pool?: PoolConfig;
   /** Warm-instance routing preference (§17.4). */
@@ -767,6 +771,8 @@ export interface StepRecord {
   idempotency_key: string;
   /** The HDC space bound against (§15.4), where applicable. */
   space_id?: string;
+  /** The document version this record was produced under (§16.3 run-pinning). */
+  definitionVersion?: string;
   /** The authenticated caller (§11) — audit trail. */
   principal?: Principal;
   /** The rotor instance (§11) — attribution. */

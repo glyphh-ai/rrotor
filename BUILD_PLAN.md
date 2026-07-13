@@ -43,7 +43,7 @@ not "done" until its acceptance tests are green in CI.
 | 5 | Trust layer (access, identity attenuation, anomaly/firewall, merge) | ✅ | L2 |
 | 6 | HDC grounding law | ✅ | L2 (headline feature) |
 | 7 | wait/interrupt resume + approval | ✅ | L2 |
-| 8 | Run-pinning / patch gates / replay divergence | ⬜ | L3 |
+| 8 | Run-pinning / patch gates / replay divergence | ✅ | L3 |
 | 9 | Gateway translation + prompt cache + model frontier/micro-rotor | ⬜ | L3 |
 | 10 | Secondary handler completeness | ⬜ | L3 |
 | 11 | Pooling (hot/warm/cold) + affinity | ⬜ | L3 |
@@ -449,20 +449,32 @@ no-record-on-interrupt, `wait` routing in `select_next`), `control.ts` wait hand
 
 ---
 
-## Phase 8 — Run-pinning / patch gates / replay divergence  ⬜
+## Phase 8 — Run-pinning / patch gates / replay divergence  ✅
 
-**Why:** gap #9 (§16.3) — `definitionVersion` is recorded but there are no `patch`
+**Why:** gap #9 (§16.3) — `definitionVersion` was recorded but there were no `patch`
 markers and no failure on replay divergence, so portable/long-lived replay (L3)
-is unsafe.
+was unsafe.
 
 ### Tasks
-- [ ] `patch(marker)` support and version-pinned replay.
-- [ ] Detect and fail on replay divergence (recorded vs recomputed) with a typed
-      error.
+- [x] Run-pinning: every `StepRecord` now carries `definitionVersion`.
+- [x] Divergence detection on replay: the `idempotency_key` already encodes
+      `(definitionVersion, step_id, input, space_id)`, so a recomputed key that
+      differs from the record means the rotor was edited under the run → fail with
+      the typed `E_REPLAY_DIVERGENCE` (surfaced on `RunResult.error`).
+- [x] Patch gates (`spec.patch`, added to types + schema): a run recorded on a
+      version listed in `spec.patch` replays cleanly against the edited document;
+      an unlisted version fails — the Temporal patch model, so old and new
+      definitions coexist.
 
 ### Acceptance
-- [ ] Changing a rotor without a patch marker fails replay of an old run with the
-      divergence error; with a marker it replays cleanly.
+- [x] `test/integration/patch.test.ts`: replaying a `0.1.0` run against an edited
+      `0.2.0` document fails with `E_REPLAY_DIVERGENCE`; adding
+      `spec.patch: ["0.1.0"]` to the `0.2.0` document replays cleanly; same-version
+      replay is always clean; every record carries its `definitionVersion`.
+
+**Landed:** `StepRecord.definitionVersion` + `RunResult.error`, executor divergence
+check + `patchCompatible` (`spec.patch`), `types.ts` + `rotor.schema.json` (`spec.patch`).
+Test: `patch`. **130 tests green**, coverage floor raised to ~77%.
 
 ---
 

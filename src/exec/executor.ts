@@ -101,6 +101,8 @@ export interface RunResult {
   /** Set when the run paused at a `wait`/`approval` step (§7.14). Resume by
    *  re-executing with `ExecuteOptions.resume = { stepId, payload }`. */
   interrupt?: { stepId: string; awaiting?: unknown };
+  /** The typed error that drove the run to a `__fail__` terminal, if any. */
+  error?: { name: string; cause?: string };
 }
 
 const COMPOSITE: ReadonlySet<StepType> = new Set<StepType>(["loop", "parallel", "sub-rotor"]);
@@ -149,6 +151,7 @@ class RunSession {
   private budgetOutcome?: BudgetOutcome;
   private budgetHandled = false;
   private interrupt?: { stepId: string; awaiting?: unknown };
+  private lastError?: { name: string; cause?: string };
 
   constructor(
     private readonly doc: RotorDocument,
@@ -265,6 +268,7 @@ class RunSession {
 
       const { result, nextOverride } = await this.runStepById(cursor);
       this.lastStatus = result.status ?? "ok";
+      if (result.status === "failed" && result.error) this.lastError = result.error;
       this.attention.record(result.usage);
 
       if (result.status === "interrupted") {
@@ -290,12 +294,21 @@ class RunSession {
       history: this.plugins.memory.readEventHistory(this.runId),
       budget: this.budgetOutcome,
       interrupt: this.interrupt,
+      error: terminal === "__fail__" ? this.lastError : undefined,
     };
   }
 
   /** The first `escalate` step other than the current cursor, if any (§9.1). */
   private findEscalateStep(cursor: string): string | undefined {
     return this.doc.spec.steps.find((s) => s.type === "escalate" && s.id !== cursor)?.id;
+  }
+
+  /** §16.3 patch gate: is a run recorded on `recordedVersion` allowed to replay
+   *  against this (possibly edited) document? Same version is always fine; a prior
+   *  version must be explicitly listed in `spec.patch`. */
+  private patchCompatible(recordedVersion?: string): boolean {
+    if (!recordedVersion || recordedVersion === this.definitionVersion) return true;
+    return (this.doc.spec.patch ?? []).includes(recordedVersion);
   }
 
   // ── one step: resolve → redact → (replay | cache | execute) → merge ────────
@@ -340,6 +353,19 @@ class RunSession {
       const wasReplay = existing !== undefined;
 
       if (existing && !composite) {
+        // §16.3 run-pinning: verify this step still computes what it recorded. The
+        // idempotency key encodes (definitionVersion, step_id, input, space_id), so
+        // a recomputed key that differs from the record means the rotor was edited
+        // under the run — fail rather than silently diverge, unless a patch gate
+        // declares the recorded version replay-compatible.
+        const currentIdem = idempotencyKey(this.definitionVersion, step.id, input, this.spaceId);
+        if (currentIdem !== existing.idempotency_key && !this.patchCompatible(existing.definitionVersion)) {
+          const result = failResult(
+            "E_REPLAY_DIVERGENCE",
+            `step ${step.id}: recorded on ${existing.definitionVersion ?? "?"}, replaying on ${this.definitionVersion} (no patch gate)`,
+          );
+          return { result, nextOverride: "__fail__" };
+        }
         // Pure replay — return the recorded result, no handler call (§5.4).
         result = recordToResult(existing);
       } else if (existing && composite) {
@@ -450,6 +476,7 @@ class RunSession {
       input_hash: sha256(canonicalize(input)),
       idempotency_key: idempotencyKey(this.definitionVersion, step.id, input, this.spaceId),
       space_id: this.spaceId,
+      definitionVersion: this.definitionVersion,
       principal: this.principal,
       agent_identity: { ref: this.agentRef, run_id: this.runId },
       status: result.status ?? "ok",

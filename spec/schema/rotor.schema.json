@@ -261,6 +261,7 @@
         "access": { "$ref": "#/$defs/access" },
         "assurance": { "$ref": "#/$defs/assurance" },
         "cache": { "$ref": "#/$defs/cache" },
+        "patch": { "type": "array", "items": { "type": "string" } },
         "pool": { "$ref": "#/$defs/pool" },
         "affinity": { "$ref": "#/$defs/affinity" },
         "state": { "$ref": "#/$defs/state" },
