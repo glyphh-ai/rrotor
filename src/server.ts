@@ -30,8 +30,10 @@ import { parseRotor, validateRotor } from "./parser/index.js";
 import { execute } from "./exec/executor.js";
 import { buildBasicPlugins } from "./plugins/index.js";
 import { statorFromEnv } from "./exec/stator.js";
+import { drainFromEnv } from "./plugins/drain.js";
 import { log } from "./obs/logger.js";
 import type { Stator } from "./exec/store.js";
+import type { DrainPlugin } from "./plugins/interfaces.js";
 import type { CapabilityStatus } from "./runtime/registry.js";
 import type { RotorDocument } from "./types.js";
 
@@ -84,7 +86,13 @@ function readiness(rt: Runtime): ReturnType<typeof computeReadiness> {
 }
 
 /** The request router. Kept flat and allocation-light — this is the probe path. */
-function handle(rt: Runtime, store: Stator, req: http.IncomingMessage, res: http.ServerResponse): void {
+function handle(
+  rt: Runtime,
+  store: Stator,
+  drain: DrainPlugin,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): void {
   const method = req.method ?? "GET";
   // Strip any query string; probes hit bare paths.
   const path = (req.url ?? "/").split("?", 1)[0];
@@ -156,7 +164,7 @@ function handle(rt: Runtime, store: Stator, req: http.IncomingMessage, res: http
         // per-run plugin state (e.g. the grounding space guard) isolated, while
         // history/cache/facts persist across requests via the shared store — so a
         // run recorded by one request replays from another.
-        execute(doc, runInputs, buildBasicPlugins({ store }))
+        execute(doc, runInputs, buildBasicPlugins({ store, drain }))
           .then((result) => {
             log.info("run complete", {
               run_id: result.run_id,
@@ -215,16 +223,40 @@ export function startServer(
   port: number = DEFAULT_PORT,
   rt: Runtime = new Runtime(),
   store: Stator = statorFromEnv(),
+  drain: DrainPlugin = drainFromEnv(),
 ): http.Server {
-  const server = http.createServer((req, res) => handle(rt, store, req, res));
+  const server = http.createServer((req, res) => handle(rt, store, drain, req, res));
   server.listen(port, () => {
     log.info("runtime listening", { port, version: VERSION });
   });
   return server;
 }
 
+/**
+ * Graceful shutdown: flush the drain (within the pod's termination grace window),
+ * release the stator, then close the server. Ordered so buffered telemetry is
+ * delivered before the process exits.
+ */
+export async function shutdown(server: http.Server, store: Stator, drain: DrainPlugin): Promise<void> {
+  try {
+    await drain.close();
+  } catch (err) {
+    log.error("drain flush on shutdown failed", { detail: (err as Error).message });
+  }
+  store.close?.();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
 // Run when invoked directly (as `node dist/server.js`), not when imported.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? DEFAULT_PORT);
-  startServer(Number.isFinite(port) ? port : DEFAULT_PORT);
+  const store = statorFromEnv();
+  const drain = drainFromEnv();
+  const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain);
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    process.on(sig, () => {
+      log.info("shutting down", { signal: sig });
+      void shutdown(server, store, drain).then(() => process.exit(0));
+    });
+  }
 }

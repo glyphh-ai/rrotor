@@ -207,9 +207,49 @@ export interface PoolPlugin extends Capability {
   instanceState(id?: string): InstanceState;
 }
 
+// ── §3.8 drain / observability sink ─────────────────────────────────────────
+
+/**
+ * The wire shape a log drain forwards — one per `StepRecord` (CloudEvents-ish,
+ * per the §14 aspiration). It carries the record's audit + telemetry fields; the
+ * `output` may be field-redacted before it leaves the process.
+ */
+export interface DrainEnvelope {
+  /** Event type, e.g. `com.openrotor.step.v0`. */
+  type: string;
+  run_id: string;
+  step_id: string;
+  attempt: number;
+  logical_tick: number;
+  status: string;
+  space_id?: string;
+  principal?: { id: string; kind: string; scopes?: string[] };
+  agent?: { ref: string; run_id: string };
+  usage?: Usage;
+  frames?: Frame[];
+  output?: Record<string, unknown>;
+  error?: { name: string; cause?: string };
+}
+
+/**
+ * A log drain streams the run's `StepRecord` event stream to an external sink for
+ * audit / FinOps / observability. It is strictly a telemetry **observer** — it
+ * MUST NOT influence control flow ("telemetry only, never a control predicate",
+ * SPEC.md §17.6), and `emit` MUST be fire-and-forget: it never blocks the run and
+ * never throws. Delivery is best-effort and asynchronous.
+ */
+export interface DrainPlugin extends Capability {
+  /** Enqueue a record for delivery. Fire-and-forget; never throws. */
+  emit(rec: StepRecord): void;
+  /** Flush buffered envelopes to the sink. */
+  flush(): Promise<void>;
+  /** Flush and release resources (called on shutdown). */
+  close(): Promise<void>;
+}
+
 // ── the bundle ──────────────────────────────────────────────────────────────
 
-/** The seven capabilities the executor holds (docs/runtime.md §2.1). */
+/** The eight capabilities the executor holds (docs/runtime.md §2.1, §3.8). */
 export interface Plugins {
   grounding: GroundingPlugin;
   memory: MemoryPlugin;
@@ -218,4 +258,5 @@ export interface Plugins {
   gateway: GatewayPlugin;
   governance: GovernancePlugin;
   pool: PoolPlugin;
+  drain: DrainPlugin;
 }

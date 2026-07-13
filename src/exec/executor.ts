@@ -376,6 +376,11 @@ class RunSession {
       error: result.error,
     };
     this.plugins.memory.appendStepRecord(rec);
+    // Fan out to the log drain AFTER the durable write (§3.8). Fire-and-forget:
+    // telemetry only, never affects the run (SPEC.md §17.6). Only fresh
+    // executions reach here — replay short-circuits before append — so a replayed
+    // run never re-emits.
+    this.plugins.drain?.emit(rec);
     return recordToResult(rec);
   }
 
@@ -522,6 +527,7 @@ function manifest(plugins: Plugins): RunContextEnvelope["capabilities"] {
     gateway: plugins.gateway.status(),
     governance: plugins.governance.status(),
     pool: plugins.pool.status(),
+    drain: plugins.drain.status(),
   };
 }
 

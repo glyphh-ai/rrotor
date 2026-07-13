@@ -51,6 +51,8 @@ describe("probes", () => {
       expect(cap.tier, name).toBe("basic");
     }
     expect(Object.keys(body.capabilities)).toContain("memory");
+    // The log-drain seam (Phase 3) is advertised too.
+    expect(Object.keys(body.capabilities)).toContain("drain");
   });
 
   it("GET /version returns build identity", async () => {

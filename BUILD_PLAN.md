@@ -38,7 +38,7 @@ not "done" until its acceptance tests are green in CI.
 | 0 | Test & CI harness | ✅ | tooling |
 | 1 | Structured logging + wire the real runtime | ✅ | L1 hardening |
 | 2 | Durable & shared stator (SQLite) | ✅ | L1→L2 |
-| 3 | **Log drains subsystem** | ⬜ | L2 (observability) |
+| 3 | **Log drains subsystem** | ✅ | L2 (observability) |
 | 4 | Attention budgets + gateway metering | ⬜ | L2 |
 | 5 | Trust layer (access, identity attenuation, anomaly/firewall, merge) | ⬜ | L2 |
 | 6 | HDC grounding law | ⬜ | L2 (headline feature) |
@@ -186,7 +186,7 @@ cross-request replay. **66 tests green**, coverage floor raised to ~64%.
 
 ---
 
-## Phase 3 — Log drains subsystem  ⬜  ⭐ (explicit requirement)
+## Phase 3 — Log drains subsystem  ✅  ⭐ (explicit requirement)
 
 **Why:** the runtime has a rich, fully-typed, identity-stamped `StepRecord`/`Frame`
 event stream (`types.ts:708-780`) but **no way to forward it anywhere**. This phase
@@ -205,43 +205,48 @@ external destination for audit, FinOps, and observability — honoring SPEC's
   purity invariant (`executor.ts:17`).
 
 ### Tasks
-- [ ] Define `DrainPlugin` interface in `plugins/interfaces.ts` (`emit(record)`,
-      `flush()`, `status()`), add `drain` to `CAPABILITY_NAMES` and the `Plugins`
-      bundle.
-- [ ] Implement `plugins/drain.ts`:
-  - [ ] `NoopDrain` (basic-tier default; `ready:true`, `tier:"basic"`).
-  - [ ] `HttpDrain`: batched, newline-delimited JSON POST to `ROTOR_DRAIN_URL`
-        with `ROTOR_DRAIN_TOKEN` bearer auth; configurable batch size / flush
-        interval (`ROTOR_DRAIN_BATCH`, `ROTOR_DRAIN_FLUSH_MS`).
-  - [ ] `FileDrain`: append NDJSON to a path (local dev / sidecar tailing).
-- [ ] **Serializer** producing a stable drain envelope from a `StepRecord`
-      (CloudEvents-ish, per the §14 aspiration): `run_id`, `step_id`, `attempt`,
-      `logical_tick`, `status`, `principal`, `agent_identity`, `usage`, `frames`,
-      `error`. Apply **field redaction** here (reuse governance redaction from
-      Phase 5 when available; ship a config-driven allowlist now).
-- [ ] **Reliability:** bounded in-memory buffer with backpressure (drop-oldest +
-      counter, never block the run loop), retry with backoff on the sink, and a
-      **flush-on-shutdown** hook tied to the server's SIGTERM path within the
-      `terminationGracePeriodSeconds: 30` window (`deployment.yaml:54`).
-- [ ] Decorate `appendStepRecord` to fan out to the drain after the durable write
-      succeeds (drain failures never fail the run).
-- [ ] Thread the drain through `buildBasicPlugins()` and the per-request bundle so
-      HTTP runs are drained.
-- [ ] Config wiring: add `ROTOR_DRAIN_*` to `deploy/k8s/configmap.yaml`;
-      `ROTOR_DRAIN_TOKEN` to `deploy/k8s/secret.yaml` (never the ConfigMap).
-- [ ] Docs: new `docs/observability.md` covering the drain envelope, config,
-      redaction, and the telemetry-only invariant.
+- [x] Define `DrainPlugin` interface in `plugins/interfaces.ts` (`emit(record)`,
+      `flush()`, `close()`, `status()`), add `drain` to `CAPABILITY_NAMES` and the
+      `Plugins` bundle.
+- [x] Implement `plugins/drain.ts`:
+  - [x] `NoopDrain` (basic-tier default; `ready:true`, `tier:"basic"`).
+  - [x] `HttpDrain`: batched, newline-delimited JSON POST to `ROTOR_DRAIN_URL`
+        with `ROTOR_DRAIN_TOKEN` bearer auth; configurable `ROTOR_DRAIN_BATCH`.
+  - [x] `FileDrain`: append NDJSON to a path (local dev / sidecar tailing).
+- [x] **Serializer** (`toEnvelope`) producing a stable `com.openrotor.step.v0`
+      envelope from a `StepRecord` (run/step/attempt/tick, status, space, principal,
+      agent, usage, frames, output, error). **Field redaction** applied here via
+      `ROTOR_DRAIN_REDACT` (governance redaction routes through here in Phase 5).
+- [x] **Reliability** (`BufferedDrain`): bounded buffer with backpressure
+      (drop-oldest + counter, never blocks the run), retry-with-backoff (drop after
+      N, never throws), auto-ship on full batch, and `close()` flush wired to the
+      server's SIGTERM/SIGINT path within the `terminationGracePeriodSeconds` window.
+- [x] Executor `append()` fans out to `plugins.drain.emit(rec)` after the durable
+      write — fire-and-forget; **only fresh executions emit**, so replay never
+      re-emits.
+- [x] Thread one shared drain through `buildBasicPlugins({ drain })` and the
+      per-request server bundle (parallel to the shared stator).
+- [x] Config wiring: `ROTOR_DRAIN_*` + `ROTOR_LOG_LEVEL` in
+      `deploy/k8s/configmap.yaml`; `ROTOR_DRAIN_TOKEN` in `deploy/k8s/secret.yaml`.
+- [x] Docs: `docs/observability.md` — envelope, config, redaction, reliability,
+      invariants.
 
 ### Acceptance
-- [ ] Unit: a run emits exactly N drain envelopes for N step records, with the
-      expected redacted shape; determinism/replay unchanged with drain enabled
-      (golden replay still green).
-- [ ] Integration: `HttpDrain` against a local mock sink receives batched NDJSON;
-      on sink 5xx it retries and does **not** fail the run.
-- [ ] Backpressure: with the sink blocked, the run still completes and the buffer
-      caps at its bound (drop counter increments, logged).
-- [ ] Shutdown: SIGTERM flushes buffered envelopes before exit.
-- [ ] `/readyz` shows `drain` seam status; misconfigured URL degrades, not throws.
+- [x] Unit (`drain.test.ts`): envelope shape + redaction; batching order;
+      backpressure drop-oldest + counter; retry delivers; drop-after-retries never
+      throws.
+- [x] Integration (`drain.test.ts`): a run emits exactly N envelopes for N records;
+      **run shape identical with and without a drain** (determinism preserved);
+      **replay never re-emits**; `HttpDrain` delivers batched NDJSON to a mock sink
+      and **retries a transient 500** without failing the run.
+- [x] Shutdown: `shutdown()` flushes buffered envelopes to the sink before closing.
+- [x] `/readyz` advertises the `drain` seam (server integration test).
+
+**Landed:** `src/plugins/drain.ts` (`toEnvelope`, `NoopDrain`, `BufferedDrain`,
+`HttpDrain`, `FileDrain`, `drainFromEnv`), `DrainPlugin`/`DrainEnvelope` +
+8th seam, executor `emit` fan-out, shared drain + `shutdown()` in `server.ts`,
+`docs/observability.md`, configmap/secret wiring. **80 tests green**, coverage
+floor ~66%.
 
 ---
 
@@ -310,14 +315,31 @@ not code, and `E_UNMERGEABLE` is never raised.
 a degraded exact-substring matcher; `encode` returns an empty cortex and margins
 are hardcoded. This is the largest single body of work.
 
+> **Decision (embedding fidelity, basic tier):** the basic-tier embedding is a
+> **deterministic local embedding** — hashed n-gram → fixed-dim vector, cosine
+> similarity — chosen because it is **replay-safe by construction** (no RNG, no
+> model call), a real upgrade over substring matching, and swappable for a neural
+> lane later. A neural/frontier embedding is a **premium** lane that MUST be
+> **checkpointed** into the `StepRecord` at the embedding boundary (§7.7) to stay
+> replay-safe. **Short-term memory** (embedding every inbound prompt + outbound
+> completion into the stator's turn buffer, recalled by cosine) is built here, not
+> earlier — decided with the user during Phase 2.
+
 ### Tasks
 - [ ] Real hypervector encoder in `grounding.ts` (`hdc.map` §7.3): roles/segments/
       layers/cortex per the universal 7×33 schema; bind/bundle/permute algebra.
+- [ ] **Deterministic local embedding** (`src/obs`/`src/exec` sibling module): a
+      pure `embed(text) → number[]` (hashed n-gram, unit-normalized) + `cosine`.
+      Replay-safe; the basis for short-term recall.
+- [ ] **Short-term memory**: embed every inbound prompt + outbound completion and
+      store the vector alongside the turn text in the stator; `semanticRecall`
+      ranks by cosine over these (currently lexical unit-dot).
 - [ ] Associative memory probe/verify with a real **margin**; the **hard logit
       gate** on `model` decode (§6.3) constraining decode to grounded fillers.
 - [ ] `retrieve.kb` (§7.6) `probe|node|neighbors` over a real EntityGraph.
 - [ ] `retrieve.vector` (§7.7) recorded-embedding lane with the embedding
-      checkpointed at the boundary (currently lexical overlap, not checkpointed).
+      checkpointed at the boundary (deterministic-local by default; neural lane
+      checkpointed as premium).
 - [ ] `hdc-ground` gate and `assert` operate on real HDC margins.
 
 ### Acceptance
