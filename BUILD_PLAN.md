@@ -764,6 +764,75 @@ stator-factory unit test. **190 total green.**
 
 ---
 
+## Enterprise readiness
+
+Making OpenRotor a piece of software an enterprise would run: a known error
+taxonomy, disciplined exception handling, and traceability/supportability good
+enough that an AI dev-ops agent (or a human driving one) can trace a failure to its
+cause and fix it fast. Same rules: test-first, determinism-safe (all the rich
+error/telemetry data is telemetry-only — the tape stays a pure `{name, cause}`).
+
+### E1 — Error taxonomy (the reflector)  ✅
+
+**Requirement (user):** proper try/catch/finally with a **known error taxonomy
+defined for the entire runtime**; error handling/reporting/logging "significantly
+good." Catalog: [`docs/errors.md`](docs/errors.md).
+
+- [x] `src/errors.ts` — the closed **CATALOG** (24 codes) mapping each to a
+      `category` (validation / config / policy / grounding / transport / persistence
+      / capacity / determinism / escalation / internal), `retryable`, `severity`,
+      HTTP status, a one-line `summary`, and a concrete **remediation**. Consolidates
+      the ~20 previously-scattered ad-hoc `E_*` strings into one vocabulary.
+- [x] `RotorError` — structured error; category/retryable/severity/http/remediation
+      pulled from the catalog; `name === code` so the executor's retry/catch matching
+      and the recorded `StepError.name` are unchanged. `context` (redaction-safe) +
+      `cause` chain for supportability. `RotorError.from(unknown)` normalizes any
+      throw (preserving a taxonomy code carried on `err.name`).
+- [x] **Determinism preserved:** `toStepError()` is the tape projection — only the
+      stable `{name, cause}`. The rich fields ride `toTelemetry()` → logs + drain.
+- [x] Wired: the executor's handler-catch normalizes via `RotorError.from(…,
+      "E_HANDLER")` (a thrown `RotorError` keeps its specific code); the **drain
+      envelope enriches every failure** with category/severity/retryable/remediation
+      via `describe()`, so observability tools get it without a catalog lookup.
+- [x] `docs/errors.md` — the generated, machine+human catalog: code → cause →
+      remediation, plus a "how to use" for grabbing `code` + `trace_id` and pivoting.
+
+**Acceptance (`test/unit/errors.test.ts`, 12 tests):** catalog completeness +
+actionable remediation on every code; retryable only where the category allows;
+`RotorError` field derivation + `name===code`; deterministic `toStepError`; full
+`toTelemetry`; `from()` pass-through / code-preservation / fallback. **202 total
+green.**
+
+### E2 — Error-handling discipline (try/catch/finally sweep)  ⏳
+
+Every boundary (handlers, plugins, transports, stator, server, CLI) throws or
+normalizes to a `RotorError`; nothing swallows silently; resources release in
+`finally`. Grep-audit throw sites; convert ad-hoc throws to taxonomy codes.
+
+### E3 — Observability / OpenTelemetry  ⏳
+
+W3C trace context (`trace_id`/`span_id`) threaded as telemetry (never in the tape),
+per-step spans, OTel-semantic-convention structured logs, OTLP-shaped drain.
+Decision: dependency-light OTLP-compatible core + an **optional** `@opentelemetry/*`
+exporter behind the drain seam (so OTel and other tools consume natively without
+bloating the runtime hot path).
+
+### E4 — Traceability & supportability  ⏳
+
+Surface a stable `trace_id` + error `code` in results and over the wire; a
+machine-readable catalog export + a `rotor errors` / support-bundle command; a
+runbook. Target consumer: an AI dev-ops agent or a human driving one.
+
+### E5 — Async Stator + real Postgres in the container  ⏳
+
+Per the user's decision (async, real, full parity): refactor the `Stator` interface
+to async (thread `await` through executor + plugins/handlers, keeping golden replay
+green at each step), replacing the sync hydrate-then-flush mirror; run a **real**
+Postgres+pgvector service in the container/CI; adopt the E1 taxonomy (`E_STATOR`)
+for persistence failures.
+
+---
+
 ## Cross-cutting standards (apply to every phase)
 
 - **Test-first:** write the failing acceptance test, then the code.

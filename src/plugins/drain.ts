@@ -24,6 +24,7 @@ import type { StepRecord } from "../types.js";
 import type { CapabilityStatus } from "../runtime/registry.js";
 import type { DrainEnvelope, DrainPlugin } from "./interfaces.js";
 import { loggerFromEnv, type Logger } from "../obs/logger.js";
+import { describe } from "../errors.js";
 
 const ENVELOPE_TYPE = "com.openrotor.step.v0";
 const REDACTED = "[redacted]";
@@ -50,7 +51,17 @@ export function toEnvelope(rec: StepRecord, redact?: ReadonlySet<string>): Drain
   if (rec.agent_identity) env.agent = { ref: rec.agent_identity.ref, run_id: rec.agent_identity.run_id };
   if (rec.usage) env.usage = rec.usage;
   if (rec.frames) env.frames = rec.frames;
-  if (rec.error) env.error = { name: rec.error.name, cause: rec.error.cause };
+  if (rec.error) {
+    const d = describe(rec.error.name);
+    env.error = {
+      name: rec.error.name,
+      cause: rec.error.cause,
+      category: d.category,
+      severity: d.severity,
+      retryable: d.retryable,
+      remediation: d.remediation,
+    };
+  }
   if (rec.output) env.output = redactFields(rec.output, redact);
   return env;
 }

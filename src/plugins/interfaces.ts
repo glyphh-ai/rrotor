@@ -265,7 +265,18 @@ export interface DrainEnvelope {
   usage?: Usage;
   frames?: Frame[];
   output?: Record<string, unknown>;
-  error?: { name: string; cause?: string };
+  /** The failure, enriched from the error taxonomy (src/errors.ts) so downstream
+   *  observability tools get category/severity/retryable/remediation without a
+   *  catalog lookup. `name` is the stable code; the rest are derived (telemetry
+   *  only — never in the tape). */
+  error?: {
+    name: string;
+    cause?: string;
+    category?: string;
+    severity?: string;
+    retryable?: boolean;
+    remediation?: string;
+  };
 }
 
 /**

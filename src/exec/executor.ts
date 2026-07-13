@@ -60,6 +60,7 @@ import {
   type StepHandler,
 } from "../handlers/index.js";
 import { AttentionMeter, type BudgetOutcome } from "./budget.js";
+import { RotorError } from "../errors.js";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Public surface.
@@ -467,8 +468,10 @@ class RunSession {
     try {
       return await handler.execute({ step, input, env: this.env, plugins: this.plugins, engine: this.engine });
     } catch (e) {
-      const err = e instanceof Error ? e : new Error(String(e));
-      return failResult(err.name && err.name !== "Error" ? err.name : "E_HANDLER", err.message);
+      // Normalize to the taxonomy: a thrown RotorError keeps its specific code; a
+      // raw throw is a handler defect → E_HANDLER (a non-taxonomy handler error).
+      const err = RotorError.from(e, "E_HANDLER");
+      return failResult(err.code, err.message);
     }
   }
 
