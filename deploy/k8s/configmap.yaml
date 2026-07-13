@@ -1,0 +1,38 @@
+# ConfigMap — the NON-secret ROTOR_* configuration every rotor pod reads.
+#
+# FUNGIBILITY: this is the same config on every pod. It points each interchangeable
+# instance at the SHARED, EXTERNAL stator backend and gateway — the places run state
+# actually lives (SPEC.md §17.1). Because the config is identical fleet-wide and the
+# state is external, any pod can serve any run; there is no per-pod configuration
+# that would make one pod "own" a run.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openrotor-config
+  labels:
+    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/component: runtime
+data:
+  # The stator (memory) backend — the append-only event history + Context + caches
+  # live here, NOT in the pod (SPEC.md §17.1, docs/runtime.md §3.2). For multi-node
+  # this MUST be a shared, external Postgres+pgvector; the in-process store is
+  # single-node only. Host/port only — credentials come from the Secret.
+  ROTOR_STATOR_URL: "postgres://openrotor-postgres:5432/openrotor"
+  ROTOR_STATOR_BACKEND: "postgres"
+
+  # The model inference lane (SPEC.md §3.3) — an OpenAI-compatible endpoint the
+  # gateway routes `model` steps to. Local-model warmth burns no frontier credits.
+  ROTOR_MODEL_URL: "http://openrotor-model:8000/v1"
+
+  # The pool-coordination channel (Redis) — the pending-rotors queue + warm-pool
+  # bookkeeping the HPA's custom metric reads (SPEC.md §17.3). Shared across pods so
+  # affinity/pool decisions are fleet-global, not per-pod.
+  ROTOR_CHANNEL: "redis://openrotor-redis:6379/0"
+
+  # The port startServer() binds — must match the container EXPOSE + probe ports.
+  PORT: "8080"
+  ROTOR_PORT: "8080"
+
+  # Observability: the serving instance id + hot/warm/cold state are operational
+  # metadata ONLY (SPEC.md §17.6) — recorded for FinOps, never a control input.
+  ROTOR_LOG_FORMAT: "json"

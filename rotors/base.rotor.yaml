@@ -1,0 +1,158 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# glyphh/base@0.1.0 — THE base rotor (SPEC.md §15.1)
+#
+# The default rotor for any task with no domain rotor. It is the canonical
+# ask → plan → execute → test loop:
+#
+#   ask      ingest the prompt and compose a bounded, grounded block. In a full
+#            deployment this expands to the per-prompt macro cycle
+#            WRITE → RECALL → REASON (§15.1); here it is a single grounded
+#            `prompt` step for clarity — swap in write/retrieve steps to ground
+#            against the stator.
+#   plan     decide the approach with a typed, schema-constrained `plan` step —
+#            the model emits language, the lattice keeps authority (§7.10).
+#   execute  do the work through a deterministic `tool` step (§7.16).
+#   test     a `gate` verifies the result (§7.8). On reject it loops back to
+#            `plan` to refine; on repeated / low-margin failure it climbs the
+#            escalation ladder (§9); on pass it asserts the grounded answer.
+#
+# Termination is guaranteed: every path reaches the terminal `assert` (or a
+# reserved `end`), and the refine cycle is bounded by the declared attention
+# `revolutions` budget (§10.4).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rotor.glyphh.ai/v0.1
+kind: Rotor
+metadata:
+  name: base
+  version: 0.1.0
+  namespace: glyphh
+  description: The default ask → plan → execute → test loop with a refine cycle and escalation ladder.
+  labels:
+    tier: base
+    domain: general
+
+spec:
+  # Inputs the caller binds at run start (§4.1).
+  inputs:
+    - name: prompt
+      type: string
+      required: true
+      description: The user turn / task to satisfy.
+    - name: entity
+      type: string
+      description: Optional memory entity to ground against (keys RECALL / the ground gate).
+
+  # Every retrieval / gate / encode step binds an HDC space (§15.4). Because
+  # `test` is a `gate`, `spec.space` is REQUIRED.
+  space:
+    vector_dim: 10000
+    encoder_seed: 42
+    roles_config: universal-7x33
+
+  # The refine cycle is bounded by an attention budget (§10.4): at most 4
+  # revolutions of plan → execute → test before we stop climbing and escalate.
+  attention:
+    budget:
+      revolutions: 4
+      on_exhausted: escalate
+
+  # Durable run state (§4.1). The asserted answer is written last-write-wins.
+  state:
+    schema:
+      answer: { type: string }
+    reducers:
+      answer: last-write-wins
+
+  # Execution starts here (defaults to steps[0] if omitted).
+  entry: ask
+
+  steps:
+    # ── ask ──────────────────────────────────────────────────────────────────
+    # Compose a bounded prompt. `cache.breakpoints` marks the stable system
+    # block for prompt-prefix caching (§8). In a full base rotor this step is
+    # preceded by a `write` (persist the turn) and a `retrieve.*` (RECALL).
+    - id: ask
+      type: prompt
+      in: { question: $.inputs.prompt, entity: $.inputs.entity }
+      out: { text: string }
+      config:
+        blocks:
+          - name: system
+            text: "You are a grounded assistant. Use only supported facts; if unsupported, say you don't know."
+        max_tokens: 1024
+        cache: { breakpoints: [system] }
+      next: plan
+
+    # ── plan ───────────────────────────────────────────────────────────────
+    # Typed constrained decode: the model picks an op from a closed enum; an
+    # out-of-schema slot refuses rather than inventing one (§7.10).
+    - id: plan
+      type: plan
+      in: { question: $.steps.ask.text }
+      out: { plan: object, result: object }
+      config:
+        ops: [answer, retrieve, compute, tool]
+        executor: base.planner
+        on_out_of_schema: refuse
+      next: execute
+
+    # ── execute ────────────────────────────────────────────────────────────
+    # Deterministic side-effecting work via an in-runtime MCP substrate tool
+    # (§7.16). Idempotency 'auto' keys the effect so a replay does not re-run it.
+    - id: execute
+      type: tool
+      in: { plan: $.steps.plan.plan }
+      out: { result: object }
+      idempotency: auto
+      config:
+        flavor: mcp
+        name: query
+        args: { plan: $.steps.plan.plan }
+      next: test
+
+    # ── test ───────────────────────────────────────────────────────────────
+    # The gate (§7.8). Three-way verdict:
+    #   on_pass     → deliver (assert the grounded answer)
+    #   on_fail     → plan    (loop back and refine — bounded by the budget)
+    #   on_escalate → escalate (climb the ladder on repeated / low-margin fail)
+    - id: test
+      type: gate
+      in: { candidate: $.steps.execute.result, entity: $.inputs.entity }
+      out: { verdict: string, score: number }
+      config:
+        mode: evaluator
+        scorer: base.evaluator
+        threshold: 0.75
+        margin: 0.05
+        on_pass: deliver
+        on_fail: plan
+        on_escalate: escalate
+
+    # ── escalate ─────────────────────────────────────────────────────────────
+    # The ladder (§7.15 / §9): a gate-reject routes to a governed frontier lane;
+    # a FrontierDeclined falls back to a human rung rather than crashing.
+    - id: escalate
+      type: escalate
+      in: { candidate: $.steps.execute.result, reason: $.steps.test.verdict }
+      out: { lane: string, text: string }
+      config:
+        trigger: gate-reject
+        to: frontier
+        fallback: human
+      next: deliver
+
+    # ── deliver ──────────────────────────────────────────────────────────────
+    # Grounded terminal (§7.9): assert the answer or refuse on an empty cell.
+    - id: deliver
+      type: assert
+      in: { candidate: $.steps.execute.result, verdict: $.steps.test.verdict }
+      out: { text: string }
+      config:
+        refusal: "I don't know."
+        empty_cell: refuse
+      next: end
+
+  # Project run state to the caller-visible result (§4.1).
+  outputs:
+    - name: answer
+      from: $.state.answer

@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rotor.glyphh.ai/schema/v0.1/rotor.schema.json",
+  "title": "RotorSpec Rotor Document",
+  "description": "A versioned Rotor Document (SPEC.md §4): apiVersion / kind / metadata / spec. The `spec.steps` array is a discriminated union over the closed §7 catalog, validated by step.schema.json.",
+
+  "$defs": {
+    "valueType": {
+      "enum": ["string", "number", "boolean", "object", "array", "vector"]
+    },
+
+    "inputParam": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "$ref": "#/$defs/valueType" },
+        "required": { "type": "boolean" },
+        "default": {},
+        "description": { "type": "string" }
+      }
+    },
+
+    "outputProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "from"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "from": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "space": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vector_dim", "encoder_seed", "roles_config"],
+      "properties": {
+        "vector_dim": { "type": "integer", "minimum": 1 },
+        "encoder_seed": { "type": "integer" },
+        "roles_config": { "type": "string" },
+        "space_id": { "type": "string" }
+      }
+    },
+
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "rateLimit": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope"],
+            "properties": {
+              "scope": { "enum": ["provider", "rotor", "step", "tenant"] },
+              "key": { "type": "string" },
+              "rpm": { "type": "number", "minimum": 0 },
+              "tpm": { "type": "number", "minimum": 0 },
+              "concurrency": { "type": "integer", "minimum": 0 },
+              "on_exceed": { "enum": ["queue", "backoff", "decline"] }
+            }
+          }
+        },
+        "metering": { "type": "object" }
+      }
+    },
+
+    "attention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "wall_ms": { "type": "number", "minimum": 0 },
+            "revolutions": { "type": "integer", "minimum": 0 },
+            "tokens": { "type": "number", "minimum": 0 },
+            "cost": { "type": "number", "minimum": 0 },
+            "on_exhausted": { "enum": ["stop", "escalate", "best-effort"] }
+          }
+        },
+        "weights": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        }
+      }
+    },
+
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "principal": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean" },
+            "kind": {
+              "type": "array",
+              "items": { "enum": ["user", "service"] }
+            }
+          }
+        },
+        "scopes": { "type": "array", "items": { "type": "string" } },
+        "on_missing_scope": { "enum": ["refuse", "escalate"] }
+      }
+    },
+
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requires": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "step_types": {
+              "type": "array",
+              "items": { "$ref": "step.schema.json#/$defs/stepType" }
+            },
+            "tools": { "type": "array", "items": { "type": "string" } },
+            "models": { "type": "array", "items": { "type": "string" } },
+            "connections": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "approvals": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stator": { "$ref": "step.schema.json#/$defs/statorAccess" },
+        "connections": {
+          "type": "array",
+          "items": { "$ref": "step.schema.json#/$defs/connectionAccessScope" }
+        },
+        "on_ungranted": { "enum": ["redact", "refuse"] }
+      }
+    },
+
+    "assurance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "effectiveness": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "metrics": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "anomaly": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input": { "$ref": "step.schema.json#/$defs/anomalyGate" },
+            "output": { "$ref": "step.schema.json#/$defs/anomalyGate" }
+          }
+        }
+      }
+    },
+
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" },
+        "ttl": { "type": "string" },
+        "scope": { "enum": ["run", "rotor", "tenant", "global"] }
+      }
+    },
+
+    "pool": {
+      "type": "object",
+      "properties": {
+        "minHot": { "type": "integer", "minimum": 0 },
+        "maxHot": { "type": "integer", "minimum": 0 },
+        "targetConcurrency": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "affinity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": { "enum": ["tenant", "conversation", "entity"] }
+        },
+        "mode": { "enum": ["prefer", "require"] }
+      }
+    },
+
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["type"],
+            "properties": { "type": { "$ref": "#/$defs/valueType" } }
+          }
+        },
+        "reducers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  },
+
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "pattern": "^rotor\\.glyphh\\.ai/v[0-9]+\\.[0-9]+$"
+    },
+    "kind": { "enum": ["Rotor", "SubRotor"] },
+
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string" },
+        "description": { "type": "string" },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputs", "steps"],
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/inputParam" }
+        },
+        "space": { "$ref": "#/$defs/space" },
+        "gateway": { "$ref": "#/$defs/gateway" },
+        "attention": { "$ref": "#/$defs/attention" },
+        "identity": { "$ref": "#/$defs/identity" },
+        "policy": { "$ref": "#/$defs/policy" },
+        "access": { "$ref": "#/$defs/access" },
+        "assurance": { "$ref": "#/$defs/assurance" },
+        "cache": { "$ref": "#/$defs/cache" },
+        "pool": { "$ref": "#/$defs/pool" },
+        "affinity": { "$ref": "#/$defs/affinity" },
+        "state": { "$ref": "#/$defs/state" },
+        "entry": { "type": "string" },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "step.schema.json" }
+        },
+        "outputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/outputProjection" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,676 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rotor.glyphh.ai/schema/v0.1/step.schema.json",
+  "title": "RotorSpec Step",
+  "description": "The §4.2 step envelope with a `config` discriminated on the closed §7 catalog of 20 step types.",
+
+  "$defs": {
+    "valueType": {
+      "enum": ["string", "number", "boolean", "object", "array", "vector"]
+    },
+
+    "stepType": {
+      "enum": [
+        "prompt",
+        "model",
+        "hdc.map",
+        "write",
+        "retrieve.sql",
+        "retrieve.kb",
+        "retrieve.vector",
+        "gate",
+        "assert",
+        "plan",
+        "branch",
+        "loop",
+        "parallel",
+        "wait",
+        "escalate",
+        "tool",
+        "transform",
+        "cascade",
+        "sub-rotor",
+        "fail"
+      ]
+    },
+
+    "nextTarget": { "type": "string", "minLength": 1 },
+
+    "retrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["errors"],
+      "properties": {
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "interval_ms": { "type": "number", "minimum": 0 },
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "backoff_rate": { "type": "number", "minimum": 1 }
+      }
+    },
+
+    "catcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["errors", "next"],
+      "properties": {
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "next": { "$ref": "#/$defs/nextTarget" }
+      }
+    },
+
+    "attentionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wall_ms": { "type": "number", "minimum": 0 },
+        "revolutions": { "type": "integer", "minimum": 0 },
+        "tokens": { "type": "number", "minimum": 0 },
+        "cost": { "type": "number", "minimum": 0 },
+        "on_exhausted": { "enum": ["stop", "escalate", "best-effort"] }
+      }
+    },
+
+    "weights": {
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    },
+
+    "statorAccessScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spaces": { "type": "array", "items": { "type": "string" } },
+        "entities": { "type": "array", "items": { "type": "string" } },
+        "roles": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "statorAccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "read": { "$ref": "#/$defs/statorAccessScope" },
+        "write": { "$ref": "#/$defs/statorAccessScope" }
+      }
+    },
+
+    "connectionAccessScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connector"],
+      "properties": {
+        "connector": { "type": "string" },
+        "operations": { "type": "array", "items": { "type": "string" } },
+        "fields": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "anomalyGate": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["firewall", "anomaly", "hdc-ground", "off"] },
+        "checks": {
+          "type": "array",
+          "items": { "enum": ["policy", "pii", "drift", "ood"] }
+        },
+        "scanner": { "type": "string" },
+        "on_ungrounded": { "enum": ["refuse", "escalate"] }
+      }
+    },
+
+    "cacheBlock": {
+      "oneOf": [
+        { "const": "none" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "key": { "type": "string" },
+            "ttl": { "type": "string" },
+            "scope": { "enum": ["run", "rotor", "tenant", "global"] }
+          }
+        }
+      ]
+    },
+
+    "gatewayConfig": {
+      "type": "object",
+      "properties": {
+        "rateLimit": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope"],
+            "properties": {
+              "scope": { "enum": ["provider", "rotor", "step", "tenant"] },
+              "key": { "type": "string" },
+              "rpm": { "type": "number", "minimum": 0 },
+              "tpm": { "type": "number", "minimum": 0 },
+              "concurrency": { "type": "integer", "minimum": 0 },
+              "on_exceed": { "enum": ["queue", "backoff", "decline"] }
+            }
+          }
+        },
+        "metering": { "type": "object" }
+      }
+    },
+
+    "promptCache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "breakpoints": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "gateConfig": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": {
+          "enum": [
+            "hdc-ground",
+            "schema",
+            "assertion",
+            "evaluator",
+            "approval",
+            "firewall",
+            "anomaly"
+          ]
+        },
+        "entity": { "type": "string" },
+        "role": { "type": "string" },
+        "admit": { "type": "number" },
+        "margin": { "type": "number" },
+        "enforcement": { "enum": ["hard", "soft"] },
+        "schema": {},
+        "threshold": { "type": "number" },
+        "scorer": { "type": "string" },
+        "scanner": { "type": "string" },
+        "checks": {
+          "type": "array",
+          "items": { "enum": ["policy", "pii", "drift", "ood"] }
+        },
+        "on_pass": { "$ref": "#/$defs/nextTarget" },
+        "on_fail": { "$ref": "#/$defs/nextTarget" },
+        "on_escalate": { "$ref": "#/$defs/nextTarget" }
+      }
+    }
+  },
+
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "type"],
+
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "type": { "$ref": "#/$defs/stepType" },
+    "in": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "out": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "next": { "$ref": "#/$defs/nextTarget" },
+    "retry": { "type": "array", "items": { "$ref": "#/$defs/retrier" } },
+    "catch": { "type": "array", "items": { "$ref": "#/$defs/catcher" } },
+    "idempotency": { "type": "string" },
+    "cache": { "$ref": "#/$defs/cacheBlock" },
+    "attention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "budget": { "$ref": "#/$defs/attentionBudget" },
+        "weights": { "$ref": "#/$defs/weights" }
+      }
+    },
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stator": { "$ref": "#/$defs/statorAccess" },
+        "connections": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/connectionAccessScope" }
+        }
+      }
+    },
+    "assurance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "anomaly": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input": { "$ref": "#/$defs/anomalyGate" },
+            "output": { "$ref": "#/$defs/anomalyGate" }
+          }
+        }
+      }
+    },
+    "gateway": { "$ref": "#/$defs/gatewayConfig" },
+    "affinity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": { "enum": ["tenant", "conversation", "entity"] }
+        },
+        "mode": { "enum": ["prefer", "require"] }
+      }
+    },
+    "config": { "type": "object" }
+  },
+
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "prompt" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "template": { "type": "string" },
+              "blocks": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "text"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "text": { "type": "string" }
+                  }
+                }
+              },
+              "max_tokens": { "type": "number", "minimum": 0 },
+              "cache": { "$ref": "#/$defs/promptCache" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "model" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "lane": { "enum": ["local", "frontier"] },
+              "model": { "type": "string" },
+              "max_tokens": { "type": "number", "minimum": 0 },
+              "temperature": { "type": "number" },
+              "tools": { "type": "array", "items": { "type": "string" } },
+              "seed": { "type": "number" },
+              "ground": {
+                "type": "object",
+                "properties": {
+                  "entity": { "type": "string" },
+                  "role": { "type": "string" },
+                  "enforcement": { "enum": ["hard", "soft"] },
+                  "refusal": { "type": "string" }
+                }
+              },
+              "micro": { "type": "boolean" },
+              "max_backtracks": { "type": "integer", "minimum": 0 },
+              "cache": { "$ref": "#/$defs/promptCache" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "hdc.map" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "schema": { "type": "string" },
+              "enricher": { "enum": ["heuristic", "local", "auto"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "write" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "mode": { "enum": ["raw", "absorb"] },
+              "key": { "type": "string" },
+              "speaker": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "retrieve.sql" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["op"],
+            "properties": {
+              "op": {
+                "enum": [
+                  "lookup",
+                  "prev",
+                  "count",
+                  "count_not",
+                  "top",
+                  "who",
+                  "compare",
+                  "refuse"
+                ]
+              },
+              "slot": { "type": "string" },
+              "person": {},
+              "conditions": { "type": "object" },
+              "value": {},
+              "a": {},
+              "b": {},
+              "k": { "type": "integer" }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "retrieve.kb" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["mode"],
+            "properties": {
+              "mode": { "enum": ["probe", "verify", "node", "neighbors"] },
+              "entity": { "type": "string" },
+              "role": { "type": "string" },
+              "topn": { "type": "integer", "minimum": 0 },
+              "depth": { "type": "integer", "minimum": 0 },
+              "margin": { "type": "number" }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "retrieve.vector" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "top_k": { "type": "integer", "minimum": 0 },
+              "kind": { "enum": ["query", "document"] },
+              "threshold": { "type": "number" },
+              "embed_model": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "gate" } } },
+      "then": {
+        "properties": { "config": { "$ref": "#/$defs/gateConfig" } },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "assert" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "refusal": { "type": "string" },
+              "empty_cell": { "enum": ["refuse", "escalate"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "plan" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "ops": { "type": "array", "items": { "type": "string" } },
+              "executor": { "type": "string" },
+              "on_out_of_schema": { "const": "refuse" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "branch" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cases"],
+            "properties": {
+              "cases": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["when", "next"],
+                  "properties": {
+                    "when": { "type": "string" },
+                    "next": { "$ref": "#/$defs/nextTarget" }
+                  }
+                }
+              },
+              "default": { "$ref": "#/$defs/nextTarget" }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "loop" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["body", "max_iterations"],
+            "properties": {
+              "body": { "type": "string" },
+              "gate": { "$ref": "#/$defs/gateConfig" },
+              "max_iterations": { "type": "integer", "minimum": 1 },
+              "budget": { "type": "object" },
+              "on_exhausted": { "enum": ["escalate", "refuse", "best-so-far"] }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "parallel" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["mode"],
+            "properties": {
+              "mode": { "enum": ["parallel", "map"] },
+              "branches": { "type": "array", "items": { "type": "string" } },
+              "over": { "type": "string" },
+              "as": { "type": "string" },
+              "body": { "type": "string" },
+              "reducer": {},
+              "max_concurrency": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "wait" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["on"],
+            "properties": {
+              "on": { "enum": ["approval", "signal", "timer", "callback"] },
+              "token": { "type": "string" },
+              "timeout_ms": { "type": "number", "minimum": 0 },
+              "on_timeout": { "enum": ["escalate", "fail", "resume"] }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "escalate" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["trigger"],
+            "properties": {
+              "trigger": {
+                "enum": [
+                  "refuse",
+                  "low-margin",
+                  "frontier-decline",
+                  "gate-reject",
+                  "budget-exceeded"
+                ]
+              },
+              "to": { "enum": ["frontier", "human"] },
+              "frontier_model": { "type": "string" },
+              "gateway_url": { "type": "string" },
+              "auth_token": { "type": "string" },
+              "fallback": { "enum": ["local", "human", "refuse"] }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["flavor"],
+            "properties": {
+              "flavor": { "enum": ["mcp", "app"] },
+              "name": { "type": "string" },
+              "method": { "type": "string" },
+              "args": { "type": "object" },
+              "params": { "type": "object" }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "transform" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "set": { "type": "object" },
+              "map": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "cascade" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "span": { "type": "integer", "minimum": 0 },
+              "trigger": { "type": "integer", "minimum": 0 },
+              "recall_k": { "type": "integer", "minimum": 0 },
+              "cadence": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "sub-rotor" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["ref"],
+            "properties": {
+              "ref": { "type": "string" },
+              "mode": { "enum": ["call", "handoff"] },
+              "inputs": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              },
+              "space": {}
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "fail" } } },
+      "then": {
+        "properties": {
+          "config": {
+            "type": "object",
+            "required": ["error"],
+            "properties": {
+              "error": { "type": "string" },
+              "cause": { "type": "string" }
+            }
+          }
+        },
+        "required": ["config"]
+      }
+    }
+  ]
+}

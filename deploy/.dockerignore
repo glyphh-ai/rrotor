@@ -1,0 +1,25 @@
+# Keep the build context small + reproducible. The build stage runs `npm ci` from
+# the lockfile and `npm run build`, so we ship source, tsconfig, and the manifests —
+# and nothing that would bloat the context or leak local state.
+node_modules
+dist
+*.tsbuildinfo
+.DS_Store
+*.log
+.env
+.env.*
+.git
+.gitignore
+
+# Docs, spec, and reference corpora are not needed to build the runtime image.
+docs
+spec
+rotors
+tools
+SPEC.md
+README.md
+NOTICE
+LICENSE
+
+# The deploy assets themselves don't belong in the image build context.
+deploy

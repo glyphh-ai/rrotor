@@ -1,0 +1,161 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# glyphh/corp-data-slim@0.1.0 — a DOMAIN rotor (SPEC.md §15.2)
+#
+#   lookup → probe → ground → summarize → answer
+#
+# The "corp-data → slim pre-trained model with a prompt call last" pattern: the
+# exact numbers come from deterministic retrieval, HDC grounding checks them, a
+# small LOCAL model reasons over the grounded facts, and a final `prompt` step
+# composes the answer. The stochastic model never invents a number — the store
+# and the lattice keep authority.
+#
+#   lookup     deterministic closed-op SQL query (RECALL, §7.5) — numbers from
+#              the store, never decoded from vectors.
+#   probe      entity-keyed associative recall over the knowledge base (§7.6).
+#   ground     map NL → sim and enrich to the 7×33 roles — the grounding bridge
+#              that keeps the model honest (§7.3).
+#   summarize  a SLIM local model reasons over ONLY the grounded facts, hard
+#              grounded so an unsupported claim refuses (§7.2).
+#   answer     the final `prompt` call composes the response (§7.1) — the LAST
+#              step, exactly the corp-data idiom (§15.2).
+#
+# It also demonstrates deny-by-default DATA-ACCESS GRANTS (§13.4) and a declared
+# ATTENTION BUDGET (§10.4).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rotor.glyphh.ai/v0.1
+kind: Rotor
+metadata:
+  name: corp-data-slim
+  version: 0.1.0
+  namespace: glyphh
+  description: retrieve.sql/kb → hdc.map ground → slim local model → final prompt, under deny-by-default access grants.
+  labels:
+    tier: domain
+    domain: corp-data
+
+spec:
+  inputs:
+    - name: question
+      type: string
+      required: true
+      description: The corp-data question to answer (e.g. "what tier is account Acme?").
+    - name: entity
+      type: string
+      required: true
+      description: The subject entity the answer is keyed to.
+
+  # Required: retrieve.sql / retrieve.kb / hdc.map all bind this space (§15.4).
+  space:
+    vector_dim: 10000
+    encoder_seed: 42
+    roles_config: universal-7x33
+
+  # Data-access governance (§13.4): DENY-BY-DEFAULT. The rotor sees only what it
+  # DECLARES here and the platform GRANTS. Fields outside the grant are redacted
+  # at the retrieval / gateway boundary before they enter context — an ungranted
+  # field is absent, not merely unused. This marketing/corp rotor can read the
+  # named CRM fields and the `corp` space's relational roles; it never declares —
+  # and can never be granted — the `finance` space.
+  access:
+    connections:
+      - connector: crm
+        operations: [read]
+        fields: [account.name, account.tier, account.region]
+    stator:
+      read:
+        spaces: [corp]
+        roles: [relational.subject, relational.object]
+      write:
+        spaces: [corp]
+    on_ungranted: refuse
+
+  # Declared attention budget (§10.4): a slim-model path is cheap and bounded;
+  # if it runs out, escalate rather than silently truncating.
+  attention:
+    budget:
+      tokens: 4000
+      cost: 0.02
+      on_exhausted: escalate
+
+  state:
+    schema:
+      answer: { type: string }
+    reducers:
+      answer: last-write-wins
+
+  entry: lookup
+
+  steps:
+    # ── lookup ───────────────────────────────────────────────────────────────
+    # Deterministic closed-op query (§7.5). The exact value comes from the store.
+    - id: lookup
+      type: retrieve.sql
+      in: { person: $.inputs.entity }
+      out: { rows: array }
+      config:
+        op: lookup
+        slot: account.tier
+      next: probe
+
+    # ── probe ────────────────────────────────────────────────────────────────
+    # Entity-keyed associative recall over the KB (§7.6): pull the top grounded
+    # neighbours for the subject, keeping only high-margin matches.
+    - id: probe
+      type: retrieve.kb
+      in: { entity: $.inputs.entity }
+      out: { facts: array }
+      config:
+        mode: probe
+        entity: $.inputs.entity
+        role: relational.object
+        topn: 5
+        margin: 0.05
+      next: ground
+
+    # ── ground ───────────────────────────────────────────────────────────────
+    # Map the recalled NL facts into the space and enrich to the 7×33 roles
+    # (§7.3) — the deterministic bridge the model must stay inside.
+    - id: ground
+      type: hdc.map
+      in: { rows: $.steps.lookup.rows, facts: $.steps.probe.facts }
+      out: { grounded: object }
+      config:
+        schema: corp.account
+        enricher: heuristic
+      next: summarize
+
+    # ── summarize ────────────────────────────────────────────────────────────
+    # The SLIM local model reasons over ONLY the grounded facts. `micro: true`
+    # runs the quarantined micro-rotor; hard grounding means an assertion the
+    # store did not support refuses (§7.2, §6.3).
+    - id: summarize
+      type: model
+      in: { grounded: $.steps.ground.grounded, question: $.inputs.question }
+      out: { text: string, frames: array }
+      config:
+        lane: local
+        model: glyphh-slim-1b
+        max_tokens: 512
+        temperature: 0.0
+        micro: true
+        ground: { role: relational.object, enforcement: hard, refusal: "I don't know." }
+      next: answer
+
+    # ── answer ───────────────────────────────────────────────────────────────
+    # The FINAL prompt call (§7.1) — composes the grounded summary into the
+    # response. It is the last step; on `end` the run projects `state.answer`.
+    - id: answer
+      type: prompt
+      in: { summary: $.steps.summarize.text, question: $.inputs.question }
+      out: { text: string }
+      config:
+        blocks:
+          - name: system
+            text: "Compose a concise answer using only the grounded summary. Do not add facts."
+        max_tokens: 512
+        cache: { breakpoints: [system] }
+      next: end
+
+  outputs:
+    - name: answer
+      from: $.state.answer

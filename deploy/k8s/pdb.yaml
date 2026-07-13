@@ -1,0 +1,20 @@
+# PodDisruptionBudget — keep the pool serving during voluntary disruptions.
+#
+# During a node drain / cluster upgrade, keep at least 2 rotor pods available so the
+# Service always has ready endpoints. Fungibility (SPEC.md §17.1) is what makes a PDB
+# sufficient rather than fragile: evicting a pod never loses a run — the run resumes
+# on any surviving/replacement pod from the shared stator — so we only need to bound
+# how many go at once, not pin any particular pod.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: openrotor
+  labels:
+    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/component: runtime
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openrotor
+      app.kubernetes.io/component: runtime

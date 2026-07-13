@@ -1,0 +1,61 @@
+# HorizontalPodAutoscaler — scale the fungible pool 3→20 on load.
+#
+# Because pods are fungible (SPEC.md §17.1), horizontal scaling is the ENTIRE
+# scaling story: adding a pod adds capacity for ANY run, and removing one strands no
+# run (state is external). Two signals drive it:
+#   1. CPU utilization — the generic compute-pressure signal.
+#   2. `pending_rotors` — the portable, rotor-native signal (SPEC.md §17.3
+#      `targetConcurrency`): in-flight/queued runs per instance. When the shared
+#      pending-rotors queue (Redis) backs up, warm another instance.
+# The pool floor of minReplicas:3 mirrors a `spec.pool.minHot: 3` intent; the
+# ceiling of 20 is the hard cost cap (`maxHot`) — warm-pool size is BOUNDED by
+# budget governance (SPEC.md §17.3), so the platform may provision DOWN from 20.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: openrotor
+  labels:
+    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/component: runtime
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: openrotor
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # Custom metric: pending rotors per pod. Requires a metrics adapter (e.g.
+    # prometheus-adapter) exposing `pending_rotors` as a per-pod Pods metric. This is
+    # SPEC.md §17.3 `targetConcurrency` expressed as a k8s autoscaling signal —
+    # in-flight requests per instance before the runtime warms another.
+    - type: Pods
+      pods:
+        metric:
+          name: pending_rotors
+        target:
+          type: AverageValue
+          averageValue: "5"
+  behavior:
+    scaleUp:
+      # React quickly to a burst — the cold-start budget (SPEC.md §17.3
+      # coldStart.budget_ms) is what pre-warming exists to protect.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+    scaleDown:
+      # Shed warm capacity conservatively; idle hot instances are a FinOps cost, but
+      # thrashing the pool wastes cold-starts. Pre-warm is shed before live runs.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

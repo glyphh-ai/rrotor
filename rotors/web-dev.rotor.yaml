@@ -1,0 +1,167 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# glyphh/web-dev@0.1.0 — a DOMAIN rotor for web-dev tasks (SPEC.md §15.2)
+#
+#   recall → plan → scaffold → code → test → (escalate on failure) → deliver
+#
+# It composes the base rotor's grounding cycle rather than reinventing it:
+#   recall    semantic recall of framework docs / prior snippets via a cached
+#             `retrieve.vector` step (§7.7) — the cache means repeat builds over
+#             the same corpus skip re-embedding + re-search.
+#   plan      typed constrained decode of the build steps (§7.10).
+#   scaffold  a deterministic `tool` step lays down the project skeleton (§7.16).
+#   code      a LOCAL coder `model` writes the implementation (§7.2), grounded
+#             softly against the recalled docs with a small backtrack budget.
+#   test      a `gate` runs the schema / evaluator check (§7.8); on failure it
+#             escalates to a governed frontier coder rather than looping forever.
+#   deliver   grounded terminal (§7.9).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rotor.glyphh.ai/v0.1
+kind: Rotor
+metadata:
+  name: web-dev
+  version: 0.1.0
+  namespace: glyphh
+  description: Plan → scaffold → code (local coder) → test → escalate, with cached doc retrieval.
+  labels:
+    tier: domain
+    domain: web-dev
+
+spec:
+  inputs:
+    - name: task
+      type: string
+      required: true
+      description: The feature / change to implement.
+    - name: repo
+      type: string
+      description: Optional target repo or workspace path.
+
+  # Required because `recall` (retrieve.vector) and `test` (gate) bind a space.
+  space:
+    vector_dim: 10000
+    encoder_seed: 42
+    roles_config: universal-7x33
+
+  attention:
+    budget:
+      wall_ms: 120000
+      tokens: 200000
+      on_exhausted: escalate
+
+  state:
+    schema:
+      artifact: { type: object }
+    reducers:
+      artifact: last-write-wins
+
+  entry: recall
+
+  steps:
+    # ── recall ───────────────────────────────────────────────────────────────
+    # Semantic doc / snippet recall (RECALL, §7.7). The step-level `cache`
+    # memoizes the retrieval by query for a day at rotor scope — repeated builds
+    # over the same docs corpus reuse the result instead of re-embedding.
+    - id: recall
+      type: retrieve.vector
+      in: { query: $.inputs.task }
+      out: { hits: array }
+      cache:
+        key: $.inputs.task
+        ttl: 24h
+        scope: rotor
+      config:
+        top_k: 8
+        kind: query
+        threshold: 0.2
+        embed_model: bge-small-en
+      next: plan
+
+    # ── plan ───────────────────────────────────────────────────────────────
+    # Constrained decode of the build approach (§7.10): the model chooses an op
+    # from a closed enum; an out-of-schema slot refuses.
+    - id: plan
+      type: plan
+      in: { question: $.inputs.task, context: $.steps.recall.hits }
+      out: { plan: object }
+      config:
+        ops: [scaffold, edit, add_dependency, write_test, refactor]
+        executor: webdev.planner
+        on_out_of_schema: refuse
+      next: scaffold
+
+    # ── scaffold ─────────────────────────────────────────────────────────────
+    # Lay down the project skeleton through a client/app tool method over the
+    # loopback attach channel (§7.16, tool.app). Idempotent by key so a replay
+    # does not re-scaffold.
+    - id: scaffold
+      type: tool
+      in: { plan: $.steps.plan.plan, repo: $.inputs.repo }
+      out: { files: array }
+      idempotency: auto
+      config:
+        flavor: app
+        method: apps.callTool
+        params: { app: web-scaffold, plan: $.steps.plan.plan }
+      next: code
+
+    # ── code ───────────────────────────────────────────────────────────────
+    # The LOCAL coder model writes the implementation (§7.2). It is grounded
+    # softly against the recalled docs and given a bounded backtrack budget; the
+    # stable system prefix is prompt-cached (§8).
+    - id: code
+      type: model
+      in: { plan: $.steps.plan.plan, docs: $.steps.recall.hits, files: $.steps.scaffold.files }
+      out: { text: string, frames: array }
+      config:
+        lane: local
+        model: glyphh-coder-7b
+        max_tokens: 8192
+        temperature: 0.2
+        ground: { role: docs.snippet, enforcement: soft }
+        max_backtracks: 3
+        cache: { breakpoints: [system] }
+      next: test
+
+    # ── test ───────────────────────────────────────────────────────────────
+    # Verify the generated code against a schema / evaluator (§7.8).
+    #   on_pass → deliver ; on_fail → escalate to a frontier coder ; on_escalate → escalate
+    - id: test
+      type: gate
+      in: { code: $.steps.code.text }
+      out: { verdict: string, score: number }
+      config:
+        mode: evaluator
+        scorer: webdev.build-and-test
+        threshold: 0.8
+        enforcement: hard
+        on_pass: deliver
+        on_fail: escalate
+        on_escalate: escalate
+
+    # ── escalate ─────────────────────────────────────────────────────────────
+    # Climb to a governed, metered frontier coder on a gate reject; fall back to
+    # a human rung if the frontier is declined (§7.15 / §9).
+    - id: escalate
+      type: escalate
+      in: { code: $.steps.code.text, reason: $.steps.test.verdict }
+      out: { lane: string, text: string }
+      config:
+        trigger: gate-reject
+        to: frontier
+        frontier_model: frontier-coder-xl
+        fallback: human
+      next: deliver
+
+    # ── deliver ──────────────────────────────────────────────────────────────
+    - id: deliver
+      type: assert
+      in: { artifact: $.steps.code.text, verdict: $.steps.test.verdict }
+      out: { text: string }
+      config:
+        refusal: "Could not produce a passing implementation."
+        empty_cell: refuse
+      next: end
+
+  outputs:
+    - name: artifact
+      from: $.state.artifact

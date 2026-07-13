@@ -1,0 +1,49 @@
+/**
+ * The BASIC plugin bundle + the `buildBasicPlugins()` factory the executor and
+ * CLI use (docs/runtime.md §3). Every seam reports `status().tier === "basic"`
+ * and degrades (`ready` stays true, work falls back) rather than raising.
+ *
+ * The grounding and memory plugins SHARE one {@link InProcessStore} — grounding
+ * reads the fact store the memory plugin owns, exactly as the premium tier reads
+ * one substrate. Pass your own store to seed facts or share history across runs.
+ */
+
+import { InProcessStore, type Stator } from "../exec/store.js";
+import { BasicGrounding } from "./grounding.js";
+import { BasicMemory } from "./memory.js";
+import { BasicModels, type BasicModelsOptions } from "./models.js";
+import { BasicConnections } from "./connections.js";
+import { BasicGateway } from "./gateway.js";
+import { BasicGovernance } from "./governance.js";
+import { BasicPool } from "./pool.js";
+import type { Plugins } from "./interfaces.js";
+
+export * from "./interfaces.js";
+export { BasicGrounding } from "./grounding.js";
+export { BasicMemory } from "./memory.js";
+export { BasicModels, type BasicModelsOptions } from "./models.js";
+export { BasicConnections } from "./connections.js";
+export { BasicGateway } from "./gateway.js";
+export { BasicGovernance } from "./governance.js";
+export { BasicPool } from "./pool.js";
+
+export interface BuildBasicPluginsOptions {
+  /** A pre-seeded / shared stator. Defaults to a fresh {@link InProcessStore}. */
+  store?: Stator;
+  /** Model lane configuration (local endpoint, timeout, default model). */
+  models?: BasicModelsOptions;
+}
+
+/** The seven basic capabilities, wired against one shared in-process stator. */
+export function buildBasicPlugins(opts: BuildBasicPluginsOptions = {}): Plugins {
+  const store = opts.store ?? new InProcessStore();
+  return {
+    grounding: new BasicGrounding(store),
+    memory: new BasicMemory(store),
+    models: new BasicModels(opts.models),
+    connections: new BasicConnections(),
+    gateway: new BasicGateway(),
+    governance: new BasicGovernance(),
+    pool: new BasicPool(),
+  };
+}
