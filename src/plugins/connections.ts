@@ -11,6 +11,7 @@
  */
 
 import type { CapabilityStatus } from "../runtime/registry.js";
+import { RotorError } from "../errors.js";
 import type {
   ConnectionsPlugin,
   DispatchResult,
@@ -53,13 +54,16 @@ export class BasicConnections implements ConnectionsPlugin {
       const result = await handler(args);
       return { ok: true, result };
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      // Never raises (§3.4): normalize to the taxonomy and surface `code: detail`
+      // so a caller/log sees the code without a separate lookup.
+      const err = RotorError.from(e, "E_TOOL");
+      return { ok: false, error: `${err.code}: ${err.message}` };
     }
   }
 
   async invoke(method: string, args: Row): Promise<unknown> {
     const handler = this.handlers.get(method);
-    if (!handler) throw new Error(`E_NO_TOOL: ${method}`);
+    if (!handler) throw new RotorError("E_NO_TOOL", method, { context: { method } });
     return await handler(args);
   }
 

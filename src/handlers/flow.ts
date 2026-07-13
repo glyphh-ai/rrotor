@@ -18,6 +18,7 @@ import type {
   SubRotorConfig,
 } from "../types.js";
 import { applyReducer, resolveRef } from "../exec/util.js";
+import { RotorError } from "../errors.js";
 import { evalGate } from "./gate.js";
 import type { HandlerArgs, StepHandler } from "./types.js";
 
@@ -79,9 +80,9 @@ export const parallelHandler: StepHandler = {
         // E_UNMERGEABLE, never a silent last-write-wins.
         const reducer = reducerFor(key);
         if (!reducer) {
-          const e = new Error(`E_UNMERGEABLE: concurrent write to '${key}' with no declared reducer`);
-          e.name = "E_UNMERGEABLE";
-          throw e;
+          throw new RotorError("E_UNMERGEABLE", `concurrent write to '${key}' with no declared reducer`, {
+            context: { key },
+          });
         }
         merged[key] = applyReducer(merged[key], out[key], reducer);
       }

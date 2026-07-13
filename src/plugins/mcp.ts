@@ -17,6 +17,7 @@
  */
 
 import { VERSION } from "../version.js";
+import { RotorError } from "../errors.js";
 import type { ConnectionsPlugin, Row, ToolSchema } from "./interfaces.js";
 
 /** Static headers, or a (possibly async) provider called per request. */
@@ -74,7 +75,7 @@ async function parseRpc(res: Response): Promise<RpcResponse> {
         }
       }
     }
-    throw new Error("MCP: no JSON-RPC frame in SSE response");
+    throw new RotorError("E_TRANSPORT", "MCP: no JSON-RPC frame in SSE response");
   }
   return JSON.parse(body) as RpcResponse;
 }
@@ -95,9 +96,9 @@ export class McpClient {
     });
     const sid = res.headers.get("mcp-session-id");
     if (sid) this.sessionId = sid;
-    if (!res.ok) throw new Error(`MCP ${method} → HTTP ${res.status}`);
+    if (!res.ok) throw new RotorError("E_TRANSPORT", `MCP ${method} → HTTP ${res.status}`, { context: { method, status: res.status } });
     const rpc = await parseRpc(res);
-    if (rpc.error) throw new Error(`MCP ${method}: ${rpc.error.message}`);
+    if (rpc.error) throw new RotorError("E_TOOL", `MCP ${method}: ${rpc.error.message}`, { context: { method } });
     return rpc.result ?? {};
   }
 

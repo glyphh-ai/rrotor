@@ -14,6 +14,7 @@
 
 import type { CapabilityStatus } from "../runtime/registry.js";
 import type { Usage } from "../types.js";
+import { RotorError } from "../errors.js";
 import type { GatewayPlugin, MeterSnapshot, PromptCacheResult } from "./interfaces.js";
 
 /** The canonical internal tool-call form the table pivots through. */
@@ -68,10 +69,8 @@ function fromInternal(to: string, p: InternalCall): unknown {
   }
 }
 
-function untranslatable(from: string, to: string): Error {
-  const e = new Error(`E_UNTRANSLATABLE: ${from} → ${to}`);
-  e.name = "E_UNTRANSLATABLE";
-  return e;
+function untranslatable(from: string, to: string): RotorError {
+  return new RotorError("E_UNTRANSLATABLE", `${from} → ${to}`, { context: { from, to } });
 }
 
 export class BasicGateway implements GatewayPlugin {

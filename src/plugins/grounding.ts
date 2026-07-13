@@ -16,6 +16,7 @@
 
 import type { CapabilityStatus } from "../runtime/registry.js";
 import { sha256 } from "../exec/util.js";
+import { RotorError } from "../errors.js";
 import { hdcSpace, type HdcSpace, type HyperVector } from "../exec/hdc.js";
 import type { Stator } from "../exec/store.js";
 import type {
@@ -54,7 +55,9 @@ export class BasicGrounding implements GroundingPlugin {
       return;
     }
     if (this.bound !== spaceId) {
-      throw new Error(`E_SPACE_MISMATCH: bound to ${this.bound}, asked for ${spaceId}`);
+      throw new RotorError("E_SPACE_MISMATCH", `bound to ${this.bound}, asked for ${spaceId}`, {
+        context: { bound: this.bound, asked: spaceId },
+      });
     }
   }
 

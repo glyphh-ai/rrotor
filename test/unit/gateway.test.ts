@@ -37,7 +37,10 @@ describe("gateway translation (§8.3)", () => {
   });
 
   it("throws E_UNTRANSLATABLE for an unknown representation", () => {
-    expect(() => gw().translate("internal", "smoke-signal", call)).toThrowError(/E_UNTRANSLATABLE/);
+    // The taxonomy code is on `.name`/`.code` (RotorError), not embedded in the message.
+    expect(() => gw().translate("internal", "smoke-signal", call)).toThrowError(
+      expect.objectContaining({ name: "E_UNTRANSLATABLE", code: "E_UNTRANSLATABLE" }),
+    );
   });
 });
 

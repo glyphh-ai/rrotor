@@ -803,11 +803,31 @@ actionable remediation on every code; retryable only where the category allows;
 `toTelemetry`; `from()` pass-through / code-preservation / fallback. **202 total
 green.**
 
-### E2 — Error-handling discipline (try/catch/finally sweep)  ⏳
+### E2 — Error-handling discipline (throw-site sweep)  ✅
 
-Every boundary (handlers, plugins, transports, stator, server, CLI) throws or
-normalizes to a `RotorError`; nothing swallows silently; resources release in
-`finally`. Grep-audit throw sites; convert ad-hoc throws to taxonomy codes.
+Every runtime throw site now raises a `RotorError`, so the code survives to the
+tape, the retry/catch rules, and telemetry — fixing a latent bug where
+`new Error("E_XXX: …")` (name `"Error"`) was recorded as `E_HANDLER`, losing the
+real code.
+
+- [x] Converted the step-path + plugin throws: `E_SPACE_MISMATCH` (grounding),
+      `E_UNMERGEABLE` (flow merge), `E_UNTRANSLATABLE` (gateway), `E_NO_TOOL`
+      (connections), `E_TRANSPORT`/`E_TOOL` (MCP client + HTTP drain sink),
+      `E_MISSING_INPUT` (executor input validation) — each with structured
+      `context`.
+- [x] `connections.dispatch` (which never raises) normalizes to `RotorError` and
+      surfaces `code: detail`, so the closed tool boundary reports a taxonomy code.
+- [x] The executor's handler-catch (E1) already normalizes any residual raw throw
+      to `E_HANDLER`, so nothing reaches the tape uncoded.
+
+**Acceptance (`test/integration/errors-e2e.test.ts`, 2 tests):** a handler-thrown
+`RotorError("E_TOOL")` records `{name:"E_TOOL", cause}` on the tape (deterministic)
+and the drain envelope is enriched (category `transport`, retryable, remediation); a
+raw throw normalizes to `E_HANDLER` (category `internal`). **204 total green.**
+
+Deferred (not step-path failures): construction-time guards (`createStator`
+pgvector misuse) and the HTTP body-size limit stay plain — they surface to the
+operator directly, never through the run tape.
 
 ### E3 — Observability / OpenTelemetry  ⏳
 

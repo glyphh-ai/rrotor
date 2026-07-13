@@ -634,7 +634,7 @@ function validateInputs(doc: RotorDocument, inputs: Record<string, unknown>): Re
   for (const p of doc.spec.inputs ?? []) {
     if (inputs[p.name] !== undefined) out[p.name] = inputs[p.name];
     else if (p.default !== undefined) out[p.name] = p.default;
-    else if (p.required) throw new Error(`E_MISSING_INPUT: required input '${p.name}'`);
+    else if (p.required) throw new RotorError("E_MISSING_INPUT", `required input '${p.name}'`, { context: { input: p.name } });
   }
   // Carry through any extra inputs the caller supplied (permissive).
   for (const k of Object.keys(inputs)) if (!(k in out)) out[k] = inputs[k];

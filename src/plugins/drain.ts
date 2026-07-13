@@ -24,7 +24,7 @@ import type { StepRecord } from "../types.js";
 import type { CapabilityStatus } from "../runtime/registry.js";
 import type { DrainEnvelope, DrainPlugin } from "./interfaces.js";
 import { loggerFromEnv, type Logger } from "../obs/logger.js";
-import { describe } from "../errors.js";
+import { describe, RotorError } from "../errors.js";
 
 const ENVELOPE_TYPE = "com.openrotor.step.v0";
 const REDACTED = "[redacted]";
@@ -236,7 +236,7 @@ export class HttpDrain extends BufferedDrain {
     const headers: Record<string, string> = { "content-type": "application/x-ndjson" };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
     const res = await fetch(this.url, { method: "POST", headers, body });
-    if (!res.ok) throw new Error(`drain sink responded ${res.status}`);
+    if (!res.ok) throw new RotorError("E_TRANSPORT", `drain sink responded ${res.status}`, { context: { status: res.status } });
   }
 }
 
