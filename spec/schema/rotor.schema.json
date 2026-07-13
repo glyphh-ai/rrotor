@@ -139,7 +139,8 @@
           "type": "array",
           "items": { "$ref": "step.schema.json#/$defs/connectionAccessScope" }
         },
-        "on_ungranted": { "enum": ["redact", "refuse"] }
+        "on_ungranted": { "enum": ["redact", "refuse"] },
+        "redact": { "type": "array", "items": { "type": "string" } }
       }
     },
 

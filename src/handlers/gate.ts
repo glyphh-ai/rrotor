@@ -78,12 +78,20 @@ export function evalGate(
     }
     case "firewall":
     case "anomaly": {
-      // A scanner verdict is stochastic-checkpointed; basic tier finds no anomaly.
-      const verdict: Verdict = "pass";
+      // Deterministic basic-tier scanner over the candidate value (§12.2/§14.2).
+      const target = String(input.candidate ?? input.text ?? input.value ?? firstDefined(input) ?? "");
+      const checks = (cfg.checks as string[] | undefined) ?? ["pii", "policy"];
+      const hit = scanForAnomaly(target, checks);
+      if (!hit) {
+        return { verdict: "pass", output: { verdict: "pass", anomaly: null }, frames: [gateFrame("pass", { anomaly: null })] };
+      }
+      // A firewall BLOCKS (fail → on_fail); an anomaly ESCALATES (§14.2: a
+      // first-class signal, emitted as a frame, that triggers escalation).
+      const verdict: Verdict = cfg.mode === "firewall" ? "fail" : "escalate";
       return {
         verdict,
-        output: { verdict, anomaly: null },
-        frames: [gateFrame(verdict, { anomaly: null })],
+        output: { verdict, anomaly: hit },
+        frames: [gateFrame(verdict, { anomaly: hit }), { type: "refuse", logical_tick: env.logical_tick, data: { anomaly: hit } }],
       };
     }
     case "approval": {
@@ -108,6 +116,30 @@ function firstDefined(input: Record<string, unknown>): unknown {
     if (input[k] !== undefined) return input[k];
   }
   return undefined;
+}
+
+/**
+ * The deterministic basic-tier anomaly scanner. Pure pattern matching over the
+ * candidate text for the requested check classes — no model, no RNG — so the
+ * verdict is replay-safe. Returns a short anomaly kind, or `null` if clean. The
+ * premium tier swaps in a real classifier behind the same gate contract.
+ */
+function scanForAnomaly(text: string, checks: string[]): string | null {
+  for (const check of checks) {
+    if (check === "pii") {
+      if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(text)) return "pii:email";
+      if (/\b\d{3}-\d{2}-\d{4}\b/.test(text)) return "pii:ssn";
+      if (/\b(?:\d[ -]?){13,16}\b/.test(text)) return "pii:card";
+    }
+    if (check === "policy") {
+      if (/ignore\s+(?:all\s+|the\s+|your\s+)?(?:previous|prior|above)\s+instructions/i.test(text)) {
+        return "policy:injection";
+      }
+      if (/\b(?:system\s+prompt|reveal\s+your\s+(?:instructions|prompt))\b/i.test(text)) return "policy:probe";
+    }
+    // `drift` / `ood` have no deterministic bare-box signal → skipped.
+  }
+  return null;
 }
 
 export const gateHandler: StepHandler = {

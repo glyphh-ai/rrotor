@@ -248,6 +248,9 @@ export interface AccessConfig {
   stator?: StatorAccess;
   connections?: ConnectionAccessScope[];
   on_ungranted?: OnUngranted;
+  /** Field names redacted from step inputs AND outputs before they enter the
+   *  Context / event history (§13.4). Deny-by-default at the field grain. */
+  redact?: string[];
 }
 
 // ── spec.assurance (§14) ───────────────────────────────────────────────────

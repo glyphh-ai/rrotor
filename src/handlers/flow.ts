@@ -63,15 +63,27 @@ export const parallelHandler: StepHandler = {
     const cfg = step.config as ParallelConfig;
     const merged: Record<string, unknown> = {};
 
-    const reducerFor = (key: string): Reducer => {
-      if (cfg.reducer && typeof cfg.reducer === "object") return cfg.reducer[key] ?? "merge";
+    // A declared reducer for a key, or `undefined` when none is declared.
+    const reducerFor = (key: string): Reducer | undefined => {
+      if (cfg.reducer && typeof cfg.reducer === "object") return cfg.reducer[key];
       if (typeof cfg.reducer === "string") return cfg.reducer;
-      return "merge";
+      return undefined;
     };
     const mergeIn = (out: Record<string, unknown>): void => {
       for (const key of Object.keys(out).sort()) {
-        merged[key] =
-          key in merged ? applyReducer(merged[key], out[key], reducerFor(key)) : out[key];
+        if (!(key in merged)) {
+          merged[key] = out[key];
+          continue;
+        }
+        // §5.2: a concurrent write to a key with no declared reducer is
+        // E_UNMERGEABLE, never a silent last-write-wins.
+        const reducer = reducerFor(key);
+        if (!reducer) {
+          const e = new Error(`E_UNMERGEABLE: concurrent write to '${key}' with no declared reducer`);
+          e.name = "E_UNMERGEABLE";
+          throw e;
+        }
+        merged[key] = applyReducer(merged[key], out[key], reducer);
       }
     };
 
@@ -79,11 +91,19 @@ export const parallelHandler: StepHandler = {
       const coll = resolveRef(cfg.over, env.context);
       const items = Array.isArray(coll) ? coll : [];
       const asName = cfg.as ?? "item";
-      for (let i = 0; i < items.length; i++) {
-        // Bind the current item into shared state for the body to read.
-        env.context.state[asName] = items[i];
-        const r = await engine.runStep(cfg.body);
-        mergeIn(r.output);
+      // The map variable is scoped to the body; save/restore the prior value so
+      // it does not leak into shared state after the fan-out.
+      const hadPrior = asName in env.context.state;
+      const prior = env.context.state[asName];
+      try {
+        for (let i = 0; i < items.length; i++) {
+          env.context.state[asName] = items[i];
+          const r = await engine.runStep(cfg.body);
+          mergeIn(r.output);
+        }
+      } finally {
+        if (hadPrior) env.context.state[asName] = prior;
+        else delete env.context.state[asName];
       }
     } else {
       // Fan-out over declared branches, deterministic order.
@@ -108,10 +128,14 @@ export const subRotorHandler: StepHandler = {
       }
     }
     const rr = await engine.runRotor(cfg.ref, mapped);
+    // Surface a callee failure/refusal (e.g. §11.3 scope attenuation) rather than
+    // masking it as ok.
+    const status: StepResult["status"] =
+      rr.status === "failed" ? "failed" : rr.status === "refused" ? "refused" : "ok";
     return {
       output: rr.outputs,
-      frames: [{ type: "done", data: { ref: cfg.ref, status: rr.status } }],
-      status: rr.status === "failed" ? "failed" : "ok",
+      frames: [{ type: rr.status === "refused" ? "refuse" : "done", data: { ref: cfg.ref, status: rr.status } }],
+      status,
     };
   },
 };

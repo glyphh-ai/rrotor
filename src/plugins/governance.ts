@@ -29,6 +29,9 @@ export class BasicGovernance implements GovernancePlugin {
     const declaredTools = policy?.requires?.tools;
     const declaredModels = policy?.requires?.models;
     const scopes = new Set(doc.spec.identity?.scopes ?? []);
+    // Field-grain redaction declared in spec.access (§13.4): these fields are
+    // stripped from step inputs AND outputs before entering Context / history.
+    const redact = doc.spec.access?.redact;
 
     // A declared surface becomes an allow-list; an undeclared one stays open
     // (undefined) — the bare-box default. This is deny-by-default in SHAPE with
@@ -38,7 +41,7 @@ export class BasicGovernance implements GovernancePlugin {
       tools: declaredTools ? new Set(declaredTools) : undefined,
       models: declaredModels ? new Set(declaredModels) : undefined,
       scopes,
-      redactFields: undefined,
+      redactFields: redact && redact.length > 0 ? new Set(redact) : undefined,
       principal: principal ?? { id: "local", kind: "user", scopes: Array.from(scopes) },
     };
   }

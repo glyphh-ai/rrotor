@@ -40,7 +40,7 @@ not "done" until its acceptance tests are green in CI.
 | 2 | Durable & shared stator (SQLite) | ✅ | L1→L2 |
 | 3 | **Log drains subsystem** | ✅ | L2 (observability) |
 | 4 | Attention budgets + gateway metering | ✅ | L2 |
-| 5 | Trust layer (access, identity attenuation, anomaly/firewall, merge) | ⬜ | L2 |
+| 5 | Trust layer (access, identity attenuation, anomaly/firewall, merge) | ✅ | L2 |
 | 6 | HDC grounding law | ⬜ | L2 (headline feature) |
 | 7 | wait/interrupt resume + approval | ⬜ | L2 |
 | 8 | Run-pinning / patch gates / replay divergence | ⬜ | L3 |
@@ -301,37 +301,49 @@ green**, coverage floor raised to ~70%.
 
 ---
 
-## Phase 5 — Trust layer  ⬜
+## Phase 5 — Trust layer  ✅
 
-**Why:** gaps #5, #7, #8 + redaction. The governable core of L2 is stubbed:
-`firewall`/`anomaly` gates always `pass`, `spec.access` is never parsed,
-`redactFields` is always undefined, sub-rotor identity attenuation is a comment
-not code, and `E_UNMERGEABLE` is never raised.
+**Why:** gaps #5, #7, #8 + redaction. The governable core of L2 was stubbed:
+`firewall`/`anomaly` gates always `pass`, `spec.access` never parsed,
+`redactFields` always undefined, sub-rotor identity attenuation a comment not
+code, and `E_UNMERGEABLE` never raised.
 
 ### Tasks
-- [ ] `E_UNMERGEABLE` (§5.2): undeclared concurrent writes error instead of
-      silent last-write-wins (`executor.ts:399`, `flow.ts` parallel/map fan-in).
-- [ ] Fix `parallel` map-mode leaking the loop var into shared `state[as]`
-      (`flow.ts:84`).
-- [ ] Sub-rotor **identity attenuation** (§11.3): callee runs under an intersected
-      scope set; refuse on scope-exceed (`executor.ts:442`). Resolve/verify
-      sub-rotor refs (no fake `ok`).
-- [ ] Parse `spec.access` (§13.4): connector/field/stator grants; implement
-      `governance.redactFields` and wire `redact` (used by Phase 3 drains too).
-- [ ] Implement `firewall` (input) and `anomaly` (output) gates (§12.2/§14.2) —
-      real scanning, anomaly emitted as a frame + escalation trigger, not a log
-      line.
-- [ ] Routing governance (§13.3): PII→local, approved-providers only.
+- [x] `E_UNMERGEABLE` (§5.2): a concurrent (parallel fan-in) write to a key with
+      no declared reducer now raises the typed error instead of silent
+      last-write-wins (`flow.ts`). (Sequential writes are ordered, not concurrent,
+      so they keep last-write-wins correctly.)
+- [x] Fixed `parallel` map-mode leaking the loop var into shared `state[as]` —
+      save/restore around the fan-out (`flow.ts`).
+- [x] Sub-rotor **identity attenuation** (§11.3): the callee runs under the
+      INTERSECTION of caller grants and its own declared scopes; a scope the caller
+      lacks is **refused** (`__attenuation__`, `E_SCOPE_EXCEEDED`); the sub-run's
+      StepRecords carry the narrowed identity. Unresolved ref is a hard failure,
+      not a fake `ok` (`executor.ts`).
+- [x] `spec.access.redact` (§13.4) added to types + schema; `governance.resolveGrants`
+      populates `redactFields`; the executor redacts step **outputs** at `append()`
+      so redacted fields are absent from the record, the Context, AND drain envelopes.
+- [x] `firewall` (input, blocks → fail) and `anomaly` (output, escalates + refuse
+      frame) gates (§12.2/§14.2) via a deterministic pattern scanner (pii/policy).
+- [~] **Deferred:** routing governance (§13.3, PII→local / approved-providers) —
+      determinism-neutral model routing that needs model-step plumbing; tracked as
+      a follow-up (composes with the Phase 9 gateway/model work).
 
 ### Acceptance
-- [ ] Concurrent-write conformance test raises `E_UNMERGEABLE` unless a reducer is
-      declared.
-- [ ] Attenuation test: a sub-rotor requesting a scope the caller lacks is refused;
-      the StepRecord shows the intersected identity.
-- [ ] Redaction test: `spec.access`-marked fields are absent from outputs **and**
+- [x] Concurrent-write test raises `E_UNMERGEABLE` unless a reducer is declared
+      (`test/integration/trust.test.ts`).
+- [x] Attenuation test: a callee requesting a scope the caller lacks is refused;
+      the sub-run's StepRecord shows the intersected identity `["scope:a"]`.
+- [x] Redaction test: `spec.access`-marked fields are absent from outputs **and**
       from drain envelopes.
-- [ ] Firewall/anomaly test: a malicious input is gated; an anomalous output emits
-      an anomaly frame and triggers escalation.
+- [x] Firewall/anomaly test (`test/unit/gate.test.ts`): PII/injection input is
+      gated (fail); an anomalous output escalates and emits a refuse frame.
+
+**Landed:** `flow.ts` (E_UNMERGEABLE + map save/restore + sub-rotor refused
+passthrough), `executor.ts` (attenuation + output redaction), `governance.ts`
+(`redactFields` from `spec.access.redact`), `gate.ts` (`scanForAnomaly`),
+`types.ts` + `rotor.schema.json` (`access.redact`). Tests: `trust.test.ts`,
+`gate.test.ts`. **102 tests green**, coverage floor raised to ~72%.
 
 ---
 

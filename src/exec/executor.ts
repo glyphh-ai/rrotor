@@ -416,6 +416,10 @@ class RunSession {
 
   /** Build + append the StepRecord, return the result it records. */
   private append(step: Step, attempt: number, input: Record<string, unknown>, result: StepResult): StepResult {
+    // §13.4 field-grain redaction: strip granted-out fields from the OUTPUT before
+    // it is recorded, so they are absent from the event history, the Context (via
+    // recordToResult below), and any log drain built from the record.
+    const output = this.plugins.governance.redact(result.output, this.grants);
     const rec: StepRecord = {
       run_id: this.runId,
       step_id: step.id,
@@ -427,7 +431,7 @@ class RunSession {
       principal: this.principal,
       agent_identity: { ref: this.agentRef, run_id: this.runId },
       status: result.status ?? "ok",
-      output: result.output,
+      output,
       frames: result.frames,
       usage: result.usage,
       error: result.error,
@@ -508,21 +512,41 @@ class RunSession {
   private async runRotor(ref: string, subInputs: Record<string, unknown>): Promise<RunResult> {
     const subDoc = this.opts.rotorResolver?.(ref);
     if (!subDoc) {
-      // Unresolved reference: return an empty, non-failing result with a note.
+      // Unresolved reference is a hard failure, not a fake success (§7.19).
       return {
         run_id: `${this.runId}::${ref}`,
-        status: "ok",
-        terminal: "end",
-        outputs: { unresolved: ref },
+        status: "failed",
+        terminal: "__fail__",
+        outputs: {},
         context: { inputs: subInputs, state: {}, steps: {} },
         history: [],
       };
     }
-    // Recursive execute; the callee shares the same plugins (stator, §17.1). A
-    // premium tier attenuates identity here (§11.3); basic runs under the caller.
+
+    // §11.3 identity attenuation: a callee may only NARROW the caller's scopes,
+    // never widen them. A scope the callee declares that the caller lacks is
+    // refused; otherwise the callee runs under the INTERSECTION.
+    const callerScopes = new Set(this.principal.scopes ?? []);
+    const requested = subDoc.spec.identity?.scopes ?? [];
+    const exceeded = requested.filter((s) => !callerScopes.has(s));
+    if (exceeded.length > 0) {
+      return {
+        run_id: `${this.runId}::${ref}`,
+        status: "refused",
+        terminal: "__attenuation__",
+        outputs: { refused: "E_SCOPE_EXCEEDED", scopes: exceeded },
+        context: { inputs: subInputs, state: {}, steps: {} },
+        history: [],
+      };
+    }
+    const attenuated = requested.length > 0 ? requested.filter((s) => callerScopes.has(s)) : [...callerScopes];
+    const calleePrincipal: Principal = { ...this.principal, scopes: attenuated };
+
+    // Recursive execute; the callee shares the same plugins (stator, §17.1) and
+    // runs under the attenuated identity — its StepRecords carry the narrowed scopes.
     return execute(subDoc, subInputs, this.plugins, {
       runId: `${this.runId}::${ref}`,
-      principal: this.principal,
+      principal: calleePrincipal,
       handlers: this.opts.handlers,
       rotorResolver: this.opts.rotorResolver,
       maxTicks: this.maxTicks,
