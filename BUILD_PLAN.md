@@ -39,7 +39,7 @@ not "done" until its acceptance tests are green in CI.
 | 1 | Structured logging + wire the real runtime | ✅ | L1 hardening |
 | 2 | Durable & shared stator (SQLite) | ✅ | L1→L2 |
 | 3 | **Log drains subsystem** | ✅ | L2 (observability) |
-| 4 | Attention budgets + gateway metering | ⬜ | L2 |
+| 4 | Attention budgets + gateway metering | ✅ | L2 |
 | 5 | Trust layer (access, identity attenuation, anomaly/firewall, merge) | ⬜ | L2 |
 | 6 | HDC grounding law | ⬜ | L2 (headline feature) |
 | 7 | wait/interrupt resume + approval | ⬜ | L2 |
@@ -250,28 +250,54 @@ floor ~66%.
 
 ---
 
-## Phase 4 — Attention budgets + gateway metering  ⬜
+## Phase 4 — Attention budgets + gateway metering  ✅
 
 **Why:** gap #3 — `spec.attention` (§10) and gateway `rateLimit`/`metering.budget`
-(§8.4/§8.5) are typed but never read; the only bound is a hardcoded
-`maxTicks = 10_000`. Governance `checkBudget` always returns `ok` and is never
+(§8.4/§8.5) were typed but never read; the only bound was a hardcoded
+`maxTicks = 10_000`. Governance `checkBudget` always returned `ok` and was never
 called.
 
+> **Determinism boundary (the load-bearing decision):** a budget is a *control
+> input* — `on_exhausted` changes transitions — so it MUST be a pure function of
+> recorded state, never wall-clock (§6, §17.6), or replay would diverge. Hence the
+> deterministic dimensions (**revolutions / tokens / cost**, all recomputable from
+> the event history) are enforced as control predicates; **wall-clock** dimensions
+> (`AttentionBudget.wall_ms`, `rateLimit` rpm/tpm) are **not** control predicates
+> and are handled — if at all — as transport timing outside the control plane.
+
 ### Tasks
-- [ ] Executor reads `spec.attention`: bound revolutions, tokens, cost, and wall
-      time; on exhaustion apply `on_exhausted` = `stop | escalate | best-effort`.
-- [ ] Raise the `budget-exceeded` escalation trigger (§9.1) automatically.
-- [ ] Gateway (`gateway.ts`) enforces `rateLimit` (throttle/backoff) and
-      `metering.budget` caps; usage counter shared via the stator, not per-request.
-- [ ] Wire governance `checkBudget` into the loop (org/tenant caps, §13.2).
-- [ ] Honor retry `interval_ms` / `backoff_rate` in `runOne` (currently ignored).
+- [x] Executor reads `spec.attention`: bounds **revolutions** (loop re-entries),
+      **tokens**, and **cost**; on exhaustion applies `on_exhausted` =
+      `stop | escalate | best-effort`. Surfaced as `RunResult.budget` and a
+      `__budget__` terminal. (`src/exec/budget.ts` `AttentionMeter`.)
+- [x] Raises the `budget-exceeded` escalation trigger (§9.1) automatically — routes
+      to the rotor's `escalate` step when `on_exhausted: escalate`.
+- [x] Wired `governance.checkBudget` into the loop (org/tenant cap seam, §13.2;
+      basic tier never blocks, premium can).
+- [x] Honors retry `interval_ms` / `backoff_rate` in `runOne` via an injectable
+      `sleep` — **fresh failures only; replay never sleeps**.
+- [~] **Deferred (transport, not control):** gateway `rateLimit` throttle
+      (rpm/tpm/concurrency) and `wall_ms` — wall-clock quantities cannot be
+      determinism-safe control predicates. They belong in an outcome-neutral
+      transport layer (throttle delays a call, never changes a recorded outcome)
+      and are tracked as a follow-up, not enforced as transitions here. The
+      deterministic **cost/token cap** already covers the "budget cap refuses"
+      need; `metering.budget` as a distinct gateway cap folds into it.
 
 ### Acceptance
-- [ ] A rotor with a tiny `revolutions`/`tokens` budget stops/escalates exactly at
-      the bound, deterministically.
-- [ ] Rate-limit test: bursts are throttled; budget cap refuses with the typed
-      error and an escalation frame.
-- [ ] Retry test: observed backoff matches `interval_ms`/`backoff_rate`.
+- [x] A rotor with a tiny `revolutions` budget stops/escalates exactly at the bound
+      (`test/integration/budget.test.ts`), **deterministically and replay-identical**.
+- [x] `on_exhausted: escalate` routes to the escalate step (escalation frame via
+      that step's normal recorded path).
+- [x] Retry test: observed backoff sequence matches `interval_ms * backoff_rate^n`
+      on fresh execution, and is **empty on replay**.
+- [x] Unit: `AttentionMeter` exhaustion on revolutions/tokens/cost with precedence
+      (`test/unit/budget.test.ts`).
+
+**Landed:** `src/exec/budget.ts` (`AttentionMeter`), executor budget enforcement +
+`RunResult.budget` + `findEscalateStep`, retry backoff with injectable `sleep`,
+`governance.checkBudget` hook, `test/fixtures/looping.rotor.yaml`. **91 tests
+green**, coverage floor raised to ~70%.
 
 ---
 

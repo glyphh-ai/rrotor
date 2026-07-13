@@ -59,6 +59,7 @@ import {
   type Engine,
   type StepHandler,
 } from "../handlers/index.js";
+import { AttentionMeter, type BudgetOutcome } from "./budget.js";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Public surface.
@@ -75,12 +76,15 @@ export interface ExecuteOptions {
   rotorResolver?: (ref: string) => RotorDocument | undefined;
   /** Safety cap on total physical step executions. */
   maxTicks?: number;
+  /** Sleep between retry attempts (§5.5 backoff). Injectable for tests; defaults
+   *  to a real timer. Only used on FRESH execution — replay never sleeps. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface RunResult {
   run_id: string;
   status: StepStatus;
-  /** The terminal reached: `end` | `__fail__` | the id of a terminal step. */
+  /** The terminal reached: `end` | `__fail__` | `__budget__` | a terminal step id. */
   terminal: string;
   /** Projected `spec.outputs` from the final Context. */
   outputs: Record<string, unknown>;
@@ -88,6 +92,8 @@ export interface RunResult {
   context: RunContext;
   /** The append-only event history for this run (§5.4). */
   history: StepRecord[];
+  /** Set when an attention budget (§10) was exhausted — deterministic. */
+  budget?: BudgetOutcome;
 }
 
 const COMPOSITE: ReadonlySet<StepType> = new Set<StepType>(["loop", "parallel", "sub-rotor"]);
@@ -130,6 +136,11 @@ class RunSession {
   /** Session-local per-step visit counter — the replay key (§5.4). */
   private readonly visits = new Map<string, number>();
   private lastStatus: StepStatus = "ok";
+  /** Deterministic §10 attention budget meter. */
+  private readonly attention: AttentionMeter;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private budgetOutcome?: BudgetOutcome;
+  private budgetHandled = false;
 
   constructor(
     private readonly doc: RotorDocument,
@@ -143,6 +154,8 @@ class RunSession {
     this.stateKeys = new Set(Object.keys(doc.spec.state?.schema ?? {}));
     this.definitionVersion = doc.metadata.version;
     this.maxTicks = opts.maxTicks ?? 10_000;
+    this.attention = new AttentionMeter(doc.spec.attention?.budget);
+    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 
     // Space identity (§15.4): compute + bind if the document declares a space.
     if (doc.spec.space) {
@@ -208,6 +221,33 @@ class RunSession {
         runStatus = "failed";
         break;
       }
+      // Trust point (§13.2) — org/tenant budget cap. Basic tier never blocks;
+      // the seam is wired so a premium governance plugin can enforce it.
+      if (this.plugins.governance.checkBudget() === "budget-exceeded") {
+        this.budgetOutcome = { on: "stop", reason: "cost", ...this.attention.snapshot() };
+        terminal = "__budget__";
+        runStatus = "refused";
+        break;
+      }
+
+      // §10 attention budget — deterministic (revolutions / tokens / cost).
+      const exhausted = this.attention.exhausted();
+      if (exhausted && !this.budgetHandled) {
+        this.budgetHandled = true;
+        this.budgetOutcome = exhausted;
+        if (exhausted.on === "escalate") {
+          const esc = this.findEscalateStep(cursor);
+          if (esc) {
+            cursor = esc; // raise the budget-exceeded escalation trigger (§9.1)
+            continue;
+          }
+        }
+        // stop | best-effort | escalate-with-no-ladder: end with the best so far.
+        terminal = "__budget__";
+        runStatus = exhausted.on === "best-effort" || exhausted.on === "stop" ? this.lastStatus : "refused";
+        break;
+      }
+
       const step = this.stepsById.get(cursor);
       if (!step) {
         terminal = "__fail__";
@@ -217,6 +257,7 @@ class RunSession {
 
       const { result, nextOverride } = await this.runStepById(cursor);
       this.lastStatus = result.status ?? "ok";
+      this.attention.record(result.usage);
 
       if (result.status === "interrupted") {
         terminal = cursor;
@@ -224,7 +265,10 @@ class RunSession {
         break;
       }
 
-      cursor = nextOverride ?? this.selectNext(step, result);
+      const nextCursor = nextOverride ?? this.selectNext(step, result);
+      // A transition back into an already-executed step is one loop revolution.
+      if ((this.visits.get(nextCursor) ?? 0) > 0) this.attention.revolution();
+      cursor = nextCursor;
     }
 
     const outputs = this.projectOutputs();
@@ -235,7 +279,13 @@ class RunSession {
       outputs,
       context: this.env.context,
       history: this.plugins.memory.readEventHistory(this.runId),
+      budget: this.budgetOutcome,
     };
+  }
+
+  /** The first `escalate` step other than the current cursor, if any (§9.1). */
+  private findEscalateStep(cursor: string): string | undefined {
+    return this.doc.spec.steps.find((s) => s.type === "escalate" && s.id !== cursor)?.id;
   }
 
   // ── one step: resolve → redact → (replay | cache | execute) → merge ────────
@@ -270,6 +320,7 @@ class RunSession {
       const attempt = this.bumpVisit(step.id);
       const existing = this.plugins.memory.lookupRecord(this.runId, step.id, attempt);
       let result: StepResult;
+      const wasReplay = existing !== undefined;
 
       if (existing && !composite) {
         // Pure replay — return the recorded result, no handler call (§5.4).
@@ -286,9 +337,15 @@ class RunSession {
 
       if (result.status !== "failed") return { result };
 
-      // Failure routing (§5.5): retry, then catch, else propagate to __fail__.
+      // Failure routing (§5.5): retry (with backoff), then catch, else __fail__.
       const retrier = matchError(step.retry, result.error?.name);
       if (retrier && retryCount < (retrier.max_attempts ?? 1) - 1) {
+        // Backoff only on FRESH failures — replay never sleeps (the retry
+        // sequence is already recorded, and re-timing it would just be waste).
+        if (!wasReplay) {
+          const ms = (retrier.interval_ms ?? 0) * (retrier.backoff_rate ?? 1) ** retryCount;
+          if (ms > 0) await this.sleep(ms);
+        }
         retryCount++;
         continue;
       }
