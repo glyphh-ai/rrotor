@@ -651,11 +651,33 @@ that dials once and **replays without re-dialing**. **6 tests; 160 total green.*
 supplies the Pipedream Connect provider (token mint from `.env` + per-user headers)
 and registers a user's tools into the run's bundle before executing.
 
+### C2 — Memory: prove it or cut it  ✅
+
+**Requirement:** a directive at turn 1 recalled at turn 20, **transportable across
+vendors** (Claude → OpenAI → local). Full report: [`docs/memory.md`](docs/memory.md).
+
+- [x] Named the two modes: **standing directives/facts** (always-injected, the
+      headline) vs **semantic recall** (similarity). The headline is mode 1.
+- [x] Directive extraction (`always/never/from now on/I told you to …`) → durable
+      `directive` facts, content-keyed; `my X is Y` → user self-facts.
+- [x] `src/exec/recall.ts` — the model-independent RECALL assembler
+      (`assembleRecall`/`recallBlock`): directives + top-k semantic hits → a plain
+      text block prepended to any provider's prompt.
+- [x] **Verdict: keep everything, with documented bounds.** HDC grounding is
+      reliable to **~128 facts/entity at the default dim** (`facts ≲ dim/75`),
+      degrades gracefully, and the hard gate refuses on low margin rather than
+      returning garbage. Semantic recall is strong on keyword overlap, weak on
+      conceptual (premium neural lane); NL extraction is deterministic patterns
+      (model enricher is premium). Nothing cut.
+
+**Acceptance (`test/memory/`, 8 tests):** turn-1 directive recalled at turn 20 over
+a 20-turn code/doc/fact corpus; **byte-identical recall regardless of vendor**;
+self-facts + keyword semantic recall; HDC capacity envelope locked (100% to 100
+facts/entity at dim 10k) + graceful degradation. **168 total green.**
+
 ### Next candidates
 - **Base-rotor hardening** — expand the base `ask→plan→execute→test` conformance
   suite; a real end-to-end run with a live local model.
-- **Memory characterization** — HDC capacity/accuracy sweep (facts-per-entity ×
-  `vector_dim`) to find the reliability cliff; keep-with-bounds or cut the HDC gate.
 - **Mega test-rotor** — hundreds/thousands of rotor shapes × local vs. frontier
   models, as a conformance + quality harness.
 
