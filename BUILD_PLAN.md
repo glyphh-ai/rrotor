@@ -44,7 +44,7 @@ not "done" until its acceptance tests are green in CI.
 | 6 | HDC grounding law | ✅ | L2 (headline feature) |
 | 7 | wait/interrupt resume + approval | ✅ | L2 |
 | 8 | Run-pinning / patch gates / replay divergence | ✅ | L3 |
-| 9 | Gateway translation + prompt cache + model frontier/micro-rotor | ⬜ | L3 |
+| 9 | Gateway translation + prompt cache + model frontier/micro-rotor | ✅ | L3 |
 | 10 | Secondary handler completeness | ⬜ | L3 |
 | 11 | Pooling (hot/warm/cold) + affinity | ⬜ | L3 |
 
@@ -478,23 +478,46 @@ Test: `patch`. **130 tests green**, coverage floor raised to ~77%.
 
 ---
 
-## Phase 9 — Gateway translation + prompt cache + model frontier/micro-rotor  ⬜
+## Phase 9 — Gateway translation + prompt cache + model frontier/micro-rotor  ✅
 
-**Why:** gap #10 — the §8.3 MCP↔API↔provider translation table throws
-`E_UNTRANSLATABLE` for everything but identity; prompt-cache lowering is a no-op;
+**Why:** gap #10 — the §8.3 MCP↔API↔provider translation table threw
+`E_UNTRANSLATABLE` for everything but identity; prompt-cache lowering was a no-op;
 the `model` frontier lane, micro-rotor (propose/dispose/backtrack), and
-cache-aware `usage` breakdown are absent.
+cache-aware `usage` breakdown were absent.
 
 ### Tasks
-- [ ] Implement the protocol translation table + adapters.
-- [ ] Prompt-cache breakpoint lowering (§8.6) and cache-aware usage accounting.
-- [ ] Model micro-rotor with `max_backtracks`; reachable frontier lane behind
-      config.
+- [x] §8.3 translation via a canonical **internal** pivot (`toInternal`/`fromInternal`)
+      over `mcp`/`provider`/`internal` (tool-call round-trip); an unknown
+      representation is a typed `E_UNTRANSLATABLE`, never a silent drop.
+- [x] §8.6 prompt-cache lowering (`lowerPromptCache`): Anthropic `cache_control`,
+      OpenAI stable-order, **local `cache_prompt: true`** — a provider that can't
+      honor it degrades to a no-op, never an error. Cache-aware accounting
+      (`accountPromptCache`): first sight of a prefix writes, later sights hit;
+      wired into the model handler's `usage.cache_read`/`cache_write` + a `cache`
+      frame. Determinism-neutral (per-run gateway; output never changes).
+- [x] Deterministic **micro rotor** (`propose → dispose → backtrack → assert`) over
+      the role vocabulary, bounded by `max_backtracks`; exceeding it refuses.
+      Frontier lane reachable behind `ROTOR_FRONTIER_URL` (degrades to local, and
+      only the frontier lane accrues cost).
 
 ### Acceptance
-- [ ] Translation round-trip tests across the protocol matrix.
-- [ ] Cache test shows `cache_read`/`cache_write` usage populated correctly.
-- [ ] Micro-rotor backtrack test bounded by `max_backtracks`.
+- [x] Translation round-trips (`test/unit/gateway.test.ts`) across
+      internal↔mcp↔provider; same-rep is identity; unknown rep → `E_UNTRANSLATABLE`.
+- [x] Prompt-cache: lowering per provider (+ no-op cases); `accountPromptCache`
+      write-then-hit; a two-`model`-step run shows `cache_write` on the first and
+      `cache_read` on the second (`test/integration/model-cache-micro.test.ts`).
+- [x] Micro-rotor backtrack bounded by `max_backtracks`: winner at vocab index 2
+      succeeds with 2 backtracks at `max_backtracks: 5`, and **refuses** at `1`.
+
+**Landed:** rewrote `gateway.ts` (translation table, prompt-cache lowering +
+accounting), rewrote `model.ts` (micro rotor + prompt-cache wiring), `models.ts`
+frontier lane (`ROTOR_FRONTIER_URL`), `PromptCacheResult` interface. Tests:
+`gateway`, `model-cache-micro`. **141 tests green**, coverage ~79%.
+
+> **Note (prompt caching for local models):** this is the design discussed
+> mid-build — the gateway lowers breakpoints to `llama-server`'s `cache_prompt`
+> KV-prefix reuse and records `cache_read`/`cache_write`, kept determinism-safe by
+> treating the disposition as recorded telemetry (§17.6), never a control predicate.
 
 ---
 

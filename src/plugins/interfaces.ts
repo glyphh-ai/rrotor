@@ -161,13 +161,24 @@ export interface MeterSnapshot {
   cost: number;
 }
 
+/** A prompt-cache accounting result (§8.6) — determinism-neutral usage only. */
+export interface PromptCacheResult {
+  disposition: "write" | "hit";
+  cache_read: number;
+  cache_write: number;
+}
+
 export interface GatewayPlugin extends Capability {
   inAdapter(wire: unknown): unknown;
   outAdapter(io: unknown): unknown;
   /** Table-driven; a missing entry is `E_UNTRANSLATABLE`, never a silent drop. */
   translate(from: string, to: string, payload: unknown): unknown;
-  /** Unhonorable → no-op, never error (§3.5). */
+  /** Lower abstract prompt-cache breakpoints to a provider's wire form (§8.6).
+   *  Unhonorable → no-op (`undefined`), never error. */
   lowerPromptCache(breakpoints: string[] | undefined, provider: string): unknown;
+  /** Account a prompt-prefix cache lookup (§8.6): first sight of a prefix key is a
+   *  write, later sights are hits. Determinism-neutral — usage only. */
+  accountPromptCache(prefixKey: string, promptTokens: number): PromptCacheResult;
   /** Accumulate metered usage (§8.5). Local is unmetered by construction. */
   recordUsage(usage: Usage, lane?: string): void;
   meter(): MeterSnapshot;
