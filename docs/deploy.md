@@ -7,6 +7,10 @@ This document covers `deploy/`: the `Dockerfile`, the `docker-compose.yml` local
 stack, and the `deploy/k8s/` manifest set. The runtime's HTTP surface (the probe/run
 server) lives in `src/server.ts`.
 
+For *where* to place a runtime — Fly, GKE/EKS, and other vendors, plus the
+open-vs-glyphh-managed line — see [hosting.md](hosting.md). This document is *how* a
+placed runtime scales.
+
 ---
 
 ## 1. The one idea: a rotor instance is stateless and fungible
