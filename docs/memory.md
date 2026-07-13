@@ -11,6 +11,47 @@ keep/cut decision for each layer. Tests: `test/memory/`.
 
 ---
 
+## Scoping: runtime vs. session vs. run (where memory lives)
+
+The mental model: a **runtime instance** is the long-lived thing (the user's machine,
+or a cloud instance with a git remote). One runtime instance ⇒ **one stator**. Many
+rotor **definitions** (base, super-power, web-dev…) run against that one stator. A
+rotor is a *path*; the stator is the *memory*.
+
+| Scope | What | Keyed by | Lifetime |
+| --- | --- | --- | --- |
+| **Run** | the event history (StepRecords) — the replay tape | `run_id` | one run (prunable/archivable) |
+| **Runtime / lifelong** | facts, directives, turns, HDC space | `(entity, role, space_id)` | the runtime instance's life |
+| **Definition** | the rotor spec | `namespace/name@version` | lives in the definition registry, not the stator |
+
+So, concretely:
+
+- **Facts span everything in a runtime** — every run, every definition. `base` for 10
+  prompts then `super-power` for the next both read/write the same stator; the
+  super-power run recalls what base wrote (`continuity.test.ts`).
+- **No throwaway per-session SQLite for facts** — that would orphan lifelong memory.
+  The stator persists for the runtime; only the run *tape* is per-run.
+- **`run_id` content-addresses the rotor identity** (`namespace/name@version` + inputs),
+  not just the version — so many definitions sharing one stator never collide tapes.
+
+### Where the stator lives
+
+The runtime is **stateless compute** (§17.1): it holds no run-critical state and
+points at an external stator. So "the runtime is spun up per session" is fine — the
+memory isn't in the runtime.
+
+- **Local machine:** the stator is a durable **SQLite file** on disk
+  (`ROTOR_STATOR_URL=/path/rotor.db`). Survives runtime restarts → lifelong.
+- **Cloud instance:** the container filesystem is ephemeral, so the stator MUST be on
+  durable storage — a mounted/networked volume for SQLite, or **Postgres + pgvector**
+  (the premium stator) reached over `ROTOR_STATOR_URL`. The per-session runtime
+  connects to that durable, persistent store.
+- **Tenancy:** one runtime instance = one user ⇒ the stator is single-tenant, so no
+  row-level tenant scoping is needed. (A *shared* multi-tenant runtime would need a
+  tenant key on facts — not this model.)
+
+---
+
 ## The two modes (they are different, and the distinction matters)
 
 | Mode | Example | Mechanism | Recall trigger |

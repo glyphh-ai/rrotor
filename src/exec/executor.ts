@@ -178,14 +178,19 @@ class RunSession {
     // Resolve concrete inputs (validate required, fill defaults) before step 1.
     const resolvedInputs = validateInputs(doc, inputs);
 
-    this.runId =
-      opts.runId ?? "run-" + sha256(this.definitionVersion, canonicalize(resolvedInputs)).slice(0, 16);
-
-    // Identities (§11): checkpointed grant set + principal + agent identity.
-    const grants = plugins.governance.resolveGrants(doc, opts.principal);
-    this.principal = grants.principal ?? opts.principal ?? { id: "local", kind: "user" };
+    // Agent identity (§11): namespace/name@version. Many definitions share one
+    // stator, so the run id MUST content-address the ROTOR IDENTITY, not just its
+    // version — otherwise base@0.1.0 and super-power@0.1.0 with the same inputs
+    // would collide on run_id and mix their run tapes.
     const ns = doc.metadata.namespace ? doc.metadata.namespace + "/" : "";
     this.agentRef = `${ns}${doc.metadata.name}@${doc.metadata.version}`;
+
+    this.runId =
+      opts.runId ?? "run-" + sha256(this.agentRef, " ", canonicalize(resolvedInputs)).slice(0, 16);
+
+    // Identities (§11): checkpointed grant set + principal.
+    const grants = plugins.governance.resolveGrants(doc, opts.principal);
+    this.principal = grants.principal ?? opts.principal ?? { id: "local", kind: "user" };
 
     const context: RunContext = { inputs: resolvedInputs, state: {}, steps: {} };
     this.env = {
