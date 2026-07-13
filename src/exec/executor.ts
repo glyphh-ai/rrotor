@@ -48,6 +48,7 @@ import {
   parseTicks,
   resolveInputs,
   resolveRef,
+  scopedCacheKey,
   sha256,
 } from "./util.js";
 import { evalPredicate } from "./util.js";
@@ -299,9 +300,15 @@ class RunSession {
   /** Execute a handler and append its StepRecord (fresh path), honoring the
    *  result cache (§5.7). */
   private async physical(step: Step, input: Record<string, unknown>, attempt: number): Promise<StepResult> {
-    const cacheCfg = this.resolveCache(step);
+    const cacheCfg = this.usableCache(step);
     const idem = idempotencyKey(this.definitionVersion, step.id, input, this.spaceId);
-    const cacheKey = cacheCfg && cacheCfg.key && cacheCfg.key !== "auto" ? cacheCfg.key : idem;
+    const baseKey = cacheCfg && cacheCfg.key && cacheCfg.key !== "auto" ? cacheCfg.key : idem;
+    // §5.7 scope isolation: confine reuse to the cache config's sharing boundary.
+    const cacheKey = scopedCacheKey(baseKey, cacheCfg?.scope, {
+      runId: this.runId,
+      definitionVersion: this.definitionVersion,
+      spaceId: this.spaceId,
+    });
 
     let result: StepResult;
     let cacheFrames: Frame[] = [];
@@ -325,6 +332,17 @@ class RunSession {
       cacheFrames = [cacheFrame("miss")];
     }
     return this.append(step, attempt, input, mergeFrames(result, cacheFrames));
+  }
+
+  /** The step's cache config, or `undefined` if caching MUST be refused here.
+   *  §5.7: a `tenant`/`global` entry whose key omits `space_id` is unsound (it
+   *  could bind against a foreign HDC space), so an engine MUST refuse it — with
+   *  no space bound we simply do not cache. */
+  private usableCache(step: Step): CacheConfig | undefined {
+    const cfg = this.resolveCache(step);
+    if (!cfg) return undefined;
+    if ((cfg.scope === "tenant" || cfg.scope === "global") && !this.spaceId) return undefined;
+    return cfg;
   }
 
   /** Invoke the handler; a thrown error becomes a typed failed result. */

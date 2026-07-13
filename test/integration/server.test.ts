@@ -92,4 +92,19 @@ describe("POST /run", () => {
     const res = await fetch(`${base}/nope`);
     expect(res.status).toBe(404);
   });
+
+  it("replays a run across two requests against the shared stator (§17.1)", async () => {
+    const body = JSON.stringify({ rotor: baseRotorYaml, inputs: { prompt: "shared-state" } });
+    const post = () =>
+      fetch(`${base}/run`, { method: "POST", headers: { "content-type": "application/json" }, body });
+
+    const first = (await (await post()).json()) as { run_id: string; outputs: unknown; history: unknown[] };
+    const second = (await (await post()).json()) as { run_id: string; outputs: unknown; history: unknown[] };
+
+    // Same doc + inputs → same run id; the second request replays the first's
+    // recorded history from the shared stator, returning an identical result.
+    expect(second.run_id).toBe(first.run_id);
+    expect(second.outputs).toEqual(first.outputs);
+    expect(second.history).toEqual(first.history);
+  });
 });

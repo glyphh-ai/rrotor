@@ -29,7 +29,9 @@ import { VERSION } from "./version.js";
 import { parseRotor, validateRotor } from "./parser/index.js";
 import { execute } from "./exec/executor.js";
 import { buildBasicPlugins } from "./plugins/index.js";
+import { statorFromEnv } from "./exec/stator.js";
 import { log } from "./obs/logger.js";
+import type { Stator } from "./exec/store.js";
 import type { CapabilityStatus } from "./runtime/registry.js";
 import type { RotorDocument } from "./types.js";
 
@@ -82,7 +84,7 @@ function readiness(rt: Runtime): ReturnType<typeof computeReadiness> {
 }
 
 /** The request router. Kept flat and allocation-light — this is the probe path. */
-function handle(rt: Runtime, req: http.IncomingMessage, res: http.ServerResponse): void {
+function handle(rt: Runtime, store: Stator, req: http.IncomingMessage, res: http.ServerResponse): void {
   const method = req.method ?? "GET";
   // Strip any query string; probes hit bare paths.
   const path = (req.url ?? "/").split("?", 1)[0];
@@ -149,7 +151,12 @@ function handle(rt: Runtime, req: http.IncomingMessage, res: http.ServerResponse
           });
         }
         const runInputs = (inputs && typeof inputs === "object" ? inputs : {}) as Record<string, unknown>;
-        execute(doc, runInputs, buildBasicPlugins())
+        // Fungibility invariant (§17.1): the run-critical state lives in the shared
+        // stator, not this process. A fresh plugin bundle per request keeps
+        // per-run plugin state (e.g. the grounding space guard) isolated, while
+        // history/cache/facts persist across requests via the shared store — so a
+        // run recorded by one request replays from another.
+        execute(doc, runInputs, buildBasicPlugins({ store }))
           .then((result) => {
             log.info("run complete", {
               run_id: result.run_id,
@@ -204,8 +211,12 @@ function readBody(req: http.IncomingMessage, limit = 1_000_000): Promise<string>
  * One `Runtime` is constructed per instance — it owns the capability registry the
  * readiness probe reads. Returns the `http.Server` so callers can close it.
  */
-export function startServer(port: number = DEFAULT_PORT, rt: Runtime = new Runtime()): http.Server {
-  const server = http.createServer((req, res) => handle(rt, req, res));
+export function startServer(
+  port: number = DEFAULT_PORT,
+  rt: Runtime = new Runtime(),
+  store: Stator = statorFromEnv(),
+): http.Server {
+  const server = http.createServer((req, res) => handle(rt, store, req, res));
   server.listen(port, () => {
     log.info("runtime listening", { port, version: VERSION });
   });

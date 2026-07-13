@@ -37,7 +37,7 @@ not "done" until its acceptance tests are green in CI.
 | --- | --- | --- | --- |
 | 0 | Test & CI harness | ✅ | tooling |
 | 1 | Structured logging + wire the real runtime | ✅ | L1 hardening |
-| 2 | Durable & shared stator (SQLite) | ⬜ | L1→L2 |
+| 2 | Durable & shared stator (SQLite) | ✅ | L1→L2 |
 | 3 | **Log drains subsystem** | ⬜ | L2 (observability) |
 | 4 | Attention budgets + gateway metering | ⬜ | L2 |
 | 5 | Trust layer (access, identity attenuation, anomaly/firewall, merge) | ⬜ | L2 |
@@ -139,35 +139,50 @@ seven seams as `planned()` stubs and never constructed `buildBasicPlugins()`, so
 
 ---
 
-## Phase 2 — Durable & shared stator (SQLite)  ⬜
+## Phase 2 — Durable & shared stator (SQLite)  ✅
 
-**Why:** gap #2 — event history + cache live in per-process, per-request Maps, so
-the load-bearing §17.1 "state in the stator, fungible pods" claim is false and
-cross-request replay is impossible. A durable stator is a prerequisite for
+**Why:** gap #2 — event history + cache lived in per-process, per-request Maps, so
+the load-bearing §17.1 "state in the stator, fungible pods" claim was false and
+cross-request replay was impossible. A durable stator is a prerequisite for
 honest replay tests and for a stable log-drain append seam (Phase 3).
 
 ### Tasks
-- [ ] Define a clean persistence boundary behind the existing `EventHistory` +
-      cache interfaces in `src/exec/store.ts` (no interface change for callers).
-- [ ] Implement a **SQLite** stator (`better-sqlite3` or `node:sqlite`) backing
-      the event history (append-only), fact chains (`is_current` supersession),
-      and the result cache with §5.7 scope isolation (`run|rotor|tenant|global`,
-      tenant/global keyed with `space_id`).
-- [ ] Thread a **single stator instance** through the server so it is constructed
-      once per process, not per `/run` request (`server.ts:138`).
-- [ ] Backend selected by `ROTOR_STATOR_BACKEND` / `ROTOR_STATOR_URL` (already in
-      `configmap.yaml`); `memory` backend kept for tests/bare box.
-- [ ] Enforce §5.7 cache scope on read (currently `scope` is stored but never
-      gates reuse).
+- [x] Factor the closed-op fact engine into `src/exec/facts.ts` (pure functions)
+      so both backends share byte-identical semantics; refactor `InProcessStore`
+      to use it (behavior-identical — conformance suite unchanged).
+- [x] Implement a **SQLite** stator (`better-sqlite3`; stable API, prebuilt
+      binaries, Node-20 compatible) backing the event history (append-only), fact
+      chains (`is_current` supersession), result cache, kv, and turns — behind the
+      same `Stator` interface (added optional `close()`).
+- [x] Thread a **single stator instance** through the server (`statorFromEnv`);
+      a fresh plugin bundle per `/run` keeps per-run plugin state isolated while
+      history/cache/facts persist across requests via the shared store.
+- [x] Backend selected by `ROTOR_STATOR_BACKEND` / `ROTOR_STATOR_URL`
+      (`src/exec/stator.ts`); `memory` backend is the default (tests/bare box).
+- [x] Enforce §5.7 cache scope via a scope-aware effective key (`scopedCacheKey`):
+      `run`/`rotor`/`tenant`/`global`. Per SPEC §5.7, `tenant`/`global` keys carry
+      `space_id`, and caching is **refused** when scope is tenant/global with no
+      space bound (`usableCache`).
 
 ### Acceptance
-- [ ] Replay test: run a rotor in one request, replay it in a **second** request
-      against the same process — outputs + ticks identical (impossible today).
-- [ ] Cache-scope test: a `tenant`-scoped entry is not reused across `space_id`;
-      a `global` entry is.
-- [ ] Restart test: history survives a store reopen (durable), returns identical
-      replay.
-- [ ] Golden replay harness passes on the SQLite backend and the memory backend.
+- [x] Cross-request replay (`server.test.ts`): two `POST /run`s of the same rotor
+      return the same run id and identical outputs/history — the second replays
+      the first from the shared stator (impossible before).
+- [x] Cache-scope test (`cache-scope.test.ts`): `run` isolates per run; `rotor`
+      shares across runs; `tenant`/`global` both isolate by `space_id`.
+      *(Correction: the spec — §5.7 — requires `global` to carry `space_id` too;
+      an earlier draft of this acceptance wrongly said a global entry is reused
+      across spaces. Both tenant and global isolate by space.)*
+- [x] Restart durability (`sqlite-store.test.ts`): a run recorded to a file
+      replays byte-identically from a freshly-reopened store.
+- [x] Golden replay + cross-backend parity (`backends.test.ts`): determinism and
+      zero-append replay pass on **both** backends, and a run's shape is identical
+      across memory and SQLite. Plus a full Stator-surface parity test.
+
+**Landed:** `src/exec/facts.ts`, `src/exec/sqlite-store.ts`, `src/exec/stator.ts`,
+`scopedCacheKey`/`usableCache` (util + executor), shared stator in `server.ts`,
+`better-sqlite3` dep. Tests: backends parity, sqlite store, cache scope, +
+cross-request replay. **66 tests green**, coverage floor raised to ~64%.
 
 ---
 

@@ -20,8 +20,14 @@
 
 import { execute, type ExecuteOptions, type RunResult } from "../../src/exec/executor.js";
 import { buildBasicPlugins } from "../../src/plugins/index.js";
-import { InProcessStore } from "../../src/exec/store.js";
+import { InProcessStore, type Stator } from "../../src/exec/store.js";
 import type { RotorDocument, StepRecord } from "../../src/types.js";
+
+/** How each harness call obtains a stator. Defaults to the in-process backend;
+ *  pass a SQLite factory to prove backend parity. */
+export type StoreFactory = () => Stator;
+
+const defaultStore: StoreFactory = () => new InProcessStore();
 
 /** The parts of a StepRecord that MUST be reproducible across runs. Excludes
  *  nothing today (the record carries no wall-clock field) but is the single
@@ -78,8 +84,14 @@ export async function runFresh(
   doc: RotorDocument,
   inputs: Record<string, unknown>,
   opts: ExecuteOptions = {},
+  storeFactory: StoreFactory = defaultStore,
 ): Promise<RunResult> {
-  return execute(doc, inputs, buildBasicPlugins(), opts);
+  const store = storeFactory();
+  try {
+    return await execute(doc, inputs, buildBasicPlugins({ store }), opts);
+  } finally {
+    store.close?.();
+  }
 }
 
 export interface DeterminismResult {
@@ -93,9 +105,10 @@ export async function checkDeterminism(
   doc: RotorDocument,
   inputs: Record<string, unknown>,
   opts: ExecuteOptions = {},
+  storeFactory: StoreFactory = defaultStore,
 ): Promise<DeterminismResult> {
-  const a = shapeOf(await runFresh(doc, inputs, opts));
-  const b = shapeOf(await runFresh(doc, inputs, opts));
+  const a = shapeOf(await runFresh(doc, inputs, opts, storeFactory));
+  const b = shapeOf(await runFresh(doc, inputs, opts, storeFactory));
   return { a, b, identical: JSON.stringify(a) === JSON.stringify(b) };
 }
 
@@ -116,23 +129,28 @@ export async function checkReplay(
   doc: RotorDocument,
   inputs: Record<string, unknown>,
   opts: ExecuteOptions = {},
+  storeFactory: StoreFactory = defaultStore,
 ): Promise<ReplayResult> {
-  const store = new InProcessStore();
-  const plugins = buildBasicPlugins({ store });
+  const store = storeFactory();
+  try {
+    // A fresh plugin bundle per pass (isolated per-run plugin state), but the
+    // SAME shared store — exactly how the server serves runs across requests.
+    const firstResult = await execute(doc, inputs, buildBasicPlugins({ store }), opts);
+    const runId = firstResult.run_id;
+    const before = store.history.read(runId).length;
 
-  const firstResult = await execute(doc, inputs, plugins, opts);
-  const runId = firstResult.run_id;
-  const before = store.history.read(runId).length;
+    const replayResult = await execute(doc, inputs, buildBasicPlugins({ store }), opts);
+    const after = store.history.read(runId).length;
 
-  const replayResult = await execute(doc, inputs, plugins, opts);
-  const after = store.history.read(runId).length;
-
-  const first = shapeOf(firstResult);
-  const replay = shapeOf(replayResult);
-  return {
-    first,
-    replay,
-    appendedDuringReplay: after - before,
-    identical: JSON.stringify(first) === JSON.stringify(replay),
-  };
+    const first = shapeOf(firstResult);
+    const replay = shapeOf(replayResult);
+    return {
+      first,
+      replay,
+      appendedDuringReplay: after - before,
+      identical: JSON.stringify(first) === JSON.stringify(replay),
+    };
+  } finally {
+    store.close?.();
+  }
 }
