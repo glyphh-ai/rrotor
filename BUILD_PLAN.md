@@ -36,7 +36,7 @@ not "done" until its acceptance tests are green in CI.
 | # | Phase | Gate | Conformance |
 | --- | --- | --- | --- |
 | 0 | Test & CI harness | ✅ | tooling |
-| 1 | Structured logging + wire the real runtime | ⬜ | L1 hardening |
+| 1 | Structured logging + wire the real runtime | ✅ | L1 hardening |
 | 2 | Durable & shared stator (SQLite) | ⬜ | L1→L2 |
 | 3 | **Log drains subsystem** | ⬜ | L2 (observability) |
 | 4 | Attention budgets + gateway metering | ⬜ | L2 |
@@ -95,39 +95,47 @@ with proof. This phase builds the scaffolding that makes progress trackable.
 
 ---
 
-## Phase 1 — Structured logging + wire the real runtime  ⬜
+## Phase 1 — Structured logging + wire the real runtime  ✅
 
-**Why:** the biggest correctness-of-story gap (gap #1) — `Runtime` advertises all
-seven seams as `planned()` stubs and never constructs `buildBasicPlugins()`, so
-`/readyz`, the REPL, and the manifest all lie. This phase also lays the
+**Why:** the biggest correctness-of-story gap (gap #1) — `Runtime` advertised all
+seven seams as `planned()` stubs and never constructed `buildBasicPlugins()`, so
+`/readyz`, the REPL, and the manifest all lied. This phase also laid the
 **structured logging foundation** that Phase 3's drains ride on.
 
 ### Tasks
-- [ ] Add `src/obs/logger.ts`: a small structured logger (`level`, `msg`, `fields`,
-      `run_id`/`step_id` when in a run scope). JSON output when
-      `ROTOR_LOG_FORMAT=json` (env already declared in `configmap.yaml:38`,
-      currently unread), pretty otherwise. No external deps.
-- [ ] Replace scattered `console.*` in `server.ts`, `cli.ts`, `repl.ts`,
-      `banner.ts` with the logger (keep human-facing CLI stdout as-is; route
-      diagnostics through the logger).
-- [ ] Wire `Runtime` (`src/runtime/runtime.ts`) to construct the real
+- [x] Add `src/obs/logger.ts`: a small structured logger (`level`, `msg`, `fields`,
+      `run_id`/`step_id` via `child()` scope). JSON output when
+      `ROTOR_LOG_FORMAT=json` (env in `configmap.yaml:38`), pretty otherwise.
+      Injectable sink + clock. No external deps.
+- [x] Route runtime diagnostics (`server.ts` boot line, run complete/error) through
+      the logger; human-facing CLI/REPL stdout kept as-is.
+- [x] Wire `Runtime` (`src/runtime/runtime.ts`) to construct the real
       `buildBasicPlugins()` and register **actual** capability statuses, not
-      `planned()` stubs.
-- [ ] Fix `/readyz` (`server.ts`) to reflect true per-seam readiness instead of
-      `Object.keys(...).length > 0`; pod `ready` = all required seams ready.
-- [ ] Make the REPL `validate`/`run` commands actually execute (remove the
-      "lands next build phase" placeholders in `repl.ts:63`).
-- [ ] Add load-time reconciliation: on rotor load, check `spec.requires` against
-      the manifest and refuse/warn on unmet requirements (docs/runtime §3.8).
-- [ ] Correct the stale docstring in `server.ts` ("501 until executor wired").
+      `planned()` stubs. `Runtime.plugins` exposed for reuse.
+- [x] Fix `/readyz` (`server.ts`) to reflect true per-seam readiness (pod `ready`
+      = every advertised seam ready), extracted as pure `computeReadiness()`.
+- [x] Make the REPL `validate`/`run` commands actually execute — factored into a
+      TTY-free `execCommand()`; removed the "lands next build phase" placeholders.
+- [x] Add load-time reconciliation (`Runtime.reconcile`): derive required seams
+      from a rotor's step types and warn on unmet against the manifest (§3.8).
+      (RotorSpec has no top-level `spec.requires`; needs are implied by step type.)
+- [x] Correct the stale docstrings in `server.ts` ("501 until executor wired").
 
 ### Acceptance
-- [ ] Integration test: boot server, `GET /readyz` reports the true tier map and
-      flips to not-ready when a required seam is absent.
-- [ ] REPL test: `validate` + `run` on a fixture return real results.
-- [ ] Logger test: `ROTOR_LOG_FORMAT=json` emits one JSON object per line with the
-      expected keys; run-scoped logs carry `run_id`.
-- [ ] Manifest test: `manifest()` matches `buildBasicPlugins()` reality.
+- [x] Integration test (`test/integration/server.test.ts`): boots the server on an
+      ephemeral port; `/healthz`, `/readyz` (true tier map), `/version`, and
+      `POST /run` all drive over the wire. `computeReadiness` unit test proves the
+      flip to not-ready when a seam is down.
+- [x] REPL test (`test/unit/repl.test.ts`): `validate` + `run` return real results.
+- [x] Logger test (`test/unit/logger.test.ts`): JSON one-object-per-line with
+      level/msg/ts; `child()` bindings carry `run_id`; level filtering; env config.
+- [x] Manifest test (`test/unit/runtime.test.ts`): manifest == `plugins.status()`,
+      all seams ready + basic (no "planned").
+
+**Landed:** `src/obs/logger.ts`, rewrote `src/runtime/runtime.ts` (real plugins +
+`reconcile`), `src/server.ts` (`computeReadiness`, logger, `/run` reconciliation),
+`src/repl.ts` (`execCommand`). Tests: logger, runtime, repl, server integration —
+**43 tests green**, coverage floor raised to ~58%.
 
 ---
 

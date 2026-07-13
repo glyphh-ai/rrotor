@@ -9,18 +9,20 @@ export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
     environment: "node",
+    // Quiet the runtime's diagnostic logger during tests (logs go to stderr).
+    env: { ROTOR_LOG_LEVEL: "error" },
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "json-summary"],
       include: ["src/**/*.ts"],
       exclude: ["src/banner.ts", "src/version.ts", "src/index.ts"],
       thresholds: {
-        // Phase 0 floor (measured ~52% lines / ~52% branches / ~63% funcs on the
-        // smoke suite). Ratchet up as later phases add targeted tests.
-        lines: 50,
-        functions: 60,
-        branches: 50,
-        statements: 50,
+        // Ratcheting floor. Phase 1: measured ~62% lines / ~58% branches / ~69%
+        // funcs. Raise these as later phases add targeted tests.
+        lines: 58,
+        functions: 65,
+        branches: 55,
+        statements: 58,
       },
     },
   },

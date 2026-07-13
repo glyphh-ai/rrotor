@@ -13,12 +13,12 @@
  * so the probe surface has no cold-start cost of its own. It exposes:
  *
  *   GET  /healthz   liveness  — the process is up and the event loop turns
- *   GET  /readyz    readiness — the runtime's capability manifest is servable
+ *   GET  /readyz    readiness — every advertised capability seam is ready
  *   GET  /version   build identity (the pinned runtime version)
- *   POST /run       accept a rotor + inputs; 501 until the executor is wired
+ *   POST /run       accept a rotor + inputs; parse → validate → execute → return
  *
- * `startServer(port)` returns the listening `http.Server`. The executor wiring
- * (POST /run → engine) lands in the Integrate stage; this is the k8s-probe shell.
+ * `startServer(port)` returns the listening `http.Server`. The POST /run path is
+ * wired to the executor against the basic-tier plugin bundle.
  */
 
 import * as http from "node:http";
@@ -29,6 +29,8 @@ import { VERSION } from "./version.js";
 import { parseRotor, validateRotor } from "./parser/index.js";
 import { execute } from "./exec/executor.js";
 import { buildBasicPlugins } from "./plugins/index.js";
+import { log } from "./obs/logger.js";
+import type { CapabilityStatus } from "./runtime/registry.js";
 import type { RotorDocument } from "./types.js";
 
 /** Coerce the POST /run `rotor` field into a document: accept an inline object
@@ -56,25 +58,27 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 
 /**
  * Readiness derives from the runtime's capability manifest (docs/runtime.md §3.8):
- * the pod is READY once it can advertise a manifest at all — i.e. the capability
- * registry is wired. Even a BASIC-tier runtime whose seams are still `planned`
- * (memory/models/etc.) is a legitimate, servable pod; it declines runs it cannot
- * satisfy via clean-refuse rather than by failing readiness. The probe reports the
- * per-capability ready/tier so an operator can see WHY a pod would refuse.
+ * the pod is READY only when every advertised seam reports `ready` — so the probe
+ * tells the truth about what the pod can serve. The per-capability ready/tier is
+ * returned so an operator can see exactly which seam is holding readiness down.
+ * (Per-rotor capability gaps are handled at run time by clean-refusal, not by the
+ * pod-level probe — see `Runtime.reconcile`.)
  */
-function readiness(rt: Runtime): { ready: boolean; capabilities: Record<string, { ready: boolean; tier: string }> } {
-  const manifest = rt.status();
+export function computeReadiness(manifest: Record<string, CapabilityStatus>): {
+  ready: boolean;
+  capabilities: Record<string, { ready: boolean; tier: string }>;
+} {
   const capabilities: Record<string, { ready: boolean; tier: string }> = {};
   for (const [name, st] of Object.entries(manifest)) {
     capabilities[name] = { ready: st.ready, tier: st.tier };
   }
-  // A manifest that exists at all means the registry negotiated — the pod can
-  // accept traffic and reconcile each rotor's `requires` at load time. Until any
-  // seam is live we still report ready:true so the pod joins the Service and
-  // serves /version + clean-refusals; flip the gate by making this depend on a
-  // required seam (e.g. `capabilities.gateway.ready`) once the executor lands.
-  const ready = Object.keys(capabilities).length > 0;
+  const names = Object.keys(capabilities);
+  const ready = names.length > 0 && names.every((n) => capabilities[n].ready);
   return { ready, capabilities };
+}
+
+function readiness(rt: Runtime): ReturnType<typeof computeReadiness> {
+  return computeReadiness(rt.status());
 }
 
 /** The request router. Kept flat and allocation-light — this is the probe path. */
@@ -134,9 +138,26 @@ function handle(rt: Runtime, req: http.IncomingMessage, res: http.ServerResponse
           sendJson(res, 422, { error: "invalid-rotor", detail: "rotor failed validation", errors });
           return;
         }
+        // Reconcile the rotor's capability needs against the manifest (§3.8). An
+        // unmet seam does not block the run — the step clean-refuses — but it is
+        // surfaced as a warning so the operator sees the degraded path.
+        const recon = rt.reconcile(doc);
+        if (!recon.satisfied) {
+          log.warn("rotor requires unmet capabilities", {
+            rotor: `${doc.metadata.name}@${doc.metadata.version}`,
+            unmet: recon.unmet.join(","),
+          });
+        }
         const runInputs = (inputs && typeof inputs === "object" ? inputs : {}) as Record<string, unknown>;
         execute(doc, runInputs, buildBasicPlugins())
           .then((result) => {
+            log.info("run complete", {
+              run_id: result.run_id,
+              rotor: `${doc.metadata.name}@${doc.metadata.version}`,
+              status: result.status,
+              terminal: result.terminal,
+              steps: result.history.length,
+            });
             sendJson(res, 200, {
               run_id: result.run_id,
               status: result.status,
@@ -146,6 +167,7 @@ function handle(rt: Runtime, req: http.IncomingMessage, res: http.ServerResponse
             });
           })
           .catch((err: unknown) => {
+            log.error("run error", { detail: (err as Error).message });
             sendJson(res, 500, { error: "run-error", detail: (err as Error).message });
           });
       })
@@ -182,11 +204,10 @@ function readBody(req: http.IncomingMessage, limit = 1_000_000): Promise<string>
  * One `Runtime` is constructed per instance — it owns the capability registry the
  * readiness probe reads. Returns the `http.Server` so callers can close it.
  */
-export function startServer(port: number = DEFAULT_PORT): http.Server {
-  const rt = new Runtime();
+export function startServer(port: number = DEFAULT_PORT, rt: Runtime = new Runtime()): http.Server {
   const server = http.createServer((req, res) => handle(rt, req, res));
   server.listen(port, () => {
-    console.log(`openrotor runtime listening on :${port} (v${VERSION})`);
+    log.info("runtime listening", { port, version: VERSION });
   });
   return server;
 }
