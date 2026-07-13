@@ -35,7 +35,7 @@ not "done" until its acceptance tests are green in CI.
 
 | # | Phase | Gate | Conformance |
 | --- | --- | --- | --- |
-| 0 | Test & CI harness | ⬜ | tooling |
+| 0 | Test & CI harness | ✅ | tooling |
 | 1 | Structured logging + wire the real runtime | ⬜ | L1 hardening |
 | 2 | Durable & shared stator (SQLite) | ⬜ | L1→L2 |
 | 3 | **Log drains subsystem** | ⬜ | L2 (observability) |
@@ -52,39 +52,46 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done
 
 ---
 
-## Phase 0 — Test & CI harness  ⬜
+## Phase 0 — Test & CI harness  ✅
 
 **Why first:** there are currently **zero tests** and no lint. A critical,
 methodical build needs the harness before the code, so every later phase lands
 with proof. This phase builds the scaffolding that makes progress trackable.
 
 ### Tasks
-- [ ] Add **Vitest** (`vitest`, `@vitest/coverage-v8`) as devDeps; `type: module`
+- [x] Add **Vitest** (`vitest`, `@vitest/coverage-v8`) as devDeps; `type: module`
       already set. Config `vitest.config.ts` with node environment.
-- [ ] Add scripts: `test`, `test:watch`, `test:cov`, `lint` (eslint +
-      `@typescript-eslint`), and a composite **`verify`** = `typecheck && lint &&
+- [x] Add scripts: `test`, `test:watch`, `test:cov`, `lint` (eslint +
+      `typescript-eslint`), and a composite **`verify`** = `typecheck && lint &&
       test`. `verify` is the single command every phase gates on.
-- [ ] Establish test layout: `test/unit/**`, `test/integration/**`,
-      `test/conformance/**`, `test/fixtures/**` (sample `.rotor.yaml` docs +
-      expected outputs).
-- [ ] Build the **golden replay harness** (`test/harness/replay.ts`): run a rotor
+- [x] Establish test layout: `test/unit/**`, `test/integration/**` (added as
+      phases need it), `test/conformance/**`, `test/harness/**` (shared helpers +
+      fixtures over the shipped `rotors/`).
+- [x] Build the **golden replay harness** (`test/harness/replay.ts`): run a rotor
       to completion, capture its `StepRecord[]` history, then re-run in replay
-      mode and assert byte-identical outputs + identical `logical_tick` sequence.
-      This is the core determinism guardrail reused by every later phase.
-- [ ] Build a **capability-status assertion helper** (`test/harness/caps.ts`):
-      assert a runtime's `manifest()` reports expected `{ready, tier}` per seam.
-- [ ] Seed smoke tests against the existing base rotors in `rotors/` so the
+      mode and assert byte-identical outputs + identical `logical_tick` sequence,
+      and that replay appends **zero** new records. Core determinism guardrail.
+- [x] Build a **capability-status assertion helper** (`test/harness/caps.ts`):
+      assert a runtime's manifest reports expected `{ready, tier}` per seam.
+- [x] Seed smoke tests against the existing base rotors in `rotors/` so the
       current happy path is pinned before we change anything.
-- [ ] Wire CI: GitHub Actions workflow running `npm ci && npm run verify` on push
-      to the branch. Add a coverage floor (start at 60%, ratchet up per phase).
-- [ ] Add a `SessionStart` hook so web sessions can run tests/lint (use the
-      `session-start-hook` skill).
+- [x] Wire CI: GitHub Actions workflow (`.github/workflows/ci.yml`) running
+      `npm ci && npm run verify` + coverage on push/PR. Coverage floor enforced
+      in `vitest.config.ts` (Phase 0: ~50% lines/branches; ratchets up).
+- [x] Add a `SessionStart` hook (`.claude/hooks/session-start.sh` +
+      `.claude/settings.json`) so web sessions install deps and can run
+      tests/lint.
 
 ### Acceptance
-- [ ] `npm run verify` passes locally and in CI on a clean checkout.
-- [ ] Golden replay harness proves determinism for `rotors/base.rotor.yaml`,
-      `web-dev.rotor.yaml`, `corp-data-slim.rotor.yaml`.
-- [ ] Coverage report is produced and the floor is enforced.
+- [x] `npm run verify` passes locally (typecheck + lint + 18 tests green).
+- [x] Golden replay harness proves determinism **and** zero-append replay for
+      `rotors/base.rotor.yaml`, `web-dev.rotor.yaml`, `corp-data-slim.rotor.yaml`.
+- [x] Coverage report is produced and the floor is enforced (`npm run test:cov`).
+
+**Landed:** `package.json` (scripts + devDeps), `vitest.config.ts`,
+`eslint.config.js`, `tsconfig.test.json`, `test/harness/{replay,caps,fixtures}.ts`,
+`test/conformance/base-rotors.test.ts`, `test/unit/{parser,caps}.test.ts`,
+`.github/workflows/ci.yml`, `.claude/`. Removed dead `W` const in `banner.ts`.
 
 ---
 
