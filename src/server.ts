@@ -32,6 +32,7 @@ import { buildBasicPlugins } from "./plugins/index.js";
 import { statorFromEnv, statorFromEnvAsync } from "./exec/stator.js";
 import { drainFromEnv } from "./plugins/drain.js";
 import { log } from "./obs/logger.js";
+import { describe } from "./errors.js";
 import type { Stator } from "./exec/store.js";
 import type { DrainPlugin } from "./plugins/interfaces.js";
 import type { CapabilityStatus } from "./runtime/registry.js";
@@ -246,19 +247,31 @@ function respondRun(
   }
   log.info("run complete", {
     run_id: result.run_id,
+    trace_id: result.trace_id,
     rotor: `${doc.metadata.name}@${doc.metadata.version}`,
     status: result.status,
     terminal: result.terminal,
     steps: result.history.length,
+    ...(result.error ? { error: result.error.name } : {}),
   });
+  // Surface the taxonomy detail on a failed run so a caller (or an AI dev-ops agent)
+  // gets code + remediation in the response, not just a status string.
+  const error = result.error
+    ? (() => {
+        const d = describe(result.error.name);
+        return { ...result.error, category: d.category, retryable: d.retryable, severity: d.severity, remediation: d.remediation };
+      })()
+    : undefined;
   sendJson(res, 200, {
     run_id: result.run_id,
+    trace_id: result.trace_id,
     status: result.status,
     terminal: result.terminal,
     outputs: result.outputs,
     history: result.history,
     interrupt: result.interrupt,
     budget: result.budget,
+    error,
   });
 }
 

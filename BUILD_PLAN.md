@@ -854,11 +854,28 @@ replay-stable + distinct per run/step/attempt; one trace per run, one span per s
 envelope carries the context; OTLP span shape + OK/ERROR status mapping with the
 taxonomy code as `error.type`. **210 total green.**
 
-### E4 — Traceability & supportability  ⏳
+### E4 — Traceability & supportability  ✅
 
-Surface a stable `trace_id` + error `code` in results and over the wire; a
-machine-readable catalog export + a `rotor errors` / support-bundle command; a
-runbook. Target consumer: an AI dev-ops agent or a human driving one.
+Symptom → fix without reading source, for a human or an AI dev-ops agent. Two
+handles: the taxonomy **`code`** and the run **`trace_id`**.
+
+- [x] Surfaced over the wire: the `/run` response carries `trace_id` and, on
+      failure, an `error` block enriched with category/retryable/severity/
+      remediation; the run-complete log line carries `trace_id` + code.
+- [x] CLI `openrotor errors [CODE] [--json]` — the catalog for humans and agents
+      (whole table, one code's remediation, or the machine-readable JSON).
+- [x] CLI `openrotor support <run_id> [--json]` — a run's trace + timeline + every
+      step's error + fix, pulled from the durable stator (the ticket/agent artifact).
+      `run` now persists to the env stator so the bundle is retrievable.
+- [x] The CLI `run` output surfaces `trace:` and, on failure, the taxonomy error
+      block (code · category · retryable · cause · fix · doc pointer).
+- [x] [`docs/support.md`](docs/support.md) — the runbook: the two handles, triage in
+      three steps, reading a failure, escalation.
+
+**Acceptance (`test/integration/support-cli.test.ts`, 4 tests):** `errors` prints
+the catalog / one code / `--json`; `support` runs a rotor durably then produces a
+bundle with the matching run_id + derived trace_id + full timeline. **214 total
+green.**
 
 ### E5 — Async Stator + real Postgres in the container  ⏳
 

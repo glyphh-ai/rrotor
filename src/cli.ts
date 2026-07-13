@@ -18,7 +18,10 @@ import { buildBasicPlugins } from "./plugins/index.js";
 import { startServer } from "./server.js";
 import { runRepl } from "./repl.js";
 import { VERSION } from "./version.js";
-import type { RotorDocument } from "./types.js";
+import { describe, errorCatalog } from "./errors.js";
+import { statorFromEnvAsync } from "./exec/stator.js";
+import { traceId } from "./obs/trace.js";
+import type { RotorDocument, StepRecord } from "./types.js";
 
 /** `openrotor validate <file>` — L1 parse + JSON Schema + static graph checks.
  *  Exit code is the conformance gate: 0 = valid, 1 = invalid / error. */
@@ -97,7 +100,10 @@ async function runRotorFile(file: string | undefined, rest: string[]): Promise<n
   }
 
   const inputs = fillRequired(doc, parseInputs(rest));
-  const plugins = buildBasicPlugins();
+  // Persist to the env-configured stator so `openrotor support <run_id>` can pull
+  // the run's tape afterward (durable backends only; in-memory is per-process).
+  const store = await statorFromEnvAsync();
+  const plugins = buildBasicPlugins({ store });
 
   let result;
   try {
@@ -109,24 +115,119 @@ async function runRotorFile(file: string | undefined, rest: string[]): Promise<n
 
   const ns = doc.metadata.namespace ? `${doc.metadata.namespace}/` : "";
   console.log(`▸ ${ns}${doc.metadata.name}@${doc.metadata.version}  run ${result.run_id}`);
+  console.log(`  trace:  ${result.trace_id}`);
   console.log(`  inputs: ${JSON.stringify(inputs)}`);
   console.log("");
   console.log("  step records:");
   for (const rec of result.history) {
     const frameTypes = (rec.frames ?? []).map((f) => f.type).join(",");
+    const errMark = rec.error ? `  ✗ ${rec.error.name}` : "";
     console.log(
       `    #${rec.logical_tick.toString().padStart(2)} ${rec.step_id.padEnd(12)} ` +
-        `${rec.status.padEnd(10)} ${frameTypes ? `[${frameTypes}]` : ""}`,
+        `${rec.status.padEnd(10)} ${frameTypes ? `[${frameTypes}]` : ""}${errMark}`,
     );
   }
   console.log("");
   console.log(`  terminal: ${result.terminal}`);
   console.log(`  status:   ${result.status}`);
   console.log(`  outputs:  ${JSON.stringify(result.outputs, null, 2).replace(/\n/g, "\n            ")}`);
+  // On failure, surface the taxonomy code + remediation right here — no log-diving.
+  if (result.error) printErrorHelp(result.error);
   console.log("");
+  await store.close?.();
 
   // Exit non-zero when the run failed, so scripts can gate on it.
   return result.status === "failed" ? 1 : 0;
+}
+
+/** Print a taxonomy-backed error block: what failed, whether it retries, how to fix. */
+function printErrorHelp(err: { name: string; cause?: string }): void {
+  const d = describe(err.name);
+  console.log("");
+  console.log(`  ✗ error:  ${d.code}  (${d.category}, retryable=${d.retryable}, severity=${d.severity})`);
+  if (err.cause) console.log(`            ${err.cause}`);
+  console.log(`            ↳ fix: ${d.remediation}`);
+  console.log(`            ↳ see: docs/errors.md#codes  ·  \`openrotor errors ${d.code}\``);
+}
+
+/** `openrotor errors [CODE] [--json]` — the error catalog for humans and dev-ops
+ *  agents. No args: the whole table. A code: that entry's detail. `--json`: the
+ *  machine-readable catalog. */
+function runErrors(rest: string[]): number {
+  const json = rest.includes("--json");
+  const code = rest.find((r) => !r.startsWith("--"));
+  const rows = errorCatalog();
+  if (code) {
+    const d = describe(code);
+    if (json) console.log(JSON.stringify(d, null, 2));
+    else {
+      console.log(`${d.code}  (${d.category}, retryable=${d.retryable}, severity=${d.severity}, http=${d.httpStatus})`);
+      console.log(`  ${d.summary}`);
+      console.log(`  fix: ${d.remediation}`);
+    }
+    return 0;
+  }
+  if (json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return 0;
+  }
+  console.log("OpenRotor error catalog (docs/errors.md):\n");
+  for (const r of rows) {
+    console.log(`  ${r.code.padEnd(20)} ${r.category.padEnd(12)} retry=${r.retryable ? "y" : "n"}  ${r.summary}`);
+  }
+  console.log(`\n  ${rows.length} codes. \`openrotor errors <CODE>\` for remediation, \`--json\` for machine output.`);
+  return 0;
+}
+
+/** `openrotor support <run_id> [--json]` — a support bundle for a run: its trace id
+ *  and every step's status + any taxonomy error + remediation, pulled from the
+ *  durable stator. The artifact you attach to a ticket or hand an AI dev-ops agent. */
+async function runSupport(rest: string[]): Promise<number> {
+  const runId = rest.find((r) => !r.startsWith("--"));
+  if (!runId) {
+    console.error("support: missing <run_id> (usage: openrotor support <run_id> [--json])");
+    return 1;
+  }
+  const store = await statorFromEnvAsync();
+  const history: StepRecord[] = store.history.read(runId);
+  const failing = history.filter((h) => h.error).map((h) => ({
+    step_id: h.step_id,
+    attempt: h.attempt,
+    ...describe(h.error!.name),
+    cause: h.error!.cause,
+  }));
+  const bundle = {
+    run_id: runId,
+    trace_id: traceId(runId),
+    steps: history.length,
+    status: history.length === 0 ? "not-found" : "found",
+    errors: failing,
+    timeline: history.map((h) => ({ tick: h.logical_tick, step_id: h.step_id, status: h.status, error: h.error?.name })),
+  };
+  await store.close?.();
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify(bundle, null, 2));
+    return 0;
+  }
+  if (history.length === 0) {
+    console.log(`No history for run ${runId}. (A durable stator is required — set ROTOR_STATOR_BACKEND=sqlite|pgvector.)`);
+    return 1;
+  }
+  console.log(`Support bundle · run ${runId}`);
+  console.log(`  trace: ${bundle.trace_id}`);
+  console.log(`  steps: ${bundle.steps}`);
+  console.log("  timeline:");
+  for (const t of bundle.timeline) {
+    console.log(`    #${String(t.tick).padStart(2)} ${t.step_id.padEnd(12)} ${t.status}${t.error ? `  ✗ ${t.error}` : ""}`);
+  }
+  if (failing.length > 0) {
+    console.log("  errors:");
+    for (const f of failing) {
+      console.log(`    ${f.step_id}: ${f.code} (${f.category}) — ${f.cause ?? ""}`);
+      console.log(`      ↳ fix: ${f.remediation}`);
+    }
+  }
+  return 0;
 }
 
 /** `openrotor serve [-p PORT]` — start the HTTP runtime and block. */
@@ -159,6 +260,10 @@ export async function main(argv: string[]): Promise<number> {
       return runRotorFile(rest[0], rest.slice(1));
     case "validate":
       return runValidate(rest[0]);
+    case "errors":
+      return runErrors(rest);
+    case "support":
+      return runSupport(rest);
     case "serve":
       return runServe(rest);
     case "help":
@@ -174,10 +279,12 @@ export async function main(argv: string[]): Promise<number> {
 
 function printHelp(): void {
   printBanner(VERSION);
-  console.log(`  openrotor                    launch the REPL
-  openrotor run <file> [k=v…]  execute a .rotor through the executor
-  openrotor validate <file>    validate a .rotor against the schema
-  openrotor serve [-p PORT]    start the HTTP runtime (probes + /run)
+  console.log(`  openrotor                     launch the REPL
+  openrotor run <file> [k=v…]   execute a .rotor through the executor
+  openrotor validate <file>     validate a .rotor against the schema
+  openrotor errors [CODE]       the error catalog (--json for machine output)
+  openrotor support <run_id>    a support bundle for a run (trace + errors + fixes)
+  openrotor serve [-p PORT]     start the HTTP runtime (probes + /run)
   openrotor version
 `);
 }
