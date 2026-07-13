@@ -701,10 +701,36 @@ task fact should decay. Full model: [`docs/memory.md`](docs/memory.md#retention-
 wall-clock); default tiers = **directives/self-facts = long, task facts = mid, turns
 = short**. Determinism preserved: no wall-clock in the visibility predicate.
 
-**Acceptance (`test/memory/tiers.test.ts`, 5 tests):** short stays in its session
+- [x] **Explicit tier tagging (deterministic floor).** `WriteConfig.tier` +
+      `execute({ session })` → `RunContextEnvelope.session` thread a spec author's
+      explicit tier and the run's session end-to-end through the `write` handler.
+      Precedence: **explicit step tier ?? enricher per-fact tier ?? long.** The
+      explicit tier is the authoritative override (deciding tier from *meaning* is a
+      model judgment; the deterministic answer is an explicit lever or form heuristics
+      — see [`docs/memory.md`](docs/memory.md#how-a-tier-is-decided-deterministically)).
+
+**Acceptance (`test/memory/tiers.test.ts`, 7 tests):** short stays in its session
 while mid+long cross into the next; mid ages out of the window while long persists;
 absorb default tiers (directive long, task mid) recalled a session later; no-session
-backward compatibility; SQLite/InProcess parity. **175 total green.**
+backward compatibility; **a write step's explicit `short` overrides the enricher's
+`long`; the run's session stamps absorbed facts**; SQLite/InProcess parity. **177
+total green.**
+
+### C4 — Pluggable vector stores & spec-defined dims  📝 (design)
+
+**Requirement (user):** pgvector caps vectors at 2k, so allow the user to pick
+different vector stores and let the spec define the HDC `vector_dim`. Design:
+[`docs/vector-stores.md`](docs/vector-stores.md).
+
+- [x] **Key clarification documented:** the 2k limit is an *index* cap and lands only
+      on the ANN-searched **embedding** (256), not the **HDC hypervector** (10k),
+      which is bundled per-entity and never cross-row indexed. pgvector stores to 16k,
+      indexes to 2k (`halfvec` 4k).
+- [x] Spec-defined HDC `vector_dim` is **already wired** (`spec.space.vector_dim` →
+      `computeSpaceId` → `hdcSpace`, part of `space_id`).
+- [ ] Build a `pgvector` `Stator` backend behind the existing `createStator` seam
+      (HDC raw/`bytea` unindexed, embedding `hnsw`-indexed, dim-cap validation that
+      degrades to a scan). Scoped as the "durable cloud stator" follow-up.
 
 ### Next candidates
 - **Turn session-scoping** — thread `session` into `recordTurn` so short-tier turns

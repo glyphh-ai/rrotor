@@ -68,6 +68,10 @@ import { AttentionMeter, type BudgetOutcome } from "./budget.js";
 export interface ExecuteOptions {
   /** Pin a run id; defaults to a content-address of the doc + inputs. */
   runId?: string;
+  /** The session this run belongs to (docs/memory.md retention tiers). Stamps
+   *  short/mid-tier fact writes so they scope correctly across sessions. Omit for
+   *  a session-agnostic run (permissive recall). */
+  session?: string;
   /** The authenticated caller (§11); defaults to a local principal. */
   principal?: Principal;
   /** Override / extend the dispatch table (e.g. inject a premium handler). */
@@ -195,6 +199,7 @@ class RunSession {
     const context: RunContext = { inputs: resolvedInputs, state: {}, steps: {} };
     this.env = {
       run_id: this.runId,
+      session: opts.session,
       definitionVersion: this.definitionVersion,
       logical_tick: 0,
       space_id: this.spaceId,

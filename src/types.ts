@@ -12,6 +12,7 @@
  */
 
 import type { CapabilityStatus } from "./runtime/registry.js";
+import type { MemoryTier } from "./exec/facts.js";
 
 export type { CapabilityStatus } from "./runtime/registry.js";
 
@@ -474,6 +475,11 @@ export interface WriteConfig {
   mode?: "raw" | "absorb";
   key?: string;
   speaker?: string;
+  /** Explicit retention tier for the facts this step writes (docs/memory.md):
+   *  `long` lifelong, `mid` within a session window, `short` this session only.
+   *  Deterministic — the spec author's own lever. Overrides the absorb enricher's
+   *  per-fact default. Omit to let the enricher decide (directive/self → long). */
+  tier?: MemoryTier;
 }
 
 export type SqlOp =
@@ -832,6 +838,10 @@ export interface RunContext {
  */
 export interface RunContextEnvelope {
   run_id: string;
+  /** The session this run belongs to (docs/memory.md retention tiers). Scopes
+   *  short/mid-tier fact writes; `undefined` ⇒ session-agnostic (permissive
+   *  recall, backward compatible). One runtime engagement = one session. */
+  session?: string;
   /** The document version this run is pinned to (§16.3). */
   definitionVersion: string;
   /** Monotonic logical step counter (§5.3). */

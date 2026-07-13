@@ -84,11 +84,30 @@ The filter is a pure function, `visibleFacts(facts, opts)` (`src/exec/facts.ts`)
   **backward compatible** — untagged facts default to `long` and behave exactly as
   before (`tiers.test.ts`, "no session ⇒ everything visible").
 
-Default tiers are assigned by the absorb enricher (`src/handlers/memory.ts`):
-directives and `my X is Y` self-facts → `long`; other extracted facts → `mid`. A
-`write` step's explicit `tier` overrides the default. Both backends enforce the tiers
-identically — the SQLite stator carries `tier`/`session` columns and a `sessions`
-ordinal table, and `tiers.test.ts` asserts InProcess/SQLite parity.
+### How a tier is decided (deterministically)
+
+The honest boundary: nothing reads a 10k-token blob and *judges* what matters — that
+is inherently a model call and cannot be made deterministic by purity. Instead the
+tier is decided by one of three mechanisms, most-reliable first:
+
+1. **Explicit** — a `write` step's `config.tier` (`WriteConfig.tier`) is the spec
+   author's own lever, and it **overrides** everything below. Fully deterministic
+   (it's in the pinned document). This is the reliable floor and it always works —
+   the run's `session` (an `execute` option → `RunContextEnvelope.session`) stamps
+   the facts so short/mid scope correctly. Wired end-to-end (`tiers.test.ts`).
+2. **Form heuristics** (the absorb enricher, `src/handlers/memory.ts`) — classifies
+   by *linguistic form*, not meaning: directives (`always/never/from now on…`) and
+   `my X is Y` self-facts → `long`; other extracted relations → `mid`. Deterministic;
+   catches the common shapes, ignores anything phrased indirectly.
+3. **Model enricher, checkpointed** (premium, not yet wired) — a model reads the text
+   and emits `{fact, tier}`; that output is **checkpointed at the enricher boundary**
+   (the §7.7 pattern for neural embeddings), so replay reads the tape, not the model.
+   Determinism-by-recording, not determinism-by-purity.
+
+Precedence in `memory.write`: explicit step `tier` ?? per-fact enricher `tier` ??
+`long` (the visibility default). Both backends enforce the tiers identically — the
+SQLite stator carries `tier`/`session` columns and a `sessions` ordinal table, and
+`tiers.test.ts` asserts InProcess/SQLite parity.
 
 **Design note:** tiers are a *recall visibility* filter, not deletion. A mid-tier fact
 that ages out of the window is still in the stator (auditable, replayable); it simply

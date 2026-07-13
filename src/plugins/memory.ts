@@ -72,8 +72,10 @@ export class BasicMemory implements MemoryPlugin {
       is_current: true,
       speaker: opts.speaker,
       tick,
-      // Per-fact tier (from the absorb enricher) wins; else the step's default.
-      tier: (f.tier as MemoryTier | undefined) ?? opts.tier,
+      // Precedence: the step's EXPLICIT tier is the author's deterministic
+      // override and wins; else the per-fact tier from the absorb enricher; else
+      // undefined (defaults to `long` at the visibility filter).
+      tier: opts.tier ?? (f.tier as MemoryTier | undefined),
       session: opts.session,
     }));
     return this.store.writeFacts(toWrite);

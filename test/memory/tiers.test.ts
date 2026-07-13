@@ -11,7 +11,12 @@ import { createStator } from "../../src/exec/stator.js";
 import { buildBasicPlugins } from "../../src/plugins/index.js";
 import { absorbText } from "../../src/handlers/memory.js";
 import { assembleRecall } from "../../src/exec/recall.js";
+import { execute } from "../../src/exec/executor.js";
 import type { Stator } from "../../src/exec/store.js";
+import type { RotorDocument } from "../../src/types.js";
+
+const doc = (spec: Record<string, unknown>): RotorDocument =>
+  ({ apiVersion: "rotor.glyphh.ai/v0.1", kind: "Rotor", metadata: { name: "t", version: "0.1.0" }, spec }) as unknown as RotorDocument;
 
 function mem(store: Stator) {
   return buildBasicPlugins({ store }).memory;
@@ -74,6 +79,41 @@ describe("default tiers from absorb", () => {
     m.write(absorbText("Always cite sources.", "user"), {});
     // No session context → tier filtering is permissive (long always, mid/no-session visible).
     expect(assembleRecall(m, "").directives.join(" ")).toMatch(/cite/i);
+  });
+});
+
+describe("explicit tier tagging via the write step (deterministic override)", () => {
+  it("a write step's explicit tier scopes facts and overrides the enricher default", async () => {
+    const store = new InProcessStore();
+    store.touchSession("s1");
+    // absorb would tag this directive `long`; the step explicitly forces `short`.
+    const d = doc({
+      entry: "w",
+      steps: [{ id: "w", type: "write", in: { text: "Always use tabs." }, out: {}, config: { mode: "absorb", key: "user", tier: "short" }, next: "end" }],
+    });
+    await execute(d, {}, buildBasicPlugins({ store }), { session: "s1" });
+
+    const m = mem(store);
+    // Within s1 the directive is visible...
+    expect(m.recall({ session: "s1" }).map((f) => f.tier)).toContain("short");
+    // ...but a new session does NOT see it — the explicit `short` won over `long`.
+    store.touchSession("s2");
+    expect(assembleRecall(m, "", { session: "s2" }).directives.join(" ")).not.toMatch(/tabs/i);
+  });
+
+  it("the run's session stamps absorbed facts so short-tier stays put", async () => {
+    const store = new InProcessStore();
+    store.touchSession("s1");
+    const d = doc({
+      entry: "w",
+      steps: [{ id: "w", type: "write", in: { text: "The build uses vitest." }, out: {}, config: { mode: "absorb", tier: "short" }, next: "end" }],
+    });
+    await execute(d, {}, buildBasicPlugins({ store }), { session: "s1" });
+    const m = mem(store);
+    store.touchSession("s2");
+    // short-tier fact belongs to s1 only.
+    expect(fillers(m.recall({ session: "s1" })).join(" ")).toMatch(/vitest/i);
+    expect(fillers(m.recall({ session: "s2" })).join(" ")).not.toMatch(/vitest/i);
   });
 });
 

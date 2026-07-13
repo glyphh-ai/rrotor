@@ -41,6 +41,10 @@ export const writeHandler: StepHandler = {
       speaker: cfg.speaker,
       spaceId: env.space_id,
       tick: env.logical_tick,
+      // The run's session scopes short/mid-tier facts; the step's explicit `tier`
+      // (if set) is the spec author's deterministic override of the enricher.
+      session: env.session,
+      tier: cfg.tier,
     });
     return {
       output: { written, key: cfg.key, space_id: env.space_id },
