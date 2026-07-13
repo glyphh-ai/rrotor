@@ -617,6 +617,50 @@ stayed green from Phase 0 to Phase 11.
 
 ---
 
+## Post-plan: Connections & integrations
+
+Work beyond the original 12 phases, toward "world-class, it just works." Same
+rules: test-first, determinism-safe.
+
+### C1 — MCP connections (Pipedream / custom MCP servers)  ✅
+
+**Why:** rotors need real external tools. In glyphh, a *connection* is a source of
+tools — a custom MCP server (`/mcp`), or a provider like **Pipedream Connect**
+(per-user OAuth creds live in Pipedream, keyed by external user id; glyphh-server
+mints short-lived tokens from the project creds in `.env`).
+
+- [x] Generic **streamable-HTTP MCP client** (`src/plugins/mcp.ts`): JSON-RPC
+      `initialize` → `tools/list` → `tools/call`, session id, JSON **and** SSE
+      responses.
+- [x] **Provider-agnostic auth:** an injected `headers` provider (static token OR
+      an **async** per-request provider) so a host mints a fresh Connect token and
+      injects per-user context (`x-pd-external-user-id`, app slug) on every call.
+      OpenRotor knows nothing about Pipedream — the provider closure does.
+- [x] `connectMcp` discovers a server's tools and registers them **namespaced**
+      (`<conn>:<tool>`) into the connections registry, so a `tool.mcp` step
+      dispatches straight to them and they appear in `listTools()`.
+- [x] Determinism: a `tool.mcp` result is checkpointed in the StepRecord, so
+      **replay never re-dials the server or re-mints a token**.
+
+**Acceptance (`test/integration/mcp.test.ts`, mock MCP server):** discovery +
+namespaced registration; dispatch + result normalization; static bearer **and**
+async per-user header injection; SSE-framed responses; and a `tool.mcp` rotor step
+that dials once and **replays without re-dialing**. **6 tests; 160 total green.**
+
+**Open-core boundary:** OpenRotor ships the generic client + registry; glyphh-server
+supplies the Pipedream Connect provider (token mint from `.env` + per-user headers)
+and registers a user's tools into the run's bundle before executing.
+
+### Next candidates
+- **Base-rotor hardening** — expand the base `ask→plan→execute→test` conformance
+  suite; a real end-to-end run with a live local model.
+- **Memory characterization** — HDC capacity/accuracy sweep (facts-per-entity ×
+  `vector_dim`) to find the reliability cliff; keep-with-bounds or cut the HDC gate.
+- **Mega test-rotor** — hundreds/thousands of rotor shapes × local vs. frontier
+  models, as a conformance + quality harness.
+
+---
+
 ## Cross-cutting standards (apply to every phase)
 
 - **Test-first:** write the failing acceptance test, then the code.

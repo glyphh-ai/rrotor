@@ -28,6 +28,7 @@ export { BasicGateway } from "./gateway.js";
 export { BasicGovernance } from "./governance.js";
 export { BasicPool } from "./pool.js";
 export { NoopDrain, HttpDrain, FileDrain, BufferedDrain, drainFromEnv, toEnvelope } from "./drain.js";
+export { McpClient, connectMcp, type McpConnection, type McpToolResult, type HeaderProvider } from "./mcp.js";
 
 export interface BuildBasicPluginsOptions {
   /** A pre-seeded / shared stator. Defaults to a fresh {@link InProcessStore}. */
