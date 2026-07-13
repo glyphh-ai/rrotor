@@ -11,6 +11,7 @@
 import type { CapabilityStatus } from "../runtime/registry.js";
 import type { StepRecord } from "../types.js";
 import { InProcessStore, type Fact, type Row, type Stator } from "../exec/store.js";
+import { visibleFacts, type MemoryTier } from "../exec/facts.js";
 import { cosine, embed } from "../exec/embedding.js";
 import type {
   GroundVerdict,
@@ -56,9 +57,10 @@ export class BasicMemory implements MemoryPlugin {
 
   write(
     facts: Array<Record<string, unknown>>,
-    opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number },
+    opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number; session?: string; tier?: MemoryTier },
   ): number {
     const tick = opts.tick ?? 0;
+    if (opts.session) this.store.touchSession(opts.session);
     const toWrite: Fact[] = facts.map((f) => ({
       entity: String(f.entity ?? f.subject ?? opts.key ?? "unknown"),
       role: String(f.role ?? f.slot ?? "raw.text"),
@@ -70,8 +72,22 @@ export class BasicMemory implements MemoryPlugin {
       is_current: true,
       speaker: opts.speaker,
       tick,
+      // Per-fact tier (from the absorb enricher) wins; else the step's default.
+      tier: (f.tier as MemoryTier | undefined) ?? opts.tier,
+      session: opts.session,
     }));
     return this.store.writeFacts(toWrite);
+  }
+
+  recall(opts: { entity?: string; role?: string; session?: string; midWindow?: number; spaceId?: string }): Fact[] {
+    return visibleFacts(this.store.snapshotFacts(), {
+      currentSession: opts.session,
+      ordinalOf: (s) => this.store.sessionOrdinal(s),
+      midWindow: opts.midWindow ?? 5,
+      entity: opts.entity,
+      role: opts.role,
+      spaceId: opts.spaceId,
+    });
   }
 
   probe(entity: string, role: string, spaceId?: string): ProbeResult {

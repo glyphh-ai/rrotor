@@ -20,6 +20,7 @@ import type {
   Usage,
 } from "../types.js";
 import type { QueryResult, Row } from "../exec/store.js";
+import type { Fact, MemoryTier } from "../exec/facts.js";
 
 export type { QueryResult, Row } from "../exec/store.js";
 
@@ -76,11 +77,15 @@ export interface MemoryPlugin extends Capability {
   /** Record a turn into short-term memory (inbound prompt / outbound completion),
    *  the corpus `semanticRecall` ranks over. */
   recordTurn(text: string): void;
-  /** Persist facts (§7.4). Idempotent by `key`. Returns the count written. */
+  /** Persist facts (§7.4). Idempotent by `key`. Returns the count written. A
+   *  `session` + `tier` scope the facts for tiered recall (docs/memory.md). */
   write(
     facts: Array<Record<string, unknown>>,
-    opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number },
+    opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number; session?: string; tier?: MemoryTier },
   ): number;
+  /** Tier-aware recall of the facts a `session` may see: `long` always, `short`
+   *  only in its own session, `mid` within `midWindow` sessions (docs/memory.md). */
+  recall(opts: { entity?: string; role?: string; session?: string; midWindow?: number; spaceId?: string }): Fact[];
   probe(entity: string, role: string, spaceId?: string): ProbeResult;
   verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): GroundVerdict;
 

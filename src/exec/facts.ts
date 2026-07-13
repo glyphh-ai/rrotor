@@ -12,6 +12,11 @@
 
 // ── the fact triple (entity, role, filler) ──────────────────────────────────
 
+/** Retention tier — how long a memory lives and who recalls it (docs/memory.md).
+ *  `long` = lifelong (every session); `mid` = recent sessions (a session-count
+ *  window); `short` = the current session only. Absent ⇒ `long`. */
+export type MemoryTier = "short" | "mid" | "long";
+
 export interface Fact {
   /** The subject / person the fact is keyed on. */
   entity: string;
@@ -27,6 +32,43 @@ export interface Fact {
   speaker?: string;
   /** Logical tick the fact was written at (§5.3). */
   tick: number;
+  /** Retention tier. Absent ⇒ `long`. */
+  tier?: MemoryTier;
+  /** The session that wrote this fact (for short/mid scoping). */
+  session?: string;
+}
+
+export interface VisibilityOptions {
+  /** The session recall is happening in. */
+  currentSession?: string;
+  /** Ordinal of a session id (monotonic; higher = more recent). */
+  ordinalOf: (session?: string) => number;
+  /** Mid-tier is visible within this many sessions of the current one. */
+  midWindow: number;
+  entity?: string;
+  role?: string;
+  spaceId?: string;
+}
+
+/**
+ * The tier visibility filter (docs/memory.md), pure: which current facts a recall
+ * in `currentSession` may see. `long` always; `short` only in its own session;
+ * `mid` within `midWindow` sessions. Deterministic — session distance is measured
+ * in ordinals, never wall-clock.
+ */
+export function visibleFacts(facts: readonly Fact[], opts: VisibilityOptions): Fact[] {
+  const cur = opts.ordinalOf(opts.currentSession);
+  return facts.filter((f) => {
+    if (!f.is_current || !spaceMatch(f, opts.spaceId)) return false;
+    if (opts.entity !== undefined && norm(f.entity) !== norm(opts.entity)) return false;
+    if (opts.role !== undefined && norm(f.role) !== norm(opts.role)) return false;
+    const tier: MemoryTier = f.tier ?? "long";
+    if (tier === "long") return true;
+    if (tier === "short") return f.session !== undefined && f.session === opts.currentSession;
+    // mid: a fact with no session is treated as current; otherwise window-bounded.
+    if (f.session === undefined) return true;
+    return cur - opts.ordinalOf(f.session) <= opts.midWindow;
+  });
 }
 
 /** A row projected out of a closed op — a plain, wire-agnostic object. */

@@ -52,6 +52,51 @@ memory isn't in the runtime.
 
 ---
 
+## Retention tiers: short / mid / long (not all memory should span sessions)
+
+Scoping above answers *where* memory lives (one stator per runtime, spanning all
+runs and definitions). Retention tiers answer a different question: *how far across
+**sessions** a given fact should reach.* A user's standing preference ("always use
+tabs") should be lifelong; a fact incidental to one task ("this PR touches pool.ts")
+should not leak into an unrelated session weeks later. So each fact carries a
+**tier**, and recall is scoped to the session it runs in.
+
+| Tier | Reach | Default assignment | Example |
+| --- | --- | --- | --- |
+| **short** | the current session only | recorded turns | "focus on pool.ts right now" |
+| **mid** | within a **session-count window** (default 5 sessions) | incidental task facts | "Ada's role is engineer" |
+| **long** | lifelong — every session, forever | directives + first-person self-facts | "always use tabs", "my name is Ada" |
+
+A **session** is one engagement of a rotor runtime — the stator stamps each session
+an **ordinal** (`touchSession` → monotonic counter) the first time it's seen. Mid-tier
+decay is measured in **session ordinals, never wall-clock**: a fact written in session
+ordinal *n* is visible while `current_ordinal − n ≤ midWindow`. This keeps the control
+plane deterministic — replay reproduces the exact same visibility regardless of when
+it runs (§17.6).
+
+The filter is a pure function, `visibleFacts(facts, opts)` (`src/exec/facts.ts`):
+
+- `long` → always visible.
+- `short` → visible **iff** `fact.session === currentSession`.
+- `mid` → visible while the session distance is within `midWindow`.
+- **No session context** (a run with no session bound) ⇒ permissive: `long` and
+  anything without a session ordinal stays visible. This is why tiers are fully
+  **backward compatible** — untagged facts default to `long` and behave exactly as
+  before (`tiers.test.ts`, "no session ⇒ everything visible").
+
+Default tiers are assigned by the absorb enricher (`src/handlers/memory.ts`):
+directives and `my X is Y` self-facts → `long`; other extracted facts → `mid`. A
+`write` step's explicit `tier` overrides the default. Both backends enforce the tiers
+identically — the SQLite stator carries `tier`/`session` columns and a `sessions`
+ordinal table, and `tiers.test.ts` asserts InProcess/SQLite parity.
+
+**Design note:** tiers are a *recall visibility* filter, not deletion. A mid-tier fact
+that ages out of the window is still in the stator (auditable, replayable); it simply
+stops being injected into new sessions' context. This separates retention policy from
+durability — the record of what was known stays complete.
+
+---
+
 ## The two modes (they are different, and the distinction matters)
 
 | Mode | Example | Mechanism | Recall trigger |

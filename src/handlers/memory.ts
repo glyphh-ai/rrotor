@@ -62,24 +62,26 @@ export function absorbText(text: string, key?: string): Array<Record<string, unk
     const s = raw.trim();
     if (!s) continue;
     let m: RegExpExecArray | null;
-    const add = (entity: string, role: string, filler: string, factKey?: string) =>
+    // Default tiers (docs/memory.md): directives + self-facts are lifelong (long);
+    // incidental task facts decay (mid). A `write` step's `tier` still overrides.
+    const add = (entity: string, role: string, filler: string, tier: "long" | "mid", factKey?: string) =>
       // A distinct per-slot key so multiple absorbed facts never supersede one another.
-      facts.push({ entity, role, filler, key: factKey ?? `${entity.toLowerCase()}:${role.toLowerCase()}` });
+      facts.push({ entity, role, filler, tier, key: factKey ?? `${entity.toLowerCase()}:${role.toLowerCase()}` });
     if ((m = /^(?:always|never|from now on,?|going forward,?|remember to|make sure to|be sure(?: to)?|i told you to|i asked you to|please always) .+$/i.exec(s))) {
       // A STANDING DIRECTIVE (§7.4): always-injected, not similarity-recalled.
       // Keyed by content so restating dedupes but distinct directives coexist.
-      add(key ?? "user", "directive", s, `directive:${s.toLowerCase().trim()}`);
+      add(key ?? "user", "directive", s, "long", `directive:${s.toLowerCase().trim()}`);
     } else if ((m = /^my ([\w ]+?) (?:is|are) (?:called |named )?(.+)$/i.exec(s))) {
       // First-person self-fact → the session user's own slot: `my name is Ada`.
-      add(key ?? "user", m[1].trim(), m[2].trim());
+      add(key ?? "user", m[1].trim(), m[2].trim(), "long");
     } else if ((m = /^(.+?)'s ([\w. ]+?) (?:is|are|was|were) (.+)$/i.exec(s))) {
-      add(m[1].trim(), m[2].trim(), m[3].trim());
+      add(m[1].trim(), m[2].trim(), m[3].trim(), "mid");
     } else if ((m = /^(.+?) (?:lives?|lived|resides?) in (.+)$/i.exec(s))) {
-      add(m[1].trim(), "rel.city", m[2].trim());
+      add(m[1].trim(), "rel.city", m[2].trim(), "mid");
     } else if ((m = /^(.+?) has (?:an? |the )?(.+)$/i.exec(s))) {
-      add(m[1].trim(), "rel.has", m[2].trim());
+      add(m[1].trim(), "rel.has", m[2].trim(), "mid");
     } else if ((m = /^(.+?) (?:is|are|was|were) (?:an? |the )?(.+)$/i.exec(s))) {
-      add(m[1].trim(), "attr.is", m[2].trim());
+      add(m[1].trim(), "attr.is", m[2].trim(), "mid");
     }
   }
   if (facts.length === 0) facts.push({ entity: key ?? "unknown", role: "raw.text", filler: text });

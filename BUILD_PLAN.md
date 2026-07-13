@@ -675,11 +675,46 @@ a 20-turn code/doc/fact corpus; **byte-identical recall regardless of vendor**;
 self-facts + keyword semantic recall; HDC capacity envelope locked (100% to 100
 facts/entity at dim 10k) + graceful degradation. **168 total green.**
 
+### C3 — Retention tiers: short / mid / long  ✅
+
+**Requirement:** *"some memory we might not want to span all sessions… long term
+being life long, mid-term is gray area, short term is the current session."* Not all
+memory should reach every session — a standing preference is lifelong, an incidental
+task fact should decay. Full model: [`docs/memory.md`](docs/memory.md#retention-tiers-short--mid--long-not-all-memory-should-span-sessions).
+
+- [x] `MemoryTier = short | mid | long` + `tier`/`session` on `Fact`
+      (`src/exec/facts.ts`); pure `visibleFacts(facts, opts)` filter: `long` always,
+      `short` only in its own session, `mid` within a **session-count window**.
+- [x] Decay measured in **session ordinals, never wall-clock** — the stator stamps a
+      monotonic ordinal per session (`touchSession`/`sessionOrdinal`), so replay
+      reproduces identical visibility (§17.6 determinism).
+- [x] `MemoryPlugin.recall(opts)` (tier-aware) + `write` `session`/`tier` opts;
+      absorb default tiers — directives + `my X is Y` self-facts → **long**, other
+      task facts → **mid**; a `write` step's `tier` overrides.
+- [x] Backend parity — SQLite stator carries `tier`/`session` columns + a `sessions`
+      ordinal table; InProcess + SQLite scope tiers identically.
+- [x] **Backward compatible:** untagged facts default to `long`; a run with no
+      session bound is permissive (everything visible), so pre-tier behaviour is
+      unchanged.
+
+**Decision (user, tiered memory):** mid-tier decay = **session-count window** (not
+wall-clock); default tiers = **directives/self-facts = long, task facts = mid, turns
+= short**. Determinism preserved: no wall-clock in the visibility predicate.
+
+**Acceptance (`test/memory/tiers.test.ts`, 5 tests):** short stays in its session
+while mid+long cross into the next; mid ages out of the window while long persists;
+absorb default tiers (directive long, task mid) recalled a session later; no-session
+backward compatibility; SQLite/InProcess parity. **175 total green.**
+
 ### Next candidates
+- **Turn session-scoping** — thread `session` into `recordTurn` so short-tier turns
+  are scoped like facts (deferred from C3; recall already tier-aware).
 - **Base-rotor hardening** — expand the base `ask→plan→execute→test` conformance
   suite; a real end-to-end run with a live local model.
 - **Mega test-rotor** — hundreds/thousands of rotor shapes × local vs. frontier
   models, as a conformance + quality harness.
+- **Durable cloud stator** — Postgres + pgvector behind the same interface for
+  per-session cloud runtimes (the premium stator).
 
 ---
 

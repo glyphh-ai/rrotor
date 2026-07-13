@@ -79,6 +79,13 @@ export interface Stator {
   /** Turn-level text for `retrieve.vector` lexical fallback (§7.7). */
   addTurn(text: string): void;
   turns(): string[];
+  /** Register a session id (assigning a monotonic ordinal) and mark it current.
+   *  Ordinals order sessions for mid-tier windowing (docs/memory.md). */
+  touchSession(id: string): number;
+  /** The ordinal of a session id; the latest ordinal for `undefined`. */
+  sessionOrdinal(id?: string): number;
+  /** All facts — the input to the tier visibility filter. */
+  snapshotFacts(): Fact[];
   /** Release backing resources (file handles). No-op for in-process. */
   close?(): void;
 }
@@ -93,6 +100,8 @@ export class InProcessStore implements Stator {
   private readonly facts: Fact[] = [];
   private readonly kv = new Map<string, unknown>();
   private readonly turnLog: string[] = [];
+  private readonly sessions = new Map<string, number>();
+  private sessionCounter = 0;
 
   // ── event history ────────────────────────────────────────────────────────
   readonly history: EventHistory = {
@@ -160,5 +169,22 @@ export class InProcessStore implements Stator {
   }
   turns(): string[] {
     return this.turnLog.slice();
+  }
+
+  // ── sessions + fact snapshot ────────────────────────────────────────────────
+  touchSession(id: string): number {
+    let o = this.sessions.get(id);
+    if (o === undefined) {
+      o = this.sessionCounter++;
+      this.sessions.set(id, o);
+    }
+    return o;
+  }
+  sessionOrdinal(id?: string): number {
+    if (id === undefined) return Math.max(0, this.sessionCounter - 1);
+    return this.sessions.get(id) ?? 0;
+  }
+  snapshotFacts(): Fact[] {
+    return this.facts.slice();
   }
 }

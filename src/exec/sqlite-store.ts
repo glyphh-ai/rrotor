@@ -58,7 +58,14 @@ CREATE TABLE IF NOT EXISTS facts (
   fact_key   TEXT,
   is_current INTEGER NOT NULL,
   speaker    TEXT,
-  tick       INTEGER NOT NULL
+  tick       INTEGER NOT NULL,
+  tier       TEXT,
+  session    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id      TEXT PRIMARY KEY,
+  ordinal INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS kv (
@@ -81,6 +88,8 @@ interface FactRow {
   is_current: number;
   speaker: string | null;
   tick: number;
+  tier: string | null;
+  session: string | null;
 }
 
 function rowToFact(r: FactRow): Fact {
@@ -94,6 +103,8 @@ function rowToFact(r: FactRow): Fact {
   if (r.space_id !== null) f.space_id = r.space_id;
   if (r.fact_key !== null) f.key = r.fact_key;
   if (r.speaker !== null) f.speaker = r.speaker;
+  if (r.tier !== null) f.tier = r.tier as Fact["tier"];
+  if (r.session !== null) f.session = r.session;
   return f;
 }
 
@@ -162,11 +173,11 @@ export class SqliteStore implements Stator {
       let n = 0;
       const supersede = this.db.prepare("UPDATE facts SET is_current = 0 WHERE fact_key = ? AND is_current = 1");
       const insert = this.db.prepare(
-        "INSERT INTO facts (entity, role, filler, space_id, fact_key, is_current, speaker, tick) VALUES (?,?,?,?,?,1,?,?)",
+        "INSERT INTO facts (entity, role, filler, space_id, fact_key, is_current, speaker, tick, tier, session) VALUES (?,?,?,?,?,1,?,?,?,?)",
       );
       for (const f of incoming) {
         if (f.key) supersede.run(f.key);
-        insert.run(f.entity, f.role, f.filler, f.space_id ?? null, f.key ?? null, f.speaker ?? null, f.tick);
+        insert.run(f.entity, f.role, f.filler, f.space_id ?? null, f.key ?? null, f.speaker ?? null, f.tick, f.tier ?? null, f.session ?? null);
         n++;
       }
       return n;
@@ -177,9 +188,31 @@ export class SqliteStore implements Stator {
   /** All facts in write order — the input to the shared pure query engine. */
   private allFacts(): Fact[] {
     const rows = this.db
-      .prepare("SELECT entity, role, filler, space_id, fact_key, is_current, speaker, tick FROM facts ORDER BY seq ASC")
+      .prepare("SELECT entity, role, filler, space_id, fact_key, is_current, speaker, tick, tier, session FROM facts ORDER BY seq ASC")
       .all() as FactRow[];
     return rows.map(rowToFact);
+  }
+
+  snapshotFacts(): Fact[] {
+    return this.allFacts();
+  }
+
+  touchSession(id: string): number {
+    const existing = this.db.prepare("SELECT ordinal FROM sessions WHERE id = ?").get(id) as { ordinal: number } | undefined;
+    if (existing) return existing.ordinal;
+    const max = this.db.prepare("SELECT MAX(ordinal) AS m FROM sessions").get() as { m: number | null };
+    const ordinal = (max.m ?? -1) + 1;
+    this.db.prepare("INSERT INTO sessions (id, ordinal) VALUES (?, ?)").run(id, ordinal);
+    return ordinal;
+  }
+
+  sessionOrdinal(id?: string): number {
+    if (id === undefined) {
+      const max = this.db.prepare("SELECT MAX(ordinal) AS m FROM sessions").get() as { m: number | null };
+      return Math.max(0, max.m ?? 0);
+    }
+    const row = this.db.prepare("SELECT ordinal FROM sessions WHERE id = ?").get(id) as { ordinal: number } | undefined;
+    return row?.ordinal ?? 0;
   }
 
   lookupFact(entity: string, role: string, spaceId?: string): Fact | undefined {

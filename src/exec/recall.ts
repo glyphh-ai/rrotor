@@ -18,6 +18,10 @@ import type { MemoryPlugin, SemanticHit } from "../plugins/interfaces.js";
 export interface RecallOptions {
   /** The directive-owning entity (the user/session). Default `user`. */
   entity?: string;
+  /** The session recall runs in — scopes short/mid-tier memory (docs/memory.md). */
+  session?: string;
+  /** Mid-tier is visible within this many sessions. Default 5. */
+  midWindow?: number;
   /** Semantic-recall breadth. Default 5. */
   topK?: number;
   /** Minimum cosine to include a semantic hit. Default 0.08. */
@@ -33,12 +37,14 @@ export interface RecalledContext {
   recalled: SemanticHit[];
 }
 
-/** Assemble the recall context for `query` from memory. Pure over the stator. */
+/** Assemble the recall context for `query` from memory. Pure over the stator.
+ *  Directives are tier-scoped to the session (docs/memory.md): `long` always,
+ *  `mid` within the session window. */
 export function assembleRecall(memory: MemoryPlugin, query: string, opts: RecallOptions = {}): RecalledContext {
   const entity = opts.entity ?? "user";
   const directives = memory
-    .executeOp("lookup", { person: entity, slot: "directive" }, opts.spaceId)
-    .rows.map((r) => String(r.filler));
+    .recall({ entity, role: "directive", session: opts.session, midWindow: opts.midWindow, spaceId: opts.spaceId })
+    .map((f) => f.filler);
   const recalled = query.trim() ? memory.semanticRecall(query, opts.topK ?? 5, opts.threshold ?? 0.08) : [];
   return { directives, recalled };
 }
