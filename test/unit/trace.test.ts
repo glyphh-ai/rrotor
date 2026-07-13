@@ -82,4 +82,29 @@ describe("OTLP span export (OTel-native, no SDK)", () => {
     expect(errType.value.stringValue).toBe("E_TOOL");
     expect(span.attributes.find((a: any) => a.key === "rotor.error.category").value.stringValue).toBe("transport");
   });
+
+  it("maps a refused step to UNSET (a control outcome, not an error) and falls back to the code as message", () => {
+    const env = toEnvelope(rec({ status: "refused", error: { name: "E_UNGROUNDED" } }));
+    const span = (toOtlpSpan(env) as any).resourceSpans[0].scopeSpans[0].spans[0];
+    expect(span.status.code).toBe(0); // UNSET
+    expect(span.status.message).toBe("E_UNGROUNDED"); // no cause → code
+  });
+
+  it("encodes usage as int/double/bool/string attribute values and honors export times", () => {
+    const env = toEnvelope(
+      rec({
+        principal: { id: "u1", kind: "user" },
+        agent_identity: { ref: "glyphh/base@0.1.0", run_id: "run-1" },
+        usage: { input: 10, output: 20, cost: 0.0025 },
+      }),
+    );
+    const span = (toOtlpSpan(env, { startUnixNano: "5", endUnixNano: "9" }) as any).resourceSpans[0].scopeSpans[0].spans[0];
+    expect(span.startTimeUnixNano).toBe("5");
+    expect(span.endTimeUnixNano).toBe("9");
+    const by = (k: string) => span.attributes.find((a: any) => a.key === k)?.value;
+    expect(by("rotor.usage.input_tokens")).toEqual({ intValue: 10 }); // integer
+    expect(by("rotor.usage.cost")).toEqual({ doubleValue: 0.0025 }); // double
+    expect(by("enduser.id")).toEqual({ stringValue: "u1" });
+    expect(by("rotor.agent.ref")).toEqual({ stringValue: "glyphh/base@0.1.0" });
+  });
 });

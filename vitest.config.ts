@@ -17,13 +17,13 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/banner.ts", "src/version.ts", "src/index.ts"],
       thresholds: {
-        // Ratcheting floor. Enterprise E1 (error taxonomy): measured ~83.2% lines /
-        // ~75% branches / ~90.1% funcs. The uncovered remainder is live-endpoint
-        // degradation paths (e.g. the real `pg` connection, exercised via PGlite).
-        lines: 83,
+        // Ratcheting floor. Enterprise E1–E5: measured ~85.1% lines / ~75% branches
+        // / ~90% funcs. The uncovered remainder is CLI formatting branches and
+        // live-endpoint degradation paths.
+        lines: 85,
         functions: 90,
         branches: 75,
-        statements: 83,
+        statements: 85,
       },
     },
   },
