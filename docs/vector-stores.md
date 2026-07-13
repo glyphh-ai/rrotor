@@ -115,12 +115,19 @@ negotiation can refuse an unstorable combination up front.
 
 ## Testing without a server
 
-There is no Postgres in CI, so the backend is tested against **PGlite** — an
+The backend is tested at two fidelities. Fast unit tests run against **PGlite** — an
 in-process WASM Postgres with the pgvector extension (`@electric-sql/pglite`, a dev
 dep). The same `PgLike` client interface is satisfied by both PGlite (tests) and
 `pg`'s `Pool` (real deployments, lazy-imported so `pg` is never pulled into
 memory/sqlite/injected setups). So the ANN queries, `hnsw` index, hydrate, and
-error-latch paths are all really exercised in `npm run verify`.
+error-latch paths are all exercised in `npm run verify`.
+
+For real-server fidelity, `scripts/pg-setup.sh` provisions a local Postgres +
+pgvector cluster and prints a `ROTOR_TEST_PG_URL`; `test/memory/pgvector-real.test.ts`
+then drives the store over the actual `pg` driver + a real `hnsw` index (it
+`skipIf(!ROTOR_TEST_PG_URL)`, so a bare dev box just skips it). CI runs a
+`pgvector/pgvector:pg16` service container and sets the URL, so every push exercises
+the backend on real Postgres.
 
 ## Deferred / open questions
 

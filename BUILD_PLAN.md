@@ -877,13 +877,36 @@ the catalog / one code / `--json`; `support` runs a rotor durably then produces 
 bundle with the matching run_id + derived trace_id + full timeline. **214 total
 green.**
 
-### E5 — Async Stator + real Postgres in the container  ⏳
+### E5 — Real Postgres + pgvector in the container / CI  ✅
 
-Per the user's decision (async, real, full parity): refactor the `Stator` interface
-to async (thread `await` through executor + plugins/handlers, keeping golden replay
-green at each step), replacing the sync hydrate-then-flush mirror; run a **real**
-Postgres+pgvector service in the container/CI; adopt the E1 taxonomy (`E_STATOR`)
-for persistence failures.
+The pgvector stator (already built as the hydrate-then-flush mirror) now runs
+against a **real** Postgres, not only the in-process PGlite.
+
+- [x] `scripts/pg-setup.sh` — provisions a local Postgres + pgvector cluster
+      (idempotent; drops to the `postgres` user under root for containers/CI),
+      prints the `ROTOR_TEST_PG_URL`.
+- [x] `test/memory/pgvector-real.test.ts` — the stator against a live server via the
+      `pg` driver + a real `hnsw` index: tier/session scoping + supersession, ANN
+      cosine recall, durable hydrate-across-restart (fresh pod, same DB).
+      `describe.skipIf(!ROTOR_TEST_PG_URL)` — runs where a server is provisioned,
+      skips cleanly on a bare dev box.
+- [x] CI (`​.github/workflows/ci.yml`) runs a `pgvector/pgvector:pg16` **service
+      container** and sets `ROTOR_TEST_PG_URL`, so every push exercises the backend
+      on real Postgres.
+- [x] SessionStart hook best-effort provisions PG+pgvector for web sessions
+      (never fails the session; the test skips if unavailable).
+- [x] Persistence failures already flow through the E1 taxonomy as `E_STATOR`.
+
+**Acceptance:** `npm run verify` = **214 passed + 3 skipped** with no server; **217
+passed** with `ROTOR_TEST_PG_URL` set (CI + this container).
+
+**Deliberately deferred — the async `Stator` interface refactor.** The user chose
+"asynchronous," but the design doc (docs/vector-stores.md) intentionally keeps the
+synchronous hydrate-then-flush mirror and defers the full async-interface change as a
+larger, correctness-sensitive refactor (it threads `await` through the executor + all
+plugins/handlers and must keep golden replay green at every step). Real Postgres is
+now exercised via that mirror; making the *interface* itself async — needed only for
+true multi-pod concurrent writers — is the one remaining checkpointed decision.
 
 ---
 

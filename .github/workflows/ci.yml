@@ -9,6 +9,28 @@ jobs:
   verify:
     name: typecheck · lint · test
     runs-on: ubuntu-latest
+
+    # A real Postgres + pgvector so the pgvector stator is exercised against a live
+    # server (test/memory/pgvector-real.test.ts), not only the in-process PGlite.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: openrotor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The pgvector stator test picks this up; unset ⇒ the test skips.
+      ROTOR_TEST_PG_URL: postgresql://postgres:postgres@localhost:5432/openrotor_test
+
     steps:
       - uses: actions/checkout@v4
 
