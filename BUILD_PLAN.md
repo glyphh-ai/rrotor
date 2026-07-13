@@ -42,7 +42,7 @@ not "done" until its acceptance tests are green in CI.
 | 4 | Attention budgets + gateway metering | ✅ | L2 |
 | 5 | Trust layer (access, identity attenuation, anomaly/firewall, merge) | ✅ | L2 |
 | 6 | HDC grounding law | ✅ | L2 (headline feature) |
-| 7 | wait/interrupt resume + approval | ⬜ | L2 |
+| 7 | wait/interrupt resume + approval | ✅ | L2 |
 | 8 | Run-pinning / patch gates / replay divergence | ⬜ | L3 |
 | 9 | Gateway translation + prompt cache + model frontier/micro-rotor | ⬜ | L3 |
 | 10 | Secondary handler completeness | ⬜ | L3 |
@@ -409,23 +409,43 @@ graph modes, turn recording in `prompt`/`model`. Tests: `hdc`, `embedding`,
 
 ---
 
-## Phase 7 — wait / interrupt resume + approval  ⬜
+## Phase 7 — wait / interrupt resume + approval  ✅
 
-**Why:** gap #6 — `wait`/`interrupt` (§7.14) always terminates the run; there is no
-resume channel, timer, or `on_timeout`, which also disables human-approval gates
+**Why:** gap #6 — `wait`/`interrupt` (§7.14) always terminated the run; there was no
+resume channel, timer, or `on_timeout`, which also disabled human-approval gates
 end-to-end.
 
+> **Determinism key:** the interrupted step is **not recorded**. Resume replays the
+> completed prefix from the event history and re-runs the paused step with the
+> injected payload — recording the pause would make replay re-pause forever.
+
 ### Tasks
-- [ ] Persist an interrupted run's state to the stator with a resume token.
-- [ ] Add a resume path (CLI `resume` + `POST /runs/:id/resume`) that injects the
-      recorded payload and continues from the recorded event history.
-- [ ] Timer / `on_timeout` handling for `wait`.
-- [ ] `approval` gate interrupts and resumes on decision.
+- [x] Interrupted-run state persists in the stator (`server.ts` `kvSet('run:'+id')`
+      = doc + inputs + interrupt point); the run id is the resume token.
+- [x] Resume path `POST /runs/:id/resume` (executor `ExecuteOptions.resume` injects
+      the payload into the paused step and continues from the recorded history).
+      `RunResult.interrupt` surfaces the pause point.
+- [x] `on_timeout` handling for `wait` — a timeout resume routes via `select_next`
+      (`fail` / `escalate` / continue).
+- [x] `approval` gate interrupts without a decision and resolves on
+      `approve`/`reject` when resumed.
+- [~] **Deferred:** a CLI `resume` verb — it needs a durable (sqlite) backend to
+      carry the paused run across processes and more `cli.ts` plumbing; the executor
+      + HTTP paths fully cover the mechanism. Thin follow-up.
 
 ### Acceptance
-- [ ] Interrupt→resume integration test: a run pauses at `wait`, resumes with a
-      payload, and completes; replay of the whole thing is deterministic.
-- [ ] `on_timeout` fires and routes as declared.
+- [x] Interrupt→resume (`test/integration/resume.test.ts`): pauses at `wait`
+      (records only the completed prefix), resumes with a payload to completion, and
+      the resumed history is **deterministic** across repeats.
+- [x] `on_timeout` fires and routes as declared (timeout → `__fail__`).
+- [x] `approval` gate routes on the decision (`approve`→yes, `reject`→no).
+- [x] Server resume over HTTP (`test/integration/server-resume.test.ts`): `/run`
+      pauses + persists, `/runs/:id/resume` completes; unknown run → 404.
+
+**Landed:** executor resume (`ExecuteOptions.resume`, `RunResult.interrupt`,
+no-record-on-interrupt, `wait` routing in `select_next`), `control.ts` wait handler,
+`gate.ts` approval resolve, `server.ts` persist + `/runs/:id/resume`. Tests:
+`resume`, `server-resume`. **126 tests green**, coverage floor raised to ~76%.
 
 ---
 

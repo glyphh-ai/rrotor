@@ -95,14 +95,15 @@ export function evalGate(
       };
     }
     case "approval": {
-      // Human-in-the-loop pause. Basic tier has no resume channel → interrupt and
-      // route via on_escalate (§7.14).
-      return {
-        verdict: "escalate",
-        output: { verdict: "escalate" },
-        frames: [gateFrame("escalate")],
-        interrupted: true,
-      };
+      // Human-in-the-loop (§7.14). A resume payload carries the decision; without
+      // one the gate pauses (interrupts) and the completed prefix is checkpointed.
+      const resume = input.__resume as Record<string, unknown> | undefined;
+      if (!resume) {
+        return { verdict: "escalate", output: { verdict: "escalate", awaiting: "approval" }, frames: [gateFrame("escalate")], interrupted: true };
+      }
+      const decision = String(input.decision ?? resume.decision ?? "approve").toLowerCase();
+      const verdict: Verdict = decision === "reject" || decision === "deny" ? "fail" : "pass";
+      return { verdict, output: { verdict, decision }, frames: [gateFrame(verdict, { decision })] };
     }
     default: {
       const verdict: Verdict = "pass";

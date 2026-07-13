@@ -165,22 +165,7 @@ function handle(
         // history/cache/facts persist across requests via the shared store — so a
         // run recorded by one request replays from another.
         execute(doc, runInputs, buildBasicPlugins({ store, drain }))
-          .then((result) => {
-            log.info("run complete", {
-              run_id: result.run_id,
-              rotor: `${doc.metadata.name}@${doc.metadata.version}`,
-              status: result.status,
-              terminal: result.terminal,
-              steps: result.history.length,
-            });
-            sendJson(res, 200, {
-              run_id: result.run_id,
-              status: result.status,
-              terminal: result.terminal,
-              outputs: result.outputs,
-              history: result.history,
-            });
-          })
+          .then((result) => respondRun(res, store, doc, runInputs, result))
           .catch((err: unknown) => {
             log.error("run error", { detail: (err as Error).message });
             sendJson(res, 500, { error: "run-error", detail: (err as Error).message });
@@ -192,7 +177,67 @@ function handle(
     return;
   }
 
+  // POST /runs/:id/resume — continue an interrupted run (§7.14).
+  if (method === "POST" && path.startsWith("/runs/") && path.endsWith("/resume")) {
+    const runId = decodeURIComponent(path.slice("/runs/".length, -"/resume".length));
+    readBody(req)
+      .then((raw) => {
+        let body: { payload?: Record<string, unknown>; decision?: string; timeout?: boolean };
+        try {
+          body = raw.length ? JSON.parse(raw) : {};
+        } catch {
+          sendJson(res, 400, { error: "invalid-json", detail: "resume body must be JSON" });
+          return;
+        }
+        const saved = store.kvGet(`run:${runId}`) as
+          | { doc: RotorDocument; inputs: Record<string, unknown>; interrupt: { stepId: string } }
+          | undefined;
+        if (!saved) {
+          sendJson(res, 404, { error: "no-such-run", detail: `no interrupted run ${runId}` });
+          return;
+        }
+        const payload = { ...(body.payload ?? {}), ...(body.decision ? { decision: body.decision } : {}) };
+        execute(saved.doc, saved.inputs, buildBasicPlugins({ store, drain }), {
+          runId,
+          resume: { stepId: saved.interrupt.stepId, payload, timeout: body.timeout },
+        })
+          .then((result) => respondRun(res, store, saved.doc, saved.inputs, result))
+          .catch((err: unknown) => sendJson(res, 500, { error: "run-error", detail: (err as Error).message }));
+      })
+      .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
+    return;
+  }
+
   sendJson(res, 404, { error: "not-found", detail: `no route for ${method} ${path}` });
+}
+
+/** Send a run summary; persist doc + inputs when the run paused so it can resume. */
+function respondRun(
+  res: http.ServerResponse,
+  store: Stator,
+  doc: RotorDocument,
+  inputs: Record<string, unknown>,
+  result: import("./exec/executor.js").RunResult,
+): void {
+  if (result.status === "interrupted" && result.interrupt) {
+    store.kvSet(`run:${result.run_id}`, { doc, inputs, interrupt: result.interrupt });
+  }
+  log.info("run complete", {
+    run_id: result.run_id,
+    rotor: `${doc.metadata.name}@${doc.metadata.version}`,
+    status: result.status,
+    terminal: result.terminal,
+    steps: result.history.length,
+  });
+  sendJson(res, 200, {
+    run_id: result.run_id,
+    status: result.status,
+    terminal: result.terminal,
+    outputs: result.outputs,
+    history: result.history,
+    interrupt: result.interrupt,
+    budget: result.budget,
+  });
 }
 
 /** Buffer a request body with a hard cap — a probe shell should not be a sink. */

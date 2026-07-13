@@ -79,6 +79,10 @@ export interface ExecuteOptions {
   /** Sleep between retry attempts (§5.5 backoff). Injectable for tests; defaults
    *  to a real timer. Only used on FRESH execution — replay never sleeps. */
   sleep?: (ms: number) => Promise<void>;
+  /** Resume a previously interrupted run (§7.14): re-execute the same run id,
+   *  injecting `payload` into the interrupted step so it completes instead of
+   *  pausing again. `timeout` routes the step via its `on_timeout`. */
+  resume?: { stepId: string; payload?: Record<string, unknown>; timeout?: boolean };
 }
 
 export interface RunResult {
@@ -94,6 +98,9 @@ export interface RunResult {
   history: StepRecord[];
   /** Set when an attention budget (§10) was exhausted — deterministic. */
   budget?: BudgetOutcome;
+  /** Set when the run paused at a `wait`/`approval` step (§7.14). Resume by
+   *  re-executing with `ExecuteOptions.resume = { stepId, payload }`. */
+  interrupt?: { stepId: string; awaiting?: unknown };
 }
 
 const COMPOSITE: ReadonlySet<StepType> = new Set<StepType>(["loop", "parallel", "sub-rotor"]);
@@ -141,6 +148,7 @@ class RunSession {
   private readonly sleep: (ms: number) => Promise<void>;
   private budgetOutcome?: BudgetOutcome;
   private budgetHandled = false;
+  private interrupt?: { stepId: string; awaiting?: unknown };
 
   constructor(
     private readonly doc: RotorDocument,
@@ -262,6 +270,7 @@ class RunSession {
       if (result.status === "interrupted") {
         terminal = cursor;
         runStatus = "interrupted";
+        this.interrupt = { stepId: cursor, awaiting: result.output.awaiting };
         break;
       }
 
@@ -280,6 +289,7 @@ class RunSession {
       context: this.env.context,
       history: this.plugins.memory.readEventHistory(this.runId),
       budget: this.budgetOutcome,
+      interrupt: this.interrupt,
     };
   }
 
@@ -305,7 +315,14 @@ class RunSession {
 
     // Trust point 3 — resolve + redact `in`.
     const resolved = resolveInputs(step.in, this.env.context);
-    const input = this.plugins.governance.redact(resolved, this.grants);
+    let input = this.plugins.governance.redact(resolved, this.grants);
+
+    // Resume injection (§7.14): the paused step re-runs with the caller's payload
+    // and a resume marker so wait/approval completes instead of pausing again.
+    const resume = this.opts.resume;
+    if (resume && resume.stepId === step.id) {
+      input = { ...input, ...(resume.payload ?? {}), __resume: { timeout: !!resume.timeout } };
+    }
 
     const { result, nextOverride } = await this.runOne(step, input);
     this.mergeIntoContext(step, result.output);
@@ -380,6 +397,11 @@ class RunSession {
     }
 
     result = await this.runHandler(step, input);
+
+    // An interrupted step (§7.14 wait/approval pause) is NOT recorded: on resume
+    // the run replays the completed prefix and re-runs this step with the injected
+    // payload. Recording it would make replay re-pause forever.
+    if (result.status === "interrupted") return result;
 
     if (cacheCfg && result.status === "ok") {
       this.plugins.memory.cachePut(cacheKey, result.output, {
@@ -465,6 +487,15 @@ class RunSession {
       case "loop": {
         const cfg = step.config as LoopConfig;
         if (result.output.exhausted && cfg.on_exhausted === "refuse") return "end";
+        return step.next ?? "end";
+      }
+      case "wait": {
+        // On a resumed timeout, route via on_timeout (§7.14); otherwise continue.
+        if (result.output.timedOut) {
+          const cfg = step.config as { on_timeout?: "escalate" | "fail" | "resume" };
+          if (cfg.on_timeout === "fail") return "__fail__";
+          if (cfg.on_timeout === "escalate") return this.findEscalateStep(step.id) ?? step.next ?? "end";
+        }
         return step.next ?? "end";
       }
       case "fail":
