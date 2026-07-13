@@ -69,8 +69,12 @@ export interface SemanticHit {
 export interface MemoryPlugin extends Capability {
   /** The closed op set (§7.5); NO model-generated SQL. */
   executeOp(op: string, params: Row, spaceId?: string): QueryResult;
-  /** Embed + rank over recorded turns (§7.7); basic tier is lexical unit-dot. */
+  /** Embed + rank over recorded turns (§7.7); basic tier is deterministic-local
+   *  cosine over the hashed-ngram embedding. */
   semanticRecall(query: string, topK: number, threshold: number): SemanticHit[];
+  /** Record a turn into short-term memory (inbound prompt / outbound completion),
+   *  the corpus `semanticRecall` ranks over. */
+  recordTurn(text: string): void;
   /** Persist facts (§7.4). Idempotent by `key`. Returns the count written. */
   write(
     facts: Array<Record<string, unknown>>,

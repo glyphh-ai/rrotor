@@ -11,6 +11,7 @@
 import type { CapabilityStatus } from "../runtime/registry.js";
 import type { StepRecord } from "../types.js";
 import { InProcessStore, type Fact, type Row, type Stator } from "../exec/store.js";
+import { cosine, embed } from "../exec/embedding.js";
 import type {
   GroundVerdict,
   MemoryPlugin,
@@ -34,23 +35,23 @@ export class BasicMemory implements MemoryPlugin {
     return this.store.query(op, params, spaceId);
   }
 
-  /** Lexical unit-dot over recorded turns — the bare-box fallback for the
-   *  embedding lane (§7.7). Ranking over recorded text is deterministic. */
+  /** Deterministic-local semantic recall (§7.7): cosine over the hashed-ngram
+   *  embedding of the query and each recorded turn. Replay-safe (pure). */
   semanticRecall(query: string, topK: number, threshold: number): SemanticHit[] {
-    const q = tokenSet(query);
-    if (q.size === 0) return [];
+    const qv = embed(query);
+    if (query.trim() === "") return [];
     const scored: SemanticHit[] = [];
     for (const text of this.store.turns()) {
-      const t = tokenSet(text);
-      let overlap = 0;
-      for (const w of q) if (t.has(w)) overlap++;
-      const denom = Math.sqrt(q.size) * Math.sqrt(t.size || 1);
-      const score = denom === 0 ? 0 : overlap / denom;
+      const score = cosine(qv, embed(text));
       if (score >= threshold) scored.push({ text, score });
     }
     return scored
       .sort((a, b) => b.score - a.score || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0))
       .slice(0, topK);
+  }
+
+  recordTurn(text: string): void {
+    if (text && text.trim() !== "") this.store.addTurn(text);
   }
 
   write(
@@ -114,13 +115,4 @@ export class BasicMemory implements MemoryPlugin {
     // consolidation engine.
     return { short: this.store.turns().length, mid: 0, long: 0 };
   }
-}
-
-function tokenSet(s: string): Set<string> {
-  return new Set(
-    s
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((w) => w.length > 0),
-  );
 }

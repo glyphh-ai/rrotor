@@ -41,7 +41,7 @@ not "done" until its acceptance tests are green in CI.
 | 3 | **Log drains subsystem** | ✅ | L2 (observability) |
 | 4 | Attention budgets + gateway metering | ✅ | L2 |
 | 5 | Trust layer (access, identity attenuation, anomaly/firewall, merge) | ✅ | L2 |
-| 6 | HDC grounding law | ⬜ | L2 (headline feature) |
+| 6 | HDC grounding law | ✅ | L2 (headline feature) |
 | 7 | wait/interrupt resume + approval | ⬜ | L2 |
 | 8 | Run-pinning / patch gates / replay divergence | ⬜ | L3 |
 | 9 | Gateway translation + prompt cache + model frontier/micro-rotor | ⬜ | L3 |
@@ -347,11 +347,17 @@ passthrough), `executor.ts` (attenuation + output redaction), `governance.ts`
 
 ---
 
-## Phase 6 — HDC grounding law  ⬜
+## Phase 6 — HDC grounding law  ✅
 
-**Why:** gap #4 — the spec's headline feature (G3, §6.3, §7.3/§7.6) exists only as
-a degraded exact-substring matcher; `encode` returns an empty cortex and margins
-are hardcoded. This is the largest single body of work.
+**Why:** gap #4 — the spec's headline feature (G3, §6.3, §7.3/§7.6) existed only as
+a degraded exact-substring matcher; `encode` returned an empty cortex and margins
+were hardcoded. The largest single body of work.
+
+> **IP boundary (decided with the user):** `grounding.ts` previously stated the
+> open runtime "does not practice the patent" — the real HDC engine was the closed
+> premium tier. The user explicitly chose to implement the real hypervector engine
+> + hard gate in the open runtime; that docstring was updated to describe the
+> implemented engine. Flagged before writing any code.
 
 > **Decision (embedding fidelity, basic tier):** the basic-tier embedding is a
 > **deterministic local embedding** — hashed n-gram → fixed-dim vector, cosine
@@ -364,29 +370,42 @@ are hardcoded. This is the largest single body of work.
 > earlier — decided with the user during Phase 2.
 
 ### Tasks
-- [ ] Real hypervector encoder in `grounding.ts` (`hdc.map` §7.3): roles/segments/
-      layers/cortex per the universal 7×33 schema; bind/bundle/permute algebra.
-- [ ] **Deterministic local embedding** (`src/obs`/`src/exec` sibling module): a
-      pure `embed(text) → number[]` (hashed n-gram, unit-normalized) + `cosine`.
-      Replay-safe; the basis for short-term recall.
-- [ ] **Short-term memory**: embed every inbound prompt + outbound completion and
-      store the vector alongside the turn text in the stator; `semanticRecall`
-      ranks by cosine over these (currently lexical unit-dot).
-- [ ] Associative memory probe/verify with a real **margin**; the **hard logit
-      gate** on `model` decode (§6.3) constraining decode to grounded fillers.
-- [ ] `retrieve.kb` (§7.6) `probe|node|neighbors` over a real EntityGraph.
-- [ ] `retrieve.vector` (§7.7) recorded-embedding lane with the embedding
-      checkpointed at the boundary (deterministic-local by default; neural lane
-      checkpointed as premium).
-- [ ] `hdc-ground` gate and `assert` operate on real HDC margins.
+- [x] Real hypervector engine `src/exec/hdc.ts` (`hdc.map` §7.3): deterministic
+      seeded bipolar symbols (mulberry32), `bind`/`bundle`/`permute`/`cosine`, and
+      `encodeRoleFillers` + `cleanup`. Replay-safe by construction (§6.2).
+- [x] **Deterministic local embedding** `src/exec/embedding.ts`: pure
+      `embed(text) → number[]` (hashed word + char-trigram, L2-normalized) +
+      `cosine`. Replay-safe; the basis for short-term recall.
+- [x] **Short-term memory**: `prompt` (inbound) and `model` (outbound) handlers
+      `recordTurn` their text; `semanticRecall` ranks by **embedding cosine** over
+      recorded turns (was lexical unit-dot).
+- [x] `grounding.ts` rewritten to the HDC engine: an entity's cortex is the bundle
+      of its `role⊗filler` binds; `probe` unbinds by role + cleans up for a real
+      **margin**; `verify` grounds a claim iff it clears the margin threshold.
+- [x] **Hard grounding gate** on `model` decode (§6.3): decode is constrained to
+      `groundedFillers`; no grounded continuation → refuse (`E_UNGROUNDED`); a
+      decoded output that fails `verify` (low margin) → refuse.
+- [x] `retrieve.kb` (§7.6) `probe` (HDC recall) / `node` (entity edges) /
+      `neighbors` (co-referent entities over the fact graph); `verify` uses HDC.
+- [x] `retrieve.vector` (§7.7) rides the deterministic-local embedding via
+      `semanticRecall`; the step output (hits) is checkpointed like any leaf step,
+      so replay is identical.
 
 ### Acceptance
-- [ ] Encode/decode round-trip test over the 7×33 schema with stable vectors
-      (seeded, deterministic).
-- [ ] Hard-gate test: decode cannot emit an ungrounded filler; margin below
-      threshold refuses.
-- [ ] `retrieve.kb` neighbors test returns graph-correct results; embeddings are
-      checkpointed and replay-identical.
+- [x] HDC round-trip (`test/unit/hdc.test.ts`): seeded symbols are deterministic
+      and near-orthogonal; `bind` is its own inverse; encode → unbind → cleanup
+      recovers the bound filler with a clear margin (> 0.2).
+- [x] Hard-gate test (`test/integration/grounding.test.ts`): a `model` step decodes
+      into a grounded filler when one exists, and **refuses** (`E_UNGROUNDED`) when
+      none exists; `verify` refuses when the margin threshold is not met.
+- [x] `retrieve.kb` neighbors returns graph-correct co-referents (ada→bob via a
+      shared filler, not carol); `node` returns the entity's edges. Probes are
+      deterministic (identical on repeat).
+
+**Landed:** `src/exec/hdc.ts`, `src/exec/embedding.ts`, rewrote `grounding.ts`
+(HDC), `memory.ts` (embedding recall + `recordTurn`), model hard gate, `retrieve.kb`
+graph modes, turn recording in `prompt`/`model`. Tests: `hdc`, `embedding`,
+`grounding`. **119 tests green**, coverage floor raised to ~74%.
 
 ---
 

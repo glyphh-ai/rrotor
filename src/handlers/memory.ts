@@ -77,15 +77,43 @@ export const retrieveKbHandler: StepHandler = {
     const role = String(input.role ?? cfg.role ?? "");
     if (cfg.mode === "verify") {
       const filler = String(input.filler ?? "");
-      const v = plugins.memory.verify(entity, role, filler, cfg.margin ?? 0.05, env.space_id);
+      const v = plugins.grounding.verify(entity, role, filler, cfg.margin ?? 0.05, env.space_id);
       return {
         output: { membership: v.membership, margin: v.margin, top: v.top, grounded: v.grounded },
         frames: [{ type: "done", data: { mode: "verify", grounded: v.grounded } }],
         status: "ok",
       };
     }
-    // probe | node | neighbors all reduce to an entity-keyed probe on the basic tier.
-    const p = plugins.memory.probe(entity, role, env.space_id);
+    if (cfg.mode === "node") {
+      // The entity's full node: all its current (role, filler) edges.
+      const rows = plugins.memory.executeOp("lookup", { person: entity }, env.space_id).rows;
+      return {
+        output: { node: entity, edges: rows, count: rows.length },
+        frames: [{ type: "done", data: { mode: "node", edges: rows.length } }],
+        status: "ok",
+      };
+    }
+    if (cfg.mode === "neighbors") {
+      // Graph neighbors: distinct OTHER entities that share a filler value with
+      // this entity (co-reference over the fact graph).
+      const own = plugins.memory.executeOp("lookup", { person: entity }, env.space_id).rows;
+      const fillers = [...new Set(own.map((r) => String(r.filler)))];
+      const neighbors = new Set<string>();
+      for (const filler of fillers) {
+        for (const r of plugins.memory.executeOp("who", { value: filler }, env.space_id).rows) {
+          const e = String(r.entity);
+          if (e.toLowerCase() !== entity.toLowerCase()) neighbors.add(e);
+        }
+      }
+      const list = [...neighbors].sort();
+      return {
+        output: { neighbors: list, count: list.length },
+        frames: [{ type: "done", data: { mode: "neighbors", count: list.length } }],
+        status: "ok",
+      };
+    }
+    // probe: HDC associative recall of the role's filler from the entity's cortex.
+    const p = plugins.grounding.probe(entity, role, env.space_id);
     return {
       output: { filler: p.filler, membership: p.membership, margin: p.margin, top: p.top },
       frames: [{ type: "done", data: { mode: cfg.mode } }],

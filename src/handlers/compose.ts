@@ -18,7 +18,7 @@ function interpolate(text: string, input: Record<string, unknown>): string {
 
 export const promptHandler: StepHandler = {
   type: "prompt",
-  async execute({ step, input }: HandlerArgs): Promise<StepResult> {
+  async execute({ step, input, plugins }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? {}) as PromptConfig;
     let text: string;
     if (cfg.blocks && cfg.blocks.length > 0) {
@@ -35,6 +35,7 @@ export const promptHandler: StepHandler = {
     if (cfg.max_tokens && tokenish(text) > cfg.max_tokens) {
       text = text.slice(0, cfg.max_tokens * 4);
     }
+    plugins.memory.recordTurn(text); // short-term memory: the inbound composed prompt
     const frames: Frame[] = [{ type: "done", data: { breakpoints: cfg.cache?.breakpoints } }];
     return { output: { text }, frames, status: "ok" };
   },
