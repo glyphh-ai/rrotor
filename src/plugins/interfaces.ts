@@ -11,6 +11,7 @@
 
 import type { Capability } from "../runtime/registry.js";
 import type {
+  AffinityMode,
   Frame,
   Principal,
   RotorDocument,
@@ -215,11 +216,27 @@ export interface GovernancePlugin extends Capability {
 
 export type InstanceState = "hot" | "warm" | "cold";
 
+/** A routing hint derived from `spec.affinity` (§17.4). */
+export interface AffinityHint {
+  key?: string;
+  mode?: AffinityMode;
+}
+
+export interface PoolInstanceInfo {
+  id: string;
+  state: InstanceState;
+  keys: string[];
+}
+
 export interface PoolPlugin extends Capability {
-  provision(): void;
-  route(): string;
+  /** Pre-warm instances up to `minHot`, bounded by the `maxHot` budget (§17.3). */
+  provision(opts?: { minHot?: number; maxHot?: number }): void;
+  /** Route a request to an instance, honoring affinity (§17.4). Returns the id. */
+  route(affinity?: AffinityHint): string;
   /** Telemetry ONLY — MUST NOT influence a transition (§17.6). */
   instanceState(id?: string): InstanceState;
+  /** Telemetry snapshot of the instances + their states. Never a control input. */
+  snapshot(): PoolInstanceInfo[];
 }
 
 // ── §3.8 drain / observability sink ─────────────────────────────────────────

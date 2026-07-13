@@ -46,7 +46,7 @@ not "done" until its acceptance tests are green in CI.
 | 8 | Run-pinning / patch gates / replay divergence | ✅ | L3 |
 | 9 | Gateway translation + prompt cache + model frontier/micro-rotor | ✅ | L3 |
 | 10 | Secondary handler completeness | ✅ | L3 |
-| 11 | Pooling (hot/warm/cold) + affinity | ⬜ | L3 |
+| 11 | Pooling (hot/warm/cold) + affinity | ✅ | L3 |
 
 Legend: ⬜ not started · 🟡 in progress · ✅ done
 
@@ -559,20 +559,61 @@ decode, and most `tool.app`/substrate tools.
 
 ---
 
-## Phase 11 — Pooling (hot/warm/cold) + affinity  ⬜
+## Phase 11 — Pooling (hot/warm/cold) + affinity  ✅
 
-**Why:** `pool.ts` is a conformant no-op (`route → local-0`, always `hot`);
-§17.2/§17.3 hot/warm/cold and budget-bounded warming, plus `spec.affinity`, are
-unimplemented. Telemetry-only invariant (§17.6) must hold.
+**Why:** `pool.ts` was a conformant no-op (`route → local-0`, always `hot`);
+§17.2/§17.3 hot/warm/cold and budget-bounded warming, plus `spec.affinity`, were
+unimplemented. The telemetry-only invariant (§17.6) must hold.
 
 ### Tasks
-- [ ] Implement instance-state tracking (telemetry only, never a control
-      predicate).
-- [ ] `spec.pool` / `spec.affinity` routing with budget-bounded warming.
+- [x] `BasicPool` tracks instance state (`hot`/`warm`/`cold`) and routes by
+      affinity (§17.4): an instance holding the key wins (warm reuse); otherwise
+      reuse a warm instance or warm a new one; at budget, reuse the lowest-index
+      instance so `require` degrades to a soft pin rather than over-provisioning.
+- [x] `provision` pre-warms up to `minHot`, bounded by the `maxHot` budget (§17.3).
+      The server provisions from `spec.pool` and routes per request from
+      `spec.affinity` — **operational telemetry, logged, never fed to the executor**.
 
 ### Acceptance
-- [ ] Routing test respects affinity; warming stays within budget; instance state
-      never gates control flow.
+- [x] `test/unit/pool.test.ts`: an affinity key routes back to the same instance;
+      warming never exceeds `maxHot` (later keys share instances); `provision`
+      pre-warms `minHot` capped at `maxHot`; and — the load-bearing check —
+      **instance state never changes what a run computes** (a heavily-exercised
+      pool produces a byte-identical run shape, §17.6).
+
+**Landed:** rewrote `plugins/pool.ts` (state + affinity + budget), extended the
+`PoolPlugin` interface (`route(affinity)`, `provision(opts)`, `snapshot`),
+operational routing telemetry in `server.ts`. Test: `pool`. **154 tests green**,
+coverage floor raised to ~80%.
+
+---
+
+## 🎉 Build complete — Phases 0–11 all ✅
+
+Every phase in this plan is landed, tested, and pushed. The runtime went from a
+scaffold with **zero tests** to **154 passing tests** at an ~80% coverage floor,
+clearing the full **L1 → L2 → L3** conformance ladder:
+
+- **Foundation:** golden-replay determinism harness, structured logging, honest
+  wired runtime, durable/shared SQLite stator, log drains.
+- **L2 Standard:** attention budgets, the trust layer (identity attenuation,
+  access redaction, anomaly/firewall, `E_UNMERGEABLE`), HDC grounding + the hard
+  gate, deterministic short-term memory, wait/resume + approval.
+- **L3 Full:** run-pinning + patch gates, gateway translation + prompt caching +
+  micro-rotor, handler completeness, pooling + affinity.
+
+The single guardrail that held throughout: **determinism**. Every control-plane
+decision is a pure function of recorded state; wall-clock, RNG, rate limits, and
+pool state are telemetry, never control predicates. The golden replay harness has
+stayed green from Phase 0 to Phase 11.
+
+### Deferred follow-ups (flagged, not hidden)
+- Gateway **wall-clock rate limiting** + attention `wall_ms` — transport timing,
+  not determinism-safe as control predicates (Phase 4).
+- **Routing governance** (§13.3 PII→local / approved-providers) — composes with
+  the gateway/model lanes (Phase 5).
+- **CLI `resume`** verb — needs a durable backend across processes; executor +
+  HTTP paths already cover the mechanism (Phase 7).
 
 ---
 

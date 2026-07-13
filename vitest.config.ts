@@ -17,12 +17,12 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/banner.ts", "src/version.ts", "src/index.ts"],
       thresholds: {
-        // Ratcheting floor. Phase 10: measured ~81% lines / ~73% branches / ~88%
-        // funcs. Raise these as later phases add targeted tests.
-        lines: 79,
-        functions: 86,
-        branches: 72,
-        statements: 79,
+        // Ratcheting floor. Phase 11 (final): measured ~81% lines / ~73% branches /
+        // ~89% funcs. The uncovered remainder is live-endpoint degradation paths.
+        lines: 80,
+        functions: 88,
+        branches: 73,
+        statements: 80,
       },
     },
   },

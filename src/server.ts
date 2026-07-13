@@ -159,6 +159,12 @@ function handle(
           });
         }
         const runInputs = (inputs && typeof inputs === "object" ? inputs : {}) as Record<string, unknown>;
+        // Pooling/affinity (§17.2–§17.4) is OPERATIONAL telemetry only (§17.6): the
+        // shared pool picks a warm instance for this request, but it NEVER affects
+        // what the run computes — the executor below does not consult it.
+        if (doc.spec.pool) rt.plugins.pool.provision(doc.spec.pool);
+        const instance = rt.plugins.pool.route(affinityHint(doc, runInputs));
+        log.info("routed", { instance, state: rt.plugins.pool.instanceState(instance) });
         // Fungibility invariant (§17.1): the run-critical state lives in the shared
         // stator, not this process. A fresh plugin bundle per request keeps
         // per-run plugin state (e.g. the grounding space guard) isolated, while
@@ -209,6 +215,22 @@ function handle(
   }
 
   sendJson(res, 404, { error: "not-found", detail: `no route for ${method} ${path}` });
+}
+
+/** Derive a pool routing hint from `spec.affinity` (§17.4) — telemetry only. */
+function affinityHint(doc: RotorDocument, inputs: Record<string, unknown>): import("./plugins/interfaces.js").AffinityHint | undefined {
+  const cfg = doc.spec.affinity;
+  if (!cfg?.keys?.length) return undefined;
+  const parts = cfg.keys
+    .map((k) => {
+      if (k === "tenant") return inputs.tenant;
+      if (k === "conversation") return inputs.conversation ?? inputs.conversation_id;
+      if (k === "entity") return inputs.entity;
+      return undefined;
+    })
+    .filter((v) => v !== undefined && v !== null)
+    .map(String);
+  return { key: parts.join(":") || doc.metadata.name, mode: cfg.mode };
 }
 
 /** Send a run summary; persist doc + inputs when the run paused so it can resume. */
