@@ -44,6 +44,26 @@ is a different loop is a different agent behavior, all over the same repo. That 
 why the runtime is stateless and the rotor is a typed spec — the loop has to be
 portable across the vendors below and interchangeable mid-session.
 
+### 1.1 A session is web-native — and the web-relay reaches your local box
+
+Because the apps and tooling a rotor drives are **almost exclusively web-based**, the
+IDE and the tools follow you *into* the session. The remote environment is where the
+work happens — not a thin client to somewhere else. Anything you'd reach for on your
+local machine, you reach for here, in the session, over the web.
+
+The one thing a remote session doesn't have natively is **your local box** — local
+files, a local app, a local device. That gap is bridged by a **web-relay**: your
+local machine connects *outward* to the session and exposes only what you allow, so
+the session can read those local files or drive a local app **without the cloud ever
+dialing into your personal machine.** This is the `tool.app` attach channel from
+[runtime.md §3.4](runtime.md) — loopback / relay by design; the cloud reach-in was
+removed on purpose, so reach is always initiated *from* the local box, never *into*
+it.
+
+Net: a session is web-first and self-sufficient for web tooling, and the web-relay is
+the opt-in extension that pulls your local box into reach when a workflow genuinely
+needs local files or a local device.
+
 > **Open-source stance: OpenRotor hosts nothing for anyone.** This repo is the
 > runtime and the spec. What we ship is a runtime that is *trivial to spin up* as a
 > session environment on Fly or any other vendor — a Dockerfile, a Kustomize set,
