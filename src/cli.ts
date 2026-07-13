@@ -189,7 +189,7 @@ async function runSupport(rest: string[]): Promise<number> {
     return 1;
   }
   const store = await statorFromEnvAsync();
-  const history: StepRecord[] = store.history.read(runId);
+  const history: StepRecord[] = await store.history.read(runId);
   const failing = history.filter((h) => h.error).map((h) => ({
     step_id: h.step_id,
     attempt: h.attempt,

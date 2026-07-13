@@ -18,10 +18,10 @@ const doc = (spec: Record<string, unknown>): RotorDocument =>
 /** A store seeded with a small fact graph: ada & bob both live in london; carol
  *  lives in paris; bob has a cat. ada carries several facts so its cortex is a
  *  real bundle (superposition noise → a meaningful, sub-1 recall margin). */
-function seeded() {
+async function seeded() {
   const store = new InProcessStore();
   const plugins = buildBasicPlugins({ store });
-  plugins.memory.write(
+  await plugins.memory.write(
     [
       { entity: "ada", role: "rel.city", filler: "london" },
       { entity: "ada", role: "rel.pet", filler: "dog" },
@@ -36,29 +36,29 @@ function seeded() {
 }
 
 describe("HDC probe / verify", () => {
-  it("recalls the grounded filler with a positive margin", () => {
-    const { plugins } = seeded();
-    const p = plugins.grounding.probe("ada", "rel.city");
+  it("recalls the grounded filler with a positive margin", async () => {
+    const { plugins } = await seeded();
+    const p = await plugins.grounding.probe("ada", "rel.city");
     expect(p.filler).toBe("london");
     expect(p.margin).toBeGreaterThan(0);
     // Deterministic: a second probe is identical.
-    expect(plugins.grounding.probe("ada", "rel.city")).toEqual(p);
+    expect(await plugins.grounding.probe("ada", "rel.city")).toEqual(p);
   });
 
-  it("grounds a claim that clears the margin threshold", () => {
-    const { plugins } = seeded();
-    expect(plugins.grounding.verify("ada", "rel.city", "london", 0.02).grounded).toBe(true);
+  it("grounds a claim that clears the margin threshold", async () => {
+    const { plugins } = await seeded();
+    expect((await plugins.grounding.verify("ada", "rel.city", "london", 0.02)).grounded).toBe(true);
   });
 
-  it("refuses when the margin threshold is not met (low confidence)", () => {
-    const { plugins } = seeded();
+  it("refuses when the margin threshold is not met (low confidence)", async () => {
+    const { plugins } = await seeded();
     // A threshold above any achievable margin gates the claim out.
-    expect(plugins.grounding.verify("ada", "rel.city", "london", 0.99).grounded).toBe(false);
+    expect((await plugins.grounding.verify("ada", "rel.city", "london", 0.99)).grounded).toBe(false);
   });
 
-  it("refuses a claim that is not in the grounded set", () => {
-    const { plugins } = seeded();
-    expect(plugins.grounding.verify("ada", "rel.city", "berlin", 0.02).grounded).toBe(false);
+  it("refuses a claim that is not in the grounded set", async () => {
+    const { plugins } = await seeded();
+    expect((await plugins.grounding.verify("ada", "rel.city", "berlin", 0.02)).grounded).toBe(false);
   });
 });
 
@@ -72,7 +72,7 @@ describe("hard grounding gate on a model step (§6.3)", () => {
     });
 
   it("decodes into a grounded filler when one exists", async () => {
-    const { store } = seeded();
+    const { store } = await seeded();
     const r = await execute(modelDoc("ada"), {}, buildBasicPlugins({ store }));
     expect(r.status).toBe("ok");
     const m = r.history.find((h) => h.step_id === "m");
@@ -80,7 +80,7 @@ describe("hard grounding gate on a model step (§6.3)", () => {
   });
 
   it("refuses when there is no grounded continuation", async () => {
-    const { store } = seeded();
+    const { store } = await seeded();
     const r = await execute(modelDoc("zoe"), {}, buildBasicPlugins({ store }));
     const m = r.history.find((h) => h.step_id === "m");
     expect(m?.status).toBe("refused");
@@ -96,14 +96,14 @@ describe("retrieve.kb entity graph", () => {
     });
 
   it("node returns the entity's edges", async () => {
-    const { store } = seeded();
+    const { store } = await seeded();
     const r = await execute(kbDoc("node"), {}, buildBasicPlugins({ store }));
     const out = r.history.find((h) => h.step_id === "k")?.output as { edges: Array<{ filler: string }> };
     expect(out.edges.some((e) => e.filler === "london")).toBe(true);
   });
 
   it("neighbors returns co-referent entities (shared filler)", async () => {
-    const { store } = seeded();
+    const { store } = await seeded();
     const r = await execute(kbDoc("neighbors"), {}, buildBasicPlugins({ store }));
     const out = r.history.find((h) => h.step_id === "k")?.output as { neighbors: string[] };
     // ada shares 'london' with bob, not with carol.

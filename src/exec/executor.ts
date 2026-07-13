@@ -308,7 +308,7 @@ class RunSession {
       terminal,
       outputs,
       context: this.env.context,
-      history: this.plugins.memory.readEventHistory(this.runId),
+      history: await this.plugins.memory.readEventHistory(this.runId),
       budget: this.budgetOutcome,
       interrupt: this.interrupt,
       error: terminal === "__fail__" ? this.lastError : undefined,
@@ -365,7 +365,7 @@ class RunSession {
 
     for (;;) {
       const attempt = this.bumpVisit(step.id);
-      const existing = this.plugins.memory.lookupRecord(this.runId, step.id, attempt);
+      const existing = await this.plugins.memory.lookupRecord(this.runId, step.id, attempt);
       let result: StepResult;
       const wasReplay = existing !== undefined;
 
@@ -431,7 +431,7 @@ class RunSession {
     let cacheFrames: Frame[] = [];
 
     if (cacheCfg) {
-      const hit = this.plugins.memory.cacheGet(cacheKey, this.env.logical_tick);
+      const hit = await this.plugins.memory.cacheGet(cacheKey, this.env.logical_tick);
       if (hit !== undefined) {
         result = { output: hit, frames: [], status: "ok" };
         cacheFrames = [cacheFrame("hit")];
@@ -447,7 +447,7 @@ class RunSession {
     if (result.status === "interrupted") return result;
 
     if (cacheCfg && result.status === "ok") {
-      this.plugins.memory.cachePut(cacheKey, result.output, {
+      await this.plugins.memory.cachePut(cacheKey, result.output, {
         ttlTicks: parseTicks(cacheCfg.ttl),
         scope: cacheCfg.scope,
       });
@@ -482,7 +482,7 @@ class RunSession {
   }
 
   /** Build + append the StepRecord, return the result it records. */
-  private append(step: Step, attempt: number, input: Record<string, unknown>, result: StepResult): StepResult {
+  private async append(step: Step, attempt: number, input: Record<string, unknown>, result: StepResult): Promise<StepResult> {
     // §13.4 field-grain redaction: strip granted-out fields from the OUTPUT before
     // it is recorded, so they are absent from the event history, the Context (via
     // recordToResult below), and any log drain built from the record.
@@ -504,7 +504,7 @@ class RunSession {
       usage: result.usage,
       error: result.error,
     };
-    this.plugins.memory.appendStepRecord(rec);
+    await this.plugins.memory.appendStepRecord(rec);
     // Fan out to the log drain AFTER the durable write (§3.8). Fire-and-forget:
     // telemetry only, never affects the run (SPEC.md §17.6). Only fresh
     // executions reach here — replay short-circuits before append — so a replayed

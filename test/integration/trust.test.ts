@@ -82,7 +82,7 @@ describe("sub-rotor identity attenuation (§11.3)", () => {
     const r = await execute(parent, {}, buildBasicPlugins({ store }), { principal: caller, rotorResolver: resolver });
     expect(r.status).toBe("ok");
     // The sub-run's records carry the narrowed identity.
-    const subRecords = store.history.read(`${r.run_id}::child`);
+    const subRecords = await store.history.read(`${r.run_id}::child`);
     expect(subRecords.length).toBeGreaterThan(0);
     expect(subRecords[0].principal?.scopes).toEqual(["scope:a"]);
   });

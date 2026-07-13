@@ -37,7 +37,7 @@ async function recordV1() {
 describe("run-pinning + patch gates (§16.3)", () => {
   it("records the definitionVersion on every StepRecord", async () => {
     const { store, runId } = await recordV1();
-    for (const rec of store.history.read(runId)) expect(rec.definitionVersion).toBe("0.1.0");
+    for (const rec of await store.history.read(runId)) expect(rec.definitionVersion).toBe("0.1.0");
   });
 
   it("replaying against an edited version fails with E_REPLAY_DIVERGENCE", async () => {

@@ -32,7 +32,7 @@ export const modelHandler: StepHandler = {
       const hard = (cfg.ground.enforcement ?? "hard") === "hard";
       if (entity && role) {
         ground = { entity, role, hard };
-        candidates = plugins.grounding.groundedFillers(entity, role, env.space_id);
+        candidates = await plugins.grounding.groundedFillers(entity, role, env.space_id);
         if (hard && candidates.length === 0) {
           return {
             output: { text: "", refused: true, reason: "E_UNGROUNDED" },
@@ -51,7 +51,7 @@ export const modelHandler: StepHandler = {
     if (cfg.micro && ground && candidates && candidates.length > 0) {
       // Decode over the role's ranked vocabulary (distractors give the backtrack
       // loop something to reject); the grounded winner is the probe's top filler.
-      const p = plugins.grounding.probe(ground.entity, ground.role, env.space_id);
+      const p = await plugins.grounding.probe(ground.entity, ground.role, env.space_id);
       const vocab = p.top.length > 0 ? p.top : candidates;
       const micro = runMicroRotor(vocab, p.filler, cfg.max_backtracks ?? vocab.length);
       decodeFrames = micro.frames;
@@ -90,7 +90,7 @@ export const modelHandler: StepHandler = {
 
     // Hard grounding gate on the decoded output (§6.3).
     if (ground?.hard) {
-      const v = plugins.grounding.verify(ground.entity, ground.role, text, GROUND_MARGIN, env.space_id);
+      const v = await plugins.grounding.verify(ground.entity, ground.role, text, GROUND_MARGIN, env.space_id);
       if (!v.grounded) {
         return {
           output: { text: cfg.ground?.refusal ?? text, refused: true, reason: "E_UNGROUNDED", margin: v.margin },

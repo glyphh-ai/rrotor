@@ -23,9 +23,12 @@ interface Turn {
 
 /** Ingest a turn: record it for semantic recall, and absorb user directives/facts.
  *  Model-independent — `vendor` never enters the stator. */
-function ingest(memory: MemoryPlugin, turn: Turn): void {
-  memory.recordTurn(turn.text);
-  if (turn.speaker === "user") memory.write(absorbText(turn.text, "user"), { tick: 0 });
+async function ingest(memory: MemoryPlugin, turn: Turn): Promise<void> {
+  await memory.recordTurn(turn.text);
+  if (turn.speaker === "user") await memory.write(absorbText(turn.text, "user"), { tick: 0 });
+}
+async function ingestAll(memory: MemoryPlugin, turns: Turn[]): Promise<void> {
+  for (const t of turns) await ingest(memory, t);
 }
 
 /** A realistic 20-turn coding conversation: a standing directive up front, then a
@@ -58,12 +61,12 @@ function freshMemory() {
 }
 
 describe("standing directives survive across turns (mode 1)", () => {
-  it("recalls a turn-1 directive at turn 20", () => {
+  it("recalls a turn-1 directive at turn 20", async () => {
     const memory = freshMemory();
-    CONVERSATION.forEach((t) => ingest(memory, t));
+    await ingestAll(memory, CONVERSATION);
 
     // Turn 20's query shares NO words with the directive — similarity would miss it.
-    const ctx = assembleRecall(memory, "write a function to parse a config file", { entity: "user" });
+    const ctx = await assembleRecall(memory, "write a function to parse a config file", { entity: "user" });
     const directives = ctx.directives.join(" | ").toLowerCase();
     expect(directives).toContain("tabs");
     expect(directives).toContain("cite");
@@ -71,46 +74,46 @@ describe("standing directives survive across turns (mode 1)", () => {
     expect(directives).toContain("never log secrets");
   });
 
-  it("de-duplicates a restated directive but keeps distinct ones", () => {
+  it("de-duplicates a restated directive but keeps distinct ones", async () => {
     const memory = freshMemory();
-    ingest(memory, { speaker: "user", text: "Always use tabs for indentation." });
-    ingest(memory, { speaker: "user", text: "Always use tabs for indentation." }); // restated
-    ingest(memory, { speaker: "user", text: "Always write tests first." });
-    const ctx = assembleRecall(memory, "", { entity: "user" });
+    await ingest(memory, { speaker: "user", text: "Always use tabs for indentation." });
+    await ingest(memory, { speaker: "user", text: "Always use tabs for indentation." }); // restated
+    await ingest(memory, { speaker: "user", text: "Always write tests first." });
+    const ctx = await assembleRecall(memory, "", { entity: "user" });
     expect(ctx.directives).toHaveLength(2);
   });
 });
 
 describe("vendor portability", () => {
-  it("recall is identical regardless of which vendor generated the turns", () => {
+  it("recall is identical regardless of which vendor generated the turns", async () => {
     // Same conversation, but every turn relabeled to a single vendor.
     const asClaude = freshMemory();
-    CONVERSATION.forEach((t) => ingest(asClaude, { ...t, vendor: "claude" }));
+    await ingestAll(asClaude, CONVERSATION.map((t) => ({ ...t, vendor: "claude" as const })));
     const asLocal = freshMemory();
-    CONVERSATION.forEach((t) => ingest(asLocal, { ...t, vendor: "local" }));
+    await ingestAll(asLocal, CONVERSATION.map((t) => ({ ...t, vendor: "local" as const })));
 
     const q = "how do I parse the config file";
-    const a = recallBlock(assembleRecall(asClaude, q, { entity: "user" }));
-    const b = recallBlock(assembleRecall(asLocal, q, { entity: "user" }));
+    const a = recallBlock(await assembleRecall(asClaude, q, { entity: "user" }));
+    const b = recallBlock(await assembleRecall(asLocal, q, { entity: "user" }));
     expect(a).toBe(b); // memory never depended on the vendor
     expect(a).toContain("Standing instructions");
   });
 });
 
 describe("structured facts + semantic recall (modes 1 & 2)", () => {
-  it("recalls user self-facts stored earlier (my X is Y → user's slot)", () => {
+  it("recalls user self-facts stored earlier (my X is Y → user's slot)", async () => {
     const memory = freshMemory();
-    CONVERSATION.forEach((t) => ingest(memory, t));
-    const name = memory.executeOp("lookup", { person: "user", slot: "name" }).rows;
-    const project = memory.executeOp("lookup", { person: "user", slot: "project" }).rows;
+    await ingestAll(memory, CONVERSATION);
+    const name = (await memory.executeOp("lookup", { person: "user", slot: "name" })).rows;
+    const project = (await memory.executeOp("lookup", { person: "user", slot: "project" })).rows;
     expect(name[0]?.filler).toBe("Ada");
     expect(project[0]?.filler).toBe("Rotor");
   });
 
-  it("surfaces the earlier config-parser turn for a keyword-overlapping query", () => {
+  it("surfaces the earlier config-parser turn for a keyword-overlapping query", async () => {
     const memory = freshMemory();
-    CONVERSATION.forEach((t) => ingest(memory, t));
-    const ctx = assembleRecall(memory, "config parser parseConfig JSON.parse", { entity: "user", topK: 3, threshold: 0.05 });
+    await ingestAll(memory, CONVERSATION);
+    const ctx = await assembleRecall(memory, "config parser parseConfig JSON.parse", { entity: "user", topK: 3, threshold: 0.05 });
     const joined = ctx.recalled.map((h) => h.text).join(" ");
     expect(joined).toContain("parseConfig");
   });

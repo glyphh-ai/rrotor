@@ -22,42 +22,42 @@ afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 /** Exercise the full Stator surface and snapshot the observable results, so two
  *  backends can be compared for byte-identical behavior. */
-function exerciseStore(s: Stator): unknown {
-  s.writeFacts([
+async function exerciseStore(s: Stator): Promise<unknown> {
+  await s.writeFacts([
     { entity: "ada", role: "rel.spouse", filler: "morgan", key: "ada:spouse", is_current: true, tick: 1 },
     { entity: "ada", role: "rel.city", filler: "london", is_current: true, tick: 2 },
     { entity: "bob", role: "rel.city", filler: "london", is_current: true, tick: 3 },
   ]);
   // Supersede ada's spouse — prev must see the old value.
-  s.writeFacts([{ entity: "ada", role: "rel.spouse", filler: "sam", key: "ada:spouse", is_current: true, tick: 4 }]);
+  await s.writeFacts([{ entity: "ada", role: "rel.spouse", filler: "sam", key: "ada:spouse", is_current: true, tick: 4 }]);
 
-  s.cache.put("ck", { v: 42 }, { ttlTicks: 5, scope: "rotor" });
-  s.kvSet("greeting", { hi: true });
-  s.addTurn("first turn");
-  s.addTurn("second turn");
+  await s.cache.put("ck", { v: 42 }, { ttlTicks: 5, scope: "rotor" });
+  await s.kvSet("greeting", { hi: true });
+  await s.addTurn("first turn");
+  await s.addTurn("second turn");
 
   return {
-    lookup_spouse: s.lookupFact("ada", "rel.spouse")?.filler,
-    fillers_city: s.fillers("bob", "rel.city"),
-    q_lookup: s.query("lookup", { person: "ada" }),
-    q_prev: s.query("prev", { person: "ada", slot: "rel.spouse" }),
-    q_count: s.query("count", { slot: "rel.city" }),
-    q_top: s.query("top", { slot: "rel.city", k: 5 }),
-    q_who: s.query("who", { slot: "rel.city", value: "london" }),
-    q_compare: s.query("compare", { a: "ada", b: "bob", slot: "rel.city" }),
-    cache_live: s.cache.get("ck", 4),
-    cache_expired: s.cache.get("ck", 5),
-    kv: s.kvGet("greeting"),
-    turns: s.turns(),
+    lookup_spouse: (await s.lookupFact("ada", "rel.spouse"))?.filler,
+    fillers_city: await s.fillers("bob", "rel.city"),
+    q_lookup: await s.query("lookup", { person: "ada" }),
+    q_prev: await s.query("prev", { person: "ada", slot: "rel.spouse" }),
+    q_count: await s.query("count", { slot: "rel.city" }),
+    q_top: await s.query("top", { slot: "rel.city", k: 5 }),
+    q_who: await s.query("who", { slot: "rel.city", value: "london" }),
+    q_compare: await s.query("compare", { a: "ada", b: "bob", slot: "rel.city" }),
+    cache_live: await s.cache.get("ck", 4),
+    cache_expired: await s.cache.get("ck", 5),
+    kv: await s.kvGet("greeting"),
+    turns: await s.turns(),
   };
 }
 
 describe("SQLite store — parity with in-process", () => {
-  it("produces identical results across the full Stator surface", () => {
-    const mem = exerciseStore(new InProcessStore());
+  it("produces identical results across the full Stator surface", async () => {
+    const mem = await exerciseStore(new InProcessStore());
     const sqlite = new SqliteStore(":memory:");
-    const sql = exerciseStore(sqlite);
-    sqlite.close();
+    const sql = await exerciseStore(sqlite);
+    await sqlite.close();
     expect(sql).toEqual(mem);
   });
 });
@@ -71,14 +71,14 @@ describe("SQLite store — restart durability", () => {
     const s1 = new SqliteStore(file);
     const first = await execute(doc, inputs, buildBasicPlugins({ store: s1 }));
     const shape1 = shapeOf(first);
-    s1.close();
+    await s1.close();
 
     // Reopen the SAME file — history must have survived the close.
     const s2 = new SqliteStore(file);
-    const before = s2.history.read(first.run_id).length;
+    const before = (await s2.history.read(first.run_id)).length;
     const second = await execute(doc, inputs, buildBasicPlugins({ store: s2 }));
-    const after = s2.history.read(first.run_id).length;
-    s2.close();
+    const after = (await s2.history.read(first.run_id)).length;
+    await s2.close();
 
     expect(before).toBeGreaterThan(0); // durable across reopen
     expect(after).toBe(before); // replay appended nothing

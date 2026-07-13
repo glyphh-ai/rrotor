@@ -83,7 +83,7 @@ export const planHandler: StepHandler = {
     }
     const plan = { op: picked.class, executor: cfg.executor };
     // Execute deterministically over the exact store where the op is a closed op.
-    const r = plugins.memory.executeOp(picked.class, { entity: input.entity, slot: input.slot }, env.space_id);
+    const r = await plugins.memory.executeOp(picked.class, { entity: input.entity, slot: input.slot }, env.space_id);
     const frames: Frame[] = [{ type: "parse", data: { plan } }, { type: "done" }];
     return { output: { plan, result: { rows: r.rows, count: r.count } }, frames, status: "ok" };
   },

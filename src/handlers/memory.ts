@@ -35,7 +35,7 @@ export const writeHandler: StepHandler = {
     } else {
       facts = [];
     }
-    const written = plugins.memory.write(facts, {
+    const written = await plugins.memory.write(facts, {
       key: cfg.key,
       mode: cfg.mode,
       speaker: cfg.speaker,
@@ -107,7 +107,7 @@ export const retrieveSqlHandler: StepHandler = {
       k: input.k ?? cfg.k,
       conditions: input.conditions ?? cfg.conditions,
     };
-    const r = plugins.memory.executeOp(cfg.op, params, env.space_id);
+    const r = await plugins.memory.executeOp(cfg.op, params, env.space_id);
     return {
       output: { rows: r.rows, count: r.count, matched: r.matched },
       frames: [{ type: "done", data: { op: cfg.op, count: r.count } }],
@@ -124,7 +124,7 @@ export const retrieveKbHandler: StepHandler = {
     const role = String(input.role ?? cfg.role ?? "");
     if (cfg.mode === "verify") {
       const filler = String(input.filler ?? "");
-      const v = plugins.grounding.verify(entity, role, filler, cfg.margin ?? 0.05, env.space_id);
+      const v = await plugins.grounding.verify(entity, role, filler, cfg.margin ?? 0.05, env.space_id);
       return {
         output: { membership: v.membership, margin: v.margin, top: v.top, grounded: v.grounded },
         frames: [{ type: "done", data: { mode: "verify", grounded: v.grounded } }],
@@ -133,7 +133,7 @@ export const retrieveKbHandler: StepHandler = {
     }
     if (cfg.mode === "node") {
       // The entity's full node: all its current (role, filler) edges.
-      const rows = plugins.memory.executeOp("lookup", { person: entity }, env.space_id).rows;
+      const rows = (await plugins.memory.executeOp("lookup", { person: entity }, env.space_id)).rows;
       return {
         output: { node: entity, edges: rows, count: rows.length },
         frames: [{ type: "done", data: { mode: "node", edges: rows.length } }],
@@ -143,11 +143,11 @@ export const retrieveKbHandler: StepHandler = {
     if (cfg.mode === "neighbors") {
       // Graph neighbors: distinct OTHER entities that share a filler value with
       // this entity (co-reference over the fact graph).
-      const own = plugins.memory.executeOp("lookup", { person: entity }, env.space_id).rows;
+      const own = (await plugins.memory.executeOp("lookup", { person: entity }, env.space_id)).rows;
       const fillers = [...new Set(own.map((r) => String(r.filler)))];
       const neighbors = new Set<string>();
       for (const filler of fillers) {
-        for (const r of plugins.memory.executeOp("who", { value: filler }, env.space_id).rows) {
+        for (const r of (await plugins.memory.executeOp("who", { value: filler }, env.space_id)).rows) {
           const e = String(r.entity);
           if (e.toLowerCase() !== entity.toLowerCase()) neighbors.add(e);
         }
@@ -160,7 +160,7 @@ export const retrieveKbHandler: StepHandler = {
       };
     }
     // probe: HDC associative recall of the role's filler from the entity's cortex.
-    const p = plugins.grounding.probe(entity, role, env.space_id);
+    const p = await plugins.grounding.probe(entity, role, env.space_id);
     return {
       output: { filler: p.filler, membership: p.membership, margin: p.margin, top: p.top },
       frames: [{ type: "done", data: { mode: cfg.mode } }],
@@ -174,7 +174,7 @@ export const retrieveVectorHandler: StepHandler = {
   async execute({ step, input, plugins }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? {}) as RetrieveVectorConfig;
     const query = String(input.query ?? input.text ?? "");
-    const hits = plugins.memory.semanticRecall(query, cfg.top_k ?? 8, cfg.threshold ?? 0.35);
+    const hits = await plugins.memory.semanticRecall(query, cfg.top_k ?? 8, cfg.threshold ?? 0.35);
     return {
       output: { hits, scores: hits.map((h) => h.score) },
       frames: [{ type: "done", data: { hits: hits.length } }],
@@ -213,7 +213,7 @@ export const cascadeHandler: StepHandler = {
   type: "cascade",
   async execute({ step, plugins }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? {}) as CascadeConfig;
-    const counts = plugins.memory.cascade(cfg.span);
+    const counts = await plugins.memory.cascade(cfg.span);
     const frames: Frame[] = [{ type: "delta", data: counts }, { type: "done", data: counts }];
     return { output: { consolidated: counts }, frames, status: "ok" };
   },

@@ -243,8 +243,10 @@ export class PgVectorStore implements Stator {
   }
 
   // ── event history (§5.4) ───────────────────────────────────────────────────
+  // Reads resolve from the in-memory mirror (async only to satisfy the Stator
+  // contract); writes update the mirror synchronously and enqueue a write-through.
   readonly history: EventHistory = {
-    append: (rec) => {
+    append: async (rec) => {
       this.recs.push(rec);
       this.enqueue(async () => {
         await this.db.query(
@@ -253,10 +255,10 @@ export class PgVectorStore implements Stator {
         );
       });
     },
-    read: (runId) => this.recs.filter((r) => r.run_id === runId),
-    lookup: (runId, stepId, attempt) =>
+    read: async (runId) => this.recs.filter((r) => r.run_id === runId),
+    lookup: async (runId, stepId, attempt) =>
       this.recs.find((r) => r.run_id === runId && r.step_id === stepId && r.attempt === attempt),
-    lastAttempt: (runId, stepId) => {
+    lastAttempt: async (runId, stepId) => {
       let max = -1;
       for (const r of this.recs) {
         if (r.run_id === runId && r.step_id === stepId && r.attempt > max) max = r.attempt;
@@ -267,13 +269,13 @@ export class PgVectorStore implements Stator {
 
   // ── result cache (§5.7) ─────────────────────────────────────────────────────
   readonly cache: ResultCache = {
-    get: (key, tick) => {
+    get: async (key, tick) => {
       const e = this.cacheMap.get(key);
       if (!e) return undefined;
       if (e.expiresTick !== undefined && tick >= e.expiresTick) return undefined;
       return e.output;
     },
-    put: (key, output, opts) => {
+    put: async (key, output, opts) => {
       const entry: CacheEntry = { output, scope: opts.scope ?? "rotor", expiresTick: opts.ttlTicks };
       this.cacheMap.set(key, entry);
       this.enqueue(async () => {
@@ -287,7 +289,7 @@ export class PgVectorStore implements Stator {
   };
 
   // ── facts — mirror runs the shared pure engine; write-through mirrors SQLite ─
-  writeFacts(facts: Fact[]): number {
+  async writeFacts(facts: Fact[]): Promise<number> {
     const n = applyFactWrite(this.factRows, facts);
     for (const f of facts) {
       this.enqueue(async () => {
@@ -304,24 +306,24 @@ export class PgVectorStore implements Stator {
     return n;
   }
 
-  lookupFact(entity: string, role: string, spaceId?: string): Fact | undefined {
+  async lookupFact(entity: string, role: string, spaceId?: string): Promise<Fact | undefined> {
     return lookupCurrentFact(this.factRows, entity, role, spaceId);
   }
-  fillers(entity: string, role: string, spaceId?: string): string[] {
+  async fillers(entity: string, role: string, spaceId?: string): Promise<string[]> {
     return currentFillers(this.factRows, entity, role, spaceId);
   }
-  query(op: string, params: Row, spaceId?: string): QueryResult {
+  async query(op: string, params: Row, spaceId?: string): Promise<QueryResult> {
     return runClosedOp(op, params, this.factRows, spaceId);
   }
-  snapshotFacts(): Fact[] {
+  async snapshotFacts(): Promise<Fact[]> {
     return this.factRows.slice();
   }
 
   // ── kv ──────────────────────────────────────────────────────────────────────
-  kvGet(key: string): unknown {
+  async kvGet(key: string): Promise<unknown> {
     return this.kvMap.get(key);
   }
-  kvSet(key: string, value: unknown): void {
+  async kvSet(key: string, value: unknown): Promise<void> {
     this.kvMap.set(key, value);
     this.enqueue(async () => {
       await this.db.query(
@@ -332,19 +334,19 @@ export class PgVectorStore implements Stator {
   }
 
   // ── turns — the embedding corpus, stored with its ANN vector ────────────────
-  addTurn(text: string): void {
+  async addTurn(text: string): Promise<void> {
     this.turnLog.push(text);
     const v = vec(embed(text, this.embedDim));
     this.enqueue(async () => {
       await this.db.query("INSERT INTO turns (text, embedding) VALUES ($1, $2::vector)", [text, v]);
     });
   }
-  turns(): string[] {
+  async turns(): Promise<string[]> {
     return this.turnLog.slice();
   }
 
   // ── sessions ──────────────────────────────────────────────────────────────
-  touchSession(id: string): number {
+  async touchSession(id: string): Promise<number> {
     let o = this.sessionMap.get(id);
     if (o === undefined) {
       o = this.sessionCounter++;
@@ -356,7 +358,7 @@ export class PgVectorStore implements Stator {
     }
     return o;
   }
-  sessionOrdinal(id?: string): number {
+  async sessionOrdinal(id?: string): Promise<number> {
     if (id === undefined) return Math.max(0, this.sessionCounter - 1);
     return this.sessionMap.get(id) ?? 0;
   }
@@ -385,10 +387,8 @@ export class PgVectorStore implements Stator {
       .filter((h) => h.score >= threshold);
   }
 
-  close(): void {
-    // Sync interface conformance — schedule an unawaited teardown. Prefer
-    // `await shutdown()` for a clean flush (the server does).
-    void this.shutdown();
+  async close(): Promise<void> {
+    await this.shutdown();
   }
 }
 

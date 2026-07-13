@@ -38,7 +38,7 @@ export const loopHandler: StepHandler = {
         accepted = true;
         break;
       }
-      const g = evalGate(cfg.gate, last.output, env, plugins);
+      const g = await evalGate(cfg.gate, last.output, env, plugins);
       if (g.verdict === "pass") {
         accepted = true;
         break;

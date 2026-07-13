@@ -45,13 +45,13 @@ describe("one runtime = one stator, shared across definitions", () => {
     expect(rows.some((row) => /always use tabs/i.test(row.filler))).toBe(true);
 
     // The self-fact is there too, retrievable by any later definition.
-    const ctx = assembleRecall(buildBasicPlugins({ store }).memory, "");
+    const ctx = await assembleRecall(buildBasicPlugins({ store }).memory, "");
     expect(ctx.directives.join(" ")).toMatch(/tabs/i);
 
     // Run history is PER-RUN (distinct run ids, distinct tapes); memory is shared.
     expect(r1.run_id).not.toBe(r2.run_id);
-    expect(store.history.read(r1.run_id).length).toBeGreaterThan(0);
-    expect(store.history.read(r2.run_id).length).toBeGreaterThan(0);
+    expect((await store.history.read(r1.run_id)).length).toBeGreaterThan(0);
+    expect((await store.history.read(r2.run_id)).length).toBeGreaterThan(0);
   });
 
   it("a fresh stator (a different runtime) starts empty — memory is per-runtime", async () => {

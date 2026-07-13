@@ -90,7 +90,7 @@ export async function runFresh(
   try {
     return await execute(doc, inputs, buildBasicPlugins({ store }), opts);
   } finally {
-    store.close?.();
+    await store.close?.();
   }
 }
 
@@ -137,10 +137,10 @@ export async function checkReplay(
     // SAME shared store — exactly how the server serves runs across requests.
     const firstResult = await execute(doc, inputs, buildBasicPlugins({ store }), opts);
     const runId = firstResult.run_id;
-    const before = store.history.read(runId).length;
+    const before = (await store.history.read(runId)).length;
 
     const replayResult = await execute(doc, inputs, buildBasicPlugins({ store }), opts);
-    const after = store.history.read(runId).length;
+    const after = (await store.history.read(runId)).length;
 
     const first = shapeOf(firstResult);
     const replay = shapeOf(replayResult);
@@ -151,6 +151,6 @@ export async function checkReplay(
       identical: JSON.stringify(first) === JSON.stringify(replay),
     };
   } finally {
-    store.close?.();
+    await store.close?.();
   }
 }

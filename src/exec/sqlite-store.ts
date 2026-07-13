@@ -118,25 +118,27 @@ export class SqliteStore implements Stator {
   }
 
   // ── event history (§5.4) ───────────────────────────────────────────────────
+  // Async to satisfy the Stator contract; better-sqlite3 is synchronous under the
+  // hood, so these resolve immediately.
   readonly history: EventHistory = {
-    append: (rec) => {
+    append: async (rec) => {
       this.db
         .prepare("INSERT OR IGNORE INTO step_records (run_id, step_id, attempt, rec) VALUES (?,?,?,?)")
         .run(rec.run_id, rec.step_id, rec.attempt, JSON.stringify(rec));
     },
-    read: (runId) => {
+    read: async (runId) => {
       const rows = this.db
         .prepare("SELECT rec FROM step_records WHERE run_id = ? ORDER BY seq ASC")
         .all(runId) as Array<{ rec: string }>;
       return rows.map((r) => JSON.parse(r.rec) as StepRecord);
     },
-    lookup: (runId, stepId, attempt) => {
+    lookup: async (runId, stepId, attempt) => {
       const row = this.db
         .prepare("SELECT rec FROM step_records WHERE run_id = ? AND step_id = ? AND attempt = ?")
         .get(runId, stepId, attempt) as { rec: string } | undefined;
       return row ? (JSON.parse(row.rec) as StepRecord) : undefined;
     },
-    lastAttempt: (runId, stepId) => {
+    lastAttempt: async (runId, stepId) => {
       const row = this.db
         .prepare("SELECT MAX(attempt) AS m FROM step_records WHERE run_id = ? AND step_id = ?")
         .get(runId, stepId) as { m: number | null };
@@ -146,7 +148,7 @@ export class SqliteStore implements Stator {
 
   // ── result cache (§5.7) ─────────────────────────────────────────────────────
   readonly cache: ResultCache = {
-    get: (key, tick) => {
+    get: async (key, tick) => {
       const row = this.db
         .prepare("SELECT output, expires_tick FROM result_cache WHERE key = ?")
         .get(key) as { output: string; expires_tick: number | null } | undefined;
@@ -154,7 +156,7 @@ export class SqliteStore implements Stator {
       if (row.expires_tick !== null && tick >= row.expires_tick) return undefined;
       return JSON.parse(row.output) as Row;
     },
-    put: (key, output, opts) => {
+    put: async (key, output, opts) => {
       const entry: CacheEntry = { output, scope: opts.scope ?? "rotor", expiresTick: opts.ttlTicks };
       this.db
         .prepare(
@@ -166,7 +168,7 @@ export class SqliteStore implements Stator {
   };
 
   // ── facts (§7.4/§7.5) — write to SQL, query via the shared pure engine ──────
-  writeFacts(facts: Fact[]): number {
+  async writeFacts(facts: Fact[]): Promise<number> {
     const tx = this.db.transaction((incoming: Fact[]) => {
       // Reuse the shared supersession logic over the current rows, then persist
       // the resulting deltas. Simpler and parity-safe: apply per-fact directly.
@@ -193,11 +195,11 @@ export class SqliteStore implements Stator {
     return rows.map(rowToFact);
   }
 
-  snapshotFacts(): Fact[] {
+  async snapshotFacts(): Promise<Fact[]> {
     return this.allFacts();
   }
 
-  touchSession(id: string): number {
+  async touchSession(id: string): Promise<number> {
     const existing = this.db.prepare("SELECT ordinal FROM sessions WHERE id = ?").get(id) as { ordinal: number } | undefined;
     if (existing) return existing.ordinal;
     const max = this.db.prepare("SELECT MAX(ordinal) AS m FROM sessions").get() as { m: number | null };
@@ -206,7 +208,7 @@ export class SqliteStore implements Stator {
     return ordinal;
   }
 
-  sessionOrdinal(id?: string): number {
+  async sessionOrdinal(id?: string): Promise<number> {
     if (id === undefined) {
       const max = this.db.prepare("SELECT MAX(ordinal) AS m FROM sessions").get() as { m: number | null };
       return Math.max(0, max.m ?? 0);
@@ -215,39 +217,39 @@ export class SqliteStore implements Stator {
     return row?.ordinal ?? 0;
   }
 
-  lookupFact(entity: string, role: string, spaceId?: string): Fact | undefined {
+  async lookupFact(entity: string, role: string, spaceId?: string): Promise<Fact | undefined> {
     return lookupCurrentFact(this.allFacts(), entity, role, spaceId);
   }
 
-  fillers(entity: string, role: string, spaceId?: string): string[] {
+  async fillers(entity: string, role: string, spaceId?: string): Promise<string[]> {
     return currentFillers(this.allFacts(), entity, role, spaceId);
   }
 
-  query(op: string, params: Row, spaceId?: string): QueryResult {
+  async query(op: string, params: Row, spaceId?: string): Promise<QueryResult> {
     return runClosedOp(op, params, this.allFacts(), spaceId);
   }
 
   // ── kv scratch ──────────────────────────────────────────────────────────────
-  kvGet(key: string): unknown {
+  async kvGet(key: string): Promise<unknown> {
     const row = this.db.prepare("SELECT v FROM kv WHERE k = ?").get(key) as { v: string } | undefined;
     return row ? JSON.parse(row.v) : undefined;
   }
-  kvSet(key: string, value: unknown): void {
+  async kvSet(key: string, value: unknown): Promise<void> {
     this.db
       .prepare("INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
       .run(key, JSON.stringify(value ?? null));
   }
 
   // ── turns ─────────────────────────────────────────────────────────────────
-  addTurn(text: string): void {
+  async addTurn(text: string): Promise<void> {
     this.db.prepare("INSERT INTO turns (text) VALUES (?)").run(text);
   }
-  turns(): string[] {
+  async turns(): Promise<string[]> {
     const rows = this.db.prepare("SELECT text FROM turns ORDER BY seq ASC").all() as Array<{ text: string }>;
     return rows.map((r) => r.text);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.db.close();
   }
 }

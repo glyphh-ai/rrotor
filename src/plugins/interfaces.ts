@@ -54,11 +54,11 @@ export interface GroundingPlugin extends Capability {
   /** NL fact → cortex (the `hdc.map` bridge, §7.3). */
   encode(roleFillers: Record<string, string>, spaceId?: string): EncodeResult;
   /** Entity-keyed probe (§7.6). */
-  probe(entity: string, role: string, spaceId?: string): ProbeResult;
+  probe(entity: string, role: string, spaceId?: string): Promise<ProbeResult>;
   /** The ground verdict (§6.3): grounded iff the winner matches `filler`. */
-  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): GroundVerdict;
+  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): Promise<GroundVerdict>;
   /** The hard-gate mask source — the grounded continuations for `(entity, role)`. */
-  groundedFillers(entity: string, role: string, spaceId?: string): string[];
+  groundedFillers(entity: string, role: string, spaceId?: string): Promise<string[]>;
 }
 
 // ── §3.2 memory / stator ────────────────────────────────────────────────────
@@ -70,37 +70,37 @@ export interface SemanticHit {
 
 export interface MemoryPlugin extends Capability {
   /** The closed op set (§7.5); NO model-generated SQL. */
-  executeOp(op: string, params: Row, spaceId?: string): QueryResult;
+  executeOp(op: string, params: Row, spaceId?: string): Promise<QueryResult>;
   /** Embed + rank over recorded turns (§7.7); basic tier is deterministic-local
    *  cosine over the hashed-ngram embedding. */
-  semanticRecall(query: string, topK: number, threshold: number): SemanticHit[];
+  semanticRecall(query: string, topK: number, threshold: number): Promise<SemanticHit[]>;
   /** Record a turn into short-term memory (inbound prompt / outbound completion),
    *  the corpus `semanticRecall` ranks over. */
-  recordTurn(text: string): void;
+  recordTurn(text: string): Promise<void>;
   /** Persist facts (§7.4). Idempotent by `key`. Returns the count written. A
    *  `session` + `tier` scope the facts for tiered recall (docs/memory.md). */
   write(
     facts: Array<Record<string, unknown>>,
     opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number; session?: string; tier?: MemoryTier },
-  ): number;
+  ): Promise<number>;
   /** Tier-aware recall of the facts a `session` may see: `long` always, `short`
    *  only in its own session, `mid` within `midWindow` sessions (docs/memory.md). */
-  recall(opts: { entity?: string; role?: string; session?: string; midWindow?: number; spaceId?: string }): Fact[];
-  probe(entity: string, role: string, spaceId?: string): ProbeResult;
-  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): GroundVerdict;
+  recall(opts: { entity?: string; role?: string; session?: string; midWindow?: number; spaceId?: string }): Promise<Fact[]>;
+  probe(entity: string, role: string, spaceId?: string): Promise<ProbeResult>;
+  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): Promise<GroundVerdict>;
 
   // event history — the source of truth (§5.4)
-  appendStepRecord(rec: StepRecord): void;
-  readEventHistory(runId: string): StepRecord[];
-  lookupRecord(runId: string, stepId: string, attempt: number): StepRecord | undefined;
-  lastAttempt(runId: string, stepId: string): number;
+  appendStepRecord(rec: StepRecord): Promise<void>;
+  readEventHistory(runId: string): Promise<StepRecord[]>;
+  lookupRecord(runId: string, stepId: string, attempt: number): Promise<StepRecord | undefined>;
+  lastAttempt(runId: string, stepId: string): Promise<number>;
 
   // result cache (§5.7) — key = idempotency key; a hit is checkpointed once
-  cacheGet(key: string, tick: number): Row | undefined;
-  cachePut(key: string, output: Row, opts: { ttlTicks?: number; scope?: string }): void;
+  cacheGet(key: string, tick: number): Promise<Row | undefined>;
+  cachePut(key: string, output: Row, opts: { ttlTicks?: number; scope?: string }): Promise<void>;
 
   /** short → mid → long consolidation (§7.18) over the `span`-recent window. */
-  cascade(span?: number): { short: number; mid: number; long: number };
+  cascade(span?: number): Promise<{ short: number; mid: number; long: number }>;
 }
 
 // ── §3.3 models / inference lanes ───────────────────────────────────────────

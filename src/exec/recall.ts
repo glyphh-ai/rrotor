@@ -40,12 +40,12 @@ export interface RecalledContext {
 /** Assemble the recall context for `query` from memory. Pure over the stator.
  *  Directives are tier-scoped to the session (docs/memory.md): `long` always,
  *  `mid` within the session window. */
-export function assembleRecall(memory: MemoryPlugin, query: string, opts: RecallOptions = {}): RecalledContext {
+export async function assembleRecall(memory: MemoryPlugin, query: string, opts: RecallOptions = {}): Promise<RecalledContext> {
   const entity = opts.entity ?? "user";
-  const directives = memory
-    .recall({ entity, role: "directive", session: opts.session, midWindow: opts.midWindow, spaceId: opts.spaceId })
-    .map((f) => f.filler);
-  const recalled = query.trim() ? memory.semanticRecall(query, opts.topK ?? 5, opts.threshold ?? 0.08) : [];
+  const directives = (
+    await memory.recall({ entity, role: "directive", session: opts.session, midWindow: opts.midWindow, spaceId: opts.spaceId })
+  ).map((f) => f.filler);
+  const recalled = query.trim() ? await memory.semanticRecall(query, opts.topK ?? 5, opts.threshold ?? 0.08) : [];
   return { directives, recalled };
 }
 

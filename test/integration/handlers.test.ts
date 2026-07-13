@@ -25,26 +25,26 @@ describe("write absorb enricher (§7.4)", () => {
     });
     const r = await execute(d, {}, buildBasicPlugins({ store }));
     expect((r.history[0].output as { written: number }).written).toBe(3);
-    expect(store.lookupFact("ada", "rel.city")?.filler).toBe("London");
-    expect(store.lookupFact("ada", "job")?.filler).toBe("engineer");
-    expect(store.lookupFact("ada", "rel.has")?.filler).toBe("dog");
+    expect((await store.lookupFact("ada", "rel.city"))?.filler).toBe("London");
+    expect((await store.lookupFact("ada", "job"))?.filler).toBe("engineer");
+    expect((await store.lookupFact("ada", "rel.has"))?.filler).toBe("dog");
   });
 
   it("falls back to a raw.text slot when nothing matches", async () => {
     const store = new InProcessStore();
     const d = doc({ entry: "w", steps: [{ id: "w", type: "write", in: { text: "?!?!" }, out: {}, config: { mode: "absorb", key: "k" }, next: "end" }] });
     await execute(d, {}, buildBasicPlugins({ store }));
-    expect(store.lookupFact("k", "raw.text")?.filler).toBe("?!?!");
+    expect((await store.lookupFact("k", "raw.text"))?.filler).toBe("?!?!");
   });
 });
 
 describe("cascade tiered consolidation (§7.18)", () => {
-  it("splits recent/short from de-duplicated older turns", () => {
+  it("splits recent/short from de-duplicated older turns", async () => {
     const store = new InProcessStore();
-    for (const t of ["one", "two", "three", "two", "one", "four", "five"]) store.addTurn(t);
+    for (const t of ["one", "two", "three", "two", "one", "four", "five"]) await store.addTurn(t);
     const mem = buildBasicPlugins({ store }).memory;
     // span 3 → short = last 3; older = [one,two,three,two] → distinct {one,two,three}=3, absorbed 1.
-    expect(mem.cascade(3)).toEqual({ short: 3, mid: 3, long: 1 });
+    expect(await mem.cascade(3)).toEqual({ short: 3, mid: 3, long: 1 });
   });
 });
 

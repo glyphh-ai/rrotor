@@ -31,12 +31,12 @@ export interface GateEval {
 
 /** Evaluate a gate config against a resolved input value. Pure/deterministic for
  *  the store-backed modes; the scanner modes record a (basic: pass) verdict. */
-export function evalGate(
+export async function evalGate(
   cfg: GateConfig,
   input: Record<string, unknown>,
   env: RunContextEnvelope,
   plugins: Plugins,
-): GateEval {
+): Promise<GateEval> {
   const gateFrame = (verdict: Verdict, data?: unknown): Frame => ({
     type: "gate",
     logical_tick: env.logical_tick,
@@ -48,7 +48,7 @@ export function evalGate(
       const entity = String(input.entity ?? cfg.entity ?? "");
       const role = String(input.role ?? cfg.role ?? "");
       const filler = String(input.filler ?? "");
-      const v = plugins.grounding.verify(entity, role, filler, cfg.margin ?? 0.05, env.space_id);
+      const v = await plugins.grounding.verify(entity, role, filler, cfg.margin ?? 0.05, env.space_id);
       const verdict: Verdict = v.grounded ? "pass" : "fail";
       return {
         verdict,
@@ -147,7 +147,7 @@ export const gateHandler: StepHandler = {
   type: "gate",
   async execute({ step, input, env, plugins }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? { mode: "assertion" }) as GateConfig;
-    const g = evalGate(cfg, input, env, plugins);
+    const g = await evalGate(cfg, input, env, plugins);
     return {
       output: g.output,
       frames: g.frames,

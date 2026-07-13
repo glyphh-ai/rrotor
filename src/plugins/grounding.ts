@@ -71,19 +71,19 @@ export class BasicGrounding implements GroundingPlugin {
   }
 
   /** The entity's cortex — the bundle of all its current `role⊗filler` binds. */
-  private cortexFor(entity: string, sp: HdcSpace, spaceId?: string): HyperVector | undefined {
-    const rows = this.store.query("lookup", { person: entity }, spaceId).rows;
+  private async cortexFor(entity: string, sp: HdcSpace, spaceId?: string): Promise<HyperVector | undefined> {
+    const rows = (await this.store.query("lookup", { person: entity }, spaceId)).rows;
     if (rows.length === 0) return undefined;
     const binds = rows.map((r) => sp.bind(sp.roleSymbol(String(r.role)), sp.symbol("filler:" + String(r.filler))));
     return sp.bundle(binds);
   }
 
-  probe(entity: string, role: string, spaceId?: string): ProbeResult {
+  async probe(entity: string, role: string, spaceId?: string): Promise<ProbeResult> {
     const sp = this.space(spaceId);
-    const cortex = this.cortexFor(entity, sp, spaceId);
+    const cortex = await this.cortexFor(entity, sp, spaceId);
     if (!cortex) return { filler: null, membership: 0, margin: 0, top: [] };
     // Candidate vocabulary for the role, across the space (distractors give margin).
-    const candidates = this.store.query("top", { slot: role }, spaceId).rows.map((r) => String(r.filler));
+    const candidates = (await this.store.query("top", { slot: role }, spaceId)).rows.map((r) => String(r.filler));
     if (candidates.length === 0) return { filler: null, membership: 0, margin: 0, top: [] };
     const recalled = sp.bind(cortex, sp.roleSymbol(role));
     const ranked = sp.cleanup(recalled, candidates);
@@ -92,8 +92,8 @@ export class BasicGrounding implements GroundingPlugin {
     return { filler: top1.filler, membership: top1.score, margin, top: ranked.map((r) => r.filler) };
   }
 
-  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): GroundVerdict {
-    const grounded = this.store.fillers(entity, role, spaceId);
+  async verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): Promise<GroundVerdict> {
+    const grounded = await this.store.fillers(entity, role, spaceId);
     if (grounded.length === 0) return { grounded: false, membership: 0, margin: 0, top: [] };
     // The claim must reference a grounded filler (exact, or wrapped in a sentence).
     const cand = norm(filler);
@@ -103,13 +103,13 @@ export class BasicGrounding implements GroundingPlugin {
     });
     if (!matched) return { grounded: false, membership: 0, margin: 0, top: grounded };
     // HDC confidence: the associative recall must clear the margin threshold.
-    const p = this.probe(entity, role, spaceId);
+    const p = await this.probe(entity, role, spaceId);
     const threshold = margin || DEFAULT_MARGIN;
     const confident = p.membership > 0 && p.margin >= threshold;
     return { grounded: confident, membership: p.membership, margin: p.margin, top: p.top };
   }
 
-  groundedFillers(entity: string, role: string, spaceId?: string): string[] {
+  async groundedFillers(entity: string, role: string, spaceId?: string): Promise<string[]> {
     return this.store.fillers(entity, role, spaceId);
   }
 }

@@ -188,7 +188,7 @@ function handle(
   if (method === "POST" && path.startsWith("/runs/") && path.endsWith("/resume")) {
     const runId = decodeURIComponent(path.slice("/runs/".length, -"/resume".length));
     readBody(req)
-      .then((raw) => {
+      .then(async (raw) => {
         let body: { payload?: Record<string, unknown>; decision?: string; timeout?: boolean };
         try {
           body = raw.length ? JSON.parse(raw) : {};
@@ -196,7 +196,7 @@ function handle(
           sendJson(res, 400, { error: "invalid-json", detail: "resume body must be JSON" });
           return;
         }
-        const saved = store.kvGet(`run:${runId}`) as
+        const saved = (await store.kvGet(`run:${runId}`)) as
           | { doc: RotorDocument; inputs: Record<string, unknown>; interrupt: { stepId: string } }
           | undefined;
         if (!saved) {
@@ -235,15 +235,15 @@ function affinityHint(doc: RotorDocument, inputs: Record<string, unknown>): impo
 }
 
 /** Send a run summary; persist doc + inputs when the run paused so it can resume. */
-function respondRun(
+async function respondRun(
   res: http.ServerResponse,
   store: Stator,
   doc: RotorDocument,
   inputs: Record<string, unknown>,
   result: import("./exec/executor.js").RunResult,
-): void {
+): Promise<void> {
   if (result.status === "interrupted" && result.interrupt) {
-    store.kvSet(`run:${result.run_id}`, { doc, inputs, interrupt: result.interrupt });
+    await store.kvSet(`run:${result.run_id}`, { doc, inputs, interrupt: result.interrupt });
   }
   log.info("run complete", {
     run_id: result.run_id,

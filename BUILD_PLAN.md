@@ -900,13 +900,34 @@ against a **real** Postgres, not only the in-process PGlite.
 **Acceptance:** `npm run verify` = **214 passed + 3 skipped** with no server; **217
 passed** with `ROTOR_TEST_PG_URL` set (CI + this container).
 
-**Deliberately deferred — the async `Stator` interface refactor.** The user chose
-"asynchronous," but the design doc (docs/vector-stores.md) intentionally keeps the
-synchronous hydrate-then-flush mirror and defers the full async-interface change as a
-larger, correctness-sensitive refactor (it threads `await` through the executor + all
-plugins/handlers and must keep golden replay green at every step). Real Postgres is
-now exercised via that mirror; making the *interface* itself async — needed only for
-true multi-pod concurrent writers — is the one remaining checkpointed decision.
+### E6 — Async `Stator` interface  ✅
+
+The `Stator` interface (history, cache, facts, turns, sessions) is now **async** —
+every method returns a `Promise`. This is the enabler for true multi-pod concurrent
+writers: a backend can read live from Postgres rather than being pinned to a
+hydrated in-memory mirror.
+
+- [x] `Stator` + `EventHistory` + `ResultCache` methods → `Promise`; the three
+      backends (`InProcessStore`, `SqliteStore`, `PgVectorStore`) implement the async
+      surface (sync backends resolve immediately; pgvector keeps its mirror behind
+      the async facade, ready to switch to live reads).
+- [x] Threaded `await` through the whole call graph: `MemoryPlugin` +
+      `GroundingPlugin` (both now async), the executor (`append`, cache get/put,
+      history append/lookup/read), every handler (`gate`/`evalGate`, `model`,
+      `control`, `memory`, `flow`), `assembleRecall`, and the server/CLI.
+- [x] `BasicMemory.recall` pre-resolves session ordinals into a map so the pure,
+      sync `visibleFacts` filter stays pure (no awaiting mid-scan).
+- [x] **Golden replay stays green.** The determinism/replay harness and all
+      conformance suites pass unchanged — replay reads the recorded tape, not the
+      live stator, so async reads on fresh execution don't perturb it.
+
+**Acceptance:** `npm run verify` = **216 passed + 3 skipped** (no server); **219
+passed** with real Postgres. Coverage 85.1/75/90 — floor holds.
+
+Follow-up (not blocking): pgvector *live-read mode* — drop the hydrate-everything
+mirror and read facts/history live from Postgres per query, so multiple pods sharing
+one database see each other's writes mid-run. The async interface (E6) is the
+prerequisite; this is a clean, scoped change on top of it.
 
 ---
 

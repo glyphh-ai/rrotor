@@ -141,5 +141,8 @@ the backend on real Postgres.
   next refinement.
 - **Which stores beyond pgvector** — Qdrant/Weaviate each become a `Stator` backend
   behind the same seam. Pick by what glyphh deployments actually run.
-- **Multi-pod concurrent writers** — the mirror is single-tenant-authoritative today.
-  True concurrent multi-writer sharing would need an async `Stator` interface.
+- **Multi-pod concurrent writers** — the `Stator` interface is now **async** (E6), so
+  the prerequisite is in place. The remaining step is a pgvector *live-read mode* that
+  reads facts/history from Postgres per query instead of from the hydrated mirror, so
+  pods sharing one database see each other's writes mid-run. The mirror is
+  single-tenant-authoritative until then.
