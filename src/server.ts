@@ -29,7 +29,7 @@ import { VERSION } from "./version.js";
 import { parseRotor, validateRotor } from "./parser/index.js";
 import { execute } from "./exec/executor.js";
 import { buildBasicPlugins } from "./plugins/index.js";
-import { statorFromEnv } from "./exec/stator.js";
+import { statorFromEnv, statorFromEnvAsync } from "./exec/stator.js";
 import { drainFromEnv } from "./plugins/drain.js";
 import { log } from "./obs/logger.js";
 import type { Stator } from "./exec/store.js";
@@ -310,20 +310,34 @@ export async function shutdown(server: http.Server, store: Stator, drain: DrainP
   } catch (err) {
     log.error("drain flush on shutdown failed", { detail: (err as Error).message });
   }
-  store.close?.();
+  // Async backends (pgvector) expose `shutdown()` to flush write-through before
+  // releasing the client; sync backends only have `close()`.
+  const s = store as Stator & { shutdown?: () => Promise<void> };
+  if (s.shutdown) {
+    try {
+      await s.shutdown();
+    } catch (err) {
+      log.error("stator flush on shutdown failed", { detail: (err as Error).message });
+    }
+  } else {
+    store.close?.();
+  }
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
 // Run when invoked directly (as `node dist/server.js`), not when imported.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? DEFAULT_PORT);
-  const store = statorFromEnv();
-  const drain = drainFromEnv();
-  const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain);
-  for (const sig of ["SIGTERM", "SIGINT"] as const) {
-    process.on(sig, () => {
-      log.info("shutting down", { signal: sig });
-      void shutdown(server, store, drain).then(() => process.exit(0));
-    });
-  }
+  void (async () => {
+    const port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? DEFAULT_PORT);
+    // Async builder so a `pgvector` backend connects + hydrates before serving.
+    const store = await statorFromEnvAsync();
+    const drain = drainFromEnv();
+    const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain);
+    for (const sig of ["SIGTERM", "SIGINT"] as const) {
+      process.on(sig, () => {
+        log.info("shutting down", { signal: sig });
+        void shutdown(server, store, drain).then(() => process.exit(0));
+      });
+    }
+  })();
 }

@@ -17,13 +17,13 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/banner.ts", "src/version.ts", "src/index.ts"],
       thresholds: {
-        // Ratcheting floor. Post-plan (tiered memory): measured ~81.7% lines /
-        // ~74% branches / ~89.6% funcs. The uncovered remainder is live-endpoint
-        // degradation paths.
-        lines: 81,
+        // Ratcheting floor. Post-plan (pgvector stator): measured ~82.3% lines /
+        // ~74.9% branches / ~89.8% funcs. The uncovered remainder is live-endpoint
+        // degradation paths (e.g. the real `pg` connection, exercised via PGlite).
+        lines: 82,
         functions: 89,
         branches: 74,
-        statements: 81,
+        statements: 82,
       },
     },
   },

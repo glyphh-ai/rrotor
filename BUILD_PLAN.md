@@ -716,21 +716,41 @@ backward compatibility; **a write step's explicit `short` overrides the enricher
 `long`; the run's session stamps absorbed facts**; SQLite/InProcess parity. **177
 total green.**
 
-### C4 — Pluggable vector stores & spec-defined dims  📝 (design)
+### C4 — Pluggable vector stores & spec-defined dims  ✅
 
 **Requirement (user):** pgvector caps vectors at 2k, so allow the user to pick
-different vector stores and let the spec define the HDC `vector_dim`. Design:
+different vector stores and let the spec define the HDC `vector_dim`. Full doc:
 [`docs/vector-stores.md`](docs/vector-stores.md).
 
-- [x] **Key clarification documented:** the 2k limit is an *index* cap and lands only
-      on the ANN-searched **embedding** (256), not the **HDC hypervector** (10k),
-      which is bundled per-entity and never cross-row indexed. pgvector stores to 16k,
-      indexes to 2k (`halfvec` 4k).
+- [x] **Key clarification:** the 2k limit is an *index* cap and lands only on the
+      ANN-searched **embedding** (256), not the **HDC hypervector** (10k), which is
+      bundled per-entity and never cross-row indexed. pgvector stores to 16k, indexes
+      to 2k (`halfvec` 4k).
 - [x] Spec-defined HDC `vector_dim` is **already wired** (`spec.space.vector_dim` →
       `computeSpaceId` → `hdcSpace`, part of `space_id`).
-- [ ] Build a `pgvector` `Stator` backend behind the existing `createStator` seam
-      (HDC raw/`bytea` unindexed, embedding `hnsw`-indexed, dim-cap validation that
-      degrades to a scan). Scoped as the "durable cloud stator" follow-up.
+- [x] **`PgVectorStore` built** (`src/exec/pgvector-store.ts`) behind the existing
+      `Stator` seam, selected by `ROTOR_STATOR_BACKEND=pgvector`. **Hydrate-then-flush
+      mirror:** a synchronous in-memory mirror (byte-identical to `InProcessStore`,
+      same pure engine) is authoritative during a run so determinism is untouched;
+      Postgres is durability + cross-pod sharing, strictly off the control path
+      (async write-through, `flush()` barrier, `shutdown()` teardown).
+- [x] Durable + hydrated on restart: facts (`tier`/`session`) + sessions ordinals +
+      turns (`hnsw`-indexed embedding) + event history + result cache + kv. ANN in the
+      DB via `semanticRecallDb` (`<=>`); in-run recall stays pure/deterministic.
+- [x] **Dim-cap degrade:** embedding dim > 2000 ⇒ no `hnsw` index, exact-scan
+      fallback (`vectorIndexed === false`), never crash.
+- [x] Async factory: `initStator` / `statorFromEnvAsync` connect+hydrate before
+      serving; `createStator({backend:"pgvector"})` throws (no silent degrade). Server
+      entrypoint + graceful shutdown flush the stator.
+- [ ] **Deferred:** HDC-cortex persistence (derivable by re-encoding facts);
+      embedding dim from `spec.space`; other backends (Qdrant/Weaviate).
+
+**Acceptance (`test/memory/pgvector.test.ts`, 8 tests, on in-process PGlite +
+pgvector):** tier/session parity with the other backends; supersession-correct closed
+ops; durable hydrate-after-restart of facts/turns/sessions and of the run
+tape/cache/kv; ANN recall ranked by cosine via the index; dim-cap exact-scan
+fallback; `shutdown` flush+release; `flush` surfaces a persistence error. Plus a
+stator-factory unit test. **190 total green.**
 
 ### Next candidates
 - **Turn session-scoping** — thread `session` into `recordTurn` so short-tier turns
@@ -739,8 +759,8 @@ different vector stores and let the spec define the HDC `vector_dim`. Design:
   suite; a real end-to-end run with a live local model.
 - **Mega test-rotor** — hundreds/thousands of rotor shapes × local vs. frontier
   models, as a conformance + quality harness.
-- **Durable cloud stator** — Postgres + pgvector behind the same interface for
-  per-session cloud runtimes (the premium stator).
+- **pgvector follow-ups** — HDC-cortex persistence, embedding dim from `spec.space`,
+  and (optionally) a second vector-store backend (Qdrant/Weaviate) behind the seam.
 
 ---
 

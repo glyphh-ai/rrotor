@@ -1,9 +1,16 @@
 # Pluggable vector stores & spec-defined dimensions
 
-This is a **design doc** (not yet fully built) for letting a deployment pick its
-vector store, and for keeping the two distinct vectors OpenRotor uses within each
-backend's real limits. It exists because "pgvector maxes out at 2000 dims" is a real
-constraint — but it lands on only *one* of our vectors, and only for the *index*.
+Letting a deployment pick its vector store, and keeping the two distinct vectors
+OpenRotor uses within each backend's real limits. It exists because "pgvector maxes
+out at 2000 dims" is a real constraint — but it lands on only *one* of our vectors,
+and only for the *index*.
+
+**Status:** the Postgres + pgvector backend is **built** —
+`src/exec/pgvector-store.ts`, selected by `ROTOR_STATOR_BACKEND=pgvector`, tested
+against an in-process PGlite instance (`test/memory/pgvector.test.ts`). Facts (with
+`tier`/`session`), the sessions ordinal table, turns (with an `hnsw`-indexed
+embedding), the event history, result cache, and kv are all durable and hydrate on
+restart. HDC-cortex persistence remains the one deferred piece (see below).
 
 ## Two vectors, two very different needs
 
@@ -37,31 +44,65 @@ So on Postgres+pgvector:
   backend validates this and **degrades to a scan rather than failing** (the
   "degrade, never raise" rule).
 
-## The seam (already present)
+## The seam
 
-The stator is already an interface — `Stator` in `src/exec/store.ts`, constructed by
-`createStator` / `statorFromEnv` in `src/exec/stator.ts`, selected by
-`ROTOR_STATOR_BACKEND` (`memory` | `sqlite`, today). A vector store is **not a new
-seam** — it's a new `Stator` backend behind the existing one. Nothing above the
-stator changes.
+The stator is an interface — `Stator` in `src/exec/store.ts` — and a vector store is
+**not a new seam**, just a new backend behind it. Nothing above the stator changes.
+Selection lives in `src/exec/stator.ts`:
 
 ```
 ROTOR_STATOR_BACKEND = memory | sqlite | pgvector   // + others later (qdrant, …)
 ROTOR_STATOR_URL     = connection string / file path
+ROTOR_EMBED_DIM      = turn-embedding dimension (default 256)
 ```
 
-### What a `pgvector` backend implements
+`createStator()` builds the **synchronous** backends (`memory`, `sqlite`).
+`pgvector` is async — it connects and hydrates before serving — so it is built by
+`initStator()` / `statorFromEnvAsync()`, which the server entrypoint awaits.
+`createStator({ backend: "pgvector" })` throws rather than silently degrading a
+durable backend to in-process.
 
-The same `Stator` surface the SQLite store already satisfies — plus honest handling
-of the dim caps:
+## Concurrency: the hydrate-then-flush mirror
+
+The `Stator` interface is synchronous (better-sqlite3 is), but every Postgres driver
+is async. Rather than make the whole control plane async, the pgvector backend keeps
+a synchronous **in-memory mirror** — byte-identical to `InProcessStore`, running the
+SAME pure fact engine (`facts.ts`) — as the authoritative state *during a run*:
+
+- `PgVectorStore.create()` **hydrates** the mirror from Postgres (facts, sessions,
+  turns, history, cache, kv) before the sync run loop starts.
+- Each mutation updates the mirror synchronously **and** enqueues an async
+  write-through to Postgres, serialized on a promise chain (a single PGlite
+  connection requires it; it also preserves write order). Errors are latched, never
+  thrown into the synchronous caller — durability is strictly off the control path.
+- `flush()` is the durability barrier (awaits the chain, re-raises the first error);
+  `shutdown()` flushes then releases the client.
+
+**Determinism is preserved:** reads/writes never await, so golden replay behaves
+exactly as on the other backends. Postgres is durability + cross-pod sharing only.
+**Consistency:** single-tenant (one runtime = one user, docs/memory.md), so the
+mirror is authoritative and Postgres is eventually-consistent across pods. True
+multi-pod concurrent writers would need an async `Stator` interface — a deliberately
+deferred, larger change.
+
+### What the `pgvector` backend implements
+
+The full `Stator` surface the SQLite store satisfies, plus honest dim-cap handling —
+all durable and hydrated on restart (`test/memory/pgvector.test.ts`):
 
 - `writeFacts` / `snapshotFacts` / `query` / `lookupFact` / `fillers` — facts, with
-  `tier`/`session` columns and the `sessions` ordinal table (parity with SQLite).
+  `tier`/`session` columns and the `sessions` ordinal table (parity with SQLite; the
+  same pure engine runs the closed ops, so supersession/`prev` behave identically).
 - `turns` / `addTurn` — the embedding corpus, in an `hnsw`-indexed `vector` column.
-- `history` / `cache` — the append-only StepRecord log and result cache.
-- **Dim validation at construction:** read the space's `vector_dim` and the
-  embedding dim; if either exceeds the chosen column/index's cap, log it and pick the
-  index-free path for that column. Never silently truncate; never crash.
+  `semanticRecallDb()` is the async large-corpus ANN path (`embedding <=> query`);
+  the in-run recall still uses the pure in-memory cosine (§7.7) so it stays
+  deterministic.
+- `history` / `cache` / `kv` — the append-only StepRecord log, result cache, and kv
+  scratch, all persisted and rehydrated.
+- **Dim validation at construction:** if the embedding dim exceeds the `hnsw`/
+  `ivfflat` cap (2000), the `vector` column is created **without** an index and ANN
+  falls back to an exact scan (`vectorIndexed === false`). Never truncate; never
+  crash.
 
 ### Spec-defined dimensions (already wired for HDC)
 
@@ -72,20 +113,26 @@ HDC dimension. The remaining work is to let the **embedding** dim be spec/config
 driven the same way, and to have each backend advertise its caps so `space_id`
 negotiation can refuse an unstorable combination up front.
 
-## Why this is a doc, not code yet
+## Testing without a server
 
-Standing up Postgres+pgvector touches deployment (a real DB, migrations, a connection
-pool) and is hard to reverse. The seam is ready and the constraints are now written
-down; building the backend is a scoped follow-up (candidate: the "durable cloud
-stator" line in `BUILD_PLAN.md`). Until then SQLite is the durable local/single-node
-store and in-process is the bare-box default.
+There is no Postgres in CI, so the backend is tested against **PGlite** — an
+in-process WASM Postgres with the pgvector extension (`@electric-sql/pglite`, a dev
+dep). The same `PgLike` client interface is satisfied by both PGlite (tests) and
+`pg`'s `Pool` (real deployments, lazy-imported so `pg` is never pulled into
+memory/sqlite/injected setups). So the ANN queries, `hnsw` index, hydrate, and
+error-latch paths are all really exercised in `npm run verify`.
 
-## Open questions
+## Deferred / open questions
 
-- **HDC storage form** — `vector(10000)` (readable, larger) vs bit-packed `bytea`
-  (compact, needs unpack). Lean `bytea`: bipolar is 1 bit/dim, and we never index it.
-- **Which stores beyond pgvector** — Qdrant/Weaviate/pgvector cover most asks; each is
-  a `Stator` backend. Pick by what glyphh deployments actually run.
-- **Embedding-dim negotiation** — should an over-cap embedding dim hard-refuse at
-  `space_id` time, or silently take the unindexed path? Current lean: refuse loudly
-  in strict mode, degrade in bare-box mode.
+- **HDC-cortex persistence** — the one Stator piece not yet on Postgres. The cortex
+  is derivable by re-encoding facts, so it's rebuildable rather than lost; storing it
+  directly (`bytea` bit-packed, since bipolar is 1 bit/dim and it's never indexed) is
+  a follow-up.
+- **Embedding dim from the spec** — HDC `vector_dim` is spec-driven; the *embedding*
+  dim is currently `ROTOR_EMBED_DIM` / a `create()` option. Threading it through
+  `spec.space` and advertising each backend's caps for `space_id` negotiation is the
+  next refinement.
+- **Which stores beyond pgvector** — Qdrant/Weaviate each become a `Stator` backend
+  behind the same seam. Pick by what glyphh deployments actually run.
+- **Multi-pod concurrent writers** — the mirror is single-tenant-authoritative today.
+  True concurrent multi-writer sharing would need an async `Stator` interface.
