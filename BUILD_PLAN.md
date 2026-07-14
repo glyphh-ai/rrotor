@@ -959,6 +959,43 @@ isolation or a partial unique index — would also serialize two pods supersedin
 
 ---
 
+## Tools — the ToolSpec + standard library  ✅
+
+RotorSpec is the loop; **ToolSpec** is the capabilities. This is the leverage point:
+the runtime becomes "code / music / slides / anything" purely through tools. Full
+model: [`docs/tools.md`](docs/tools.md).
+
+- [x] **ToolSpec** (`src/tools/spec.ts`) — name · version · `effect` · `grants` ·
+      input/output schema · handler. Two fields carry it: **`effect`** (pure/reading/
+      mutating/external → drives checkpointing, so an effectful tool step replays
+      without re-running) and **`grants`** (capability → the permission mode gates the
+      surface *by construction*, not by a post-hoc check).
+- [x] **ToolRegistry** — capability-gated install into the connections plugin; a
+      tool installs iff its grants ⊆ the run's granted set. Built-in **MODES**:
+      `chat` (read/recall/web) · `cowork` (+ doc/artifact) · `code` (+ shell/repo).
+- [x] **Batteries-included packs** — `fs` (read/write/edit/list/glob/grep, sandboxed,
+      bounded), `exec` (`shell.bash` escape hatch), `git` (structured porcelain),
+      `doc` (outline/section/write — token-smart), `cowork` (todo/artifact, durable),
+      `chat` (recall/web.fetch).
+- [x] **SDK surface** — `defineTool`/`definePack`: a user tool is the *identical*
+      mechanism as a built-in (same contract), so a better third-party `read` drops in
+      behind the same name. MCP is a third source on the same interface.
+- [x] docs/tools.md — the spec, the packs, permission modes, the "smart tools save
+      tokens / measurable marketplace" wedge, and `defineTool`.
+
+**Acceptance (`test/integration/tools.test.ts`, 15 tests):** every pack against a real
+temp workspace + git repo; sandbox-escape refused; capability gating (chat mode
+*skips* every mutating tool — they don't exist for the run; code mode gets the full
+workbench); `web.fetch` over a live server; error/edge paths; and the headline —
+**an effectful `file.write` tool step replays WITHOUT re-writing** (delete the file
+between runs, replay does not recreate it). **237 total green**; coverage
+86/74/90 (lines/funcs ratcheted up; branches eased for the defensive tool surface).
+
+**Deferred (intentional):** Windows providers (POSIX-first), version-pinning UX, and
+domain packs (office/audio/image/browser) — each a pack on this same contract.
+
+---
+
 ## Cross-cutting standards (apply to every phase)
 
 - **Test-first:** write the failing acceptance test, then the code.
