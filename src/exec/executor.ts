@@ -195,8 +195,7 @@ class RunSession {
     const ns = doc.metadata.namespace ? doc.metadata.namespace + "/" : "";
     this.agentRef = `${ns}${doc.metadata.name}@${doc.metadata.version}`;
 
-    this.runId =
-      opts.runId ?? "run-" + sha256(this.agentRef, " ", canonicalize(resolvedInputs)).slice(0, 16);
+    this.runId = opts.runId ?? deriveRunId(doc, inputs);
 
     // Identities (§11): checkpointed grant set + principal.
     const grants = plugins.governance.resolveGrants(doc, opts.principal);
@@ -636,6 +635,18 @@ class RunSession {
 // ───────────────────────────────────────────────────────────────────────────
 // Helpers.
 // ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The content-address of a run: `run-<sha256(agentRef, resolvedInputs)>`. Exported
+ * so the streaming transport can name the run in its `open` frame *before* the
+ * executor runs — the same derivation the constructor uses (§16.3, §17.1), so the
+ * id a client learns up front matches the tape it will replay.
+ */
+export function deriveRunId(doc: RotorDocument, inputs: Record<string, unknown>): string {
+  const ns = doc.metadata.namespace ? doc.metadata.namespace + "/" : "";
+  const agentRef = `${ns}${doc.metadata.name}@${doc.metadata.version}`;
+  return "run-" + sha256(agentRef, " ", canonicalize(validateInputs(doc, inputs))).slice(0, 16);
+}
 
 function validateInputs(doc: RotorDocument, inputs: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};

@@ -34,6 +34,7 @@ import { drainFromEnv } from "./plugins/drain.js";
 import { log } from "./obs/logger.js";
 import { describe } from "./errors.js";
 import { toolModeFromLabels } from "./tools/index.js";
+import { streamRunLive, replayRun } from "./transport/sse.js";
 
 /** The per-session workspace sandbox for fs/exec/git tools (docs/hosting.md §3). */
 function workspaceRoot(): string {
@@ -135,7 +136,7 @@ function handle(
           sendJson(res, 400, { error: "invalid-json", detail: "POST /run body must be JSON" });
           return;
         }
-        const { rotor, inputs } = (body ?? {}) as { rotor?: unknown; inputs?: unknown };
+        const { rotor, inputs, session } = (body ?? {}) as { rotor?: unknown; inputs?: unknown; session?: string };
         if (rotor === undefined) {
           sendJson(res, 400, { error: "missing-rotor", detail: "POST /run requires a `rotor`" });
           return;
@@ -166,6 +167,15 @@ function handle(
           });
         }
         const runInputs = (inputs && typeof inputs === "object" ? inputs : {}) as Record<string, unknown>;
+        // Streaming lane: when the client asks for `text/event-stream`, run the rotor
+        // and stream `open → step* → terminal → done` over SSE instead of buffering a
+        // single JSON reply. The run persists its tape as it goes, so a dropped client
+        // reconnects via GET /runs/:id/events?from=<cursor>. This is the transport the
+        // client SDK consumes; the buffered path below stays for simple callers.
+        if ((req.headers.accept ?? "").includes("text/event-stream")) {
+          void streamRunLive(res, doc, runInputs, { store, drain, workspace: workspaceRoot(), session });
+          return;
+        }
         // Pooling/affinity (§17.2–§17.4) is OPERATIONAL telemetry only (§17.6): the
         // shared pool picks a warm instance for this request, but it NEVER affects
         // what the run computes — the executor below does not consult it.
@@ -218,6 +228,23 @@ function handle(
           .catch((err: unknown) => sendJson(res, 500, { error: "run-error", detail: (err as Error).message }));
       })
       .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
+    return;
+  }
+
+  // GET /runs/:id/events — durable reconnect. Replay a run's SSE stream from the
+  // persisted tape, resuming after the client's cursor (`Last-Event-ID` header, or
+  // `?from=<seq>`). Default -1 replays from the beginning (the `open` frame at seq 0).
+  if (method === "GET" && path.startsWith("/runs/") && path.endsWith("/events")) {
+    const runId = decodeURIComponent(path.slice("/runs/".length, -"/events".length));
+    const query = (req.url ?? "").split("?", 2)[1] ?? "";
+    const fromParam = new URLSearchParams(query).get("from");
+    const lastEventId = req.headers["last-event-id"];
+    const cursor = Number(lastEventId ?? fromParam ?? -1);
+    replayRun(res, runId, Number.isFinite(cursor) ? cursor : -1, store)
+      .then((found) => {
+        if (!found) sendJson(res, 404, { error: "no-such-run", detail: `no run ${runId}` });
+      })
+      .catch((err: unknown) => sendJson(res, 500, { error: "replay-error", detail: (err as Error).message }));
     return;
   }
 
