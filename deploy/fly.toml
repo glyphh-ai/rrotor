@@ -1,0 +1,59 @@
+# fly.io Machine config for a PER-SESSION OpenRotor runtime instance.
+#
+# The glyphh control plane creates/starts one Machine per code session (per message
+# thread) from this app, runs `glyphh serve`, and stops it when idle. The runtime is
+# stateless (SPEC.md §17.1) — all run state lives in the external Postgres+pgvector
+# stator — so a Machine is disposable: stop-to-zero when idle, recreate on resume,
+# and the session continues from the recorded event history (docs/hosting.md §3).
+#
+# This is a template: `app`, secrets, and the Postgres/model URLs are set by the
+# control plane per environment. Deploy the image built from deploy/Dockerfile.
+
+app = "glyphh-runtime"          # per-env; the control plane may use one app + many Machines
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"      # deploy/Dockerfile — the stateless runtime image
+
+[env]
+  PORT = "8080"
+  ROTOR_STATOR_BACKEND = "pgvector"
+  ROTOR_LOG_FORMAT = "json"
+  # ROTOR_STATOR_URL, ROTOR_LOCAL_URL, ROTOR_FRONTIER_URL, ROTOR_DRAIN_URL:
+  # injected as secrets by the control plane per session/tenant.
+
+[http_service]
+  internal_port = 8080
+  # Reachable only through the control plane / private network — not force-https to
+  # the public internet. The control plane fronts auth (docs/hosting.md §6).
+  force_https = true
+  # Scale to zero when idle: an idle session costs nothing; the next request (or a
+  # control-plane `machine start`) wakes it, and the run resumes from the stator.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "15s"
+    timeout = "3s"
+    grace_period = "10s"
+
+# Readiness is distinct from liveness (docs/deploy.md §2): /readyz reports the
+# capability manifest and 503s when the stator is unreachable, so the control plane
+# can hold routing until the Machine can actually serve.
+[checks.ready]
+  type = "http"
+  port = 8080
+  method = "GET"
+  path = "/readyz"
+  interval = "10s"
+  timeout = "3s"
+  grace_period = "10s"
+
+[[vm]]
+  # Small by default — the runtime control plane is light; model inference runs off-box
+  # (Modal / fly GPU) behind ROTOR_LOCAL_URL (docs/hosting.md §4).
+  size = "shared-cpu-1x"
+  memory = "512mb"

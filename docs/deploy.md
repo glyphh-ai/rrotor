@@ -4,8 +4,14 @@ How a rotor runtime scales — from a single box to a multi-node Kubernetes flee
 and why the design makes horizontal scale almost free.
 
 This document covers `deploy/`: the `Dockerfile`, the `docker-compose.yml` local
-stack, and the `deploy/k8s/` manifest set. The runtime's HTTP surface (the probe/run
-server) lives in `src/server.ts`.
+stack, and the `deploy/k8s/` manifest set — the **fleet** topology (many
+interchangeable pods behind one Service, sharing one stator). The runtime's HTTP
+surface (the probe/run server) lives in `src/server.ts`.
+
+> For the **product** topologies — the local `brew install glyphh` CLI and the
+> fly.io **one-instance-per-session** model that the mobile/co-work/code apps use —
+> see [docs/hosting.md](hosting.md). Same binary, same HTTP contract; different
+> deployment shape.
 
 ---
 
