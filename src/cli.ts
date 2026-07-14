@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 /**
- * openrotor — the CLI entry point.
+ * openrotor — the runtime's headless command surface (ops + dev, not the product).
  *
- *   openrotor                    launch the REPL (default)
+ *   openrotor serve [-p PORT]    start the HTTP runtime (probes + /run + /ws stream)
  *   openrotor run <file> [k=v…]  execute a .rotor through the basic-tier executor
  *   openrotor validate <file>    validate against schema + static graph checks
- *   openrotor serve [-p PORT]    start the HTTP runtime (probes + /run)
+ *   openrotor errors [CODE]      the error catalog (--json for machine output)
+ *   openrotor support <run_id>   a support bundle for a run (trace + errors + fixes)
+ *   openrotor repl               the minimal REPL (dev harness)
  *   openrotor version | help
+ *
+ * The interactive product CLI (chat · co-work · code) is a separate client that
+ * talks to a rotor server over the streaming transport (SSE/WebSocket) via the
+ * glyphh client SDK — see docs/sdk-spec.md. It is not part of the runtime.
  */
 
 import { fileURLToPath } from "node:url";
@@ -17,7 +23,6 @@ import { execute } from "./exec/executor.js";
 import { buildBasicPlugins } from "./plugins/index.js";
 import { startServer } from "./server.js";
 import { runRepl } from "./repl.js";
-import { runShell } from "./tui/shell.js";
 import { VERSION } from "./version.js";
 import { describe, errorCatalog } from "./errors.js";
 import { statorFromEnvAsync } from "./exec/stator.js";
@@ -254,12 +259,10 @@ export async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case undefined:
-    case "chat":
-    case "code":
-    case "cowork":
-      // The unified TUI. `glyphh` (or chat/code/cowork) launches the same shell; the
-      // alias just preselects a rotor of that name if one exists.
-      return runShell({ rotor: cmd });
+      // No subcommand: print help. (The interactive product CLI lives outside the
+      // runtime — it is an SDK client of `openrotor serve`; see docs/sdk-spec.md.)
+      printHelp();
+      return 0;
     case "repl":
       return runRepl();
     case "version":
@@ -290,15 +293,16 @@ export async function main(argv: string[]): Promise<number> {
 
 function printHelp(): void {
   printBanner(VERSION);
-  console.log(`  glyphh                        launch the interactive TUI (chat · co-work · code)
-  glyphh chat | code | cowork   the same TUI, preselecting that rotor
+  console.log(`  openrotor serve [-p PORT]     start the HTTP runtime (probes · /run · /ws stream)
   openrotor run <file> [k=v…]   execute a .rotor through the executor
-  openrotor repl                the minimal REPL
   openrotor validate <file>     validate a .rotor against the schema
   openrotor errors [CODE]       the error catalog (--json for machine output)
   openrotor support <run_id>    a support bundle for a run (trace + errors + fixes)
-  openrotor serve [-p PORT]     start the HTTP runtime (probes + /run)
+  openrotor repl                the minimal REPL (dev harness)
   openrotor version
+
+  The interactive product CLI (chat · co-work · code) is a separate SDK client of
+  a rotor server — see docs/sdk-spec.md. It is not part of the runtime.
 `);
 }
 
