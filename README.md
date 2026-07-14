@@ -1,8 +1,8 @@
 # RotorSpec
 
-**The open standard for deterministic AI agent loops.**
+**The standard for deterministic AI agent loops.**
 
-Version 0.1 · Draft · Apache-2.0 · Reference executor: [glyphh-rotor]
+Version 0.1 · Draft · Proprietary (Glyphh AI LLC) · Reference executor: [glyphh-rotor]
 
 An AI agent is a loop. Today that loop lives inside a model's context window, is
 re-derived on every prompt, and can't be replayed, audited, or reasoned about.
@@ -109,11 +109,13 @@ pods, scaled horizontally.
 
 ## Status & license
 
-- **Apache-2.0** (see [LICENSE](LICENSE), [NOTICE](NOTICE)). Open standard.
+- **Proprietary — © 2026 Glyphh AI LLC, all rights reserved** (see [LICENSE](LICENSE),
+  [NOTICE](NOTICE)). This is a temporary, all-rights-reserved license for now; the
+  project may be re-licensed under different (including open) terms in the future.
 - Draft **v0.1**: the spec text ([SPEC.md](SPEC.md) + [docs/](docs/)) is written;
   the JSON Schema and reference rotors are in progress.
-- RotorSpec is open; the glyphh-rotor implementation and its patent-pending HDC
-  method are separate proprietary works.
+- The patent-pending HDC grounding method is not disclosed here — this repository
+  abstracts or stubs the `hdc.map` step (see [NOTICE](NOTICE)).
 
 ## Layout
 

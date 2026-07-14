@@ -3,7 +3,7 @@
 **How to build a conforming RotorSpec runtime — and why the open reference runtime
 and the glyphh product are the same contract, not the same code.**
 
-Spec version: **0.1** · Reference runtime: **Node/TypeScript, Apache-2.0** ·
+Spec version: **0.1** · Reference runtime: **Node/TypeScript, proprietary (Glyphh AI LLC)** ·
 Companion product: **glyphh-rotor (Python, closed)**
 
 This document is the design for the runtime — the program that loads, validates,
@@ -45,7 +45,7 @@ real:
 | | **Reference runtime** (this repo) | **glyphh product** (glyphh-rotor) |
 | --- | --- | --- |
 | Language | Node / TypeScript | Python |
-| License | Apache-2.0, open | Proprietary, closed |
+| License | Proprietary (Glyphh AI LLC), closed | Proprietary, closed |
 | Role | The conformance demo — readable, installable, honest | The production runtime — HDC grounding, full stator, hosting, governance |
 | Grounding | Abstracted: exact-match / soft verify-then-refuse. **Does not practice the patent.** | The patented HDC method behind an opaque `grounding` plugin |
 | Memory | SQLite, zero-dep, bare-box | Postgres + pgvector, cascade consolidation, scaled 7×33 lattice |
@@ -627,8 +627,8 @@ reference runtime targets L2 out of the box and L3 with a durable stator.
 
 ## 4. The reference runtime (Node/TypeScript)
 
-The concrete build for **this repo.** Apache-2.0. It abstracts `hdc.map` — it **does
-not practice the patent.**
+The concrete build for **this repo.** Proprietary (Glyphh AI LLC). It abstracts
+`hdc.map` — it **does not practice the patent.**
 
 ### 4.1 Module layout
 

@@ -1,5 +1,5 @@
-// OpenRotor banner — OpenRotor's own identity (Apache-2.0). A plain figlet
-// wordmark + one cyan accent; deliberately NOT glyphh's braille trademark.
+// OpenRotor banner — OpenRotor's own identity. A plain figlet wordmark + one
+// cyan accent; deliberately NOT glyphh's braille trademark.
 const C = "\x1b[36m"; // cyan accent
 const D = "\x1b[90m"; // dim
 const R = "\x1b[0m";  // reset
