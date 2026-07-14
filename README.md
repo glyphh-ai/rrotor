@@ -29,6 +29,43 @@ spec:
     - { id: test,    type: gate, on_reject: escalate }
 ```
 
+## Getting started
+
+Run the reference executor locally. Node 20+.
+
+```bash
+npm install
+npm run dev            # launch the TUI (chat · co-work · code — one prompt interface)
+```
+
+Or run a single rotor headless:
+
+```bash
+npm run dev -- run rotors/base.rotor.yaml prompt="Where does Ada live?"
+```
+
+Out of the box the model lane is a deterministic **stub** — the loop still
+grounds, gates, and replays, it just doesn't call a real model. To make it
+*think*, point it at any OpenAI-compatible endpoint:
+
+```bash
+# 1. serve a small local model (example: Qwen3-1.7B GGUF via llama.cpp)
+pip install "llama-cpp-python[server]"
+python3 -m llama_cpp.server --model Qwen3-1.7B-Q8_0.gguf \
+  --model_alias glyphh-local --host 127.0.0.1 --port 8080
+
+# 2. tell the runtime where it lives (local lane is free by construction)
+export ROTOR_MODEL_URL=http://127.0.0.1:8080
+npm run dev
+```
+
+`glyphh status` shows `local→live` once the endpoint is reachable, `local→stub`
+otherwise. Reasoning models (Qwen3, etc.) emit `<think>…</think>` first — append
+`/no_think` to a prompt to skip it on slow CPUs.
+
+> Built binaries expose two commands, both the same CLI: `glyphh` (the TUI) and
+> `openrotor` (headless `run` / `validate` / `serve` / `support`).
+
 ## The pillars
 
 - **Deterministic control plane / stochastic data plane** — which step runs next
