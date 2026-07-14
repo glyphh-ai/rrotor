@@ -35,6 +35,7 @@ import { log } from "./obs/logger.js";
 import { describe } from "./errors.js";
 import { toolModeFromLabels } from "./tools/index.js";
 import { streamRunLive, replayRun } from "./transport/sse.js";
+import { attachWebSocket } from "./transport/ws.js";
 
 /** The per-session workspace sandbox for fs/exec/git tools (docs/hosting.md §3). */
 function workspaceRoot(): string {
@@ -339,6 +340,9 @@ export function startServer(
   drain: DrainPlugin = drainFromEnv(),
 ): http.Server {
   const server = http.createServer((req, res) => handle(rt, store, drain, req, res));
+  // Bidirectional streaming transport (GET /ws upgrade) over the same event model as
+  // the SSE lane — the client SDK can use either. Shares the pod's stator + drain.
+  attachWebSocket(server, { store, drain, workspace: workspaceRoot() });
   server.listen(port, () => {
     log.info("runtime listening", { port, version: VERSION });
   });
