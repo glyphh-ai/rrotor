@@ -994,6 +994,47 @@ between runs, replay does not recreate it). **237 total green**; coverage
 **Deferred (intentional):** Windows providers (POSIX-first), version-pinning UX, and
 domain packs (office/audio/image/browser) — each a pack on this same contract.
 
+### Tools wired into live runs  ✅
+
+`buildBasicPlugins({ tools: { root, mode } })` installs the stdlib into a run's
+connections, capability-gated by mode. The **rotor drives the mode** via
+`metadata.labels.mode` (`toolModeFromLabels`, default `code`). Wired into the CLI
+`run` (workspace = cwd) and the server `/run`/resume (workspace = `ROTOR_WORKSPACE ??
+cwd`). Test: a code-mode rotor's `file.write` lands a file through the full execute
+path; a chat-mode rotor's `file.write` fails `E_NO_TOOL` (the tool doesn't exist for
+that mode) and nothing is written.
+
+---
+
+## The TUI — the unified agent shell  ✅
+
+"Three things in one terminal" (chat · co-work · code) that to the runtime is **one
+thing**: run the selected rotor and stream it. The user chooses a **rotor** (drives
+everything) and a fallback **model** (default `auto`); the CLI is just the TUI.
+
+- [x] `src/tui/session.ts` — the testable engine. `turn(prompt, onEvent)` executes
+      the selected rotor and **streams each step live via a callback drain** (no
+      executor change); `command()` handles `/rotor /model /rotors /status /help
+      /exit`; `resume()` continues a turn paused at an approval step. The rotor's
+      `labels.mode` drives the tool/permission surface.
+- [x] `src/tui/render.ts` — pure event → line rendering (steps, answer, interrupt,
+      error), colour-optional, so the desktop app can render the same stream.
+- [x] `src/tui/shell.ts` — the thin readline skin; `glyphh` (or `chat`/`code`/
+      `cowork`) launches it, streams the loop, and prompts y/n on an approval step
+      then resumes (human-in-the-loop).
+
+**Acceptance (`test/integration/tui.test.ts`, 8 tests):** `loadRotors`; a turn streams
+`ask→plan→execute→test→deliver` in order then an answer; the prompt is recorded into
+memory; every slash command; the rotor's mode is exposed; a wait-step turn pauses
+(interrupt event + `awaiting`) and **resumes to completion**; renderer output. Plus a
+live smoke run. **247 total green**; coverage 88/75/89 (shell.ts/repl.ts excluded as
+untestable readline I/O).
+
+**Honest note:** the loop streams and tools are reachable, but `plan`/`execute`'s
+model+tool are still basic-tier stubs, so a `base`-rotor turn shows the trace + an
+empty answer. The next step — a real `code` rotor + a live local model
+(`ROTOR_LOCAL_URL`) — is what makes it actually code.
+
 ---
 
 ## Cross-cutting standards (apply to every phase)

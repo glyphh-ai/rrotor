@@ -17,10 +17,12 @@ import { execute } from "./exec/executor.js";
 import { buildBasicPlugins } from "./plugins/index.js";
 import { startServer } from "./server.js";
 import { runRepl } from "./repl.js";
+import { runShell } from "./tui/shell.js";
 import { VERSION } from "./version.js";
 import { describe, errorCatalog } from "./errors.js";
 import { statorFromEnvAsync } from "./exec/stator.js";
 import { traceId } from "./obs/trace.js";
+import { toolModeFromLabels } from "./tools/index.js";
 import type { RotorDocument, StepRecord } from "./types.js";
 
 /** `openrotor validate <file>` — L1 parse + JSON Schema + static graph checks.
@@ -103,7 +105,10 @@ async function runRotorFile(file: string | undefined, rest: string[]): Promise<n
   // Persist to the env-configured stator so `openrotor support <run_id>` can pull
   // the run's tape afterward (durable backends only; in-memory is per-process).
   const store = await statorFromEnvAsync();
-  const plugins = buildBasicPlugins({ store });
+  // Install the tool stdlib for this run, gated by the rotor's declared mode. The
+  // workspace sandbox is the current directory.
+  const mode = toolModeFromLabels(doc.metadata.labels);
+  const plugins = buildBasicPlugins({ store, tools: { root: process.cwd(), mode } });
 
   let result;
   try {
@@ -249,6 +254,12 @@ export async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case undefined:
+    case "chat":
+    case "code":
+    case "cowork":
+      // The unified TUI. `glyphh` (or chat/code/cowork) launches the same shell; the
+      // alias just preselects a rotor of that name if one exists.
+      return runShell({ rotor: cmd });
     case "repl":
       return runRepl();
     case "version":
@@ -279,8 +290,10 @@ export async function main(argv: string[]): Promise<number> {
 
 function printHelp(): void {
   printBanner(VERSION);
-  console.log(`  openrotor                     launch the REPL
+  console.log(`  glyphh                        launch the interactive TUI (chat · co-work · code)
+  glyphh chat | code | cowork   the same TUI, preselecting that rotor
   openrotor run <file> [k=v…]   execute a .rotor through the executor
+  openrotor repl                the minimal REPL
   openrotor validate <file>     validate a .rotor against the schema
   openrotor errors [CODE]       the error catalog (--json for machine output)
   openrotor support <run_id>    a support bundle for a run (trace + errors + fixes)

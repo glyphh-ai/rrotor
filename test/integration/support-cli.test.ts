@@ -4,6 +4,10 @@
  * to trace a failure and fix it: code → remediation, and a run's trace + timeline.
  */
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 import { main } from "../../src/cli.js";
@@ -44,8 +48,11 @@ describe("openrotor errors", () => {
 });
 
 describe("openrotor support", () => {
-  const url = "/tmp/claude-0/-home-user-openrotor/e7e3ce1b-c868-5ec6-9b72-65265b041e19/scratchpad/support-test.db";
+  // A fresh OS temp dir per test — never a machine-specific path, so this runs
+  // identically on a dev box and a CI runner (SqliteStore opens the file there).
+  let url: string;
   beforeEach(() => {
+    url = join(mkdtempSync(join(tmpdir(), "glyphh-support-")), "support-test.db");
     process.env.ROTOR_STATOR_BACKEND = "sqlite";
     process.env.ROTOR_STATOR_URL = url;
   });
