@@ -31,18 +31,19 @@ spec:
 
 ## Getting started
 
-Run the reference executor locally. Node 20+.
+Run the reference runtime locally. Node 20+.
 
 ```bash
 npm install
-npm run dev            # launch the TUI (chat · co-work · code — one prompt interface)
+npm run dev -- serve                                          # start the runtime (HTTP + streaming)
+npm run dev -- run rotors/base.rotor.yaml prompt="Where does Ada live?"   # or run one rotor headless
 ```
 
-Or run a single rotor headless:
-
-```bash
-npm run dev -- run rotors/base.rotor.yaml prompt="Where does Ada live?"
-```
+`openrotor serve` exposes the probe surface plus the streaming transport the
+clients consume: `POST /run` (buffered or SSE), `GET /runs/:id/events` (durable
+reconnect), and a WebSocket at `/ws`. The interactive product CLI (chat ·
+co-work · code) is a **separate client** that talks to this server through the
+glyphh client SDK — see [docs/sdk-spec.md](docs/sdk-spec.md).
 
 Out of the box the model lane is a deterministic **stub** — the loop still
 grounds, gates, and replays, it just doesn't call a real model. To make it
@@ -56,15 +57,12 @@ python3 -m llama_cpp.server --model Qwen3-1.7B-Q8_0.gguf \
 
 # 2. tell the runtime where it lives (local lane is free by construction)
 export ROTOR_MODEL_URL=http://127.0.0.1:8080
-npm run dev
+npm run dev -- serve
 ```
 
-`glyphh status` shows `local→live` once the endpoint is reachable, `local→stub`
+`GET /readyz` reports `local→live` once the endpoint is reachable, `local→stub`
 otherwise. Reasoning models (Qwen3, etc.) emit `<think>…</think>` first — append
 `/no_think` to a prompt to skip it on slow CPUs.
-
-> Built binaries expose two commands, both the same CLI: `glyphh` (the TUI) and
-> `openrotor` (headless `run` / `validate` / `serve` / `support`).
 
 ## The pillars
 

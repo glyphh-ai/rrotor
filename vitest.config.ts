@@ -15,7 +15,7 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "html", "json-summary"],
       include: ["src/**/*.ts"],
-      exclude: ["src/banner.ts", "src/version.ts", "src/index.ts", "src/repl.ts", "src/tui/shell.ts"],
+      exclude: ["src/banner.ts", "src/version.ts", "src/index.ts", "src/repl.ts"],
       thresholds: {
         // Ratcheting floor. Tools + TUI: measured ~88% lines / ~75% branches / ~89.8%
         // funcs. Lines ratcheted up; funcs eased to 89 for the TUI's no-op drain
