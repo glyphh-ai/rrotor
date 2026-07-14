@@ -78,6 +78,29 @@ describe("pgvector stator — durable hydrate across a restart", () => {
   });
 });
 
+describe("pgvector stator — atomic supersede+insert (CTE)", () => {
+  it("keeps exactly one current row per key across repeated supersessions", async () => {
+    const store = await PgVectorStore.create({ client: await pglite() });
+    for (const city of ["London", "Paris", "Berlin", "Rome"]) {
+      await store.writeFacts([{ entity: "ada", role: "city", filler: city, key: "ada:city", is_current: true, tick: 0 }]);
+    }
+    const all = await store.snapshotFacts();
+    const currentForKey = all.filter((f) => f.key === "ada:city" && f.is_current);
+    expect(currentForKey).toHaveLength(1); // no torn/double-current state
+    expect(currentForKey[0].filler).toBe("Rome"); // last write wins
+    // The superseded history is intact (4 rows written, 3 now superseded).
+    expect(all.filter((f) => f.key === "ada:city" && !f.is_current)).toHaveLength(3);
+  });
+
+  it("a keyless fact inserts without superseding anything", async () => {
+    const store = await PgVectorStore.create({ client: await pglite() });
+    await store.writeFacts([{ entity: "ada", role: "note", filler: "one", is_current: true, tick: 0 }]);
+    await store.writeFacts([{ entity: "ada", role: "note", filler: "two", is_current: true, tick: 1 }]);
+    const notes = (await store.snapshotFacts()).filter((f) => f.role === "note" && f.is_current);
+    expect(notes.map((f) => f.filler).sort()).toEqual(["one", "two"]); // both current
+  });
+});
+
 describe("pgvector stator — live-read edge cases", () => {
   it("misses read empty, the latest ordinal is reported, and flush is a no-op", async () => {
     const store = await PgVectorStore.create({ client: await pglite() });

@@ -218,14 +218,17 @@ export class PgVectorStore implements Stator {
   // ── facts — write to SQL, query via the shared pure engine ──────────────────
   async writeFacts(facts: Fact[]): Promise<number> {
     for (const f of facts) {
-      // Supersede any current fact sharing this key, then insert the new current
-      // row — mirrors the SqliteStore write path so the closed ops (incl. `prev`)
-      // behave identically.
-      if (f.key) {
-        await this.db.query("UPDATE facts SET is_current = FALSE WHERE fact_key = $1 AND is_current = TRUE", [f.key]);
-      }
+      // ATOMIC supersede+insert in a single statement (a data-modifying CTE). The
+      // CTE runs to completion regardless of whether the primary query reads it, so
+      // the old current row is flipped and the new one inserted in one indivisible
+      // step — there is no window where a concurrent reader sees the key superseded
+      // with no current replacement (a torn write). Portable across `pg` Pool and
+      // PGlite without pinning a connection for BEGIN/COMMIT. A null key matches no
+      // rows in the CTE, so keyless facts just insert. Mirrors the SqliteStore write
+      // semantics, so the closed ops (incl. `prev`) behave identically.
       await this.db.query(
-        "INSERT INTO facts (entity, role, filler, space_id, fact_key, is_current, speaker, tick, tier, session) " +
+        "WITH superseded AS (UPDATE facts SET is_current = FALSE WHERE fact_key = $5 AND is_current = TRUE) " +
+          "INSERT INTO facts (entity, role, filler, space_id, fact_key, is_current, speaker, tick, tier, session) " +
           "VALUES ($1,$2,$3,$4,$5,TRUE,$6,$7,$8,$9)",
         [f.entity, f.role, f.filler, f.space_id ?? null, f.key ?? null, f.speaker ?? null, f.tick, f.tier ?? null, f.session ?? null],
       );

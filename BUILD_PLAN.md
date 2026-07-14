@@ -941,10 +941,21 @@ awaited straight to Postgres.
       committed writes mid-run — no restart. Determinism still holds (golden replay
       reads the tape, never the live stator).
 
-**Acceptance (`test/memory/pgvector.test.ts`, +2 tests → 12; also on real Postgres):**
-cross-pod live visibility (pod A writes → pod B, already running, reads it; and the
-reverse); live-read edge cases (misses, latest-ordinal, flush no-op); the persistence
-error now surfaces at the write. **221 total green**, coverage 85/75/90.
+**Acceptance (`test/memory/pgvector.test.ts`; also on real Postgres):** cross-pod
+live visibility (pod A writes → pod B, already running, reads it; and the reverse);
+live-read edge cases (misses, latest-ordinal, flush no-op); the persistence error now
+surfaces at the write. Coverage 85/75/90.
+
+**Hardening — atomic supersede+insert.** `writeFacts` now does the supersede + insert
+as a single **data-modifying CTE** (`WITH superseded AS (UPDATE … is_current=FALSE …)
+INSERT …`), so there is no window where a concurrent reader sees a key superseded
+with no current replacement (a torn write). Portable across `pg` Pool and PGlite —
+the transaction-equivalent atomicity, without pinning a connection for BEGIN/COMMIT.
+A null key matches no rows in the CTE, so keyless facts just insert. Tested: exactly
+one current row per key across repeated supersessions (+3 superseded history rows);
+keyless facts coexist. **223 total green.** (A further refinement — SERIALIZABLE
+isolation or a partial unique index — would also serialize two pods superseding the
+*same* key in the same instant; rare, and out of scope here.)
 
 ---
 
