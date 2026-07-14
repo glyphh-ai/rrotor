@@ -31,12 +31,12 @@ export interface GateEval {
 
 /** Evaluate a gate config against a resolved input value. Pure/deterministic for
  *  the store-backed modes; the scanner modes record a (basic: pass) verdict. */
-export function evalGate(
+export async function evalGate(
   cfg: GateConfig,
   input: Record<string, unknown>,
   env: RunContextEnvelope,
   plugins: Plugins,
-): GateEval {
+): Promise<GateEval> {
   const gateFrame = (verdict: Verdict, data?: unknown): Frame => ({
     type: "gate",
     logical_tick: env.logical_tick,
@@ -48,7 +48,7 @@ export function evalGate(
       const entity = String(input.entity ?? cfg.entity ?? "");
       const role = String(input.role ?? cfg.role ?? "");
       const filler = String(input.filler ?? "");
-      const v = plugins.grounding.verify(entity, role, filler, cfg.margin ?? 0.05, env.space_id);
+      const v = await plugins.grounding.verify(entity, role, filler, cfg.margin ?? 0.05, env.space_id);
       const verdict: Verdict = v.grounded ? "pass" : "fail";
       return {
         verdict,
@@ -78,23 +78,32 @@ export function evalGate(
     }
     case "firewall":
     case "anomaly": {
-      // A scanner verdict is stochastic-checkpointed; basic tier finds no anomaly.
-      const verdict: Verdict = "pass";
+      // Deterministic basic-tier scanner over the candidate value (§12.2/§14.2).
+      const target = String(input.candidate ?? input.text ?? input.value ?? firstDefined(input) ?? "");
+      const checks = (cfg.checks as string[] | undefined) ?? ["pii", "policy"];
+      const hit = scanForAnomaly(target, checks);
+      if (!hit) {
+        return { verdict: "pass", output: { verdict: "pass", anomaly: null }, frames: [gateFrame("pass", { anomaly: null })] };
+      }
+      // A firewall BLOCKS (fail → on_fail); an anomaly ESCALATES (§14.2: a
+      // first-class signal, emitted as a frame, that triggers escalation).
+      const verdict: Verdict = cfg.mode === "firewall" ? "fail" : "escalate";
       return {
         verdict,
-        output: { verdict, anomaly: null },
-        frames: [gateFrame(verdict, { anomaly: null })],
+        output: { verdict, anomaly: hit },
+        frames: [gateFrame(verdict, { anomaly: hit }), { type: "refuse", logical_tick: env.logical_tick, data: { anomaly: hit } }],
       };
     }
     case "approval": {
-      // Human-in-the-loop pause. Basic tier has no resume channel → interrupt and
-      // route via on_escalate (§7.14).
-      return {
-        verdict: "escalate",
-        output: { verdict: "escalate" },
-        frames: [gateFrame("escalate")],
-        interrupted: true,
-      };
+      // Human-in-the-loop (§7.14). A resume payload carries the decision; without
+      // one the gate pauses (interrupts) and the completed prefix is checkpointed.
+      const resume = input.__resume as Record<string, unknown> | undefined;
+      if (!resume) {
+        return { verdict: "escalate", output: { verdict: "escalate", awaiting: "approval" }, frames: [gateFrame("escalate")], interrupted: true };
+      }
+      const decision = String(input.decision ?? resume.decision ?? "approve").toLowerCase();
+      const verdict: Verdict = decision === "reject" || decision === "deny" ? "fail" : "pass";
+      return { verdict, output: { verdict, decision }, frames: [gateFrame(verdict, { decision })] };
     }
     default: {
       const verdict: Verdict = "pass";
@@ -110,11 +119,35 @@ function firstDefined(input: Record<string, unknown>): unknown {
   return undefined;
 }
 
+/**
+ * The deterministic basic-tier anomaly scanner. Pure pattern matching over the
+ * candidate text for the requested check classes — no model, no RNG — so the
+ * verdict is replay-safe. Returns a short anomaly kind, or `null` if clean. The
+ * premium tier swaps in a real classifier behind the same gate contract.
+ */
+function scanForAnomaly(text: string, checks: string[]): string | null {
+  for (const check of checks) {
+    if (check === "pii") {
+      if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(text)) return "pii:email";
+      if (/\b\d{3}-\d{2}-\d{4}\b/.test(text)) return "pii:ssn";
+      if (/\b(?:\d[ -]?){13,16}\b/.test(text)) return "pii:card";
+    }
+    if (check === "policy") {
+      if (/ignore\s+(?:all\s+|the\s+|your\s+)?(?:previous|prior|above)\s+instructions/i.test(text)) {
+        return "policy:injection";
+      }
+      if (/\b(?:system\s+prompt|reveal\s+your\s+(?:instructions|prompt))\b/i.test(text)) return "policy:probe";
+    }
+    // `drift` / `ood` have no deterministic bare-box signal → skipped.
+  }
+  return null;
+}
+
 export const gateHandler: StepHandler = {
   type: "gate",
   async execute({ step, input, env, plugins }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? { mode: "assertion" }) as GateConfig;
-    const g = evalGate(cfg, input, env, plugins);
+    const g = await evalGate(cfg, input, env, plugins);
     return {
       output: g.output,
       frames: g.frames,

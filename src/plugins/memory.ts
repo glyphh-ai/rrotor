@@ -11,6 +11,8 @@
 import type { CapabilityStatus } from "../runtime/registry.js";
 import type { StepRecord } from "../types.js";
 import { InProcessStore, type Fact, type Row, type Stator } from "../exec/store.js";
+import { visibleFacts, type MemoryTier } from "../exec/facts.js";
+import { cosine, embed } from "../exec/embedding.js";
 import type {
   GroundVerdict,
   MemoryPlugin,
@@ -30,22 +32,18 @@ export class BasicMemory implements MemoryPlugin {
     return { ready: true, detail: "in-process maps; no pgvector", tier: "basic" };
   }
 
-  executeOp(op: string, params: Row, spaceId?: string): QueryResult {
+  async executeOp(op: string, params: Row, spaceId?: string): Promise<QueryResult> {
     return this.store.query(op, params, spaceId);
   }
 
-  /** Lexical unit-dot over recorded turns — the bare-box fallback for the
-   *  embedding lane (§7.7). Ranking over recorded text is deterministic. */
-  semanticRecall(query: string, topK: number, threshold: number): SemanticHit[] {
-    const q = tokenSet(query);
-    if (q.size === 0) return [];
+  /** Deterministic-local semantic recall (§7.7): cosine over the hashed-ngram
+   *  embedding of the query and each recorded turn. Replay-safe (pure). */
+  async semanticRecall(query: string, topK: number, threshold: number): Promise<SemanticHit[]> {
+    const qv = embed(query);
+    if (query.trim() === "") return [];
     const scored: SemanticHit[] = [];
-    for (const text of this.store.turns()) {
-      const t = tokenSet(text);
-      let overlap = 0;
-      for (const w of q) if (t.has(w)) overlap++;
-      const denom = Math.sqrt(q.size) * Math.sqrt(t.size || 1);
-      const score = denom === 0 ? 0 : overlap / denom;
+    for (const text of await this.store.turns()) {
+      const score = cosine(qv, embed(text));
       if (score >= threshold) scored.push({ text, score });
     }
     return scored
@@ -53,32 +51,63 @@ export class BasicMemory implements MemoryPlugin {
       .slice(0, topK);
   }
 
-  write(
+  async recordTurn(text: string): Promise<void> {
+    if (text && text.trim() !== "") await this.store.addTurn(text);
+  }
+
+  async write(
     facts: Array<Record<string, unknown>>,
-    opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number },
-  ): number {
+    opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number; session?: string; tier?: MemoryTier },
+  ): Promise<number> {
     const tick = opts.tick ?? 0;
+    if (opts.session) await this.store.touchSession(opts.session);
     const toWrite: Fact[] = facts.map((f) => ({
       entity: String(f.entity ?? f.subject ?? opts.key ?? "unknown"),
       role: String(f.role ?? f.slot ?? "raw.text"),
       filler: String(f.filler ?? f.value ?? ""),
       space_id: opts.spaceId,
-      key: opts.key,
+      // A per-fact key versions its own (entity, role) slot; fall back to the
+      // step-level key. This keeps a multi-fact absorb from superseding itself.
+      key: (f.key as string | undefined) ?? opts.key,
       is_current: true,
       speaker: opts.speaker,
       tick,
+      // Precedence: the step's EXPLICIT tier is the author's deterministic
+      // override and wins; else the per-fact tier from the absorb enricher; else
+      // undefined (defaults to `long` at the visibility filter).
+      tier: opts.tier ?? (f.tier as MemoryTier | undefined),
+      session: opts.session,
     }));
     return this.store.writeFacts(toWrite);
   }
 
-  probe(entity: string, role: string, spaceId?: string): ProbeResult {
-    const f = this.store.lookupFact(entity, role, spaceId);
+  async recall(opts: { entity?: string; role?: string; session?: string; midWindow?: number; spaceId?: string }): Promise<Fact[]> {
+    const facts = await this.store.snapshotFacts();
+    // Pre-resolve session ordinals so `visibleFacts` (a pure, sync filter) reads
+    // them from a map instead of awaiting mid-scan.
+    const curOrd = await this.store.sessionOrdinal(opts.session);
+    const ord = new Map<string, number>();
+    for (const f of facts) {
+      if (f.session && !ord.has(f.session)) ord.set(f.session, await this.store.sessionOrdinal(f.session));
+    }
+    return visibleFacts(facts, {
+      currentSession: opts.session,
+      ordinalOf: (s) => (s === opts.session || s === undefined ? curOrd : ord.get(s) ?? 0),
+      midWindow: opts.midWindow ?? 5,
+      entity: opts.entity,
+      role: opts.role,
+      spaceId: opts.spaceId,
+    });
+  }
+
+  async probe(entity: string, role: string, spaceId?: string): Promise<ProbeResult> {
+    const f = await this.store.lookupFact(entity, role, spaceId);
     if (!f) return { filler: null, membership: 0, margin: 0, top: [] };
     return { filler: f.filler, membership: 1, margin: 1, top: [f.filler] };
   }
 
-  verify(entity: string, role: string, filler: string, _margin: number, spaceId?: string): GroundVerdict {
-    const fillers = this.store.fillers(entity, role, spaceId);
+  async verify(entity: string, role: string, filler: string, _margin: number, spaceId?: string): Promise<GroundVerdict> {
+    const fillers = await this.store.fillers(entity, role, spaceId);
     if (fillers.length === 0) return { grounded: false, membership: 0, margin: 0, top: [] };
     const cand = norm(filler);
     const hit = fillers.some((v) => {
@@ -88,39 +117,39 @@ export class BasicMemory implements MemoryPlugin {
     return { grounded: hit, membership: hit ? 1 : 0, margin: hit ? 1 : 0, top: fillers };
   }
 
-  appendStepRecord(rec: StepRecord): void {
-    this.store.history.append(rec);
+  async appendStepRecord(rec: StepRecord): Promise<void> {
+    await this.store.history.append(rec);
   }
-  readEventHistory(runId: string): StepRecord[] {
+  async readEventHistory(runId: string): Promise<StepRecord[]> {
     return this.store.history.read(runId);
   }
-  lookupRecord(runId: string, stepId: string, attempt: number): StepRecord | undefined {
+  async lookupRecord(runId: string, stepId: string, attempt: number): Promise<StepRecord | undefined> {
     return this.store.history.lookup(runId, stepId, attempt);
   }
-  lastAttempt(runId: string, stepId: string): number {
+  async lastAttempt(runId: string, stepId: string): Promise<number> {
     return this.store.history.lastAttempt(runId, stepId);
   }
 
-  cacheGet(key: string, tick: number): Row | undefined {
+  async cacheGet(key: string, tick: number): Promise<Row | undefined> {
     return this.store.cache.get(key, tick);
   }
-  cachePut(key: string, output: Row, opts: { ttlTicks?: number; scope?: string }): void {
-    this.store.cache.put(key, output, opts);
+  async cachePut(key: string, output: Row, opts: { ttlTicks?: number; scope?: string }): Promise<void> {
+    await this.store.cache.put(key, output, opts);
   }
 
-  cascade(): { short: number; mid: number; long: number } {
-    // Basic tier: report the recorded turn count as the "short" tier; no
-    // model summaries (mid) and no lattice absorb (long) without the premium
-    // consolidation engine.
-    return { short: this.store.turns().length, mid: 0, long: 0 };
+  /**
+   * Short → mid → long consolidation (§7.18), deterministic over recorded turns.
+   * The `span` most-recent turns are the hot **short** tier; older turns
+   * consolidate into the **mid** tier by de-duplication (distinct summaries); the
+   * duplicates that collapse away are the **long**-tier absorb count. A model
+   * summarizer is the premium swap-in; this keeps it pure and replay-safe.
+   */
+  async cascade(span = 8): Promise<{ short: number; mid: number; long: number }> {
+    const turns = await this.store.turns();
+    const window = Math.max(0, span);
+    const short = Math.min(turns.length, window);
+    const older = turns.slice(0, Math.max(0, turns.length - window));
+    const distinctOlder = new Set(older).size;
+    return { short, mid: distinctOlder, long: older.length - distinctOlder };
   }
-}
-
-function tokenSet(s: string): Set<string> {
-  return new Set(
-    s
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((w) => w.length > 0),
-  );
 }

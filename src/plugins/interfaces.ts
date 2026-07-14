@@ -11,6 +11,7 @@
 
 import type { Capability } from "../runtime/registry.js";
 import type {
+  AffinityMode,
   Frame,
   Principal,
   RotorDocument,
@@ -19,6 +20,7 @@ import type {
   Usage,
 } from "../types.js";
 import type { QueryResult, Row } from "../exec/store.js";
+import type { Fact, MemoryTier } from "../exec/facts.js";
 
 export type { QueryResult, Row } from "../exec/store.js";
 
@@ -52,11 +54,11 @@ export interface GroundingPlugin extends Capability {
   /** NL fact → cortex (the `hdc.map` bridge, §7.3). */
   encode(roleFillers: Record<string, string>, spaceId?: string): EncodeResult;
   /** Entity-keyed probe (§7.6). */
-  probe(entity: string, role: string, spaceId?: string): ProbeResult;
+  probe(entity: string, role: string, spaceId?: string): Promise<ProbeResult>;
   /** The ground verdict (§6.3): grounded iff the winner matches `filler`. */
-  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): GroundVerdict;
+  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): Promise<GroundVerdict>;
   /** The hard-gate mask source — the grounded continuations for `(entity, role)`. */
-  groundedFillers(entity: string, role: string, spaceId?: string): string[];
+  groundedFillers(entity: string, role: string, spaceId?: string): Promise<string[]>;
 }
 
 // ── §3.2 memory / stator ────────────────────────────────────────────────────
@@ -68,29 +70,37 @@ export interface SemanticHit {
 
 export interface MemoryPlugin extends Capability {
   /** The closed op set (§7.5); NO model-generated SQL. */
-  executeOp(op: string, params: Row, spaceId?: string): QueryResult;
-  /** Embed + rank over recorded turns (§7.7); basic tier is lexical unit-dot. */
-  semanticRecall(query: string, topK: number, threshold: number): SemanticHit[];
-  /** Persist facts (§7.4). Idempotent by `key`. Returns the count written. */
+  executeOp(op: string, params: Row, spaceId?: string): Promise<QueryResult>;
+  /** Embed + rank over recorded turns (§7.7); basic tier is deterministic-local
+   *  cosine over the hashed-ngram embedding. */
+  semanticRecall(query: string, topK: number, threshold: number): Promise<SemanticHit[]>;
+  /** Record a turn into short-term memory (inbound prompt / outbound completion),
+   *  the corpus `semanticRecall` ranks over. */
+  recordTurn(text: string): Promise<void>;
+  /** Persist facts (§7.4). Idempotent by `key`. Returns the count written. A
+   *  `session` + `tier` scope the facts for tiered recall (docs/memory.md). */
   write(
     facts: Array<Record<string, unknown>>,
-    opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number },
-  ): number;
-  probe(entity: string, role: string, spaceId?: string): ProbeResult;
-  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): GroundVerdict;
+    opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number; session?: string; tier?: MemoryTier },
+  ): Promise<number>;
+  /** Tier-aware recall of the facts a `session` may see: `long` always, `short`
+   *  only in its own session, `mid` within `midWindow` sessions (docs/memory.md). */
+  recall(opts: { entity?: string; role?: string; session?: string; midWindow?: number; spaceId?: string }): Promise<Fact[]>;
+  probe(entity: string, role: string, spaceId?: string): Promise<ProbeResult>;
+  verify(entity: string, role: string, filler: string, margin: number, spaceId?: string): Promise<GroundVerdict>;
 
   // event history — the source of truth (§5.4)
-  appendStepRecord(rec: StepRecord): void;
-  readEventHistory(runId: string): StepRecord[];
-  lookupRecord(runId: string, stepId: string, attempt: number): StepRecord | undefined;
-  lastAttempt(runId: string, stepId: string): number;
+  appendStepRecord(rec: StepRecord): Promise<void>;
+  readEventHistory(runId: string): Promise<StepRecord[]>;
+  lookupRecord(runId: string, stepId: string, attempt: number): Promise<StepRecord | undefined>;
+  lastAttempt(runId: string, stepId: string): Promise<number>;
 
   // result cache (§5.7) — key = idempotency key; a hit is checkpointed once
-  cacheGet(key: string, tick: number): Row | undefined;
-  cachePut(key: string, output: Row, opts: { ttlTicks?: number; scope?: string }): void;
+  cacheGet(key: string, tick: number): Promise<Row | undefined>;
+  cachePut(key: string, output: Row, opts: { ttlTicks?: number; scope?: string }): Promise<void>;
 
-  /** short → mid → long consolidation (§7.18). Basic: counts, no summaries. */
-  cascade(): { short: number; mid: number; long: number };
+  /** short → mid → long consolidation (§7.18) over the `span`-recent window. */
+  cascade(span?: number): Promise<{ short: number; mid: number; long: number }>;
 }
 
 // ── §3.3 models / inference lanes ───────────────────────────────────────────
@@ -157,13 +167,24 @@ export interface MeterSnapshot {
   cost: number;
 }
 
+/** A prompt-cache accounting result (§8.6) — determinism-neutral usage only. */
+export interface PromptCacheResult {
+  disposition: "write" | "hit";
+  cache_read: number;
+  cache_write: number;
+}
+
 export interface GatewayPlugin extends Capability {
   inAdapter(wire: unknown): unknown;
   outAdapter(io: unknown): unknown;
   /** Table-driven; a missing entry is `E_UNTRANSLATABLE`, never a silent drop. */
   translate(from: string, to: string, payload: unknown): unknown;
-  /** Unhonorable → no-op, never error (§3.5). */
+  /** Lower abstract prompt-cache breakpoints to a provider's wire form (§8.6).
+   *  Unhonorable → no-op (`undefined`), never error. */
   lowerPromptCache(breakpoints: string[] | undefined, provider: string): unknown;
+  /** Account a prompt-prefix cache lookup (§8.6): first sight of a prefix key is a
+   *  write, later sights are hits. Determinism-neutral — usage only. */
+  accountPromptCache(prefixKey: string, promptTokens: number): PromptCacheResult;
   /** Accumulate metered usage (§8.5). Local is unmetered by construction. */
   recordUsage(usage: Usage, lane?: string): void;
   meter(): MeterSnapshot;
@@ -200,16 +221,88 @@ export interface GovernancePlugin extends Capability {
 
 export type InstanceState = "hot" | "warm" | "cold";
 
+/** A routing hint derived from `spec.affinity` (§17.4). */
+export interface AffinityHint {
+  key?: string;
+  mode?: AffinityMode;
+}
+
+export interface PoolInstanceInfo {
+  id: string;
+  state: InstanceState;
+  keys: string[];
+}
+
 export interface PoolPlugin extends Capability {
-  provision(): void;
-  route(): string;
+  /** Pre-warm instances up to `minHot`, bounded by the `maxHot` budget (§17.3). */
+  provision(opts?: { minHot?: number; maxHot?: number }): void;
+  /** Route a request to an instance, honoring affinity (§17.4). Returns the id. */
+  route(affinity?: AffinityHint): string;
   /** Telemetry ONLY — MUST NOT influence a transition (§17.6). */
   instanceState(id?: string): InstanceState;
+  /** Telemetry snapshot of the instances + their states. Never a control input. */
+  snapshot(): PoolInstanceInfo[];
+}
+
+// ── §3.8 drain / observability sink ─────────────────────────────────────────
+
+/**
+ * The wire shape a log drain forwards — one per `StepRecord` (CloudEvents-ish,
+ * per the §14 aspiration). It carries the record's audit + telemetry fields; the
+ * `output` may be field-redacted before it leaves the process.
+ */
+export interface DrainEnvelope {
+  /** Event type, e.g. `com.openrotor.step.v0`. */
+  type: string;
+  run_id: string;
+  step_id: string;
+  attempt: number;
+  logical_tick: number;
+  status: string;
+  /** W3C trace context (src/obs/trace.ts), derived from the run/step identity so it
+   *  is deterministic and replay-stable. Telemetry only — never in the tape. */
+  trace_id?: string;
+  span_id?: string;
+  traceparent?: string;
+  space_id?: string;
+  principal?: { id: string; kind: string; scopes?: string[] };
+  agent?: { ref: string; run_id: string };
+  usage?: Usage;
+  frames?: Frame[];
+  output?: Record<string, unknown>;
+  /** The failure, enriched from the error taxonomy (src/errors.ts) so downstream
+   *  observability tools get category/severity/retryable/remediation without a
+   *  catalog lookup. `name` is the stable code; the rest are derived (telemetry
+   *  only — never in the tape). */
+  error?: {
+    name: string;
+    cause?: string;
+    category?: string;
+    severity?: string;
+    retryable?: boolean;
+    remediation?: string;
+  };
+}
+
+/**
+ * A log drain streams the run's `StepRecord` event stream to an external sink for
+ * audit / FinOps / observability. It is strictly a telemetry **observer** — it
+ * MUST NOT influence control flow ("telemetry only, never a control predicate",
+ * SPEC.md §17.6), and `emit` MUST be fire-and-forget: it never blocks the run and
+ * never throws. Delivery is best-effort and asynchronous.
+ */
+export interface DrainPlugin extends Capability {
+  /** Enqueue a record for delivery. Fire-and-forget; never throws. */
+  emit(rec: StepRecord): void;
+  /** Flush buffered envelopes to the sink. */
+  flush(): Promise<void>;
+  /** Flush and release resources (called on shutdown). */
+  close(): Promise<void>;
 }
 
 // ── the bundle ──────────────────────────────────────────────────────────────
 
-/** The seven capabilities the executor holds (docs/runtime.md §2.1). */
+/** The eight capabilities the executor holds (docs/runtime.md §2.1, §3.8). */
 export interface Plugins {
   grounding: GroundingPlugin;
   memory: MemoryPlugin;
@@ -218,4 +311,5 @@ export interface Plugins {
   gateway: GatewayPlugin;
   governance: GovernancePlugin;
   pool: PoolPlugin;
+  drain: DrainPlugin;
 }

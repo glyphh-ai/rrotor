@@ -16,7 +16,8 @@ import { BasicConnections } from "./connections.js";
 import { BasicGateway } from "./gateway.js";
 import { BasicGovernance } from "./governance.js";
 import { BasicPool } from "./pool.js";
-import type { Plugins } from "./interfaces.js";
+import { NoopDrain } from "./drain.js";
+import type { DrainPlugin, Plugins } from "./interfaces.js";
 
 export * from "./interfaces.js";
 export { BasicGrounding } from "./grounding.js";
@@ -26,15 +27,19 @@ export { BasicConnections } from "./connections.js";
 export { BasicGateway } from "./gateway.js";
 export { BasicGovernance } from "./governance.js";
 export { BasicPool } from "./pool.js";
+export { NoopDrain, HttpDrain, FileDrain, BufferedDrain, drainFromEnv, toEnvelope } from "./drain.js";
+export { McpClient, connectMcp, type McpConnection, type McpToolResult, type HeaderProvider } from "./mcp.js";
 
 export interface BuildBasicPluginsOptions {
   /** A pre-seeded / shared stator. Defaults to a fresh {@link InProcessStore}. */
   store?: Stator;
   /** Model lane configuration (local endpoint, timeout, default model). */
   models?: BasicModelsOptions;
+  /** A log drain (shared across runs). Defaults to a {@link NoopDrain}. */
+  drain?: DrainPlugin;
 }
 
-/** The seven basic capabilities, wired against one shared in-process stator. */
+/** The eight basic capabilities, wired against one shared in-process stator. */
 export function buildBasicPlugins(opts: BuildBasicPluginsOptions = {}): Plugins {
   const store = opts.store ?? new InProcessStore();
   return {
@@ -45,5 +50,6 @@ export function buildBasicPlugins(opts: BuildBasicPluginsOptions = {}): Plugins 
     gateway: new BasicGateway(),
     governance: new BasicGovernance(),
     pool: new BasicPool(),
+    drain: opts.drain ?? new NoopDrain(),
   };
 }

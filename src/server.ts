@@ -13,12 +13,12 @@
  * so the probe surface has no cold-start cost of its own. It exposes:
  *
  *   GET  /healthz   liveness  — the process is up and the event loop turns
- *   GET  /readyz    readiness — the runtime's capability manifest is servable
+ *   GET  /readyz    readiness — every advertised capability seam is ready
  *   GET  /version   build identity (the pinned runtime version)
- *   POST /run       accept a rotor + inputs; 501 until the executor is wired
+ *   POST /run       accept a rotor + inputs; parse → validate → execute → return
  *
- * `startServer(port)` returns the listening `http.Server`. The executor wiring
- * (POST /run → engine) lands in the Integrate stage; this is the k8s-probe shell.
+ * `startServer(port)` returns the listening `http.Server`. The POST /run path is
+ * wired to the executor against the basic-tier plugin bundle.
  */
 
 import * as http from "node:http";
@@ -29,6 +29,13 @@ import { VERSION } from "./version.js";
 import { parseRotor, validateRotor } from "./parser/index.js";
 import { execute } from "./exec/executor.js";
 import { buildBasicPlugins } from "./plugins/index.js";
+import { statorFromEnv, statorFromEnvAsync } from "./exec/stator.js";
+import { drainFromEnv } from "./plugins/drain.js";
+import { log } from "./obs/logger.js";
+import { describe } from "./errors.js";
+import type { Stator } from "./exec/store.js";
+import type { DrainPlugin } from "./plugins/interfaces.js";
+import type { CapabilityStatus } from "./runtime/registry.js";
 import type { RotorDocument } from "./types.js";
 
 /** Coerce the POST /run `rotor` field into a document: accept an inline object
@@ -56,29 +63,37 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 
 /**
  * Readiness derives from the runtime's capability manifest (docs/runtime.md §3.8):
- * the pod is READY once it can advertise a manifest at all — i.e. the capability
- * registry is wired. Even a BASIC-tier runtime whose seams are still `planned`
- * (memory/models/etc.) is a legitimate, servable pod; it declines runs it cannot
- * satisfy via clean-refuse rather than by failing readiness. The probe reports the
- * per-capability ready/tier so an operator can see WHY a pod would refuse.
+ * the pod is READY only when every advertised seam reports `ready` — so the probe
+ * tells the truth about what the pod can serve. The per-capability ready/tier is
+ * returned so an operator can see exactly which seam is holding readiness down.
+ * (Per-rotor capability gaps are handled at run time by clean-refusal, not by the
+ * pod-level probe — see `Runtime.reconcile`.)
  */
-function readiness(rt: Runtime): { ready: boolean; capabilities: Record<string, { ready: boolean; tier: string }> } {
-  const manifest = rt.status();
+export function computeReadiness(manifest: Record<string, CapabilityStatus>): {
+  ready: boolean;
+  capabilities: Record<string, { ready: boolean; tier: string }>;
+} {
   const capabilities: Record<string, { ready: boolean; tier: string }> = {};
   for (const [name, st] of Object.entries(manifest)) {
     capabilities[name] = { ready: st.ready, tier: st.tier };
   }
-  // A manifest that exists at all means the registry negotiated — the pod can
-  // accept traffic and reconcile each rotor's `requires` at load time. Until any
-  // seam is live we still report ready:true so the pod joins the Service and
-  // serves /version + clean-refusals; flip the gate by making this depend on a
-  // required seam (e.g. `capabilities.gateway.ready`) once the executor lands.
-  const ready = Object.keys(capabilities).length > 0;
+  const names = Object.keys(capabilities);
+  const ready = names.length > 0 && names.every((n) => capabilities[n].ready);
   return { ready, capabilities };
 }
 
+function readiness(rt: Runtime): ReturnType<typeof computeReadiness> {
+  return computeReadiness(rt.status());
+}
+
 /** The request router. Kept flat and allocation-light — this is the probe path. */
-function handle(rt: Runtime, req: http.IncomingMessage, res: http.ServerResponse): void {
+function handle(
+  rt: Runtime,
+  store: Stator,
+  drain: DrainPlugin,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): void {
   const method = req.method ?? "GET";
   // Strip any query string; probes hit bare paths.
   const path = (req.url ?? "/").split("?", 1)[0];
@@ -134,18 +149,32 @@ function handle(rt: Runtime, req: http.IncomingMessage, res: http.ServerResponse
           sendJson(res, 422, { error: "invalid-rotor", detail: "rotor failed validation", errors });
           return;
         }
+        // Reconcile the rotor's capability needs against the manifest (§3.8). An
+        // unmet seam does not block the run — the step clean-refuses — but it is
+        // surfaced as a warning so the operator sees the degraded path.
+        const recon = rt.reconcile(doc);
+        if (!recon.satisfied) {
+          log.warn("rotor requires unmet capabilities", {
+            rotor: `${doc.metadata.name}@${doc.metadata.version}`,
+            unmet: recon.unmet.join(","),
+          });
+        }
         const runInputs = (inputs && typeof inputs === "object" ? inputs : {}) as Record<string, unknown>;
-        execute(doc, runInputs, buildBasicPlugins())
-          .then((result) => {
-            sendJson(res, 200, {
-              run_id: result.run_id,
-              status: result.status,
-              terminal: result.terminal,
-              outputs: result.outputs,
-              history: result.history,
-            });
-          })
+        // Pooling/affinity (§17.2–§17.4) is OPERATIONAL telemetry only (§17.6): the
+        // shared pool picks a warm instance for this request, but it NEVER affects
+        // what the run computes — the executor below does not consult it.
+        if (doc.spec.pool) rt.plugins.pool.provision(doc.spec.pool);
+        const instance = rt.plugins.pool.route(affinityHint(doc, runInputs));
+        log.info("routed", { instance, state: rt.plugins.pool.instanceState(instance) });
+        // Fungibility invariant (§17.1): the run-critical state lives in the shared
+        // stator, not this process. A fresh plugin bundle per request keeps
+        // per-run plugin state (e.g. the grounding space guard) isolated, while
+        // history/cache/facts persist across requests via the shared store — so a
+        // run recorded by one request replays from another.
+        execute(doc, runInputs, buildBasicPlugins({ store, drain }))
+          .then((result) => respondRun(res, store, doc, runInputs, result))
           .catch((err: unknown) => {
+            log.error("run error", { detail: (err as Error).message });
             sendJson(res, 500, { error: "run-error", detail: (err as Error).message });
           });
       })
@@ -155,7 +184,95 @@ function handle(rt: Runtime, req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  // POST /runs/:id/resume — continue an interrupted run (§7.14).
+  if (method === "POST" && path.startsWith("/runs/") && path.endsWith("/resume")) {
+    const runId = decodeURIComponent(path.slice("/runs/".length, -"/resume".length));
+    readBody(req)
+      .then(async (raw) => {
+        let body: { payload?: Record<string, unknown>; decision?: string; timeout?: boolean };
+        try {
+          body = raw.length ? JSON.parse(raw) : {};
+        } catch {
+          sendJson(res, 400, { error: "invalid-json", detail: "resume body must be JSON" });
+          return;
+        }
+        const saved = (await store.kvGet(`run:${runId}`)) as
+          | { doc: RotorDocument; inputs: Record<string, unknown>; interrupt: { stepId: string } }
+          | undefined;
+        if (!saved) {
+          sendJson(res, 404, { error: "no-such-run", detail: `no interrupted run ${runId}` });
+          return;
+        }
+        const payload = { ...(body.payload ?? {}), ...(body.decision ? { decision: body.decision } : {}) };
+        execute(saved.doc, saved.inputs, buildBasicPlugins({ store, drain }), {
+          runId,
+          resume: { stepId: saved.interrupt.stepId, payload, timeout: body.timeout },
+        })
+          .then((result) => respondRun(res, store, saved.doc, saved.inputs, result))
+          .catch((err: unknown) => sendJson(res, 500, { error: "run-error", detail: (err as Error).message }));
+      })
+      .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
+    return;
+  }
+
   sendJson(res, 404, { error: "not-found", detail: `no route for ${method} ${path}` });
+}
+
+/** Derive a pool routing hint from `spec.affinity` (§17.4) — telemetry only. */
+function affinityHint(doc: RotorDocument, inputs: Record<string, unknown>): import("./plugins/interfaces.js").AffinityHint | undefined {
+  const cfg = doc.spec.affinity;
+  if (!cfg?.keys?.length) return undefined;
+  const parts = cfg.keys
+    .map((k) => {
+      if (k === "tenant") return inputs.tenant;
+      if (k === "conversation") return inputs.conversation ?? inputs.conversation_id;
+      if (k === "entity") return inputs.entity;
+      return undefined;
+    })
+    .filter((v) => v !== undefined && v !== null)
+    .map(String);
+  return { key: parts.join(":") || doc.metadata.name, mode: cfg.mode };
+}
+
+/** Send a run summary; persist doc + inputs when the run paused so it can resume. */
+async function respondRun(
+  res: http.ServerResponse,
+  store: Stator,
+  doc: RotorDocument,
+  inputs: Record<string, unknown>,
+  result: import("./exec/executor.js").RunResult,
+): Promise<void> {
+  if (result.status === "interrupted" && result.interrupt) {
+    await store.kvSet(`run:${result.run_id}`, { doc, inputs, interrupt: result.interrupt });
+  }
+  log.info("run complete", {
+    run_id: result.run_id,
+    trace_id: result.trace_id,
+    rotor: `${doc.metadata.name}@${doc.metadata.version}`,
+    status: result.status,
+    terminal: result.terminal,
+    steps: result.history.length,
+    ...(result.error ? { error: result.error.name } : {}),
+  });
+  // Surface the taxonomy detail on a failed run so a caller (or an AI dev-ops agent)
+  // gets code + remediation in the response, not just a status string.
+  const error = result.error
+    ? (() => {
+        const d = describe(result.error.name);
+        return { ...result.error, category: d.category, retryable: d.retryable, severity: d.severity, remediation: d.remediation };
+      })()
+    : undefined;
+  sendJson(res, 200, {
+    run_id: result.run_id,
+    trace_id: result.trace_id,
+    status: result.status,
+    terminal: result.terminal,
+    outputs: result.outputs,
+    history: result.history,
+    interrupt: result.interrupt,
+    budget: result.budget,
+    error,
+  });
 }
 
 /** Buffer a request body with a hard cap — a probe shell should not be a sink. */
@@ -182,17 +299,58 @@ function readBody(req: http.IncomingMessage, limit = 1_000_000): Promise<string>
  * One `Runtime` is constructed per instance — it owns the capability registry the
  * readiness probe reads. Returns the `http.Server` so callers can close it.
  */
-export function startServer(port: number = DEFAULT_PORT): http.Server {
-  const rt = new Runtime();
-  const server = http.createServer((req, res) => handle(rt, req, res));
+export function startServer(
+  port: number = DEFAULT_PORT,
+  rt: Runtime = new Runtime(),
+  store: Stator = statorFromEnv(),
+  drain: DrainPlugin = drainFromEnv(),
+): http.Server {
+  const server = http.createServer((req, res) => handle(rt, store, drain, req, res));
   server.listen(port, () => {
-    console.log(`openrotor runtime listening on :${port} (v${VERSION})`);
+    log.info("runtime listening", { port, version: VERSION });
   });
   return server;
 }
 
+/**
+ * Graceful shutdown: flush the drain (within the pod's termination grace window),
+ * release the stator, then close the server. Ordered so buffered telemetry is
+ * delivered before the process exits.
+ */
+export async function shutdown(server: http.Server, store: Stator, drain: DrainPlugin): Promise<void> {
+  try {
+    await drain.close();
+  } catch (err) {
+    log.error("drain flush on shutdown failed", { detail: (err as Error).message });
+  }
+  // Async backends (pgvector) expose `shutdown()` to flush write-through before
+  // releasing the client; sync backends only have `close()`.
+  const s = store as Stator & { shutdown?: () => Promise<void> };
+  if (s.shutdown) {
+    try {
+      await s.shutdown();
+    } catch (err) {
+      log.error("stator flush on shutdown failed", { detail: (err as Error).message });
+    }
+  } else {
+    store.close?.();
+  }
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
 // Run when invoked directly (as `node dist/server.js`), not when imported.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? DEFAULT_PORT);
-  startServer(Number.isFinite(port) ? port : DEFAULT_PORT);
+  void (async () => {
+    const port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? DEFAULT_PORT);
+    // Async builder so a `pgvector` backend connects + hydrates before serving.
+    const store = await statorFromEnvAsync();
+    const drain = drainFromEnv();
+    const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain);
+    for (const sig of ["SIGTERM", "SIGINT"] as const) {
+      process.on(sig, () => {
+        log.info("shutting down", { signal: sig });
+        void shutdown(server, store, drain).then(() => process.exit(0));
+      });
+    }
+  })();
 }

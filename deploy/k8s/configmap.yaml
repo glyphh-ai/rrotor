@@ -36,3 +36,15 @@ data:
   # Observability: the serving instance id + hot/warm/cold state are operational
   # metadata ONLY (SPEC.md §17.6) — recorded for FinOps, never a control input.
   ROTOR_LOG_FORMAT: "json"
+  ROTOR_LOG_LEVEL: "info"
+
+  # Log drain (docs/observability.md): stream the StepRecord event stream to an
+  # external sink. Telemetry only, never a control predicate (§17.6). Set
+  # ROTOR_DRAIN_URL for the HTTP sink (bearer token in the Secret), or
+  # ROTOR_DRAIN_FILE for a sidecar-tailed NDJSON file. Unset → no drain.
+  ROTOR_DRAIN_URL: ""
+  # ROTOR_DRAIN_FILE: "/var/log/openrotor/drain.ndjson"
+  ROTOR_DRAIN_BATCH: "50"
+  ROTOR_DRAIN_BUFFER: "10000"
+  # Comma-separated StepRecord output field names to redact before egress.
+  ROTOR_DRAIN_REDACT: ""

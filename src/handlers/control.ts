@@ -38,12 +38,30 @@ export const waitHandler: StepHandler = {
   type: "wait",
   async execute({ step, input, env }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? { on: "approval" }) as WaitConfig;
-    // Basic tier has no external resume channel: a wait interrupts and
-    // checkpoints. A resumable run re-enters with the recorded payload (§7.14).
+    const resume = input.__resume as { timeout?: boolean } | undefined;
+
+    // No resume payload → pause and checkpoint the completed prefix (§7.14).
+    if (!resume) {
+      return {
+        output: { resumed_with: null, awaiting: cfg.on, token: cfg.token, value: input.draft ?? input.value },
+        frames: [{ type: "done", logical_tick: env.logical_tick, data: { awaiting: cfg.on } }],
+        status: "interrupted",
+      };
+    }
+
+    // Resumed. A timeout resume routes via on_timeout (select_next); otherwise the
+    // run continues with the injected payload.
+    if (resume.timeout) {
+      return {
+        output: { timedOut: true, awaiting: cfg.on },
+        frames: [{ type: "done", logical_tick: env.logical_tick, data: { timedOut: true } }],
+        status: "ok",
+      };
+    }
     return {
-      output: { resumed_with: null, awaiting: cfg.on, token: cfg.token, value: input.draft ?? input.value },
-      frames: [{ type: "done", logical_tick: env.logical_tick, data: { awaiting: cfg.on } }],
-      status: "interrupted",
+      output: { resumed: true, awaiting: cfg.on, value: input.value ?? input.payload ?? input.draft },
+      frames: [{ type: "done", logical_tick: env.logical_tick, data: { resumed: true } }],
+      status: "ok",
     };
   },
 };
@@ -65,7 +83,7 @@ export const planHandler: StepHandler = {
     }
     const plan = { op: picked.class, executor: cfg.executor };
     // Execute deterministically over the exact store where the op is a closed op.
-    const r = plugins.memory.executeOp(picked.class, { entity: input.entity, slot: input.slot }, env.space_id);
+    const r = await plugins.memory.executeOp(picked.class, { entity: input.entity, slot: input.slot }, env.space_id);
     const frames: Frame[] = [{ type: "parse", data: { plan } }, { type: "done" }];
     return { output: { plan, result: { rows: r.rows, count: r.count } }, frames, status: "ok" };
   },

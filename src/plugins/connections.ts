@@ -11,6 +11,7 @@
  */
 
 import type { CapabilityStatus } from "../runtime/registry.js";
+import { RotorError } from "../errors.js";
 import type {
   ConnectionsPlugin,
   DispatchResult,
@@ -53,13 +54,16 @@ export class BasicConnections implements ConnectionsPlugin {
       const result = await handler(args);
       return { ok: true, result };
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      // Never raises (§3.4): normalize to the taxonomy and surface `code: detail`
+      // so a caller/log sees the code without a separate lookup.
+      const err = RotorError.from(e, "E_TOOL");
+      return { ok: false, error: `${err.code}: ${err.message}` };
     }
   }
 
   async invoke(method: string, args: Row): Promise<unknown> {
     const handler = this.handlers.get(method);
-    if (!handler) throw new Error(`E_NO_TOOL: ${method}`);
+    if (!handler) throw new RotorError("E_NO_TOOL", method, { context: { method } });
     return await handler(args);
   }
 
@@ -98,7 +102,19 @@ export class BasicConnections implements ConnectionsPlugin {
       () => ({ keys: [] }),
       { name: "keys", description: "List memory keys (empty on the bare box).", inputSchema: { type: "object" } },
     );
-    // `tool.app` loopback stubs — no-ops until a live client attaches.
+    this.register(
+      "compute",
+      (args) => ({ result: computeArith(String(args.expr ?? args.text ?? "")) }),
+      { name: "compute", description: "Evaluate a closed arithmetic expression (deterministic).", inputSchema: { type: "object", properties: { expr: { type: "string" } } } },
+    );
+    this.register(
+      "concat",
+      (args) => ({ text: (Array.isArray(args.parts) ? args.parts : []).map((p) => String(p)).join(String(args.sep ?? "")) }),
+      { name: "concat", description: "Join string parts deterministically.", inputSchema: { type: "object" } },
+    );
+    // `tool.app` methods are LOOPBACK-only (§7.16) — nothing dials into a personal
+    // machine. They echo a deterministic applied result; a live client overrides
+    // them with real UI effects.
     for (const m of [
       "panels.open",
       "panels.switch",
@@ -107,10 +123,41 @@ export class BasicConnections implements ConnectionsPlugin {
       "apps.callTool",
       "apps.install",
     ]) {
-      this.register(m, (args) => ({ method: m, params: args, applied: false }), {
+      this.register(m, (args) => ({ method: m, params: args, applied: true, loopback: true }), {
         name: m,
-        description: `App method ${m} (stub; a live client overrides).`,
+        description: `App method ${m} (loopback; a live client applies real effects).`,
       });
     }
   }
+}
+
+/** A closed, deterministic arithmetic evaluator — `+ - * /` over numbers, no
+ *  `eval`, no identifiers. Returns `null` on anything it does not recognize. */
+function computeArith(expr: string): number | null {
+  const tokens = expr.match(/\d+(?:\.\d+)?|[+\-*/()]/g);
+  if (!tokens || tokens.length === 0) return null;
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const eat = () => tokens[pos++];
+  const parseExpr = (): number => {
+    let v = parseTerm();
+    while (peek() === "+" || peek() === "-") v = eat() === "+" ? v + parseTerm() : v - parseTerm();
+    return v;
+  };
+  const parseTerm = (): number => {
+    let v = parseFactor();
+    while (peek() === "*" || peek() === "/") v = eat() === "*" ? v * parseFactor() : v / parseFactor();
+    return v;
+  };
+  const parseFactor = (): number => {
+    if (peek() === "(") {
+      eat();
+      const v = parseExpr();
+      if (peek() === ")") eat();
+      return v;
+    }
+    return Number(eat());
+  };
+  const result = parseExpr();
+  return Number.isFinite(result) ? result : null;
 }

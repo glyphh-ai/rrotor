@@ -12,6 +12,7 @@
  */
 
 import type { CapabilityStatus } from "./runtime/registry.js";
+import type { MemoryTier } from "./exec/facts.js";
 
 export type { CapabilityStatus } from "./runtime/registry.js";
 
@@ -98,6 +99,10 @@ export interface RotorSpecBody {
   assurance?: AssuranceConfig;
   /** Document-level default cross-run result-cache policy (§5.7). */
   cache?: CacheConfig;
+  /** Prior `metadata.version`s this document is replay-compatible with (§16.3
+   *  patch gates). A run recorded on a listed version replays cleanly against this
+   *  edited document; an unlisted version fails with `E_REPLAY_DIVERGENCE`. */
+  patch?: string[];
   /** Warm-pool intent — runtime-optional (§17.3). */
   pool?: PoolConfig;
   /** Warm-instance routing preference (§17.4). */
@@ -248,6 +253,9 @@ export interface AccessConfig {
   stator?: StatorAccess;
   connections?: ConnectionAccessScope[];
   on_ungranted?: OnUngranted;
+  /** Field names redacted from step inputs AND outputs before they enter the
+   *  Context / event history (§13.4). Deny-by-default at the field grain. */
+  redact?: string[];
 }
 
 // ── spec.assurance (§14) ───────────────────────────────────────────────────
@@ -467,6 +475,11 @@ export interface WriteConfig {
   mode?: "raw" | "absorb";
   key?: string;
   speaker?: string;
+  /** Explicit retention tier for the facts this step writes (docs/memory.md):
+   *  `long` lifelong, `mid` within a session window, `short` this session only.
+   *  Deterministic — the spec author's own lever. Overrides the absorb enricher's
+   *  per-fact default. Omit to let the enricher decide (directive/self → long). */
+  tier?: MemoryTier;
 }
 
 export type SqlOp =
@@ -764,6 +777,8 @@ export interface StepRecord {
   idempotency_key: string;
   /** The HDC space bound against (§15.4), where applicable. */
   space_id?: string;
+  /** The document version this record was produced under (§16.3 run-pinning). */
+  definitionVersion?: string;
   /** The authenticated caller (§11) — audit trail. */
   principal?: Principal;
   /** The rotor instance (§11) — attribution. */
@@ -823,6 +838,10 @@ export interface RunContext {
  */
 export interface RunContextEnvelope {
   run_id: string;
+  /** The session this run belongs to (docs/memory.md retention tiers). Scopes
+   *  short/mid-tier fact writes; `undefined` ⇒ session-agnostic (permissive
+   *  recall, backward compatible). One runtime engagement = one session. */
+  session?: string;
   /** The document version this run is pinned to (§16.3). */
   definitionVersion: string;
   /** Monotonic logical step counter (§5.3). */

@@ -21,7 +21,7 @@ export interface Capability {
   status(): CapabilityStatus;
 }
 
-/** The seven capability seams (docs/runtime.md §3). */
+/** The eight capability seams (docs/runtime.md §3, §3.8). */
 export const CAPABILITY_NAMES = [
   "grounding",
   "memory",
@@ -30,6 +30,7 @@ export const CAPABILITY_NAMES = [
   "gateway",
   "governance",
   "pool",
+  "drain",
 ] as const;
 
 export type CapabilityName = (typeof CAPABILITY_NAMES)[number];

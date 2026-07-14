@@ -1,0 +1,53 @@
+# A deterministic looping rotor for attention-budget tests. With input
+# `loop: yes` the branch routes back to `a` forever, so the run is bounded only
+# by the §10 attention budget. The `esc` step is statically reachable (via the
+# `loop: never` case) so the graph validates, and is the target when the budget
+# is exhausted with `on_exhausted: escalate`.
+apiVersion: rotor.glyphh.ai/v0.1
+kind: Rotor
+metadata:
+  name: looping
+  version: 0.1.0
+spec:
+  inputs:
+    - name: loop
+      type: string
+      required: true
+
+  attention:
+    budget:
+      revolutions: 3
+      on_exhausted: stop
+
+  entry: a
+  steps:
+    - id: a
+      type: prompt
+      in: { q: $.inputs.loop }
+      out: { text: string }
+      config:
+        blocks:
+          - name: system
+            text: "loop step"
+        max_tokens: 64
+      next: b
+
+    - id: b
+      type: branch
+      in: {}
+      out: {}
+      config:
+        cases:
+          - { when: "$.inputs.loop == 'yes'", next: a }
+          - { when: "$.inputs.loop == 'never'", next: esc }
+        default: end
+
+    - id: esc
+      type: escalate
+      in: {}
+      out: { lane: string }
+      config:
+        trigger: budget-exceeded
+        to: frontier
+        fallback: human
+      next: end
