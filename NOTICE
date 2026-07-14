@@ -1,11 +1,13 @@
-RotorSpec
-Copyright 2026 Glyphh AI LLC
+OpenRotor / RotorSpec
+Copyright (c) 2026 Glyphh AI LLC. All rights reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License"); you may not use
-these files except in compliance with the License. See the LICENSE file.
+PROPRIETARY AND CONFIDENTIAL. This repository and all of its contents are the
+proprietary property of Glyphh AI LLC and are licensed under the Glyphh
+Proprietary License (see the LICENSE file). This is a temporary, all-rights-
+reserved license; Glyphh may re-license all or part of this work under different
+terms in the future.
 
-RotorSpec is an open standard. The reference executor "glyphh-rotor" and its
-HDC grounding implementation are SEPARATE, proprietary works and are NOT
-licensed under Apache-2.0. This open repository does not practice the
-patent-pending grounding method (U.S. Patent Application No. 63/969,729); a
-conformant implementation may abstract or stub the `hdc.map` step.
+The HDC grounding method is the subject of a pending U.S. patent application
+(No. 63/969,729). This repository abstracts or stubs the `hdc.map` step and does
+not disclose the patented method; the production grounding implementation is a
+separate proprietary work.

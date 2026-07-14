@@ -1,9 +1,10 @@
 {
   "name": "openrotor",
   "version": "0.0.1",
-  "description": "OpenRotor — the open runtime for RotorSpec, the standard for deterministic AI agent loops.",
+  "description": "OpenRotor — the runtime for RotorSpec, the standard for deterministic AI agent loops.",
   "type": "module",
-  "license": "Apache-2.0",
+  "private": true,
+  "license": "UNLICENSED",
   "bin": {
     "openrotor": "dist/cli.js"
   },
