@@ -277,6 +277,37 @@ describe("tool error + edge paths", () => {
   });
 });
 
+describe("wired into a live run via buildBasicPlugins({ tools })", () => {
+  const writeDoc = (mode: string, path: string): RotorDocument =>
+    ({
+      apiVersion: "rotor.glyphh.ai/v0.1",
+      kind: "Rotor",
+      metadata: { name: "w", version: "0.1.0", labels: { mode } },
+      spec: {
+        entry: "w",
+        steps: [{ id: "w", type: "tool", in: {}, out: {}, idempotency: "auto", config: { flavor: "mcp", name: "file.write", args: { path, content: "wired" } }, next: "end" }],
+      },
+    }) as unknown as RotorDocument;
+
+  it("code mode: the rotor's file.write actually lands a file", async () => {
+    const store = new InProcessStore();
+    rmSync(join(root, "wired.txt"), { force: true });
+    const plugins = buildBasicPlugins({ store, tools: { root, mode: "code" } });
+    const r = await execute(writeDoc("code", "wired.txt"), {}, plugins);
+    expect(r.status).toBe("ok");
+    expect(existsSync(join(root, "wired.txt"))).toBe(true);
+  });
+
+  it("chat mode: file.write is not installed, so the step fails and nothing is written", async () => {
+    const store = new InProcessStore();
+    rmSync(join(root, "wired2.txt"), { force: true });
+    const plugins = buildBasicPlugins({ store, tools: { root, mode: "chat" } });
+    const r = await execute(writeDoc("chat", "wired2.txt"), {}, plugins);
+    expect(r.status).toBe("failed"); // E_NO_TOOL — the tool doesn't exist in chat mode
+    expect(existsSync(join(root, "wired2.txt"))).toBe(false);
+  });
+});
+
 describe("SDK surface — defineTool", () => {
   it("a user-defined tool installs and dispatches behind the same contract", async () => {
     const shout = defineTool({

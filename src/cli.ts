@@ -21,6 +21,7 @@ import { VERSION } from "./version.js";
 import { describe, errorCatalog } from "./errors.js";
 import { statorFromEnvAsync } from "./exec/stator.js";
 import { traceId } from "./obs/trace.js";
+import { toolModeFromLabels } from "./tools/index.js";
 import type { RotorDocument, StepRecord } from "./types.js";
 
 /** `openrotor validate <file>` — L1 parse + JSON Schema + static graph checks.
@@ -103,7 +104,10 @@ async function runRotorFile(file: string | undefined, rest: string[]): Promise<n
   // Persist to the env-configured stator so `openrotor support <run_id>` can pull
   // the run's tape afterward (durable backends only; in-memory is per-process).
   const store = await statorFromEnvAsync();
-  const plugins = buildBasicPlugins({ store });
+  // Install the tool stdlib for this run, gated by the rotor's declared mode. The
+  // workspace sandbox is the current directory.
+  const mode = toolModeFromLabels(doc.metadata.labels);
+  const plugins = buildBasicPlugins({ store, tools: { root: process.cwd(), mode } });
 
   let result;
   try {

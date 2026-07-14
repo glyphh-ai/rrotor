@@ -18,6 +18,7 @@ import { BasicGovernance } from "./governance.js";
 import { BasicPool } from "./pool.js";
 import { NoopDrain } from "./drain.js";
 import type { DrainPlugin, Plugins } from "./interfaces.js";
+import { installStdlib, kvFromStore, type Capability, type ModeName } from "../tools/index.js";
 
 export * from "./interfaces.js";
 export { BasicGrounding } from "./grounding.js";
@@ -37,12 +38,15 @@ export interface BuildBasicPluginsOptions {
   models?: BasicModelsOptions;
   /** A log drain (shared across runs). Defaults to a {@link NoopDrain}. */
   drain?: DrainPlugin;
+  /** Install the tool standard library into `connections`, gated by permission
+   *  mode. Off by default (bare bundle). `root` is the workspace sandbox. */
+  tools?: { root: string; mode?: ModeName; granted?: ReadonlySet<Capability> };
 }
 
 /** The eight basic capabilities, wired against one shared in-process stator. */
 export function buildBasicPlugins(opts: BuildBasicPluginsOptions = {}): Plugins {
   const store = opts.store ?? new InProcessStore();
-  return {
+  const plugins: Plugins = {
     grounding: new BasicGrounding(store),
     memory: new BasicMemory(store),
     models: new BasicModels(opts.models),
@@ -52,4 +56,14 @@ export function buildBasicPlugins(opts: BuildBasicPluginsOptions = {}): Plugins 
     pool: new BasicPool(),
     drain: opts.drain ?? new NoopDrain(),
   };
+  if (opts.tools) {
+    installStdlib(plugins.connections, {
+      root: opts.tools.root,
+      memory: plugins.memory,
+      kv: kvFromStore(store),
+      mode: opts.tools.mode,
+      granted: opts.tools.granted,
+    });
+  }
+  return plugins;
 }

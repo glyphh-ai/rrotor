@@ -33,6 +33,12 @@ import { statorFromEnv, statorFromEnvAsync } from "./exec/stator.js";
 import { drainFromEnv } from "./plugins/drain.js";
 import { log } from "./obs/logger.js";
 import { describe } from "./errors.js";
+import { toolModeFromLabels } from "./tools/index.js";
+
+/** The per-session workspace sandbox for fs/exec/git tools (docs/hosting.md §3). */
+function workspaceRoot(): string {
+  return process.env.ROTOR_WORKSPACE ?? process.cwd();
+}
 import type { Stator } from "./exec/store.js";
 import type { DrainPlugin } from "./plugins/interfaces.js";
 import type { CapabilityStatus } from "./runtime/registry.js";
@@ -171,7 +177,7 @@ function handle(
         // per-run plugin state (e.g. the grounding space guard) isolated, while
         // history/cache/facts persist across requests via the shared store — so a
         // run recorded by one request replays from another.
-        execute(doc, runInputs, buildBasicPlugins({ store, drain }))
+        execute(doc, runInputs, buildBasicPlugins({ store, drain, tools: { root: workspaceRoot(), mode: toolModeFromLabels(doc.metadata.labels) } }))
           .then((result) => respondRun(res, store, doc, runInputs, result))
           .catch((err: unknown) => {
             log.error("run error", { detail: (err as Error).message });
@@ -204,7 +210,7 @@ function handle(
           return;
         }
         const payload = { ...(body.payload ?? {}), ...(body.decision ? { decision: body.decision } : {}) };
-        execute(saved.doc, saved.inputs, buildBasicPlugins({ store, drain }), {
+        execute(saved.doc, saved.inputs, buildBasicPlugins({ store, drain, tools: { root: workspaceRoot(), mode: toolModeFromLabels(saved.doc.metadata.labels) } }), {
           runId,
           resume: { stepId: saved.interrupt.stepId, payload, timeout: body.timeout },
         })

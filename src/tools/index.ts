@@ -75,6 +75,13 @@ export function kvFromStore(store: { kvGet(k: string): Promise<unknown>; kvSet(k
   return { get: (k) => store.kvGet(k), set: (k, v) => store.kvSet(k, v) };
 }
 
+/** The permission mode a rotor declares via `metadata.labels.mode`. The rotor drives
+ *  it; default `code` (the full local workbench). */
+export function toolModeFromLabels(labels?: Record<string, string>): ModeName {
+  const m = labels?.mode;
+  return m === "chat" || m === "cowork" || m === "code" ? m : "code";
+}
+
 // ── SDK surface: define your own tools behind the same contract ─────────────────
 
 /** Typed constructor for a user-defined tool (identity — the value IS the spec). */
