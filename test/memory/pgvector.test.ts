@@ -78,12 +78,51 @@ describe("pgvector stator — durable hydrate across a restart", () => {
   });
 });
 
+describe("pgvector stator — live-read edge cases", () => {
+  it("misses read empty, the latest ordinal is reported, and flush is a no-op", async () => {
+    const store = await PgVectorStore.create({ client: await pglite() });
+    // Misses across the surface.
+    expect(await store.lookupFact("nobody", "role")).toBeUndefined();
+    expect(await store.kvGet("absent")).toBeUndefined();
+    expect(await store.cache.get("absent", 0)).toBeUndefined();
+    expect(await store.history.lookup("nope", "s", 0)).toBeUndefined();
+    expect(await store.history.lastAttempt("nope", "s")).toBe(-1);
+    // No sessions yet ⇒ latest ordinal is 0.
+    expect(await store.sessionOrdinal()).toBe(0);
+    // Two sessions ⇒ latest is the max.
+    await store.touchSession("a");
+    await store.touchSession("b");
+    expect(await store.sessionOrdinal()).toBe(1);
+    await store.flush(); // no-op with live writes
+  });
+});
+
+describe("pgvector stator — live cross-pod visibility (mirror dropped)", () => {
+  it("a second store already running sees the first's committed writes — no restart", async () => {
+    const db = await pglite();
+    // Two live stores over the SAME database (two pods sharing one Postgres).
+    const podA = await PgVectorStore.create({ client: db });
+    const podB = await PgVectorStore.create({ client: db });
+
+    // B sees nothing before A writes.
+    expect(await podB.lookupFact("shared", "x")).toBeUndefined();
+
+    // A writes; B — already constructed, never restarted — reads it live.
+    await podA.writeFacts([{ entity: "shared", role: "x", filler: "y", key: "shared:x", is_current: true, tick: 0 }]);
+    expect((await podB.lookupFact("shared", "x"))?.filler).toBe("y");
+
+    // And the reverse: B's write is visible to A live.
+    await podB.addTurn("a turn written by pod B");
+    expect(await podA.turns()).toContain("a turn written by pod B");
+  });
+});
+
 describe("pgvector stator — event history, cache and kv are durable", () => {
   it("hydrates the run tape, result cache and kv across a restart", async () => {
     const db = await pglite();
     const s1 = await PgVectorStore.create({ client: db });
     await s1.history.append(rec("r1", "a", 0));
-    s1.history.append(rec("r1", "a", 1)); // a retry
+    await s1.history.append(rec("r1", "a", 1)); // a retry
     expect(await s1.history.lastAttempt("r1", "a")).toBe(1);
     expect(await s1.history.lookup("r1", "a", 0)).toBeDefined();
     await s1.cache.put("k1", { answer: 42 }, { scope: "rotor" });
@@ -112,19 +151,17 @@ describe("pgvector stator — lifecycle", () => {
     await expect(db.query("SELECT 1")).rejects.toBeDefined(); // client is closed
   });
 
-  it("flush surfaces a persistence error instead of swallowing it", async () => {
+  it("surfaces a persistence error instead of swallowing it (live writes)", async () => {
     const db = await pglite();
-    // A client that fails only the facts insert — DDL + hydrate still succeed.
+    // A client that fails only the facts insert — DDL still succeeds.
     const flaky: PgLike = {
       query: (sql, params) => (sql.includes("INSERT INTO facts") ? Promise.reject(new Error("boom")) : db.query(sql, params)),
       exec: (sql) => db.exec!(sql),
       close: () => db.close!(),
     };
     const store = await PgVectorStore.create({ client: flaky });
-    await store.writeFacts([{ entity: "a", role: "b", filler: "c", is_current: true, tick: 0 }]);
-    // Mirror still has it (control path unaffected); the durability error surfaces on flush.
-    expect((await store.lookupFact("a", "b"))?.filler).toBe("c");
-    await expect(store.flush()).rejects.toThrow(/boom/);
+    // With live reads/writes there is no mirror to hide it: the write itself rejects.
+    await expect(store.writeFacts([{ entity: "a", role: "b", filler: "c", is_current: true, tick: 0 }])).rejects.toThrow(/boom/);
   });
 });
 

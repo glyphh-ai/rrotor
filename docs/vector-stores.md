@@ -7,10 +7,12 @@ and only for the *index*.
 
 **Status:** the Postgres + pgvector backend is **built** —
 `src/exec/pgvector-store.ts`, selected by `ROTOR_STATOR_BACKEND=pgvector`, tested
-against an in-process PGlite instance (`test/memory/pgvector.test.ts`). Facts (with
-`tier`/`session`), the sessions ordinal table, turns (with an `hnsw`-indexed
-embedding), the event history, result cache, and kv are all durable and hydrate on
-restart. HDC-cortex persistence remains the one deferred piece (see below).
+against both in-process PGlite and a real Postgres (`test/memory/pgvector.test.ts`,
+`pgvector-real.test.ts`). Facts (with `tier`/`session`), the sessions ordinal table,
+turns (with an `hnsw`-indexed embedding), the event history, result cache, and kv are
+all durable, and reads/writes are **live** (multiple pods sharing one database see
+each other's writes mid-run). HDC-cortex persistence remains the one deferred piece
+(see below).
 
 ## Two vectors, two very different needs
 
@@ -57,48 +59,45 @@ ROTOR_EMBED_DIM      = turn-embedding dimension (default 256)
 ```
 
 `createStator()` builds the **synchronous** backends (`memory`, `sqlite`).
-`pgvector` is async — it connects and hydrates before serving — so it is built by
-`initStator()` / `statorFromEnvAsync()`, which the server entrypoint awaits.
+`pgvector` is async — it connects and creates its schema before serving — so it is
+built by `initStator()` / `statorFromEnvAsync()`, which the server entrypoint awaits.
 `createStator({ backend: "pgvector" })` throws rather than silently degrading a
 durable backend to in-process.
 
-## Concurrency: the hydrate-then-flush mirror
+## Concurrency: live reads (mirror dropped)
 
-The `Stator` interface is synchronous (better-sqlite3 is), but every Postgres driver
-is async. Rather than make the whole control plane async, the pgvector backend keeps
-a synchronous **in-memory mirror** — byte-identical to `InProcessStore`, running the
-SAME pure fact engine (`facts.ts`) — as the authoritative state *during a run*:
+The `Stator` interface is now **async** (E6), so `PgVectorStore` reads and writes
+**live** against Postgres — there is no in-memory mirror:
 
-- `PgVectorStore.create()` **hydrates** the mirror from Postgres (facts, sessions,
-  turns, history, cache, kv) before the sync run loop starts.
-- Each mutation updates the mirror synchronously **and** enqueues an async
-  write-through to Postgres, serialized on a promise chain (a single PGlite
-  connection requires it; it also preserves write order). Errors are latched, never
-  thrown into the synchronous caller — durability is strictly off the control path.
-- `flush()` is the durability barrier (awaits the chain, re-raises the first error);
-  `shutdown()` flushes then releases the client.
+- Every fact query fetches the current rows and runs the SAME pure closed-op engine
+  (`facts.ts`) the other backends use, so behaviour is byte-identical.
+- Every write (`writeFacts`/`addTurn`/`touchSession`/`kvSet`/`history.append`/
+  `cache.put`) is awaited straight to Postgres; a persistence error surfaces at the
+  write call rather than being deferred. `flush()` is a no-op kept for symmetry.
+- `touchSession` assigns its ordinal atomically at insert time
+  (`ON CONFLICT (id) DO NOTHING`), so a pod that loses the race reads the winner's
+  ordinal.
 
-**Determinism is preserved:** reads/writes never await, so golden replay behaves
-exactly as on the other backends. Postgres is durability + cross-pod sharing only.
-**Consistency:** single-tenant (one runtime = one user, docs/memory.md), so the
-mirror is authoritative and Postgres is eventually-consistent across pods. True
-multi-pod concurrent writers would need an async `Stator` interface — a deliberately
-deferred, larger change.
+**Multi-pod, tested:** two live stores over one database see each other's committed
+writes mid-run — no restart (`test/memory/pgvector.test.ts`, "live cross-pod
+visibility"). **Determinism is preserved** because it never depended on *where* a
+read came from: golden replay returns recorded outputs from the tape (§5.4) and never
+re-reads the stator, so live reads on fresh execution don't perturb it.
 
 ### What the `pgvector` backend implements
 
 The full `Stator` surface the SQLite store satisfies, plus honest dim-cap handling —
-all durable and hydrated on restart (`test/memory/pgvector.test.ts`):
+all live over Postgres (`test/memory/pgvector.test.ts`):
 
 - `writeFacts` / `snapshotFacts` / `query` / `lookupFact` / `fillers` — facts, with
-  `tier`/`session` columns and the `sessions` ordinal table (parity with SQLite; the
-  same pure engine runs the closed ops, so supersession/`prev` behave identically).
+  `tier`/`session` columns and the `sessions` ordinal table (parity with SQLite; each
+  read fetches the current rows and runs the same pure engine, so supersession/`prev`
+  behave identically).
 - `turns` / `addTurn` — the embedding corpus, in an `hnsw`-indexed `vector` column.
-  `semanticRecallDb()` is the async large-corpus ANN path (`embedding <=> query`);
-  the in-run recall still uses the pure in-memory cosine (§7.7) so it stays
-  deterministic.
+  `semanticRecallDb()` is the large-corpus ANN path (`embedding <=> query`); the
+  short-term-recall path (§7.7) reads turns live and runs the pure cosine.
 - `history` / `cache` / `kv` — the append-only StepRecord log, result cache, and kv
-  scratch, all persisted and rehydrated.
+  scratch, all read/written live.
 - **Dim validation at construction:** if the embedding dim exceeds the `hnsw`/
   `ivfflat` cap (2000), the `vector` column is created **without** an index and ANN
   falls back to an exact scan (`vectorIndexed === false`). Never truncate; never
@@ -141,8 +140,8 @@ the backend on real Postgres.
   next refinement.
 - **Which stores beyond pgvector** — Qdrant/Weaviate each become a `Stator` backend
   behind the same seam. Pick by what glyphh deployments actually run.
-- **Multi-pod concurrent writers** — the `Stator` interface is now **async** (E6), so
-  the prerequisite is in place. The remaining step is a pgvector *live-read mode* that
-  reads facts/history from Postgres per query instead of from the hydrated mirror, so
-  pods sharing one database see each other's writes mid-run. The mirror is
-  single-tenant-authoritative until then.
+- **Multi-pod concurrent writers** — done (E6 async interface + E7 live reads): pods
+  sharing one database see each other's committed writes mid-run. A remaining
+  refinement is wrapping each `writeFacts` supersession+insert in a transaction for
+  strict atomicity under heavy concurrent contention (today it is two awaited
+  statements; fine for single-writer and light contention).

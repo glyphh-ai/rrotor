@@ -924,10 +924,27 @@ hydrated in-memory mirror.
 **Acceptance:** `npm run verify` = **216 passed + 3 skipped** (no server); **219
 passed** with real Postgres. Coverage 85.1/75/90 — floor holds.
 
-Follow-up (not blocking): pgvector *live-read mode* — drop the hydrate-everything
-mirror and read facts/history live from Postgres per query, so multiple pods sharing
-one database see each other's writes mid-run. The async interface (E6) is the
-prerequisite; this is a clean, scoped change on top of it.
+### E7 — pgvector live-read mode (mirror dropped)  ✅
+
+Built on E6: `PgVectorStore` now reads and writes **live** against Postgres — the
+in-memory mirror, hydrate, and write-through queue are gone. Every fact query fetches
+the current rows and runs the same pure closed-op engine (facts.ts); every write is
+awaited straight to Postgres.
+
+- [x] Removed the mirror (`recs`/`cacheMap`/`factRows`/`kvMap`/`turnLog`/
+      `sessionMap`), `hydrate()`, and the `enqueue`/`flushChain` machinery.
+- [x] All reads (facts/history/cache/kv/turns/sessions) are live SQL; `flush()` is a
+      no-op (writes are awaited) and errors surface at the write call, not deferred.
+- [x] `touchSession` assigns the ordinal atomically at insert time
+      (`ON CONFLICT DO NOTHING`), so a losing pod reads the winner's ordinal.
+- [x] **The payoff, tested:** two live stores over one database see each other's
+      committed writes mid-run — no restart. Determinism still holds (golden replay
+      reads the tape, never the live stator).
+
+**Acceptance (`test/memory/pgvector.test.ts`, +2 tests → 12; also on real Postgres):**
+cross-pod live visibility (pod A writes → pod B, already running, reads it; and the
+reverse); live-read edge cases (misses, latest-ordinal, flush no-op); the persistence
+error now surfaces at the write. **221 total green**, coverage 85/75/90.
 
 ---
 
