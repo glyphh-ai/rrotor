@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# glyphh/base@1.0.0 — THE single-model base rotor.
+#
+# One model, one role ("assistant"). The frictionless default: recall → respond
+# (grounded) → deliver. No planner/coder/evaluator split — the single bound model
+# does the turn, grounded against the stator, and the terminal assert refuses on an
+# empty grounded cell rather than inventing. The planning rotor (glyphh/planning) is
+# the multi-role loop for harder work.
+#
+# The step's `config.model: assistant` is a ROLE name; the control plane binds it to
+# a concrete endpoint via the model registry (control surface).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rotor.glyphh.ai/v0.1
+kind: Rotor
+metadata:
+  name: base
+  version: 1.0.0
+  namespace: glyphh
+  description: The single-model base loop — grounded respond → deliver. One model, one role.
+  labels:
+    tier: base
+    domain: general
+
+spec:
+  inputs:
+    - name: prompt
+      type: string
+      required: true
+      description: The user turn to satisfy.
+    - name: entity
+      type: string
+      description: Optional memory entity to ground against.
+
+  state:
+    schema:
+      answer: { type: string }
+    reducers:
+      answer: last-write-wins
+
+  entry: compose
+
+  steps:
+    # ── compose ────────────────────────────────────────────────────────────────
+    # Build the bounded prompt (§7.1): the stable system block + the user turn.
+    # `cache.breakpoints` marks the system block for prefix caching (§8).
+    - id: compose
+      type: prompt
+      in: { question: $.inputs.prompt, entity: $.inputs.entity }
+      out: { text: string }
+      config:
+        blocks:
+          - name: system
+            text: "You are Glyphh, a grounded assistant. Answer directly and concisely; if a claim is not supported by known facts, say what you don't know."
+        cache: { breakpoints: [system] }
+      next: respond
+
+    # ── respond ──────────────────────────────────────────────────────────────
+    # The single bound model answers (§7.2). `config.model: assistant` is the ROLE
+    # the control plane binds to a concrete endpoint via the model registry.
+    - id: respond
+      type: model
+      in: { text: $.steps.compose.text, entity: $.inputs.entity }
+      out: { text: string }
+      config:
+        model: assistant
+        lane: local
+        max_tokens: 2048
+      next: deliver
+
+    # ── deliver ──────────────────────────────────────────────────────────────
+    # Terminal (§7.9): assert the model's answer (present → asserted), or refuse.
+    - id: deliver
+      type: assert
+      in: { filler: $.steps.respond.text }
+      out: { text: string }
+      config:
+        refusal: "I don't know."
+      next: end
+
+  outputs:
+    - name: answer
+      from: $.state.answer

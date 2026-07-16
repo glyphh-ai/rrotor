@@ -17,6 +17,7 @@ import { executeToEvents, type StreamContext } from "./transport/run.js";
 import type { WireEvent } from "./transport/events.js";
 import { parseRotor } from "./parser/index.js";
 import { drainFromEnv } from "./plugins/index.js";
+import type { BasicModelsOptions } from "./plugins/models.js";
 import { initStator } from "./exec/stator.js";
 import type { Stator } from "./exec/store.js";
 import type { RotorDocument } from "./types.js";
@@ -29,6 +30,8 @@ export interface EmbedOptions {
   workspace?: string;
   /** Optional memory-scoping session id. */
   session?: string;
+  /** Model config — the control surface (role→endpoint registry) a control plane injects. */
+  models?: BasicModelsOptions;
 }
 
 /**
@@ -48,6 +51,7 @@ export async function runInProcess(
     drain: drainFromEnv(),
     workspace: opts.workspace ?? cwd(),
     ...(opts.session ? { session: opts.session } : {}),
+    ...(opts.models ? { models: opts.models } : {}),
   };
   await executeToEvents(doc, inputs, ctx, emit);
 }

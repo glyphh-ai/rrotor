@@ -13,6 +13,7 @@
 
 import { execute, deriveRunId } from "../exec/executor.js";
 import { buildBasicPlugins } from "../plugins/index.js";
+import type { BasicModelsOptions } from "../plugins/models.js";
 import { toolModeFromLabels } from "../tools/index.js";
 import { traceId } from "../obs/trace.js";
 import { log } from "../obs/logger.js";
@@ -30,12 +31,14 @@ import type { CapabilityStatus } from "../runtime/registry.js";
 import type { RotorDocument, StepRecord } from "../types.js";
 
 /** Shared dependencies a stream needs: the durable store, the base telemetry drain,
- *  the tool sandbox root, and an optional memory-scoping session id. */
+ *  the tool sandbox root, an optional memory-scoping session id, and the model config
+ *  (the control surface — role→endpoint registry the control plane injects). */
 export interface StreamContext {
   store: Stator;
   drain: DrainPlugin;
   workspace: string;
   session?: string;
+  models?: BasicModelsOptions;
 }
 
 /** Called once per event as a run streams. */
@@ -111,6 +114,7 @@ async function streamExecution(
     store: ctx.store,
     drain,
     tools: { root: ctx.workspace, mode: toolModeFromLabels(doc.metadata.labels) },
+    ...(ctx.models ? { models: ctx.models } : {}),
   });
 
   try {

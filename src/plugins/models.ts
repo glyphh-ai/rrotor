@@ -21,7 +21,31 @@ import type {
   ModelsPlugin,
 } from "./interfaces.js";
 
+/**
+ * A resolved binding for one rotor model ROLE — the control surface a control plane
+ * populates. A step's `config.model` is a role name (e.g. `planner`); the runtime looks
+ * it up here to get the concrete endpoint, model id, and auth. Every endpoint speaks the
+ * OpenAI chat-completions wire (a gateway normalizes providers like Anthropic to it), so
+ * the runtime stays provider-agnostic.
+ */
+export interface ModelEndpoint {
+  /** OpenAI-compatible base URL — a local llama-server, or the gateway. */
+  url: string;
+  /** The concrete model id to send; defaults to the role/registry key. */
+  model?: string;
+  /** Auth / routing headers (e.g. a scoped gateway bearer). Never logged. */
+  headers?: Record<string, string>;
+  /** Metered (accrues cost, §8.5) — true for hosted/proxied, false for local. */
+  metered?: boolean;
+}
+
 export interface BasicModelsOptions {
+  /**
+   * The control surface: role → resolved endpoint. Injected by the control plane (via the
+   * SDK). A rotor step's `config.model` is looked up here first; unmatched roles fall back
+   * to the lane endpoints below.
+   */
+  registry?: Record<string, ModelEndpoint>;
   /** OpenAI/Anthropic-compatible local endpoint, e.g. `http://localhost:8080`. */
   modelUrl?: string;
   /** Metered frontier endpoint (§8.5); reachable only when configured. */
@@ -34,12 +58,14 @@ export interface BasicModelsOptions {
 
 export class BasicModels implements ModelsPlugin {
   readonly name = "models";
+  private readonly registry: Record<string, ModelEndpoint>;
   private readonly url?: string;
   private readonly frontierUrl?: string;
   private readonly defaultModel: string;
   private readonly timeoutMs: number;
 
   constructor(opts: BasicModelsOptions = {}) {
+    this.registry = opts.registry ?? {};
     this.url = opts.modelUrl ?? process.env.ROTOR_MODEL_URL ?? undefined;
     this.frontierUrl = opts.frontierUrl ?? process.env.ROTOR_FRONTIER_URL ?? undefined;
     this.defaultModel = opts.defaultModel ?? "glyphh-local";
@@ -47,7 +73,11 @@ export class BasicModels implements ModelsPlugin {
   }
 
   status(): CapabilityStatus {
-    const lanes = [this.url ? "local→live" : "local→stub", this.frontierUrl ? "frontier→live" : "frontier→degrade"];
+    const roles = Object.keys(this.registry);
+    const lanes = [
+      roles.length ? `roles→[${roles.join(",")}]` : this.url ? "local→live" : "local→stub",
+      this.frontierUrl ? "frontier→live" : "frontier→degrade",
+    ];
     return { ready: true, detail: lanes.join("; "), tier: "basic" };
   }
 
@@ -57,6 +87,16 @@ export class BasicModels implements ModelsPlugin {
   }
 
   async execute(request: ModelRequest, lane: string): Promise<ModelResult> {
+    // Control surface: a step's `model` is a ROLE bound by the control plane → its endpoint.
+    const bound = request.model ? this.registry[request.model] : undefined;
+    if (bound) {
+      const live = await this.callEndpoint(bound.url, request, bound.metered ? "frontier" : "local", {
+        model: bound.model ?? request.model,
+        ...(bound.headers ? { headers: bound.headers } : {}),
+      });
+      if (live) return live;
+      // A bound endpoint that fails degrades to the lane fallback / stub rather than crash (§9).
+    }
     if (lane === "frontier" && this.frontierUrl) {
       const live = await this.callEndpoint(this.frontierUrl, request, "frontier");
       if (live) return live;
@@ -116,15 +156,16 @@ export class BasicModels implements ModelsPlugin {
     url: string,
     request: ModelRequest,
     lane: "local" | "frontier",
+    override?: { model?: string; headers?: Record<string, string> },
   ): Promise<ModelResult | undefined> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const res = await fetch(`${url}/v1/chat/completions`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...(override?.headers ?? {}) },
         body: JSON.stringify({
-          model: request.model ?? this.defaultModel,
+          model: override?.model ?? request.model ?? this.defaultModel,
           messages: [{ role: "user", content: request.prompt }],
           temperature: request.temperature ?? 0,
           seed: request.seed,

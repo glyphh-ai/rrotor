@@ -41,6 +41,10 @@ export {
   buildBasicPlugins,
   type BuildBasicPluginsOptions,
 } from "./plugins/index.js";
+
+// The model control surface — a control plane injects a role→endpoint registry so each
+// model step resolves its bound provider/model/key. Every endpoint speaks the OpenAI wire.
+export { BasicModels, type BasicModelsOptions, type ModelEndpoint } from "./plugins/models.js";
 export type { Plugins } from "./plugins/interfaces.js";
 
 // HTTP runtime face (SPEC.md §17) — for `serve` and Kubernetes.
