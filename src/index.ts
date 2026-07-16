@@ -45,3 +45,23 @@ export type { Plugins } from "./plugins/interfaces.js";
 
 // HTTP runtime face (SPEC.md §17) — for `serve` and Kubernetes.
 export { startServer } from "./server.js";
+
+// In-process runtime face — the embedded twin of `serve` (CLI / desktop link this).
+export { runInProcess, openSqliteStator, type EmbedOptions } from "./embed.js";
+
+// The transport-agnostic streaming core both faces sit on, + the wire event type.
+export { executeToEvents, resumeToEvents, type StreamContext, type Emit } from "./transport/run.js";
+export { WIRE_VERSION, type WireEvent } from "./transport/events.js";
+
+// Stator (durable memory) — factory + backends, so an embedder controls where memory
+// lives (the shared local SQLite file, an in-process store, or Postgres/pgvector).
+export {
+  createStator,
+  initStator,
+  statorFromEnvAsync,
+  type StatorOptions,
+  type StatorBackend,
+} from "./exec/stator.js";
+export { SqliteStore } from "./exec/sqlite-store.js";
+export { InProcessStore } from "./exec/store.js";
+export type { Stator } from "./exec/store.js";

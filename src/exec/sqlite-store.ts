@@ -113,7 +113,12 @@ export class SqliteStore implements Stator {
 
   constructor(path = ":memory:") {
     this.db = new Database(path);
+    // WAL + a busy timeout let MULTIPLE PROCESSES share one file safely: many
+    // readers concurrently, writes serialized, and a writer waits (up to 5s) for
+    // a competing write instead of throwing SQLITE_BUSY. This is what makes one
+    // local stator file usable by every embedded client on the machine at once.
     this.db.pragma("journal_mode = WAL");
+    this.db.pragma("busy_timeout = 5000");
     this.db.exec(SCHEMA);
   }
 
