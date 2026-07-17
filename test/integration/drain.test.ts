@@ -91,7 +91,7 @@ describe("HttpDrain delivery", () => {
 
     expect(calls).toBeGreaterThanOrEqual(2); // failed once, retried
     expect(received.length).toBeGreaterThan(0);
-    for (const e of received) expect(e.type).toBe("com.openrotor.step.v0");
+    for (const e of received) expect(e.type).toBe("com.rrotor.step.v0");
     await new Promise<void>((r) => sink.close(() => r()));
   });
 });

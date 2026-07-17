@@ -58,7 +58,7 @@ describe("probes", () => {
   it("GET /version returns build identity", async () => {
     const res = await fetch(`${base}/version`);
     const body = (await res.json()) as { name: string; version: string };
-    expect(body.name).toBe("openrotor");
+    expect(body.name).toBe("rrotor");
     expect(typeof body.version).toBe("string");
   });
 });

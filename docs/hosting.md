@@ -1,6 +1,6 @@
 # Hosting the runtime: one binary, three deployments
 
-The OpenRotor runtime is **one artifact** — the `glyphh` CLI (this package's
+The rrotor runtime is **one artifact** — the `glyphh` CLI (this package's
 `cli.js`). The same binary runs on a user's laptop and inside a cloud instance; the
 only differences are configuration (env vars) and which surface talks to it. This
 doc explains how that one binary is deployed three ways, how the glyphh control
@@ -199,7 +199,7 @@ a runtime change.
 - `deploy/fly.toml` — the fly.io Machine config for a per-session instance.
 - `deploy/homebrew/glyphh.rb` — the Homebrew formula skeleton for `brew install glyphh`.
 - `deploy/k8s/*` — the fleet topology (docs/deploy.md), for a shared multi-pod runtime.
-- `package.json` `bin` exposes both `openrotor` and `glyphh`.
+- `package.json` `bin` exposes both `rrotor` and `glyphh`.
 
 The control plane (thread→Machine mapping, fly Machines API calls, token minting)
 lives in **glyphh-server**, not here — this repo is the runtime it drives.

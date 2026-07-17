@@ -27,7 +27,7 @@ import { loggerFromEnv, type Logger } from "../obs/logger.js";
 import { describe, RotorError } from "../errors.js";
 import { spanContext } from "../obs/trace.js";
 
-const ENVELOPE_TYPE = "com.openrotor.step.v0";
+const ENVELOPE_TYPE = "com.rrotor.step.v0";
 const REDACTED = "[redacted]";
 
 /**

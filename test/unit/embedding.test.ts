@@ -17,7 +17,7 @@ describe("embed / cosine", () => {
   });
 
   it("self-similarity is 1", () => {
-    expect(textSimilarity("openrotor runtime", "openrotor runtime")).toBeCloseTo(1, 6);
+    expect(textSimilarity("rrotor runtime", "rrotor runtime")).toBeCloseTo(1, 6);
   });
 
   it("ranks related text above unrelated text", () => {

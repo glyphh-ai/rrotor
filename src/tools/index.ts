@@ -59,13 +59,15 @@ export function buildStdlib(opts: StdlibOptions): ToolRegistry {
  * Install the stdlib into a connections plugin, gated by the permission mode (or an
  * explicit capability set). Returns which tools were installed vs skipped (so the
  * client can show "this mode can't do X"). Omitting both installs everything
- * (bare-box open).
+ * (bare-box open). `packs` adds the HOST's own tools (a desktop's window manager,
+ * a CLI's connectors) behind the identical contract and gating as the built-ins.
  */
 export function installStdlib(
   connections: ConnectionsPlugin,
-  opts: StdlibOptions & { mode?: ModeName; granted?: ReadonlySet<Capability> },
+  opts: StdlibOptions & { mode?: ModeName; granted?: ReadonlySet<Capability>; packs?: ToolPack[] },
 ): InstallResult {
   const registry = buildStdlib(opts);
+  for (const pack of opts.packs ?? []) registry.add(pack);
   const granted = opts.granted ?? (opts.mode ? MODES[opts.mode] : undefined);
   return registry.install(connections, { granted });
 }

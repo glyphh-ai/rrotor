@@ -45,6 +45,7 @@ import {
   applyReducer,
   canonicalize,
   idempotencyKey,
+  interpolate,
   parseTicks,
   resolveInputs,
   resolveRef,
@@ -80,6 +81,11 @@ export interface ExecuteOptions {
   handlers?: Partial<Record<StepType, StepHandler>>;
   /** Resolve a `sub-rotor` `ref` → its document (§7.19). */
   rotorResolver?: (ref: string) => RotorDocument | undefined;
+  /** Build the callee's plugin bundle for a `sub-rotor` call — the seam that
+   *  re-gates the child's TOOL surface to its own permission mode (§13.4)
+   *  while sharing the caller's substrate. Omitted: the callee shares the
+   *  caller's plugins unchanged. */
+  pluginsFor?: (doc: RotorDocument, parent: Plugins) => Plugins;
   /** Safety cap on total physical step executions. */
   maxTicks?: number;
   /** Sleep between retry attempts (§5.5 backoff). Injectable for tests; defaults
@@ -294,8 +300,10 @@ class RunSession {
       }
 
       const nextCursor = nextOverride ?? this.selectNext(step, result);
-      // A transition back into an already-executed step is one loop revolution.
-      if ((this.visits.get(nextCursor) ?? 0) > 0) this.attention.revolution();
+      // Revolutions measure LAPS: the meter tracks the max re-entry count of
+      // any single step, so a long refine cycle costs one revolution per lap —
+      // not one per step it revisits.
+      this.attention.revolutionAtLeast(this.visits.get(nextCursor) ?? 0);
       cursor = nextCursor;
     }
 
@@ -502,6 +510,19 @@ class RunSession {
       frames: result.frames,
       usage: result.usage,
       error: result.error,
+      // Display metadata interpolates the step's resolved values ({{path}},
+      // {{file}}, …) so clients narrate THIS run, not just the step's name.
+      ...(step.display
+        ? {
+            display: {
+              label: interpolate(step.display.label, { ...input, ...output }, 64),
+              ...(step.display.detail ? { detail: interpolate(step.display.detail, { ...input, ...output }, 64) } : {}),
+            },
+          }
+        : {}),
+      // Per-step override, else the rotor's declared verbosity, else full —
+      // a rotor SHOWS ITS WORK unless the author dials it down.
+      event_output: step.display?.output ?? this.doc.spec.events?.output ?? "full",
     };
     await this.plugins.memory.appendStepRecord(rec);
     // Fan out to the log drain AFTER the durable write (§3.8). Fire-and-forget:
@@ -622,11 +643,17 @@ class RunSession {
 
     // Recursive execute; the callee shares the same plugins (stator, §17.1) and
     // runs under the attenuated identity — its StepRecords carry the narrowed scopes.
-    return execute(subDoc, subInputs, this.plugins, {
+    // §13.4: the callee's tool surface is gated by ITS mode, not the caller's.
+    const subPlugins = this.opts.pluginsFor?.(subDoc, this.plugins) ?? this.plugins;
+    return execute(subDoc, subInputs, subPlugins, {
       runId: `${this.runId}::${ref}`,
+      // The callee joins the caller's session — its memory writes/reads scope
+      // to the same conversation, not a session-agnostic void.
+      session: this.opts.session,
       principal: calleePrincipal,
       handlers: this.opts.handlers,
       rotorResolver: this.opts.rotorResolver,
+      pluginsFor: this.opts.pluginsFor,
       maxTicks: this.maxTicks,
     });
   }

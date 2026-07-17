@@ -77,6 +77,10 @@ export interface MemoryPlugin extends Capability {
   /** Record a turn into short-term memory (inbound prompt / outbound completion),
    *  the corpus `semanticRecall` ranks over. */
   recordTurn(text: string): Promise<void>;
+  /** Append one exchange to a session's conversation window (bounded). */
+  appendConversation(session: string, speaker: string, text: string): Promise<void>;
+  /** The last `k` exchanges of a session, oldest→newest. */
+  conversation(session: string, k: number): Promise<Array<{ speaker: string; text: string }>>;
   /** Persist facts (§7.4). Idempotent by `key`. Returns the count written. A
    *  `session` + `tier` scope the facts for tiered recall (docs/memory.md). */
   write(
@@ -107,12 +111,18 @@ export interface MemoryPlugin extends Capability {
 
 export interface ModelResult {
   text: string;
+  /** Which lane actually answered: `frontier` · `local` · `stub`. */
+  served?: string;
+  /** Lane failures on the way down (e.g. `frontier: HTTP 400 — …`). */
+  notes?: string[];
   frames: Frame[];
   usage: Usage;
 }
 
 export interface ModelRequest {
   prompt: string;
+  /** Per-call timeout override (ms) from the step's declared config. */
+  timeout_ms?: number;
   /** Grounded continuations to rank when there is no live model (the zero-model
    *  ranker degrades to echoing a grounded filler, §3.3). */
   candidates?: string[];
@@ -252,7 +262,7 @@ export interface PoolPlugin extends Capability {
  * `output` may be field-redacted before it leaves the process.
  */
 export interface DrainEnvelope {
-  /** Event type, e.g. `com.openrotor.step.v0`. */
+  /** Event type, e.g. `com.rrotor.step.v0`. */
   type: string;
   run_id: string;
   step_id: string;

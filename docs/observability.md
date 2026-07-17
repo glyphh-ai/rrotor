@@ -1,6 +1,6 @@
 # Observability & Log Drains
 
-How OpenRotor emits diagnostics and streams its run event history to external
+How rrotor emits diagnostics and streams its run event history to external
 sinks — and the invariants that keep both safe.
 
 Spec: [SPEC.md §14 (Assurance & Observability)](../SPEC.md), §17.6 (telemetry
@@ -10,7 +10,7 @@ only, never a control predicate). Runtime: [docs/runtime.md §3.8](runtime.md).
 
 ## 1. Two channels
 
-OpenRotor separates **diagnostics** from **the audit event stream**:
+rrotor separates **diagnostics** from **the audit event stream**:
 
 | Channel | What | Where |
 | --- | --- | --- |
@@ -55,11 +55,11 @@ loop, and never throws. A drain that is slow or down can never slow or fail a ru
 ### The envelope
 
 Each record is serialized to a stable, CloudEvents-ish envelope
-(`type: com.openrotor.step.v0`):
+(`type: com.rrotor.step.v0`):
 
 ```json
 {
-  "type": "com.openrotor.step.v0",
+  "type": "com.rrotor.step.v0",
   "run_id": "run-…", "step_id": "ask", "attempt": 0, "logical_tick": 0,
   "status": "ok", "space_id": "…",
   "principal": { "id": "local", "kind": "user", "scopes": ["…"] },

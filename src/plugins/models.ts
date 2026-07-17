@@ -14,6 +14,7 @@ import type { CapabilityStatus } from "../runtime/registry.js";
 import type { Frame, Usage } from "../types.js";
 import { tokenish } from "../exec/util.js";
 import { cosine, embed } from "../exec/embedding.js";
+import { buildCall, parseResponse, providerForUrl, authHeaders, keyFromEnv, type Provider } from "./providers.js";
 import type {
   LadderRung,
   ModelRequest,
@@ -29,8 +30,10 @@ import type {
  * the runtime stays provider-agnostic.
  */
 export interface ModelEndpoint {
-  /** OpenAI-compatible base URL — a local llama-server, or the gateway. */
+  /** Endpoint base URL — local llama-server, hosted API, or the gateway. */
   url: string;
+  /** Wire the endpoint speaks; inferred from the URL host when omitted. */
+  provider?: import("./providers.js").Provider;
   /** The concrete model id to send; defaults to the role/registry key. */
   model?: string;
   /** Auth / routing headers (e.g. a scoped gateway bearer). Never logged. */
@@ -61,6 +64,8 @@ export class BasicModels implements ModelsPlugin {
   private readonly registry: Record<string, ModelEndpoint>;
   private readonly url?: string;
   private readonly frontierUrl?: string;
+  /** Bearer for the metered frontier lane (ROTOR_FRONTIER_KEY) — never logged. */
+  private readonly frontierKey?: string;
   private readonly defaultModel: string;
   private readonly timeoutMs: number;
 
@@ -68,8 +73,9 @@ export class BasicModels implements ModelsPlugin {
     this.registry = opts.registry ?? {};
     this.url = opts.modelUrl ?? process.env.ROTOR_MODEL_URL ?? undefined;
     this.frontierUrl = opts.frontierUrl ?? process.env.ROTOR_FRONTIER_URL ?? undefined;
-    this.defaultModel = opts.defaultModel ?? "glyphh-local";
-    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.frontierKey = process.env.ROTOR_FRONTIER_KEY ?? undefined;
+    this.defaultModel = opts.defaultModel ?? process.env.ROTOR_MODEL_ID ?? "glyphh-local";
+    this.timeoutMs = opts.timeoutMs ?? (process.env.ROTOR_MODEL_TIMEOUT ? Number(process.env.ROTOR_MODEL_TIMEOUT) : 120_000);
   }
 
   status(): CapabilityStatus {
@@ -87,26 +93,40 @@ export class BasicModels implements ModelsPlugin {
   }
 
   async execute(request: ModelRequest, lane: string): Promise<ModelResult> {
+    const notes: string[] = [];
+    const finish = (r: ModelResult): ModelResult =>
+      notes.length ? { ...r, notes, frames: [{ type: "degrade", data: { notes } }, ...r.frames] } : r;
+
     // Control surface: a step's `model` is a ROLE bound by the control plane → its endpoint.
     const bound = request.model ? this.registry[request.model] : undefined;
     if (bound) {
-      const live = await this.callEndpoint(bound.url, request, bound.metered ? "frontier" : "local", {
+      const { result, error } = await this.callEndpoint(bound.url, request, bound.metered ? "frontier" : "local", {
         model: bound.model ?? request.model,
+        provider: bound.provider,
         ...(bound.headers ? { headers: bound.headers } : {}),
       });
-      if (live) return live;
+      if (result) return finish(result);
+      if (error) notes.push(`role ${request.model} @ ${bound.url}: ${error}`);
       // A bound endpoint that fails degrades to the lane fallback / stub rather than crash (§9).
     }
     if (lane === "frontier" && this.frontierUrl) {
-      const live = await this.callEndpoint(this.frontierUrl, request, "frontier");
-      if (live) return live;
+      const frontierProvider = providerForUrl(this.frontierUrl);
+      const frontierKey = this.frontierKey ?? keyFromEnv(frontierProvider);
+      const { result, error } = await this.callEndpoint(this.frontierUrl, request, "frontier", {
+        provider: frontierProvider,
+        ...(frontierKey ? { headers: authHeaders(frontierProvider, frontierKey) } : {}),
+        ...(process.env.ROTOR_FRONTIER_MODEL ? { model: process.env.ROTOR_FRONTIER_MODEL } : {}),
+      });
+      if (result) return finish(result);
+      if (error) notes.push(`frontier ${this.frontierUrl}: ${error}`);
       // FrontierDeclined → degrade to the local lane rather than crash (§9).
     }
     if (this.url) {
-      const live = await this.callEndpoint(this.url, request, "local");
-      if (live) return live;
+      const { result, error } = await this.callEndpoint(this.url, request, "local");
+      if (result) return finish(result);
+      if (error) notes.push(`local ${this.url}: ${error}`);
     }
-    return this.stub(request, lane);
+    return finish(this.stub(request, lane));
   }
 
   classify(question: string, classes: string[]): { class: string; margin: number } {
@@ -145,6 +165,9 @@ export class BasicModels implements ModelsPlugin {
       text = `[stub:${lane}] ${request.prompt}`.slice(0, 2000);
     }
     const frames: Frame[] = [
+      // A typed marker clients can read off the wire (frame TYPES stream on the
+      // step event): this answer came from the deterministic stub, not a model.
+      { type: "stub", data: { lane } },
       { type: "propose", data: { text } },
       { type: "done" },
     ];
@@ -156,42 +179,61 @@ export class BasicModels implements ModelsPlugin {
     url: string,
     request: ModelRequest,
     lane: "local" | "frontier",
-    override?: { model?: string; headers?: Record<string, string> },
-  ): Promise<ModelResult | undefined> {
+    override?: { model?: string; headers?: Record<string, string>; provider?: Provider },
+  ): Promise<{ result?: ModelResult; error?: string }> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeoutMs = request.timeout_ms ?? this.timeoutMs;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(`${url}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...(override?.headers ?? {}) },
-        body: JSON.stringify({
+      // Provider translation (§8): the runtime speaks ONE request; the adapter
+      // shapes it to whatever wire the endpoint talks.
+      const provider = providerForUrl(url, override?.provider);
+      const call = buildCall(
+        provider,
+        url,
+        {
+          prompt: request.prompt,
           model: override?.model ?? request.model ?? this.defaultModel,
-          messages: [{ role: "user", content: request.prompt }],
           temperature: request.temperature ?? 0,
           seed: request.seed,
-        }),
+          maxTokens: (request as { max_tokens?: number }).max_tokens,
+        },
+        override?.headers ?? {},
+      );
+      const res = await fetch(call.url, {
+        method: "POST",
+        headers: call.headers,
+        body: JSON.stringify(call.body),
         signal: controller.signal,
       });
-      if (!res.ok) return undefined;
-      const body = (await res.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
-      };
-      const text = body.choices?.[0]?.message?.content ?? "";
+      if (!res.ok) {
+        // Surface the provider's own words — a silent 400 cost a debugging
+        // session once; never again.
+        let detail = "";
+        try {
+          const err = (await res.json()) as { error?: { message?: string } };
+          detail = err.error?.message ?? "";
+        } catch {
+          /* body optional */
+        }
+        return { error: `HTTP ${res.status}${detail ? ` — ${detail}` : ""}` };
+      }
+      const wire = parseResponse(provider, await res.json());
+      const text = wire.text;
       const usage: Usage = {
-        input: body.usage?.prompt_tokens ?? tokenish(request.prompt),
-        output: body.usage?.completion_tokens ?? tokenish(text),
+        input: wire.inputTokens ?? tokenish(request.prompt),
+        output: wire.outputTokens ?? tokenish(text),
         // Local is free by construction; only the frontier lane accrues cost.
-        cost: lane === "frontier" ? (body.usage?.cost ?? 0) : 0,
+        cost: lane === "frontier" ? 0 : 0,
       };
       const frames: Frame[] = [
         { type: "propose", data: { text } },
         { type: "done" },
       ];
-      return { text, frames, usage };
-    } catch {
-      // Any transport error degrades to the stub (graceful degradation, §3.9).
-      return undefined;
+      return { result: { text, served: lane, frames, usage } };
+    } catch (err) {
+      // Any transport error degrades to the next lane (graceful degradation, §3.9).
+      return { error: (err as Error).name === "AbortError" ? `timeout after ${timeoutMs}ms` : (err as Error).message };
     } finally {
       clearTimeout(timer);
     }

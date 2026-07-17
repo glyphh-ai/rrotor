@@ -18,7 +18,8 @@ import { BasicGovernance } from "./governance.js";
 import { BasicPool } from "./pool.js";
 import { NoopDrain } from "./drain.js";
 import type { DrainPlugin, Plugins } from "./interfaces.js";
-import { installStdlib, kvFromStore, type Capability, type ModeName } from "../tools/index.js";
+import { installStdlib, kvFromStore, toolModeFromLabels, type Capability, type ModeName, type ToolPack } from "../tools/index.js";
+import type { RotorDocument } from "../types.js";
 
 export * from "./interfaces.js";
 export { BasicGrounding } from "./grounding.js";
@@ -39,8 +40,9 @@ export interface BuildBasicPluginsOptions {
   /** A log drain (shared across runs). Defaults to a {@link NoopDrain}. */
   drain?: DrainPlugin;
   /** Install the tool standard library into `connections`, gated by permission
-   *  mode. Off by default (bare bundle). `root` is the workspace sandbox. */
-  tools?: { root: string; mode?: ModeName; granted?: ReadonlySet<Capability> };
+   *  mode. Off by default (bare bundle). `root` is the workspace sandbox; `packs`
+   *  adds the host product's own tools behind the same contract + gating. */
+  tools?: { root: string; mode?: ModeName; granted?: ReadonlySet<Capability>; packs?: ToolPack[] };
 }
 
 /** The eight basic capabilities, wired against one shared in-process stator. */
@@ -63,7 +65,34 @@ export function buildBasicPlugins(opts: BuildBasicPluginsOptions = {}): Plugins 
       kv: kvFromStore(store),
       mode: opts.tools.mode,
       granted: opts.tools.granted,
+      packs: opts.tools.packs,
     });
   }
   return plugins;
+}
+
+/**
+ * Per-child tool re-gating (§13.4 least privilege for sub-rotors). A sub-rotor
+ * shares the caller's substrate — stator, memory, grounding, models, gateway,
+ * governance — but its TOOL surface must be its own: gated by the CHILD
+ * document's `metadata.labels.mode`, not inherited from the parent. This
+ * factory rebuilds only the connections registry for the callee; everything
+ * else passes through by reference.
+ */
+export function childPluginsFactory(opts: {
+  store: Stator;
+  root: string;
+  packs?: ToolPack[];
+}): (doc: RotorDocument, parent: Plugins) => Plugins {
+  return (doc, parent) => {
+    const connections = new BasicConnections();
+    installStdlib(connections, {
+      root: opts.root,
+      memory: parent.memory,
+      kv: kvFromStore(opts.store),
+      mode: toolModeFromLabels(doc.metadata.labels),
+      packs: opts.packs,
+    });
+    return { ...parent, connections };
+  };
 }

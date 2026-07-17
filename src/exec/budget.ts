@@ -38,6 +38,14 @@ export class AttentionMeter {
     this.revolutions++;
   }
 
+  /** Raise the revolution count to `n` (idempotent). The executor feeds it the
+   *  destination step's prior visit count, so the meter reads LOOP LAPS — the
+   *  max number of times any single step has been re-entered — not the number
+   *  of re-entered steps (a 10-step refine cycle is ONE revolution, not ten). */
+  revolutionAtLeast(n: number): void {
+    this.revolutions = Math.max(this.revolutions, n);
+  }
+
   /** Accrue a step's recorded usage (deterministic — from the StepRecord). */
   record(usage?: Usage): void {
     if (!usage) return;

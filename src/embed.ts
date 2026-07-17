@@ -1,7 +1,7 @@
 /**
  * embed.ts — the IN-PROCESS face of the runtime, the twin of `serve`.
  *
- * `openrotor serve` streams a run's `open → step* → terminal → done` over SSE;
+ * `rrotor serve` streams a run's `open → step* → terminal → done` over SSE;
  * `runInProcess` streams the SAME events to a callback in the caller's own process.
  * Both sit on the transport-agnostic core (`executeToEvents`), so an embedded client
  * (the CLI / desktop) and a remote pod run identical code — they differ only in where
@@ -18,6 +18,7 @@ import type { WireEvent } from "./transport/events.js";
 import { parseRotor } from "./parser/index.js";
 import { drainFromEnv } from "./plugins/index.js";
 import type { BasicModelsOptions } from "./plugins/models.js";
+import type { ToolPack } from "./tools/index.js";
 import { initStator } from "./exec/stator.js";
 import type { Stator } from "./exec/store.js";
 import type { RotorDocument } from "./types.js";
@@ -32,6 +33,15 @@ export interface EmbedOptions {
   session?: string;
   /** Model config — the control surface (role→endpoint registry) a control plane injects. */
   models?: BasicModelsOptions;
+  /** The HOST's tool packs (window manager, connectors, …) — installed alongside the
+   *  stdlib behind the same contract, still gated by the rotor's permission mode. */
+  tools?: ToolPack[];
+  /** Resolve `sub-rotor` refs (§7.19). Defaults to the bundled rotor registry. */
+  rotors?: (ref: string) => import("./types.js").RotorDocument | undefined;
+  /** Pin the run id. Conversational turns MUST pass a fresh id — the default
+   *  content-address (doc+inputs) makes a REPEATED question replay the old
+   *  tape (stale answer, zero steps) instead of running in today's context. */
+  runId?: string;
 }
 
 /**
@@ -52,6 +62,9 @@ export async function runInProcess(
     workspace: opts.workspace ?? cwd(),
     ...(opts.session ? { session: opts.session } : {}),
     ...(opts.models ? { models: opts.models } : {}),
+    ...(opts.tools ? { packs: opts.tools } : {}),
+    ...(opts.rotors ? { rotors: opts.rotors } : {}),
+    ...(opts.runId ? { runId: opts.runId } : {}),
   };
   await executeToEvents(doc, inputs, ctx, emit);
 }

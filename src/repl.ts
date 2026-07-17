@@ -1,5 +1,5 @@
 /**
- * The OpenRotor REPL — the human face of the runtime.
+ * The rrotor REPL — the human face of the runtime.
  *
  * Prints the banner + capability manifest, then a readline loop (up-arrow
  * history + tab completion come free from node:readline). Every command is a
@@ -15,6 +15,8 @@ import { Runtime } from "./runtime/runtime.js";
 import { VERSION } from "./version.js";
 import { loadRotor, validateRotor } from "./parser/index.js";
 import { execute } from "./exec/executor.js";
+import { openChat, chatBannerLines, type ChatSession } from "./chat.js";
+import { bundledRotorResolver } from "./rotors.js";
 import type { RotorDocument } from "./types.js";
 
 const C = "\x1b[36m";
@@ -22,45 +24,143 @@ const W = "\x1b[97m";
 const D = "\x1b[90m";
 const R = "\x1b[0m";
 
-const COMMANDS = ["help", "status", "version", "validate", "run", "clear", "quit", "exit"];
+const COMMANDS = ["help", "status", "version", "validate", "run", "chat", "clear", "quit", "exit"];
 
-export function runRepl(): Promise<number> {
+const COMMAND_PROMPT = `  ${C}rotor${R} ${D}›${R} `;
+const CHAT_PROMPT = `  ${C}you${R} ${D}›${R} `;
+
+export interface ReplOptions {
+  /** Enter chat mode immediately (`rrotor chat [file]`). */
+  chat?: { file?: string };
+}
+
+export function runRepl(opts: ReplOptions = {}): Promise<number> {
   const rt = new Runtime();
   printBanner(VERSION);
   printLines(statusLines(rt));
-  console.log(`  ${D}type${R} help ${D}for commands, ${R}quit${D} to exit${R}\n`);
+  console.log(`  ${D}type${R} help ${D}for commands, ${R}chat${D} to talk to a rotor, ${R}quit${D} to exit${R}\n`);
 
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: `  ${C}rotor${R} ${D}›${R} `,
+    prompt: COMMAND_PROMPT,
     completer,
   });
-  rl.prompt();
+
+  // Chat mode: while set, every line is a turn against this session. Extra
+  // required inputs (beyond the primary the line fills) are asked per turn and
+  // remembered as defaults for the next.
+  let chat: ChatSession | null = null;
+  let extraValues: Record<string, string> = {};
+
+  /** Ask on the same readline; Enter reuses the remembered value. */
+  const askInput = (name: string): Promise<string> =>
+    new Promise((res) => {
+      const prior = extraValues[name];
+      rl.question(`  ${C}${name}${R} ${D}${prior ? `[${prior}] ` : ""}›${R} `, (answer) => {
+        res(answer.trim() || prior || "");
+      });
+    });
+
+  const enterChat = async (file?: string): Promise<void> => {
+    try {
+      chat = await openChat(file);
+      extraValues = {};
+      rl.setPrompt(CHAT_PROMPT);
+      printLines(chatBannerLines(chat));
+    } catch (err) {
+      printLines([`  ${D}chat: ${(err as Error).message}${R}`, ""]);
+    }
+  };
+
+  const leaveChat = async (): Promise<void> => {
+    await chat?.close().catch(() => {});
+    chat = null;
+    rl.setPrompt(COMMAND_PROMPT);
+    printLines([`  ${D}left chat${R}`, ""]);
+  };
+
+  // One turn at a time: lines queue behind the in-flight handler (pasted or piped
+  // input would otherwise interleave concurrent runs mid-stream). Every link must
+  // be rejection-proof — one thrown prompt (ERR_USE_AFTER_CLOSE when stdin EOFs
+  // mid-turn) would otherwise skip every queued turn.
+  let closed = false;
+  const promptSafe = (): void => {
+    if (!closed) rl.prompt();
+  };
+  let queue: Promise<void> = (async () => {
+    if (opts.chat) await enterChat(opts.chat.file);
+    promptSafe();
+  })().catch(() => {});
 
   return new Promise<number>((resolve) => {
     rl.on("line", (line) => {
-      const [cmd = "", ...rest] = line.trim().split(/\s+/);
+      queue = queue
+        .then(() => handleLine(line))
+        .catch((err) => printLines([`  ${D}error: ${(err as Error).message}${R}`, ""]))
+        .then(promptSafe);
+    });
+
+    async function handleLine(line: string): Promise<void> {
+      const trimmed = line.trim();
+      if (chat) {
+        if (trimmed === "/exit") return leaveChat();
+        if (trimmed === "/quit") {
+          await chat.close().catch(() => {});
+          rl.close();
+          return;
+        }
+        if (!trimmed) return;
+        // A bare command word in chat mode is almost always a mode mix-up —
+        // sending "chat" or "exit" to a code-mode rotor as a TASK does real
+        // work with side effects. Hint instead of running a turn; a genuine
+        // message can always be phrased as a sentence.
+        if (COMMANDS.includes(trimmed.toLowerCase())) {
+          printLines([
+            `  ${D}"${trimmed}" looks like a command — you're already chatting with ${chat.rotor}; every line is sent to it as a turn.${R}`,
+            `  ${D}/exit leaves chat · /quit exits · phrase it as a sentence to send it as a message${R}`,
+            "",
+          ]);
+          return;
+        }
+        for (const extra of chat.inputs.extras) {
+          const v = await askInput(extra.name);
+          if (!v) {
+            printLines([`  ${D}${extra.name} is required — turn skipped${R}`, ""]);
+            return;
+          }
+          extraValues[extra.name] = v;
+        }
+        await chat.turn(trimmed, (text) => process.stdout.write(text), {
+          spinner: process.stdout.isTTY === true,
+          inputs: { ...extraValues },
+        });
+        return;
+      }
+      const [cmd = "", ...rest] = trimmed.split(/\s+/);
       const arg = rest.join(" ");
       const lc = cmd.toLowerCase();
       if (lc === "quit" || lc === "exit" || lc === "q") {
         rl.close();
         return;
       }
+      if (lc === "chat") return enterChat(arg || undefined);
       if (lc === "clear") {
         process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
         printBanner(VERSION);
-        rl.prompt();
         return;
       }
-      void execCommand(rt, cmd, arg).then((lines) => {
-        printLines(lines);
-        rl.prompt();
-      });
-    });
+      printLines(await execCommand(rt, cmd, arg));
+    }
     rl.on("close", () => {
-      console.log();
-      resolve(0);
+      closed = true;
+      // stdin EOF (piped input) can arrive while turns are still queued — drain
+      // the queue before exiting so no in-flight run is killed mid-stream.
+      queue = queue.finally(async () => {
+        await chat?.close().catch(() => {});
+        console.log();
+        resolve(0);
+      });
     });
   });
 }
@@ -80,7 +180,7 @@ export async function execCommand(rt: Runtime, cmd: string, arg: string): Promis
     case "status":
       return statusLines(rt);
     case "version":
-      return [`  openrotor v${VERSION}`, ""];
+      return [`  rrotor v${VERSION}`, ""];
     case "clear":
       // The loop clears the screen; here it is a no-op set of lines.
       return [];
@@ -128,7 +228,7 @@ async function runCommand(rt: Runtime, arg: string): Promise<string[]> {
   const inputs = parseInputs(kv);
   let result;
   try {
-    result = await execute(doc, inputs, rt.plugins);
+    result = await execute(doc, inputs, rt.plugins, { rotorResolver: bundledRotorResolver });
   } catch (err) {
     return [`  ${D}run error: ${(err as Error).message}${R}`, ""];
   }
@@ -182,6 +282,7 @@ function helpLines(): string[] {
     "    status            capability manifest",
     "    validate <file>   validate a .rotor against the schema",
     "    run <file> [k=v]  execute a .rotor",
+    "    chat [file|name]  talk to a rotor turn-by-turn (default: router; names resolve from rotors/)",
     "    version · clear · help · quit",
     "",
   ];

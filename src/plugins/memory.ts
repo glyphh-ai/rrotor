@@ -55,6 +55,23 @@ export class BasicMemory implements MemoryPlugin {
     if (text && text.trim() !== "") await this.store.addTurn(text);
   }
 
+  /** The conversation window lives in the stator's KV, keyed by session —
+   *  session-scoped by construction, ordered by append, bounded to the newest
+   *  CONV_CAP exchanges. Deterministic: an ordinal read, no embeddings. */
+  private static readonly CONV_CAP = 20;
+  async appendConversation(session: string, speaker: string, text: string): Promise<void> {
+    if (!text || text.trim() === "") return;
+    const key = `conv:${session}`;
+    const prior = ((await this.store.kvGet(key)) as Array<{ speaker: string; text: string }> | undefined) ?? [];
+    const next = [...prior, { speaker, text }].slice(-BasicMemory.CONV_CAP);
+    await this.store.kvSet(key, next);
+  }
+
+  async conversation(session: string, k: number): Promise<Array<{ speaker: string; text: string }>> {
+    const prior = ((await this.store.kvGet(`conv:${session}`)) as Array<{ speaker: string; text: string }> | undefined) ?? [];
+    return prior.slice(-Math.max(1, k));
+  }
+
   async write(
     facts: Array<Record<string, unknown>>,
     opts: { key?: string; mode?: string; speaker?: string; spaceId?: string; tick?: number; session?: string; tier?: MemoryTier },

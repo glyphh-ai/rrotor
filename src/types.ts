@@ -97,6 +97,9 @@ export interface RotorSpecBody {
   access?: AccessConfig;
   /** Effectiveness telemetry + input/output anomaly gates (§14). */
   assurance?: AssuranceConfig;
+  /** Wire-event verbosity: how much of each step's output streams to clients.
+   *  Default `full` — a rotor SHOWS ITS WORK unless the author dials it down. */
+  events?: { output?: EventOutputMode };
   /** Document-level default cross-run result-cache policy (§5.7). */
   cache?: CacheConfig;
   /** Prior `metadata.version`s this document is replay-compatible with (§16.3
@@ -390,10 +393,29 @@ export interface StepAffinity {
  * The common step envelope (SPEC.md §4.2). `config` is discriminated by `type`
  * via {@link StepConfigMap}; {@link Step} is the type-safe discriminated union.
  */
+/** How much of a step's OUTPUT rides its wire event: `full` — the complete
+ *  (already-redacted) output; `summary` — values bounded for narration;
+ *  `min` — identity/status/usage only, no output. */
+export type EventOutputMode = "full" | "summary" | "min";
+
+/** Author-controlled display metadata for a step: streamed verbatim on the step's
+ *  wire event so clients render the author's words, not raw step ids. */
+export interface StepDisplay {
+  /** Short human progress label, e.g. "planning the change". */
+  label: string;
+  /** Optional one-line detail a rich client can show on hover/expand. */
+  detail?: string;
+  /** Override the rotor's `spec.events.output` for THIS step — silence plumbing
+   *  (`min`) or bound a bulky step (`summary`) while the rotor default stays full. */
+  output?: EventOutputMode;
+}
+
 export interface StepBase {
   /** MUST be unique within the rotor. */
   id: string;
   type: StepType;
+  /** Display metadata streamed to clients with this step's wire event. */
+  display?: StepDisplay;
   /** Typed input signature: names → Context references (`$.inputs.*`, …). */
   in?: Record<string, string>;
   /** Typed output signature: names (with declared types) written to Context. */
@@ -453,6 +475,10 @@ export interface ModelConfig {
   lane?: ModelLane;
   model?: string;
   max_tokens?: number;
+  /** Per-STEP model-call timeout (ms) — a transport liveness bound, declared
+   *  where the workload is known: a router classifies in seconds, a coder
+   *  emitting a large file needs minutes. Overrides ROTOR_MODEL_TIMEOUT. */
+  timeout_ms?: number;
   temperature?: number;
   tools?: string[];
   /** Best-effort recorded seed; never a correctness guarantee (§6.3). */
@@ -472,7 +498,10 @@ export interface HdcMapConfig {
 
 /** §7.4 write */
 export interface WriteConfig {
-  mode?: "raw" | "absorb";
+  /** `raw` verbatim fact · `absorb` NL→fact enricher · `turn` a conversational
+   *  exchange: appended to the session's recency window AND the similarity
+   *  corpus, speaker-tagged. */
+  mode?: "raw" | "absorb" | "turn";
   key?: string;
   speaker?: string;
   /** Explicit retention tier for the facts this step writes (docs/memory.md):
@@ -517,9 +546,14 @@ export interface RetrieveKbConfig {
 /** §7.7 retrieve.vector */
 export interface RetrieveVectorConfig {
   top_k?: number;
-  kind?: "query" | "document";
+  /** `recent` reads the session's conversation window by ORDER (no embedding,
+   *  deterministic) — the recency channel anaphora needs; similarity can't
+   *  retrieve "how do you know?"'s referent because its meaning is positional. */
+  kind?: "query" | "document" | "recent";
   threshold?: number;
   embed_model?: string;
+  /** `recent` only: how many exchanges to return (default 6). */
+  window?: number;
 }
 
 export type GateMode =
@@ -637,6 +671,15 @@ export interface ToolConfig {
 export interface TransformConfig {
   set?: Record<string, unknown>;
   map?: Record<string, string>;
+  /** Deterministic field extraction (§7.17): each entry is `name → regex` applied
+   *  to the step's `in.text`; the FIRST capture group (trimmed) becomes the output
+   *  field, or `null` when unmatched. Pure regex — no model, replay-safe. This is
+   *  how a conversation-native rotor lifts structure out of a planner's text. */
+  parse?: Record<string, string>;
+  /** `fences`: strip a leading ```lang line and trailing ``` from `in.text`,
+   *  emitting `text` — models fence code no matter what the brief says, and a
+   *  written file must never contain markdown. Deterministic string surgery. */
+  strip?: "fences";
 }
 
 /** §7.18 cascade */
@@ -699,6 +742,8 @@ export type Step = {
 /** The closed set of frame kinds a step MAY emit (SPEC.md §2). */
 export const FRAME_TYPES = [
   "propose",
+  "stub",
+  "degrade",
   "parse",
   "dispose",
   "backtrack",
@@ -790,6 +835,10 @@ export interface StepRecord {
   frames?: Frame[];
   /** Metered usage recorded for this step (§8.5). */
   usage?: Usage;
+  /** The step's author display metadata, copied onto the record for clients. */
+  display?: StepDisplay;
+  /** The step's effective wire-output mode (display.output ?? spec.events.output). */
+  event_output?: EventOutputMode;
   /** Typed error name + cause, present iff `status === "failed"`. */
   error?: StepError;
 }

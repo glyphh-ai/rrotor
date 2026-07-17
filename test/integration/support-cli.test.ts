@@ -25,7 +25,7 @@ async function capture(argv: string[]): Promise<{ code: number; out: string }> {
   }
 }
 
-describe("openrotor errors", () => {
+describe("rrotor errors", () => {
   it("prints the whole catalog", async () => {
     const { code, out } = await capture(["errors"]);
     expect(code).toBe(0);
@@ -47,7 +47,7 @@ describe("openrotor errors", () => {
   });
 });
 
-describe("openrotor support", () => {
+describe("rrotor support", () => {
   // A fresh OS temp dir per test — never a machine-specific path, so this runs
   // identically on a dev box and a CI runner (SqliteStore opens the file there).
   let url: string;

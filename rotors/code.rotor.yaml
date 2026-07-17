@@ -1,0 +1,285 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# glyphh/code@3.0.0 — the coding CONDUCTOR: plan-as-artifact, delegated build,
+# frontier review.
+#
+# Orchestrator-worker + evaluator-optimizer, composed from the closed
+# vocabulary (§15): the frontier PLANNER writes a full BUILD PLAN to a
+# markdown FILE on disk (the spec travels as a PATH — plans can be arbitrarily
+# large without bloating any context), the glyphh/build worker implements it
+# with the cheap local coder (its own bounded verify loop), and the frontier
+# model then REVIEWS the actual written code against the plan — approve ships,
+# revise re-invokes the worker with the reviewer's notes, budget-bounded.
+# Mechanical verification lives in the worker; semantic judgment lives here.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rotor.glyphh.ai/v0.1
+kind: Rotor
+metadata:
+  name: code
+  version: 3.0.0
+  namespace: glyphh
+  description: The coding conductor — frontier plan written to disk, local build as a sub-rotor, frontier review; revise until approved.
+  labels:
+    tier: domain
+    domain: coding
+    mode: code
+
+spec:
+  inputs:
+    - name: task
+      type: string
+      required: true
+      description: What to build or change, in plain language — the chat turn.
+    - name: entity
+      type: string
+      description: Optional memory entity to ground against.
+
+  space:
+    vector_dim: 10000
+    encoder_seed: 42
+    roles_config: universal-7x33
+
+  # Outer review loop: at most 2 revise rounds before delivering as-is with
+  # the reviewer's verdict on the record.
+  attention:
+    budget:
+      revolutions: 2
+      on_exhausted: stop
+
+  state:
+    schema:
+      answer: { type: string }
+    reducers:
+      answer: last-write-wins
+
+  entry: log-task
+
+  steps:
+    # ── log-task ─────────────────────────────────────────────────────────────
+    - id: log-task
+      type: write
+      display: { label: "logging the task", output: min }
+      in: { text: $.inputs.task }
+      out: { logged: boolean }
+      config:
+        mode: turn
+        speaker: user
+      next: recall
+
+    # ── recall ───────────────────────────────────────────────────────────────
+    - id: recall
+      type: retrieve.vector
+      display: { label: "recalling context" }
+      in: { query: $.inputs.task }
+      out: { hits: array }
+      config:
+        top_k: 6
+        kind: query
+        threshold: 0.25
+      next: frame
+
+    # ── frame ────────────────────────────────────────────────────────────────
+    # The PLANNER's brief: machine-parsed header + a FULL markdown plan body —
+    # the document a less capable coder will implement from. Re-entered on a
+    # revise verdict with the reviewer's notes (empty first pass).
+    - id: frame
+      type: prompt
+      display: { label: "framing the task" }
+      in:
+        task: $.inputs.task
+        context: $.steps.recall.hits
+        prior_plan: $.steps.plan.text
+        review_notes: $.steps.review-parse.notes
+      out: { text: string }
+      config:
+        blocks:
+          - name: system
+            text: "You are a senior engineer writing a BUILD PLAN a far less capable local model will implement. Reply in EXACTLY this format — the header lines are machine-parsed:\nFILE: <the one workspace-relative file to create or rewrite>\nSETUP: <a shell command that prepares the environment (install dependencies), or none>\nTEST: <a shell command that exits 0 only if the change works>\nPLAN:\n<a complete markdown build plan: exact structure, function signatures, behaviors, edge cases — specific enough that a weak coder cannot get it wrong>\nRules: prefer the standard library; if third-party packages are essential, SETUP must install them. SETUP and TEST must finish on their own within seconds. The TEST must check real behavior, not keywords."
+          - name: user
+            text: "Task: {{task}}\nRelevant context: {{context}}\nIf the following is non-empty, revise the previous plan to address the reviewer's notes:\nPrevious plan:\n{{prior_plan}}\nReviewer notes:\n{{review_notes}}"
+        max_tokens: 2048
+        cache: { breakpoints: [system] }
+      next: plan
+
+    # ── plan ─────────────────────────────────────────────────────────────────
+    - id: plan
+      type: model
+      display: { label: "planning the build", detail: "role: planner (frontier)" }
+      in: { text: $.steps.frame.text, entity: $.inputs.entity }
+      out: { text: string }
+      config:
+        model: planner
+        lane: frontier
+        max_tokens: 2048
+        timeout_ms: 180000
+      next: extract
+
+    # ── extract ──────────────────────────────────────────────────────────────
+    - id: extract
+      type: transform
+      display: { label: "plan: {{file}} · proof: {{test_cmd}}" }
+      in: { text: $.steps.plan.text }
+      out: { file: string, setup_cmd: string, test_cmd: string }
+      config:
+        parse:
+          file: '^FILE:[ \t]*([^<\s][^\n]*)$'
+          setup_cmd: '^SETUP:[ \t]*(?!none\b)([^<\s][^\n]*)$'
+          test_cmd: '^TEST:[ \t]*([^<\s][^\n]*)$'
+      next: sane
+
+    # ── sane ─────────────────────────────────────────────────────────────────
+    - id: sane
+      type: gate
+      display: { label: "checking the plan" }
+      in: { value: $.steps.extract.test_cmd }
+      out: { verdict: string }
+      config:
+        mode: assertion
+        on_pass: save-plan
+        on_fail: badplan
+
+    - id: badplan
+      type: fail
+      display: { label: "refusing a malformed plan" }
+      config:
+        error: E_BAD_PLAN
+        cause: "planner did not emit the FILE:/TEST: header — nothing safe to execute"
+
+    # ── save-plan ────────────────────────────────────────────────────────────
+    # The plan becomes an ARTIFACT: written to disk, inspectable, durable, and
+    # handed to the worker by PATH.
+    - id: save-plan
+      type: tool
+      display: { label: "writing the plan → rrotor.plan.md" }
+      in: { content: $.steps.plan.text }
+      out: { result: object }
+      config:
+        flavor: mcp
+        name: file.write
+        args: { path: "rrotor.plan.md" }
+      next: build
+
+    # ── build ────────────────────────────────────────────────────────────────
+    # Delegate implementation to the worker (§7.19). On a revise round the
+    # reviewer's notes ride along (unresolved → empty on the first pass).
+    - id: build
+      type: sub-rotor
+      display: { label: "building", detail: "glyphh/build" }
+      out: { file: string, bytes: number, verified: string, failure: string }
+      config:
+        ref: glyphh/build
+        mode: call
+        inputs:
+          task: $.inputs.task
+          plan_path: $.steps.save-plan.result.path
+          file: $.steps.extract.file
+          setup_cmd: $.steps.extract.setup_cmd
+          test_cmd: $.steps.extract.test_cmd
+          review_notes: $.steps.review-parse.notes
+      next: read-code
+
+    # ── read-code ────────────────────────────────────────────────────────────
+    # Review judges the ACTUAL file on disk, not what anyone claims was written.
+    - id: read-code
+      type: tool
+      display: { label: "reading the result → {{path}}" }
+      in: { path: $.steps.extract.file }
+      out: { result: object }
+      config:
+        flavor: mcp
+        name: file.read
+      next: review-frame
+
+    # ── review ───────────────────────────────────────────────────────────────
+    # The evaluator (frontier): plan vs written code vs verify outcome.
+    - id: review-frame
+      type: prompt
+      display: { label: "framing the review", output: min }
+      in:
+        task: $.inputs.task
+        plan: $.steps.plan.text
+        code: $.steps.read-code.result.content
+        verified: $.steps.build.verified
+        failure: $.steps.build.failure
+      out: { text: string }
+      config:
+        blocks:
+          - name: system
+            text: "You are the senior engineer reviewing an implementation against your plan. Reply in EXACTLY this format — the first line is machine-parsed:\nVERDICT: approve\nor\nVERDICT: revise\nNOTES:\n<if revising: specific, actionable defects — wrong behavior, missing edge cases, divergence from the plan. If approving: one line on why it is acceptable.>"
+          - name: user
+            text: "Task: {{task}}\nThe plan:\n{{plan}}\nThe implementation as written to disk:\n{{code}}\nMechanical verification: {{verified}} {{failure}}"
+        max_tokens: 1024
+        cache: { breakpoints: [system] }
+      next: review
+
+    - id: review
+      type: model
+      display: { label: "reviewing the build", detail: "role: planner (frontier)" }
+      in: { text: $.steps.review-frame.text, entity: $.inputs.entity }
+      out: { text: string }
+      config:
+        model: planner
+        lane: frontier
+        max_tokens: 1024
+        timeout_ms: 180000
+      next: review-parse
+
+    - id: review-parse
+      type: transform
+      display: { label: "verdict: {{verdict}}" }
+      in: { text: $.steps.review.text }
+      out: { verdict: string, notes: string }
+      config:
+        parse:
+          verdict: '^VERDICT:[ \t]*(approve|revise)[ \t]*$'
+          notes: 'NOTES:\s*\n([\s\S]+)$'
+      next: review-gate
+
+    # ── review-gate ──────────────────────────────────────────────────────────
+    # revise → the worker goes again with the notes; anything else (approve,
+    # or an unparseable/stubbed review) delivers with the verdict on record.
+    - id: review-gate
+      type: branch
+      display: { label: "routing the verdict", output: min }
+      config:
+        cases:
+          - { when: "$.steps.review-parse.verdict == 'revise'", next: frame }
+        default: report
+
+    # ── report ───────────────────────────────────────────────────────────────
+    - id: report
+      type: prompt
+      display: { label: "reporting", output: min }
+      in:
+        file: $.steps.build.file
+        bytes: $.steps.build.bytes
+        verified: $.steps.build.verified
+        verdict: $.steps.review-parse.verdict
+        notes: $.steps.review-parse.notes
+      out: { text: string }
+      config:
+        template: "Wrote {{file}} ({{bytes}} bytes) — verify: {{verified}} · review: {{verdict}}. {{notes}}"
+      next: log-answer
+
+    - id: log-answer
+      type: write
+      display: { label: "logging the result", output: min }
+      in: { text: $.steps.report.text }
+      out: { logged: boolean }
+      config:
+        mode: turn
+        speaker: assistant
+      next: deliver
+
+    # ── deliver ──────────────────────────────────────────────────────────────
+    - id: deliver
+      type: assert
+      display: { label: "delivering", output: min }
+      in: { filler: $.steps.report.text, verdict: $.steps.build.verified }
+      out: { text: string }
+      config:
+        refusal: "The build did not verify."
+      next: end
+
+  outputs:
+    - name: answer
+      from: $.steps.report.text

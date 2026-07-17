@@ -1,6 +1,6 @@
 # Memory: what it is, what's proven, what's bounded
 
-OpenRotor's memory is **model-independent and vendor-portable by construction**: it
+rrotor's memory is **model-independent and vendor-portable by construction**: it
 reads and writes only the stator (facts + recorded turns), never a model. A
 directive given at turn 1 with one provider is recalled and injected at turn 20
 with any other provider — Claude, an OpenAI model, or a local one — because neither

@@ -1,19 +1,20 @@
 {
-  "name": "openrotor",
+  "name": "rrotor",
   "version": "0.0.1",
-  "description": "OpenRotor — the runtime for RotorSpec, the standard for deterministic AI agent loops.",
+  "description": "rrotor — Recursive Reasoning on top of reasoning. The open runtime for RotorSpec, the standard for deterministic agent loops.",
   "type": "module",
   "private": true,
   "license": "UNLICENSED",
   "bin": {
-    "openrotor": "dist/cli.js"
+    "rrotor": "dist/cli.js"
   },
   "exports": {
     ".": "./dist/index.js"
   },
   "files": [
     "dist",
-    "spec"
+    "spec",
+    "rotors"
   ],
   "engines": {
     "node": ">=20"
@@ -23,6 +24,7 @@
     "typecheck": "tsc -p tsconfig.test.json",
     "dev": "tsx src/cli.ts",
     "repl": "tsx src/cli.ts repl",
+    "chat": "tsx src/cli.ts chat",
     "start": "node dist/cli.js",
     "clean": "rm -rf dist",
     "test": "vitest run",
@@ -37,6 +39,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.14.0",
     "@types/pg": "^8.20.0",
+    "@types/react": "^18.3.31",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^2.1.9",
     "eslint": "^9.9.0",
@@ -50,7 +53,10 @@
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "better-sqlite3": "^11.10.0",
+    "ink": "^5.2.1",
+    "ink-spinner": "^5.0.0",
     "pg": "^8.22.0",
+    "react": "^18.3.1",
     "yaml": "^2.9.0"
   }
 }

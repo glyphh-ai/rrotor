@@ -50,7 +50,7 @@ describe("toEnvelope", () => {
   it("carries the record's audit + telemetry fields", () => {
     const e = toEnvelope(rec());
     expect(e).toMatchObject({
-      type: "com.openrotor.step.v0",
+      type: "com.rrotor.step.v0",
       run_id: "run-1",
       step_id: "ask",
       attempt: 0,

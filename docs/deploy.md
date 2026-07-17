@@ -1,4 +1,4 @@
-# Deploying OpenRotor
+# Deploying rrotor
 
 How a rotor runtime scales — from a single box to a multi-node Kubernetes fleet —
 and why the design makes horizontal scale almost free.
@@ -134,7 +134,7 @@ external, and the Service load-balances with no stickiness.
 ### Building the image
 
 ```sh
-docker build -f deploy/Dockerfile -t openrotor:latest .
+docker build -f deploy/Dockerfile -t rrotor:latest .
 ```
 
 Multi-stage Node 20-slim: a `build` stage runs `npm ci` + `tsc`, then a lean

@@ -21,6 +21,21 @@ export const writeHandler: StepHandler = {
   type: "write",
   async execute({ step, input, env, plugins }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? {}) as WriteConfig;
+    // §7.4 `turn`: record one conversational exchange — into the session's
+    // recency window (anaphora) AND the similarity corpus (semantic recall),
+    // speaker-tagged. The ONLY writer of turns: composed prompts never record
+    // (scaffolding in the corpus becomes instructions the model re-obeys).
+    if (cfg.mode === "turn") {
+      const text = String(input.text ?? "");
+      const speaker = cfg.speaker ?? "user";
+      await plugins.memory.appendConversation(env.session ?? "default", speaker, text);
+      await plugins.memory.recordTurn(`${speaker}: ${text}`);
+      return {
+        output: { logged: text.trim() !== "", speaker },
+        frames: [{ type: "done", data: { speaker } }],
+        status: "ok",
+      };
+    }
     let facts: Array<Record<string, unknown>>;
     if (Array.isArray(input.facts)) {
       facts = input.facts as Array<Record<string, unknown>>;
@@ -62,7 +77,7 @@ export const writeHandler: StepHandler = {
  */
 export function absorbText(text: string, key?: string): Array<Record<string, unknown>> {
   const facts: Array<Record<string, unknown>> = [];
-  for (const raw of text.split(/[.;\n]+/)) {
+  for (const raw of text.split(/[.;!?\n]+/)) {
     const s = raw.trim();
     if (!s) continue;
     let m: RegExpExecArray | null;
@@ -171,8 +186,20 @@ export const retrieveKbHandler: StepHandler = {
 
 export const retrieveVectorHandler: StepHandler = {
   type: "retrieve.vector",
-  async execute({ step, input, plugins }: HandlerArgs): Promise<StepResult> {
+  async execute({ step, input, env, plugins }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? {}) as RetrieveVectorConfig;
+    if (cfg.kind === "recent") {
+      // The RECENCY channel (§7.7): the last `window` exchanges of THIS session
+      // in order — an ordinal read, no embedding, fully deterministic. Also
+      // emits a ready-to-compose transcript block.
+      const turns = await plugins.memory.conversation(env.session ?? "default", cfg.window ?? 6);
+      const transcript = turns.map((t) => `${t.speaker}: ${t.text}`).join("\n");
+      return {
+        output: { turns, transcript, count: turns.length },
+        frames: [{ type: "done", data: { kind: "recent", count: turns.length } }],
+        status: "ok",
+      };
+    }
     const query = String(input.query ?? input.text ?? "");
     const hits = await plugins.memory.semanticRecall(query, cfg.top_k ?? 8, cfg.threshold ?? 0.35);
     return {

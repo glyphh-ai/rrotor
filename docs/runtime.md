@@ -443,7 +443,7 @@ substrate MCP tools (`think / ask / tell / remember / recall / query / keys / â€
 machine), lazy-importable without the MCP SDK; app-method stubs a live client can
 override.
 
-**glyphh premium swap-in:** server-side custom-MCP / connector execution (yo-server)
+**glyphh premium swap-in:** server-side custom-MCP / connector execution (the glyphh server)
 with write-only encrypted connection headers, a governed connector catalog,
 `org_roles` field/row scoping, and a live Electron client driving real windows/apps.
 

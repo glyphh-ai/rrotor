@@ -1,5 +1,5 @@
 /**
- * The OpenRotor error taxonomy — the single, canonical vocabulary of failure for
+ * The rrotor error taxonomy — the single, canonical vocabulary of failure for
  * the whole runtime (the "reflector" every layer reports through). Enterprise
  * operability rests on three properties this module guarantees:
  *

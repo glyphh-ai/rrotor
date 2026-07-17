@@ -8,7 +8,7 @@
  * This module is deliberately **provider-agnostic**. Auth is an injected async
  * `headers` provider, called per request, so a host (e.g. glyphh-server, which
  * fronts Pipedream Connect) can mint a fresh short-lived access token and add the
- * per-user context (`x-pd-external-user-id`, app slug) on every call. OpenRotor
+ * per-user context (`x-pd-external-user-id`, app slug) on every call. rrotor
  * knows nothing about any specific provider — it only knows how to speak MCP.
  *
  * Determinism (§6.2): a `tool.mcp` call is a nondeterministic side effect and is
@@ -107,7 +107,7 @@ export class McpClient {
     return this.rpc("initialize", {
       protocolVersion: "2025-03-26",
       capabilities: {},
-      clientInfo: { name: "openrotor", version: VERSION },
+      clientInfo: { name: "rrotor", version: VERSION },
     });
   }
 

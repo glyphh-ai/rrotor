@@ -79,6 +79,8 @@ spec:
         blocks:
           - name: system
             text: "You are a grounded assistant. Use only supported facts; if unsupported, say you don't know."
+          - name: user
+            text: "{{question}}"
         max_tokens: 1024
         cache: { breakpoints: [system] }
       next: plan

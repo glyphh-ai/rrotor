@@ -34,12 +34,36 @@ spec:
 Run the reference runtime locally. Node 20+.
 
 ```bash
-npm install
-npm run dev -- serve                                          # start the runtime (HTTP + streaming)
-npm run dev -- run rotors/base.rotor.yaml prompt="Where does Ada live?"   # or run one rotor headless
+npm install && npm run build && npm link   # once: the `rrotor` bin on your PATH
+
+make model     # serve a local GGUF via llama.cpp (or set MODEL_URL to any OpenAI-compatible endpoint)
+make tui       # the full-screen TUI · durable sqlite memory · live model
 ```
 
-`openrotor serve` exposes the probe surface plus the streaming transport the
+`make help` lists every launcher — `chat` (readline harness), `serve` (HTTP
+runtime), `repl`, `dev-tui` (run the TUI from source). Every mode variable
+overrides per-invocation:
+
+```bash
+make tui ROTOR=code                        # pin the coding rotor
+make tui STATOR=/tmp/scratch.db            # a throwaway memory store
+make serve PORT=9000 MODEL_URL=http://…    # your endpoint
+```
+
+All settings can live in a `.env` (project dir or `~/.rrotor/.env`) — copy
+[`.env.example`](./.env.example) for the full annotated catalog: model lanes,
+provider keys (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`), the stator, serve,
+logging, and the telemetry drain. Precedence: shell env > `./.env` >
+`~/.rrotor/.env` > TUI prefs.
+
+Or by hand — the runtime is configured entirely by environment:
+
+```bash
+ROTOR_STATOR_BACKEND=sqlite ROTOR_STATOR_URL=~/.rrotor/stator.db \
+ROTOR_MODEL_URL=http://127.0.0.1:8080 rrotor
+```
+
+`rrotor serve` exposes the probe surface plus the streaming transport the
 clients consume: `POST /run` (buffered or SSE), `GET /runs/:id/events` (durable
 reconnect), and a WebSocket at `/ws`. The interactive product CLI (chat ·
 co-work · code) is a **separate client** that talks to this server through the

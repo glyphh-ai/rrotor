@@ -4,21 +4,12 @@
  */
 
 import type { Frame, PromptConfig, StepResult, TransformConfig } from "../types.js";
-import { resolveRef, tokenish } from "../exec/util.js";
+import { interpolate, resolveRef, tokenish } from "../exec/util.js";
 import type { HandlerArgs, StepHandler } from "./types.js";
-
-/** Interpolate `{{name}}` occurrences from the resolved `in` values. */
-function interpolate(text: string, input: Record<string, unknown>): string {
-  return text.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, name: string) => {
-    const v = input[name];
-    if (v === undefined || v === null) return "";
-    return typeof v === "string" ? v : JSON.stringify(v);
-  });
-}
 
 export const promptHandler: StepHandler = {
   type: "prompt",
-  async execute({ step, input, plugins }: HandlerArgs): Promise<StepResult> {
+  async execute({ step, input }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? {}) as PromptConfig;
     let text: string;
     if (cfg.blocks && cfg.blocks.length > 0) {
@@ -35,7 +26,6 @@ export const promptHandler: StepHandler = {
     if (cfg.max_tokens && tokenish(text) > cfg.max_tokens) {
       text = text.slice(0, cfg.max_tokens * 4);
     }
-    plugins.memory.recordTurn(text); // short-term memory: the inbound composed prompt
     const frames: Frame[] = [{ type: "done", data: { breakpoints: cfg.cache?.breakpoints } }];
     return { output: { text }, frames, status: "ok" };
   },
@@ -43,14 +33,31 @@ export const promptHandler: StepHandler = {
 
 export const transformHandler: StepHandler = {
   type: "transform",
-  async execute({ step, env }: HandlerArgs): Promise<StepResult> {
+  async execute({ step, input, env }: HandlerArgs): Promise<StepResult> {
     const cfg = (step.config ?? {}) as TransformConfig;
     const output: Record<string, unknown> = {};
-    // Constant injections first, then reference remaps (map wins on conflict).
+    // Constant injections first, then reference remaps, then parsed fields
+    // (later stages win on conflict).
     if (cfg.set) for (const k of Object.keys(cfg.set).sort()) output[k] = cfg.set[k];
     if (cfg.map) {
       for (const name of Object.keys(cfg.map).sort()) {
         output[name] = resolveRef(cfg.map[name], env.context);
+      }
+    }
+    if (cfg.strip === "fences") {
+      const raw = String(input.text ?? "");
+      const lines = raw.replace(/\s+$/, "").split("\n");
+      if (lines[0]?.trimStart().startsWith("```")) lines.shift();
+      if (lines[lines.length - 1]?.trim() === "```") lines.pop();
+      output.text = lines.join("\n");
+    }
+    if (cfg.parse) {
+      // Deterministic extraction over `in.text`: first capture group, trimmed;
+      // unmatched → null (a downstream gate turns that into a refusal).
+      const text = String(input.text ?? "");
+      for (const name of Object.keys(cfg.parse).sort()) {
+        const m = new RegExp(cfg.parse[name], "m").exec(text);
+        output[name] = m?.[1] !== undefined ? m[1].trim() : null;
       }
     }
     return { output, frames: [{ type: "done" }], status: "ok" };

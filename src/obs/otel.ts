@@ -75,8 +75,8 @@ export function toOtlpSpan(env: DrainEnvelope, times?: { startUnixNano?: string;
   return {
     resourceSpans: [
       {
-        resource: { attributes: [attr("service.name", "openrotor")] },
-        scopeSpans: [{ scope: { name: "openrotor.runtime" }, spans: [span] }],
+        resource: { attributes: [attr("service.name", "rrotor")] },
+        scopeSpans: [{ scope: { name: "rrotor.runtime" }, spans: [span] }],
       },
     ],
   };

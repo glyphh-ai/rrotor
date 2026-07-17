@@ -152,6 +152,8 @@ spec:
         blocks:
           - name: system
             text: "Compose a concise answer using only the grounded summary. Do not add facts."
+          - name: user
+            text: "Question: {{question}}\n\nGrounded summary:\n{{summary}}"
         max_tokens: 512
         cache: { breakpoints: [system] }
       next: end

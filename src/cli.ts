@@ -1,40 +1,44 @@
 #!/usr/bin/env node
 /**
- * openrotor — the runtime's headless command surface (ops + dev, not the product).
+ * rrotor — the runtime's headless command surface (ops + dev, not the product).
  *
- *   openrotor serve [-p PORT]    start the HTTP runtime (probes + /run + /ws stream)
- *   openrotor run <file> [k=v…]  execute a .rotor through the basic-tier executor
- *   openrotor validate <file>    validate against schema + static graph checks
- *   openrotor errors [CODE]      the error catalog (--json for machine output)
- *   openrotor support <run_id>   a support bundle for a run (trace + errors + fixes)
- *   openrotor repl               the minimal REPL (dev harness)
- *   openrotor version | help
+ *   rrotor serve [-p PORT]    start the HTTP runtime (probes + /run + /ws stream)
+ *   rrotor run <file> [k=v…]  execute a .rotor through the basic-tier executor
+ *   rrotor chat [file]        chat with a rotor turn-by-turn (REPL chat mode)
+ *   rrotor validate <file>    validate against schema + static graph checks
+ *   rrotor errors [CODE]      the error catalog (--json for machine output)
+ *   rrotor support <run_id>   a support bundle for a run (trace + errors + fixes)
+ *   rrotor repl               the minimal REPL (dev harness)
+ *   rrotor version | help
  *
  * The interactive product CLI (chat · co-work · code) is a separate client that
  * talks to a rotor server over the streaming transport (SSE/WebSocket) via the
  * glyphh client SDK — see docs/sdk-spec.md. It is not part of the runtime.
  */
 
+import "./env.js"; // MUST be first — loads .env before any module reads the environment
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 
 import { printBanner } from "./banner.js";
 import { loadRotor, validateRotor } from "./parser/index.js";
 import { execute } from "./exec/executor.js";
-import { buildBasicPlugins } from "./plugins/index.js";
+import { buildBasicPlugins, childPluginsFactory } from "./plugins/index.js";
 import { startServer } from "./server.js";
 import { runRepl } from "./repl.js";
 import { VERSION } from "./version.js";
 import { describe, errorCatalog } from "./errors.js";
 import { statorFromEnvAsync } from "./exec/stator.js";
+import { bundledRotorResolver } from "./rotors.js";
 import { traceId } from "./obs/trace.js";
 import { toolModeFromLabels } from "./tools/index.js";
 import type { RotorDocument, StepRecord } from "./types.js";
 
-/** `openrotor validate <file>` — L1 parse + JSON Schema + static graph checks.
+/** `rrotor validate <file>` — L1 parse + JSON Schema + static graph checks.
  *  Exit code is the conformance gate: 0 = valid, 1 = invalid / error. */
 function runValidate(file: string | undefined): number {
   if (!file) {
-    console.error("validate: missing <file> (usage: openrotor validate <file>)");
+    console.error("validate: missing <file> (usage: rrotor validate <file>)");
     return 1;
   }
   let doc: unknown;
@@ -86,10 +90,10 @@ function fillRequired(doc: RotorDocument, inputs: Record<string, unknown>): Reco
   return out;
 }
 
-/** `openrotor run <file> [k=v…]` — load + validate + execute + print the run. */
+/** `rrotor run <file> [k=v…]` — load + validate + execute + print the run. */
 async function runRotorFile(file: string | undefined, rest: string[]): Promise<number> {
   if (!file) {
-    console.error("run: missing <file> (usage: openrotor run <file> [key=value …])");
+    console.error("run: missing <file> (usage: rrotor run <file> [key=value …])");
     return 1;
   }
   let doc: RotorDocument;
@@ -107,7 +111,7 @@ async function runRotorFile(file: string | undefined, rest: string[]): Promise<n
   }
 
   const inputs = fillRequired(doc, parseInputs(rest));
-  // Persist to the env-configured stator so `openrotor support <run_id>` can pull
+  // Persist to the env-configured stator so `rrotor support <run_id>` can pull
   // the run's tape afterward (durable backends only; in-memory is per-process).
   const store = await statorFromEnvAsync();
   // Install the tool stdlib for this run, gated by the rotor's declared mode. The
@@ -117,7 +121,10 @@ async function runRotorFile(file: string | undefined, rest: string[]): Promise<n
 
   let result;
   try {
-    result = await execute(doc, inputs, plugins);
+    result = await execute(doc, inputs, plugins, {
+      rotorResolver: bundledRotorResolver,
+      pluginsFor: childPluginsFactory({ store, root: process.cwd() }),
+    });
   } catch (err) {
     console.error(`run: execution error: ${(err as Error).message}`);
     return 1;
@@ -157,10 +164,10 @@ function printErrorHelp(err: { name: string; cause?: string }): void {
   console.log(`  ✗ error:  ${d.code}  (${d.category}, retryable=${d.retryable}, severity=${d.severity})`);
   if (err.cause) console.log(`            ${err.cause}`);
   console.log(`            ↳ fix: ${d.remediation}`);
-  console.log(`            ↳ see: docs/errors.md#codes  ·  \`openrotor errors ${d.code}\``);
+  console.log(`            ↳ see: docs/errors.md#codes  ·  \`rrotor errors ${d.code}\``);
 }
 
-/** `openrotor errors [CODE] [--json]` — the error catalog for humans and dev-ops
+/** `rrotor errors [CODE] [--json]` — the error catalog for humans and dev-ops
  *  agents. No args: the whole table. A code: that entry's detail. `--json`: the
  *  machine-readable catalog. */
 function runErrors(rest: string[]): number {
@@ -181,21 +188,21 @@ function runErrors(rest: string[]): number {
     console.log(JSON.stringify(rows, null, 2));
     return 0;
   }
-  console.log("OpenRotor error catalog (docs/errors.md):\n");
+  console.log("rrotor error catalog (docs/errors.md):\n");
   for (const r of rows) {
     console.log(`  ${r.code.padEnd(20)} ${r.category.padEnd(12)} retry=${r.retryable ? "y" : "n"}  ${r.summary}`);
   }
-  console.log(`\n  ${rows.length} codes. \`openrotor errors <CODE>\` for remediation, \`--json\` for machine output.`);
+  console.log(`\n  ${rows.length} codes. \`rrotor errors <CODE>\` for remediation, \`--json\` for machine output.`);
   return 0;
 }
 
-/** `openrotor support <run_id> [--json]` — a support bundle for a run: its trace id
+/** `rrotor support <run_id> [--json]` — a support bundle for a run: its trace id
  *  and every step's status + any taxonomy error + remediation, pulled from the
  *  durable stator. The artifact you attach to a ticket or hand an AI dev-ops agent. */
 async function runSupport(rest: string[]): Promise<number> {
   const runId = rest.find((r) => !r.startsWith("--"));
   if (!runId) {
-    console.error("support: missing <run_id> (usage: openrotor support <run_id> [--json])");
+    console.error("support: missing <run_id> (usage: rrotor support <run_id> [--json])");
     return 1;
   }
   const store = await statorFromEnvAsync();
@@ -240,7 +247,7 @@ async function runSupport(rest: string[]): Promise<number> {
   return 0;
 }
 
-/** `openrotor serve [-p PORT]` — start the HTTP runtime and block. */
+/** `rrotor serve [-p PORT]` — start the HTTP runtime and block. */
 function runServe(rest: string[]): Promise<number> {
   let port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? 8080);
   for (let i = 0; i < rest.length; i++) {
@@ -259,16 +266,25 @@ export async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case undefined:
-      // No subcommand: print help. (The interactive product CLI lives outside the
-      // runtime — it is an SDK client of `openrotor serve`; see docs/sdk-spec.md.)
+      // No subcommand on a TTY: the product face — the full-screen TUI.
+      if (process.stdout.isTTY && process.stdin.isTTY) {
+        const { runTui } = await import("./tui/main.js");
+        return runTui(VERSION);
+      }
       printHelp();
       return 0;
+    case "tui": {
+      const { runTui } = await import("./tui/main.js");
+      return runTui(VERSION, rest[0]);
+    }
     case "repl":
       return runRepl();
+    case "chat":
+      return runRepl({ chat: { file: rest[0] } });
     case "version":
     case "--version":
     case "-v":
-      console.log(`openrotor v${VERSION}`);
+      console.log(`rrotor v${VERSION}`);
       return 0;
     case "run":
       return runRotorFile(rest[0], rest.slice(1));
@@ -286,27 +302,39 @@ export async function main(argv: string[]): Promise<number> {
       printHelp();
       return 0;
     default:
-      console.error(`unknown command: ${cmd} (try: openrotor help)`);
+      console.error(`unknown command: ${cmd} (try: rrotor help)`);
       return 1;
   }
 }
 
 function printHelp(): void {
   printBanner(VERSION);
-  console.log(`  openrotor serve [-p PORT]     start the HTTP runtime (probes · /run · /ws stream)
-  openrotor run <file> [k=v…]   execute a .rotor through the executor
-  openrotor validate <file>     validate a .rotor against the schema
-  openrotor errors [CODE]       the error catalog (--json for machine output)
-  openrotor support <run_id>    a support bundle for a run (trace + errors + fixes)
-  openrotor repl                the minimal REPL (dev harness)
-  openrotor version
+  console.log(`  rrotor                        the full-screen TUI (default on a TTY)
+  rrotor tui [rotor]            the TUI pinned to a rotor (default: router)
+  rrotor serve [-p PORT]     start the HTTP runtime (probes · /run · /ws stream)
+  rrotor run <file> [k=v…]   execute a .rotor through the executor
+  rrotor chat [file|name]    chat with a rotor turn-by-turn (default: router — routes each turn to chat or code; names resolve from rotors/)
+  rrotor validate <file>     validate a .rotor against the schema
+  rrotor errors [CODE]       the error catalog (--json for machine output)
+  rrotor support <run_id>    a support bundle for a run (trace + errors + fixes)
+  rrotor repl                the minimal REPL (dev harness)
+  rrotor version
 
   The interactive product CLI (chat · co-work · code) is a separate SDK client of
   a rotor server — see docs/sdk-spec.md. It is not part of the runtime.
 `);
 }
 
-// Run when invoked directly (as the bin), not when imported.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Run when invoked directly (as the bin), not when imported. argv[1] may be a
+// SYMLINK (`npm link` puts one on PATH) — compare real paths, not strings.
+const invoked = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+if (invoked) {
   main(process.argv.slice(2)).then((code) => process.exit(code));
 }

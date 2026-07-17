@@ -123,7 +123,7 @@ function handle(
   }
 
   if (method === "GET" && path === "/version") {
-    sendJson(res, 200, { name: "openrotor", version: VERSION });
+    sendJson(res, 200, { name: "rrotor", version: VERSION });
     return;
   }
 

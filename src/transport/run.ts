@@ -12,9 +12,10 @@
  */
 
 import { execute, deriveRunId } from "../exec/executor.js";
-import { buildBasicPlugins } from "../plugins/index.js";
+import { buildBasicPlugins, childPluginsFactory } from "../plugins/index.js";
 import type { BasicModelsOptions } from "../plugins/models.js";
-import { toolModeFromLabels } from "../tools/index.js";
+import { toolModeFromLabels, type ToolPack } from "../tools/index.js";
+import { bundledRotorResolver } from "../rotors.js";
 import { traceId } from "../obs/trace.js";
 import { log } from "../obs/logger.js";
 import {
@@ -39,6 +40,12 @@ export interface StreamContext {
   workspace: string;
   session?: string;
   models?: BasicModelsOptions;
+  /** Host tool packs installed alongside the stdlib, same contract + mode gating. */
+  packs?: ToolPack[];
+  /** Resolve `sub-rotor` refs (§7.19). Defaults to the bundled rotor registry. */
+  rotors?: (ref: string) => RotorDocument | undefined;
+  /** Pin the run id (conversational turns pass a fresh one per invocation). */
+  runId?: string;
 }
 
 /** Called once per event as a run streams. */
@@ -113,12 +120,16 @@ async function streamExecution(
   const plugins = buildBasicPlugins({
     store: ctx.store,
     drain,
-    tools: { root: ctx.workspace, mode: toolModeFromLabels(doc.metadata.labels) },
+    tools: { root: ctx.workspace, mode: toolModeFromLabels(doc.metadata.labels), packs: ctx.packs },
     ...(ctx.models ? { models: ctx.models } : {}),
   });
 
   try {
-    const result = await execute(doc, inputs, plugins, execOpts);
+    const result = await execute(doc, inputs, plugins, {
+      rotorResolver: ctx.rotors ?? bundledRotorResolver,
+      pluginsFor: childPluginsFactory({ store: ctx.store, root: ctx.workspace, packs: ctx.packs }),
+      ...execOpts,
+    });
     emit(terminalEvent(result, seq++));
     emit(doneEvent(result, seq));
     await persistForReplay(ctx.store, doc, inputs, result);
@@ -140,13 +151,18 @@ export async function executeToEvents(
   ctx: StreamContext,
   emit: Emit,
 ): Promise<void> {
-  let runId = "";
-  try {
-    runId = deriveRunId(doc, inputs);
-  } catch {
-    /* execute() below surfaces the input error */
+  let runId = ctx.runId ?? "";
+  if (!runId) {
+    try {
+      runId = deriveRunId(doc, inputs);
+    } catch {
+      /* execute() below surfaces the input error */
+    }
   }
-  await streamExecution(doc, inputs, ctx, emit, runId, ctx.session ? { session: ctx.session } : undefined);
+  await streamExecution(doc, inputs, ctx, emit, runId, {
+    ...(ctx.session ? { session: ctx.session } : {}),
+    ...(runId ? { runId } : {}),
+  });
 }
 
 /**

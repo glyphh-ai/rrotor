@@ -1,0 +1,134 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# glyphh/router@1.0.0 — the FRONT DOOR: one chat surface, many rotors.
+#
+# Chat pins one rotor per session — so pin THIS one. Every turn is classified
+# by a ROUTER model into a closed enum (§7.10 in the conversation-native idiom:
+# model proposes in text, transform lifts the field deterministically, branch
+# routes), then dispatched to the right domain rotor as a sub-rotor call
+# (§7.19): conversation → glyphh/base-memory, a build/change request →
+# glyphh/code. An unparseable route defaults to conversation — the safe lane.
+#
+# The router itself is mode: chat — least privilege; it has no tool steps. Each
+# dispatched child's TOOL surface is re-gated to the CHILD's own mode (§13.4),
+# so the code child gets the workbench while the router never holds it.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rotor.glyphh.ai/v0.1
+kind: Rotor
+metadata:
+  name: router
+  version: 1.0.0
+  namespace: glyphh
+  description: The front-door router — classify each turn (router model) and dispatch to base-memory (chat) or code (build) as a sub-rotor.
+  labels:
+    tier: base
+    domain: general
+    mode: chat
+
+spec:
+  inputs:
+    - name: prompt
+      type: string
+      required: true
+      description: The user turn — conversation or coding task alike.
+    - name: entity
+      type: string
+      description: Optional memory entity to ground against.
+
+  # The dispatched child's `answer` output lands here (any step output key that
+  # matches a declared state key is reduced in), so both branches project one
+  # caller-visible result.
+  state:
+    schema:
+      answer: { type: string }
+    reducers:
+      answer: last-write-wins
+
+  entry: triage
+
+  steps:
+    # ── triage ───────────────────────────────────────────────────────────────
+    # Compose the ROUTER's brief (§7.1): a closed two-way decision with a strict
+    # machine-parsed reply format.
+    - id: triage
+      type: prompt
+      display: { label: "reading the turn", output: min }
+      in: { turn: $.inputs.prompt }
+      out: { text: string }
+      config:
+        blocks:
+          - name: system
+            text: "You are a router. Classify the user's turn. If it asks to create, modify, fix, build, run, or test code or files, its class is code. Everything else — questions, conversation, facts, memory — its class is chat. Reply with EXACTLY one word on its own line (the class, lowercase) and nothing else."
+          - name: user
+            text: "{{turn}}"
+        max_tokens: 512
+        cache: { breakpoints: [system] }
+      next: route
+
+    # ── route ────────────────────────────────────────────────────────────────
+    # The ROUTER role decides (§7.2) — a third bindable role; a control plane
+    # can pin it to a tiny fast model.
+    - id: route
+      type: model
+      display: { label: "choosing a rotor", detail: "role: router", output: min }
+      in: { text: $.steps.triage.text }
+      out: { text: string }
+      config:
+        model: router
+        lane: local
+        max_tokens: 64
+      next: pick
+
+    # ── pick ─────────────────────────────────────────────────────────────────
+    # Deterministic lift (§7.17 parse): the route or null — never a guess.
+    - id: pick
+      type: transform
+      display: { label: "extracting the route" }
+      in: { text: $.steps.route.text }
+      out: { route: string }
+      config:
+        parse:
+          # The bare class word alone on a line — a format that can never occur
+          # as a full line inside the instructions themselves, so an echoing or
+          # instruction-quoting model cannot false-match.
+          route: '^\s*(code|chat)\s*$'
+      next: decide
+
+    # ── decide ───────────────────────────────────────────────────────────────
+    # Ordered predicates (§7.11). Unparsed/ambiguous → conversation, the lane
+    # that can't mutate anything.
+    - id: decide
+      type: branch
+      display: { label: "routing" }
+      config:
+        cases:
+          - { when: "$.steps.pick.route == 'code'", next: subcode }
+        default: subchat
+
+    # ── subchat ──────────────────────────────────────────────────────────────
+    # Conversation → the memory chat loop (§7.19 call). Its `answer` output
+    # reduces into state.answer.
+    - id: subchat
+      type: sub-rotor
+      display: { label: "chatting", detail: "glyphh/base-memory", output: min }
+      out: { answer: string }
+      config:
+        ref: glyphh/base-memory
+        mode: call
+        inputs: { prompt: $.inputs.prompt, entity: $.inputs.entity }
+      next: end
+
+    # ── subcode ──────────────────────────────────────────────────────────────
+    # Build request → the coding loop (§7.19 call).
+    - id: subcode
+      type: sub-rotor
+      display: { label: "building", detail: "glyphh/code", output: min }
+      out: { answer: string }
+      config:
+        ref: glyphh/code
+        mode: call
+        inputs: { task: $.inputs.prompt, entity: $.inputs.entity }
+      next: end
+
+  outputs:
+    - name: answer
+      from: $.state.answer

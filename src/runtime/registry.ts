@@ -4,7 +4,7 @@
  * A rotor DECLARES the capabilities it needs; a runtime ADVERTISES what it
  * provides via each capability's `status()`; load-time reconciliation yields
  * satisfied | graceful-degradation | clean-refuse. This is the open-core seam:
- * OpenRotor ships BASIC implementations; glyphh swaps in PREMIUM ones behind the
+ * rrotor ships BASIC implementations; glyphh swaps in PREMIUM ones behind the
  * same interfaces.
  */
 

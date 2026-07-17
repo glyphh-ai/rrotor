@@ -20,6 +20,7 @@ metadata:
   labels:
     tier: base
     domain: general
+    mode: chat
 
 spec:
   inputs:
@@ -45,12 +46,15 @@ spec:
     # `cache.breakpoints` marks the system block for prefix caching (§8).
     - id: compose
       type: prompt
+      display: { label: "composing the prompt", output: min }
       in: { question: $.inputs.prompt, entity: $.inputs.entity }
       out: { text: string }
       config:
         blocks:
           - name: system
             text: "You are Glyphh, a grounded assistant. Answer directly and concisely; if a claim is not supported by known facts, say what you don't know."
+          - name: user
+            text: "{{question}}"
         cache: { breakpoints: [system] }
       next: respond
 
@@ -59,6 +63,7 @@ spec:
     # the control plane binds to a concrete endpoint via the model registry.
     - id: respond
       type: model
+      display: { label: "thinking", detail: "role: assistant", output: min }
       in: { text: $.steps.compose.text, entity: $.inputs.entity }
       out: { text: string }
       config:
@@ -71,6 +76,7 @@ spec:
     # Terminal (§7.9): assert the model's answer (present → asserted), or refuse.
     - id: deliver
       type: assert
+      display: { label: "answering", output: min }
       in: { filler: $.steps.respond.text }
       out: { text: string }
       config:
@@ -79,4 +85,4 @@ spec:
 
   outputs:
     - name: answer
-      from: $.state.answer
+      from: $.steps.deliver.text

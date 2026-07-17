@@ -1,6 +1,6 @@
-# OpenRotor Build Plan
+# rrotor Build Plan
 
-**Status tracker for the OpenRotor runtime build.** This is the single source of
+**Status tracker for the rrotor runtime build.** This is the single source of
 truth for what we are building, in what order, and how we know each piece is
 done. Update the checkboxes as work lands. Every phase is test-first: a phase is
 not "done" until its acceptance tests are green in CI.
@@ -213,7 +213,7 @@ external destination for audit, FinOps, and observability — honoring SPEC's
   - [x] `HttpDrain`: batched, newline-delimited JSON POST to `ROTOR_DRAIN_URL`
         with `ROTOR_DRAIN_TOKEN` bearer auth; configurable `ROTOR_DRAIN_BATCH`.
   - [x] `FileDrain`: append NDJSON to a path (local dev / sidecar tailing).
-- [x] **Serializer** (`toEnvelope`) producing a stable `com.openrotor.step.v0`
+- [x] **Serializer** (`toEnvelope`) producing a stable `com.rrotor.step.v0`
       envelope from a `StepRecord` (run/step/attempt/tick, status, space, principal,
       agent, usage, frames, output, error). **Field redaction** applied here via
       `ROTOR_DRAIN_REDACT` (governance redaction routes through here in Phase 5).
@@ -635,7 +635,7 @@ mints short-lived tokens from the project creds in `.env`).
 - [x] **Provider-agnostic auth:** an injected `headers` provider (static token OR
       an **async** per-request provider) so a host mints a fresh Connect token and
       injects per-user context (`x-pd-external-user-id`, app slug) on every call.
-      OpenRotor knows nothing about Pipedream — the provider closure does.
+      rrotor knows nothing about Pipedream — the provider closure does.
 - [x] `connectMcp` discovers a server's tools and registers them **namespaced**
       (`<conn>:<tool>`) into the connections registry, so a `tool.mcp` step
       dispatches straight to them and they appear in `listTools()`.
@@ -647,7 +647,7 @@ namespaced registration; dispatch + result normalization; static bearer **and**
 async per-user header injection; SSE-framed responses; and a `tool.mcp` rotor step
 that dials once and **replays without re-dialing**. **6 tests; 160 total green.**
 
-**Open-core boundary:** OpenRotor ships the generic client + registry; glyphh-server
+**Open-core boundary:** rrotor ships the generic client + registry; glyphh-server
 supplies the Pipedream Connect provider (token mint from `.env` + per-user headers)
 and registers a user's tools into the run's bundle before executing.
 
@@ -766,7 +766,7 @@ stator-factory unit test. **190 total green.**
 
 ## Enterprise readiness
 
-Making OpenRotor a piece of software an enterprise would run: a known error
+Making rrotor a piece of software an enterprise would run: a known error
 taxonomy, disciplined exception handling, and traceability/supportability good
 enough that an AI dev-ops agent (or a human driving one) can trace a failure to its
 cause and fix it fast. Same rules: test-first, determinism-safe (all the rich
@@ -862,9 +862,9 @@ handles: the taxonomy **`code`** and the run **`trace_id`**.
 - [x] Surfaced over the wire: the `/run` response carries `trace_id` and, on
       failure, an `error` block enriched with category/retryable/severity/
       remediation; the run-complete log line carries `trace_id` + code.
-- [x] CLI `openrotor errors [CODE] [--json]` — the catalog for humans and agents
+- [x] CLI `rrotor errors [CODE] [--json]` — the catalog for humans and agents
       (whole table, one code's remediation, or the machine-readable JSON).
-- [x] CLI `openrotor support <run_id> [--json]` — a run's trace + timeline + every
+- [x] CLI `rrotor support <run_id> [--json]` — a run's trace + timeline + every
       step's error + fix, pulled from the durable stator (the ticket/agent artifact).
       `run` now persists to the env stator so the bundle is retrievable.
 - [x] The CLI `run` output surfaces `trace:` and, on failure, the taxonomy error

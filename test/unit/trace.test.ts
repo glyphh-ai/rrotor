@@ -69,7 +69,7 @@ describe("OTLP span export (OTel-native, no SDK)", () => {
     expect(keys).toContain("rotor.run_id");
     expect(keys).toContain("rotor.step_id");
     expect(keys).toContain("rotor.space_id");
-    expect(otlp.resourceSpans[0].resource.attributes[0].value.stringValue).toBe("openrotor");
+    expect(otlp.resourceSpans[0].resource.attributes[0].value.stringValue).toBe("rrotor");
   });
 
   it("maps a failed step to ERROR status with the taxonomy code as error.type", () => {

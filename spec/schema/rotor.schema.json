@@ -249,6 +249,13 @@
       "additionalProperties": false,
       "required": ["inputs", "steps"],
       "properties": {
+        "events": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "output": { "enum": ["full", "summary", "min"] }
+          }
+        },
         "inputs": {
           "type": "array",
           "items": { "$ref": "#/$defs/inputParam" }

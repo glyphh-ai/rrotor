@@ -20,7 +20,7 @@
  */
 
 import { describe as describeError } from "../errors.js";
-import type { StepRecord } from "../types.js";
+import type { StepDisplay, StepRecord, Usage } from "../types.js";
 
 /** Bump on any breaking change to the event shape. The SDK negotiates on this. */
 export const WIRE_VERSION = "rotor.stream/v1";
@@ -39,7 +39,7 @@ export interface RunTerminal {
 /** One framed event in a run's stream. `seq` is the resume cursor. */
 export type WireEvent =
   | { seq: number; kind: "open"; wire: string; run_id: string; trace_id: string; rotor: string; session?: string }
-  | { seq: number; kind: "step"; step_id: string; type: string; status: string; frames: string[]; tick: number; error?: string }
+  | { seq: number; kind: "step"; step_id: string; type: string; status: string; frames: string[]; tick: number; error?: string; usage?: Usage; display?: StepDisplay; output?: Record<string, unknown> }
   | { seq: number; kind: "answer"; text: string }
   | { seq: number; kind: "interrupt"; step_id: string; awaiting: unknown }
   | { seq: number; kind: "error"; code: string; detail: string; remediation: string }
@@ -56,7 +56,34 @@ export function stepEvent(rec: StepRecord, seq: number): WireEvent {
     frames: (rec.frames ?? []).map((f) => f.type),
     tick: rec.logical_tick,
     ...(rec.error ? { error: rec.error.name } : {}),
+    ...(rec.usage ? { usage: rec.usage } : {}),
+    ...(rec.display ? { display: rec.display } : {}),
+    ...(rec.output && (rec.event_output ?? "full") !== "min"
+      ? { output: (rec.event_output ?? "full") === "full" ? rec.output : truncateOutput(rec.output) }
+      : {}),
   };
+}
+
+/** Bound a step's output for the wire: strings cap at 400 chars, everything
+ *  else caps via its JSON image. The full value stays on the tape — the wire
+ *  carries enough for a client to NARRATE (paths, commands, verdicts), not to
+ *  reconstruct artifacts. Field-grain redaction already ran before the record
+ *  was persisted, so nothing redacted can reach here. */
+const WIRE_VALUE_CAP = 400;
+export function truncateOutput(output: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(output).sort()) {
+    const v = output[key];
+    if (typeof v === "string") {
+      out[key] = v.length > WIRE_VALUE_CAP ? `${v.slice(0, WIRE_VALUE_CAP - 1)}…` : v;
+    } else if (v !== null && typeof v === "object") {
+      const img = JSON.stringify(v) ?? "";
+      out[key] = img.length > WIRE_VALUE_CAP ? `${img.slice(0, WIRE_VALUE_CAP - 1)}…` : v;
+    } else {
+      out[key] = v;
+    }
+  }
+  return out;
 }
 
 /** The terminal frame for a run — derived from its outputs/error/interrupt. */

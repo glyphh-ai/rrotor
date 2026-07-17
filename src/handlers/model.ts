@@ -46,6 +46,8 @@ export const modelHandler: StepHandler = {
     // ── decode: micro rotor, or a single model call ──────────────────────────
     let text: string;
     let usage: Usage;
+    let served: string | undefined;
+    let laneNotes: string[] | undefined;
     let decodeFrames: Frame[];
 
     if (cfg.micro && ground && candidates && candidates.length > 0) {
@@ -64,14 +66,17 @@ export const modelHandler: StepHandler = {
       }
       text = micro.chosen;
       usage = { input: tokenish(promptText), output: tokenish(text), cost: 0 };
+      served = "hdc";
     } else {
       const res = await plugins.models.execute(
-        { prompt: promptText, candidates, lane, model: cfg.model, temperature: cfg.temperature, seed: cfg.seed },
+        { prompt: promptText, candidates, lane, model: cfg.model, temperature: cfg.temperature, seed: cfg.seed, timeout_ms: cfg.timeout_ms },
         lane,
       );
       text = res.text;
       usage = res.usage;
       decodeFrames = res.frames;
+      served = res.served;
+      laneNotes = res.notes;
     }
 
     // ── prompt caching (§8.6) — determinism-neutral; changes only usage ──────
@@ -103,7 +108,12 @@ export const modelHandler: StepHandler = {
 
     const frames: Frame[] = [...decodeFrames, ...cacheFrames];
     return {
-      output: { text, usage },
+      output: {
+        text,
+        usage,
+        ...(served ? { served } : {}),
+        ...(laneNotes?.length ? { lane_notes: laneNotes } : {}),
+      },
       frames: frames.length > 0 ? frames : [{ type: "done" }],
       status: "ok",
       usage,

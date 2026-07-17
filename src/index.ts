@@ -1,5 +1,5 @@
 /**
- * OpenRotor — the open runtime for RotorSpec.
+ * rrotor — the open runtime for RotorSpec.
  *
  * Public surface (grows as the runtime is built out).
  */
@@ -69,3 +69,31 @@ export {
 export { SqliteStore } from "./exec/sqlite-store.js";
 export { InProcessStore } from "./exec/store.js";
 export type { Stator } from "./exec/store.js";
+
+// The tool SDK surface — a host product (desktop, CLI) defines its own tools behind
+// the same contract as the stdlib and passes them to `runInProcess({tools})` /
+// `executeToEvents(ctx.packs)`; the rotor's permission mode gates them identically.
+export {
+  defineTool,
+  definePack,
+  buildStdlib,
+  installStdlib,
+  toolModeFromLabels,
+  MODES,
+  CAPABILITIES,
+  type ToolSpec,
+  type ToolPack,
+  type ToolEffect,
+  // `Capability` (runtime seam) is taken by runtime/registry — alias the tool grant.
+  type Capability as ToolCapability,
+  type ModeName,
+  type InstallResult,
+} from "./tools/index.js";
+
+// The client config contract — what a product must bind/grant/collect to run a
+// rotor (model roles, permission mode, tools, inputs). The static twin of the
+// wire event stream.
+export { rotorManifest, type RotorManifest, type ManifestRole, type ManifestTool } from "./manifest.js";
+
+// The bundled rotor registry — the default `sub-rotor` ref resolver (§7.19).
+export { bundledRotorResolver } from "./rotors.js";

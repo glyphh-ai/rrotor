@@ -57,7 +57,8 @@ function backendFromEnv(env: NodeJS.ProcessEnv): StatorBackend {
  *  the in-process backend so nothing durable is created unless asked for. */
 export async function statorFromEnvAsync(env: NodeJS.ProcessEnv = process.env): Promise<Stator> {
   const embedDim = env.ROTOR_EMBED_DIM ? Number(env.ROTOR_EMBED_DIM) : undefined;
-  return initStator({ backend: backendFromEnv(env), url: env.ROTOR_STATOR_URL, embedDim });
+  const url = env.ROTOR_STATOR_URL?.replace(/^~(?=$|\/)/, process.env.HOME ?? "~");
+  return initStator({ backend: backendFromEnv(env), url, embedDim });
 }
 
 /** Synchronous env construction (memory/sqlite only). Retained for callers on the

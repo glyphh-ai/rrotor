@@ -27,13 +27,35 @@ export interface ExecOptions {
 
 function runBash(cmd: string, cwd: string, timeoutMs: number, maxOutput: number): Promise<{ stdout: string; stderr: string; exit_code: number; timed_out: boolean }> {
   return new Promise((resolvePromise) => {
-    const child = spawn("bash", ["-c", cmd], { cwd });
+    // detached: the child leads its own PROCESS GROUP, so the timeout can kill
+    // the whole tree — a bash wrapper's grandchildren (a spawned server, an
+    // infinite clock) would otherwise survive the kill, keep the stdio pipes
+    // open, and hang this promise forever ('close' waits on the pipes).
+    const child = spawn("bash", ["-c", cmd], { cwd, detached: true });
     let out = "";
     let err = "";
     let timedOut = false;
+    let settled = false;
+    const finish = (r: { stdout: string; stderr: string; exit_code: number; timed_out: boolean }): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise(r);
+    };
+    const killTree = (): void => {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL"); // the whole group
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killTree();
+      // Belt over braces: even if an escapee still holds a pipe open, resolve
+      // on the recorded facts — a tool step must never hang the run.
+      setTimeout(() => finish({ stdout: out.slice(0, maxOutput), stderr: err.slice(0, maxOutput), exit_code: -1, timed_out: true }), 1000).unref?.();
     }, timeoutMs);
     child.stdout.on("data", (d: Buffer) => {
       if (out.length < maxOutput) out += d.toString("utf8");
@@ -42,17 +64,19 @@ function runBash(cmd: string, cwd: string, timeoutMs: number, maxOutput: number)
       if (err.length < maxOutput) err += d.toString("utf8");
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolvePromise({
+      finish({
         stdout: out.slice(0, maxOutput),
         stderr: err.slice(0, maxOutput),
         exit_code: code ?? -1,
         timed_out: timedOut,
       });
     });
+    // 'exit' fires when the process dies even while orphans hold the pipes.
+    child.on("exit", (code) => {
+      setTimeout(() => finish({ stdout: out.slice(0, maxOutput), stderr: err.slice(0, maxOutput), exit_code: code ?? -1, timed_out: timedOut }), 50).unref?.();
+    });
     child.on("error", (e) => {
-      clearTimeout(timer);
-      resolvePromise({ stdout: out, stderr: String(e.message), exit_code: -1, timed_out: timedOut });
+      finish({ stdout: out, stderr: String(e.message), exit_code: -1, timed_out: timedOut });
     });
   });
 }

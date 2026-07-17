@@ -1,7 +1,7 @@
 # Pluggable vector stores & spec-defined dimensions
 
 Letting a deployment pick its vector store, and keeping the two distinct vectors
-OpenRotor uses within each backend's real limits. It exists because "pgvector maxes
+rrotor uses within each backend's real limits. It exists because "pgvector maxes
 out at 2000 dims" is a real constraint — but it lands on only *one* of our vectors,
 and only for the *index*.
 
@@ -16,7 +16,7 @@ each other's writes mid-run). HDC-cortex persistence remains the one deferred pi
 
 ## Two vectors, two very different needs
 
-OpenRotor stores two unrelated kinds of vectors. Conflating them is the trap.
+rrotor stores two unrelated kinds of vectors. Conflating them is the trap.
 
 | | **HDC hypervector** | **Semantic-recall embedding** |
 | --- | --- | --- |

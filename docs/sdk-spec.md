@@ -1,7 +1,7 @@
 # The glyphh Client SDK — Implementation Specification
 
 **Status:** v0.1 draft · **Package:** `@glyphh/client` · **Language:** TypeScript ·
-**License:** proprietary (not open source) · **Targets:** the OpenRotor runtime
+**License:** proprietary (not open source) · **Targets:** the rrotor runtime
 streaming transport `rotor.stream/v1`.
 
 This is the build spec for the **client SDK**: the library every glyphh client
@@ -35,7 +35,7 @@ It exposes a small typed API; a client is a thin renderer on top of it.
                   └───────┬────────┘
                           │  rotor.stream/v1 (SSE / WebSocket + HTTP control)
                   ┌───────┴────────┐
-                  │  rotor server  │                   the runtime (openrotor serve)
+                  │  rotor server  │                   the runtime (rrotor serve)
                   └────────────────┘
 ```
 
@@ -257,7 +257,7 @@ Map to (proposed) `POST /sessions/:id/files`, `GET /sessions/:id/files?path=`,
 Two layers, both typed:
 
 - **Run errors** arrive as an `error` `WireEvent` (`code`, `detail`, `remediation`)
-  — the code is a runtime taxonomy code (see `docs/errors.md`, `openrotor errors`).
+  — the code is a runtime taxonomy code (see `docs/errors.md`, `rrotor errors`).
   Surface as `RunError` carrying those fields; do not throw for these (they are run
   outcomes), deliver them in the event stream and reflect in `run.done`.
 - **Transport/SDK errors** (connect failure, auth, protocol/version mismatch,
@@ -301,7 +301,7 @@ SDK surface and should be built in the runtime alongside the SDK:
 
 ## 11. Test requirements (for the implementing agent)
 
-Test against a **real `openrotor serve`** instance (boot it on an ephemeral port),
+Test against a **real `rrotor serve`** instance (boot it on an ephemeral port),
 not a mock — the transport is cheap to run:
 
 1. Turn streaming over both SSE and WS yields `open → step* → answer → done` in

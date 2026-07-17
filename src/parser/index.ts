@@ -1,6 +1,6 @@
 /**
  * The RotorSpec loader + validator — the L1 (Core) surface the CLI drives for
- * `openrotor validate` (docs/runtime.md §4.2, §6.1).
+ * `rrotor validate` (docs/runtime.md §4.2, §6.1).
  *
  *   loadRotor(path)      parse a YAML/JSON `.rotor` document → RotorDocument
  *   validateRotor(doc)   JSON-Schema validation (ajv, draft 2020-12) against

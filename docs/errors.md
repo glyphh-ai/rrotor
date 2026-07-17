@@ -1,4 +1,4 @@
-# OpenRotor error catalog
+# rrotor error catalog
 
 The canonical taxonomy every runtime failure reports through (source of truth:
 `src/errors.ts`; this file is generated — do not hand-edit). Each failure carries a

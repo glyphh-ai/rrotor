@@ -1,0 +1,231 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# glyphh/build@1.0.0 — the WORKER: implement one file from a written plan.
+#
+# The mechanical inner loop of the coding conductor (glyphh/code): read the
+# plan FILE from disk (the spec travels as a PATH — plans can be arbitrarily
+# large without bloating context), brief the local coder with it, write,
+# provision, verify, and refine on failure — bounded. A stub coder answer is
+# a typed refusal, never a written file. Invoked as a sub-rotor (§7.19); the
+# caller reviews the result with a frontier model and may re-invoke with
+# `review_notes`.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rotor.glyphh.ai/v0.1
+kind: Rotor
+metadata:
+  name: build
+  version: 1.0.0
+  namespace: glyphh
+  description: The build worker — read the plan file, code it locally, provision, verify, refine; refuse on no live coder.
+  labels:
+    tier: domain
+    domain: coding
+    mode: code
+
+spec:
+  inputs:
+    - name: task
+      type: string
+      required: true
+      description: The original user task, verbatim.
+    - name: plan_path
+      type: string
+      required: true
+      description: Workspace-relative path of the written plan (markdown).
+    - name: file
+      type: string
+      required: true
+      description: The one file to create or rewrite.
+    - name: test_cmd
+      type: string
+      required: true
+      description: Shell command that exits 0 only if the change works.
+    - name: setup_cmd
+      type: string
+      description: Optional environment-provisioning command.
+    - name: review_notes
+      type: string
+      description: Reviewer feedback from a prior build round, when revising.
+
+  space:
+    vector_dim: 10000
+    encoder_seed: 42
+    roles_config: universal-7x33
+
+  attention:
+    budget:
+      revolutions: 3
+      on_exhausted: stop
+
+  state:
+    schema:
+      answer: { type: string }
+    reducers:
+      answer: last-write-wins
+
+  entry: read-plan
+
+  steps:
+    # ── read-plan ────────────────────────────────────────────────────────────
+    # The spec arrives as a PATH; the plan document is read here (§7.16).
+    - id: read-plan
+      type: tool
+      display: { label: "reading the plan → {{path}}" }
+      in: { path: $.inputs.plan_path }
+      out: { result: object }
+      config:
+        flavor: mcp
+        name: file.read
+      next: draft
+
+    # ── draft ────────────────────────────────────────────────────────────────
+    # The coder's brief: task + the WHOLE plan + reviewer notes + last failure.
+    - id: draft
+      type: prompt
+      display: { label: "briefing the coder", output: min }
+      in:
+        task: $.inputs.task
+        file: $.inputs.file
+        plan: $.steps.read-plan.result.content
+        notes: $.inputs.review_notes
+        feedback: $.steps.verify.result.stderr
+      out: { text: string }
+      config:
+        blocks:
+          - name: system
+            text: "You are an expert programmer implementing a written plan. Output ONLY the complete, final content of the target file. No prose, no markdown fences — the raw file content, ready to run."
+          - name: user
+            text: "Task: {{task}}\nTarget file: {{file}}\nThe plan:\n{{plan}}\nReviewer notes (address every one if present):\n{{notes}}\nIf non-empty, the previous attempt FAILED verification — fix the cause:\n{{feedback}}"
+        max_tokens: 2048
+        cache: { breakpoints: [system] }
+      next: code
+
+    # ── code ─────────────────────────────────────────────────────────────────
+    - id: code
+      type: model
+      display: { label: "writing the code", detail: "role: coder" }
+      in: { text: $.steps.draft.text }
+      out: { text: string }
+      config:
+        model: coder
+        lane: local
+        max_tokens: 4096
+        timeout_ms: 300000
+      next: clean
+
+    # ── clean ────────────────────────────────────────────────────────────────
+    - id: clean
+      type: transform
+      display: { label: "cleaning the code", output: min }
+      in: { text: $.steps.code.text }
+      out: { text: string }
+      config:
+        strip: fences
+      next: coder-live
+
+    # ── coder-live ───────────────────────────────────────────────────────────
+    # A stub answer is a diagnostic echo, not code (§3.3) — typed refusal.
+    - id: coder-live
+      type: branch
+      display: { label: "checking the coder answered", output: min }
+      config:
+        cases:
+          - { when: "$.steps.code.served == 'stub'", next: no-model }
+        default: apply
+
+    - id: no-model
+      type: fail
+      display: { label: "refusing: no model answered" }
+      config:
+        error: E_NO_MODEL
+        cause: "the coder lane produced no live answer (model unreachable or timed out) — nothing real to write; see the step's lane notes"
+
+    # ── apply ────────────────────────────────────────────────────────────────
+    - id: apply
+      type: tool
+      display: { label: "writing {{path}}" }
+      in: { path: $.inputs.file, content: $.steps.clean.text }
+      out: { result: object }
+      idempotency: auto
+      config:
+        flavor: mcp
+        name: file.write
+      next: setupq
+
+    # ── setup (when the spec declared it) ────────────────────────────────────
+    - id: setupq
+      type: branch
+      display: { label: "checking setup", output: min }
+      config:
+        cases:
+          - { when: "$.inputs.setup_cmd", next: setup }
+        default: prepare
+
+    - id: setup
+      type: tool
+      display: { label: "provisioning: {{command}}" }
+      in: { command: $.inputs.setup_cmd }
+      out: { result: object }
+      config:
+        flavor: mcp
+        name: shell.bash
+      next: prepare
+
+    # ── verify ───────────────────────────────────────────────────────────────
+    - id: prepare
+      type: prompt
+      display: { label: "preparing verification", output: min }
+      in: { cmd: $.inputs.test_cmd }
+      out: { text: string }
+      config:
+        template: "if OUT=$({{cmd}} 2>&1); then echo PASS; else printf '%s\n' \"$OUT\" >&2; exit 0; fi"
+      next: verify
+
+    - id: verify
+      type: tool
+      display: { label: "running the test" }
+      in: { command: $.steps.prepare.text }
+      out: { result: object }
+      config:
+        flavor: mcp
+        name: shell.bash
+      next: check
+
+    - id: check
+      type: gate
+      display: { label: "checking the result" }
+      in: { value: $.steps.verify.result.stdout }
+      out: { verdict: string }
+      config:
+        mode: assertion
+        on_pass: finish
+        on_fail: draft
+        on_escalate: finish
+
+    # ── finish ───────────────────────────────────────────────────────────────
+    # Project the build facts for the caller (§4.1) — the conductor reviews.
+    - id: finish
+      type: transform
+      display: { label: "packaging the result", output: min }
+      in:
+        file: $.inputs.file
+        bytes: $.steps.apply.result.bytes_written
+        verified: $.steps.check.verdict
+        failure: $.steps.verify.result.stderr
+      out: { file: string, bytes: number, verified: string, failure: string }
+      config:
+        map:
+          file: $.inputs.file
+          bytes: $.steps.apply.result.bytes_written
+          verified: $.steps.check.verdict
+          failure: $.steps.verify.result.stderr
+      next: end
+
+  outputs:
+    - name: file
+      from: $.steps.finish.file
+    - name: bytes
+      from: $.steps.finish.bytes
+    - name: verified
+      from: $.steps.finish.verified
+    - name: failure
+      from: $.steps.finish.failure

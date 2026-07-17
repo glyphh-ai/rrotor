@@ -98,7 +98,7 @@ Because every run is a recorded, metered tape, a tool's real token/time cost is
 "A built-in tool" and "your tool" are the identical mechanism:
 
 ```ts
-import { defineTool, definePack, installStdlib } from "openrotor/tools";
+import { defineTool, definePack, installStdlib } from "rrotor/tools";
 
 const shout = defineTool({
   name: "text.shout", version: 1, effect: "pure", grants: [],
@@ -118,7 +118,7 @@ cares where a tool came from.
 ## Installing for a run
 
 ```ts
-import { installStdlib, kvFromStore } from "openrotor/tools";
+import { installStdlib, kvFromStore } from "rrotor/tools";
 
 const res = installStdlib(plugins.connections, {
   root: workspaceDir,

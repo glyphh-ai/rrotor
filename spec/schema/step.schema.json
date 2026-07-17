@@ -214,6 +214,16 @@
   "properties": {
     "id": { "type": "string", "minLength": 1 },
     "type": { "$ref": "#/$defs/stepType" },
+    "display": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" },
+        "output": { "enum": ["full", "summary", "min"] }
+      }
+    },
     "in": {
       "type": "object",
       "additionalProperties": { "type": "string" }
@@ -296,6 +306,7 @@
                   }
                 }
               },
+              "timeout_ms": { "type": "integer", "minimum": 1000 },
               "max_tokens": { "type": "number", "minimum": 0 },
               "cache": { "$ref": "#/$defs/promptCache" }
             }
@@ -354,7 +365,7 @@
           "config": {
             "type": "object",
             "properties": {
-              "mode": { "enum": ["raw", "absorb"] },
+              "mode": { "enum": ["raw", "absorb", "turn"] },
               "key": { "type": "string" },
               "speaker": { "type": "string" }
             }
@@ -423,7 +434,8 @@
             "type": "object",
             "properties": {
               "top_k": { "type": "integer", "minimum": 0 },
-              "kind": { "enum": ["query", "document"] },
+              "kind": { "enum": ["query", "document", "recent"] },
+              "window": { "type": "integer", "minimum": 1 },
               "threshold": { "type": "number" },
               "embed_model": { "type": "string" }
             }
@@ -613,7 +625,12 @@
               "map": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
-              }
+              },
+              "parse": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              },
+              "strip": { "enum": ["fences"] }
             }
           }
         }
