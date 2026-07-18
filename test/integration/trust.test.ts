@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 
 import { execute } from "../../src/exec/executor.js";
+import { canonicalize, sha256 } from "../../src/exec/util.js";
 import { buildBasicPlugins } from "../../src/plugins/index.js";
 import { InProcessStore } from "../../src/exec/store.js";
 import { toEnvelope } from "../../src/plugins/drain.js";
@@ -81,8 +82,9 @@ describe("sub-rotor identity attenuation (§11.3)", () => {
     const resolver = () => child(["scope:a"]);
     const r = await execute(parent, {}, buildBasicPlugins({ store }), { principal: caller, rotorResolver: resolver });
     expect(r.status).toBe("ok");
-    // The sub-run's records carry the narrowed identity.
-    const subRecords = await store.history.read(`${r.run_id}::child`);
+    // The sub-run's records carry the narrowed identity. The child run id is
+    // input-addressed: caller run :: ref :: hash(resolved inputs).
+    const subRecords = await store.history.read(`${r.run_id}::child::${sha256(canonicalize({})).slice(0, 12)}`);
     expect(subRecords.length).toBeGreaterThan(0);
     expect(subRecords[0].principal?.scopes).toEqual(["scope:a"]);
   });

@@ -607,12 +607,16 @@ class RunSession {
   }
 
   private async runRotor(ref: string, subInputs: Record<string, unknown>): Promise<RunResult> {
+    // The child run is addressed by the caller's run AND the resolved inputs:
+    // re-invoking the same sub-rotor with new inputs (a revise round) is a new
+    // run, while an identical invocation replays deterministically (§16.3).
+    const childRunId = `${this.runId}::${ref}::${sha256(canonicalize(subInputs)).slice(0, 12)}`;
     const subDoc = this.opts.rotorResolver?.(ref);
     if (!subDoc) {
       // Unresolved reference is a hard failure, not a fake success (§7.19).
       return {
-        run_id: `${this.runId}::${ref}`,
-        trace_id: traceId(`${this.runId}::${ref}`),
+        run_id: childRunId,
+        trace_id: traceId(childRunId),
         status: "failed",
         terminal: "__fail__",
         outputs: {},
@@ -629,8 +633,8 @@ class RunSession {
     const exceeded = requested.filter((s) => !callerScopes.has(s));
     if (exceeded.length > 0) {
       return {
-        run_id: `${this.runId}::${ref}`,
-        trace_id: traceId(`${this.runId}::${ref}`),
+        run_id: childRunId,
+        trace_id: traceId(childRunId),
         status: "refused",
         terminal: "__attenuation__",
         outputs: { refused: "E_SCOPE_EXCEEDED", scopes: exceeded },
@@ -646,7 +650,7 @@ class RunSession {
     // §13.4: the callee's tool surface is gated by ITS mode, not the caller's.
     const subPlugins = this.opts.pluginsFor?.(subDoc, this.plugins) ?? this.plugins;
     return execute(subDoc, subInputs, subPlugins, {
-      runId: `${this.runId}::${ref}`,
+      runId: childRunId,
       // The callee joins the caller's session — its memory writes/reads scope
       // to the same conversation, not a session-agnostic void.
       session: this.opts.session,

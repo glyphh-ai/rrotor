@@ -96,7 +96,6 @@ spec:
             text: "You are a senior engineer writing a BUILD PLAN a far less capable local model will implement. Reply in EXACTLY this format — the header lines are machine-parsed:\nFILE: <the one workspace-relative file to create or rewrite>\nSETUP: <a shell command that prepares the environment (install dependencies), or none>\nTEST: <a shell command that exits 0 only if the change works>\nPLAN:\n<a complete markdown build plan: exact structure, function signatures, behaviors, edge cases — specific enough that a weak coder cannot get it wrong>\nRules: prefer the standard library; if third-party packages are essential, SETUP must install them. SETUP and TEST must finish on their own within seconds. The TEST must check real behavior, not keywords."
           - name: user
             text: "Task: {{task}}\nRelevant context: {{context}}\nIf the following is non-empty, revise the previous plan to address the reviewer's notes:\nPrevious plan:\n{{prior_plan}}\nReviewer notes:\n{{review_notes}}"
-        max_tokens: 2048
         cache: { breakpoints: [system] }
       next: plan
 
@@ -109,7 +108,7 @@ spec:
       config:
         model: planner
         lane: frontier
-        max_tokens: 2048
+        max_tokens: 4096
         timeout_ms: 180000
       next: extract
 
@@ -207,7 +206,6 @@ spec:
             text: "You are the senior engineer reviewing an implementation against your plan. Reply in EXACTLY this format — the first line is machine-parsed:\nVERDICT: approve\nor\nVERDICT: revise\nNOTES:\n<if revising: specific, actionable defects — wrong behavior, missing edge cases, divergence from the plan. If approving: one line on why it is acceptable.>"
           - name: user
             text: "Task: {{task}}\nThe plan:\n{{plan}}\nThe implementation as written to disk:\n{{code}}\nMechanical verification: {{verified}} {{failure}}"
-        max_tokens: 1024
         cache: { breakpoints: [system] }
       next: review
 

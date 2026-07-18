@@ -95,7 +95,6 @@ spec:
             text: "You are an expert programmer implementing a written plan. Output ONLY the complete, final content of the target file. No prose, no markdown fences — the raw file content, ready to run."
           - name: user
             text: "Task: {{task}}\nTarget file: {{file}}\nThe plan:\n{{plan}}\nReviewer notes (address every one if present):\n{{notes}}\nIf non-empty, the previous attempt FAILED verification — fix the cause:\n{{feedback}}"
-        max_tokens: 2048
         cache: { breakpoints: [system] }
       next: code
 

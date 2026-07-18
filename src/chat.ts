@@ -99,6 +99,9 @@ export async function openChat(file?: string, opts?: { models?: EmbedOptions["mo
   }
 
   const store: Stator = await statorFromEnvAsync();
+  // The tool sandbox root: ROTOR_WORKSPACE when set (same contract as `serve`),
+  // the current directory otherwise.
+  const workspace = process.env.ROTOR_WORKSPACE;
   const session = `chat-${randomBytes(4).toString("hex")}`;
   let turnSeq = 0;
   const ns = doc.metadata.namespace ? `${doc.metadata.namespace}/` : "";
@@ -119,7 +122,7 @@ export async function openChat(file?: string, opts?: { models?: EmbedOptions["mo
       const render = new TurnRenderer(sink, opts?.spinner ?? false);
       try {
         const runInputs = { ...(opts?.inputs ?? {}), [inputs.primary]: prompt };
-        await runInProcess(doc, runInputs, (ev) => render.onEvent(ev), { store, session, runId: `run-${session}-t${++turnSeq}`, ...(models ? { models } : {}) });
+        await runInProcess(doc, runInputs, (ev) => render.onEvent(ev), { store, session, runId: `run-${session}-t${++turnSeq}`, ...(workspace ? { workspace } : {}), ...(models ? { models } : {}) });
       } catch (err) {
         render.stop();
         sink(`\n  ${D}✗ turn failed: ${(err as Error).message}${R}\n\n`);
@@ -129,7 +132,7 @@ export async function openChat(file?: string, opts?: { models?: EmbedOptions["mo
     },
     async turnEvents(prompt: string, onEvent: (ev: WireEvent) => void, extra?: Record<string, unknown>): Promise<void> {
       const runInputs = { ...(extra ?? {}), [inputs.primary]: prompt };
-      await runInProcess(doc, runInputs, onEvent, { store, session, runId: `run-${session}-t${++turnSeq}`, ...(models ? { models } : {}) });
+      await runInProcess(doc, runInputs, onEvent, { store, session, runId: `run-${session}-t${++turnSeq}`, ...(workspace ? { workspace } : {}), ...(models ? { models } : {}) });
     },
     async memoryStats(): Promise<Record<"short" | "mid" | "long", { count: number; bytes: number }>> {
       const facts = await store.snapshotFacts();

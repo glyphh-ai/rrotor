@@ -23,11 +23,17 @@ export const promptHandler: StepHandler = {
         .map((k) => (typeof input[k] === "string" ? (input[k] as string) : JSON.stringify(input[k])))
         .join("\n");
     }
-    if (cfg.max_tokens && tokenish(text) > cfg.max_tokens) {
-      text = text.slice(0, cfg.max_tokens * 4);
-    }
     const frames: Frame[] = [{ type: "done", data: { breakpoints: cfg.cache?.breakpoints } }];
-    return { output: { text }, frames, status: "ok" };
+    const output: Record<string, unknown> = { text };
+    if (cfg.max_tokens && tokenish(text) > cfg.max_tokens) {
+      // Capping a composed prompt drops real content — never do it silently:
+      // a degrade frame on the wire, a ✗ note in the transcript.
+      const note = `prompt truncated: ~${tokenish(text)} tokens composed, max_tokens ${cfg.max_tokens}`;
+      output.text = text.slice(0, cfg.max_tokens * 4);
+      output.lane_notes = [note];
+      frames.unshift({ type: "degrade", data: { notes: [note] } });
+    }
+    return { output, frames, status: "ok" };
   },
 };
 

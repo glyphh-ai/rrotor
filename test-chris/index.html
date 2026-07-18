@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock Pulse</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f0f0f0; }
+  #bg { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; }
+  header { text-align: center; padding: 20px; background: rgba(255,255,255,0.8); backdrop-filter: blur(10px); }
+  .controls { display: flex; justify-content: center; margin-bottom: 20px; }
+  #sort { padding: 8px; border-radius: 4px; }
+  #cards { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; padding: 20px; }
+  .card { width: 200px; padding: 15px; background: rgba(255,255,255,0.8); backdrop-filter: blur(10px); border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); transition: transform 0.2s; }
+  .card:hover { transform: translateY(-5px); }
+  .up .change { color: green; }
+  .down .change { color: red; }
+  #advice { text-align: center; padding: 20px; background: rgba(255,255,255,0.8); backdrop-filter: blur(10px); border-radius: 8px; margin: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📈 Stock Pulse</h1>
+  <p>Trending stocks & the latest market buzz</p>
+</header>
+<div class="controls">
+  <select id="sort">
+    <option value="trending">Trending</option>
+    <option value="gainers">Top Gainers</option>
+    <option value="losers">Top Losers</option>
+    <option value="alpha">A–Z</option>
+  </select>
+</div>
+<div id="cards"></div>
+<div id="advice"></div>
+
+<script>
+const STOCKS = [
+  { symbol:"AAPL", name:"Apple Inc.", price:212.44, changePct:1.82, volume:"58M", headline:"Apple unveils new AI features driving investor optimism" },
+  { symbol:"NVDA", name:"NVIDIA Corp.", price:523.11, changePct:-0.75, volume:"34M", headline:"NVIDIA warns of supply chain disruptions affecting Q4 shipments" },
+  { symbol:"TSLA", name:"Tesla, Inc.", price:987.65, changePct:-2.40, volume:"21M", headline:"Tesla reports Q3 earnings, beats estimates but warns of macro headwinds" },
+  { symbol:"MSFT", name:"Microsoft Corp.", price:321.99, changePct:0.95, volume:"45M", headline:"Microsoft expands AI investments, announces new Azure services" },
+  { symbol:"AMZN", name:"Amazon.com, Inc.", price:3456.78, changePct:0.50, volume:"18M", headline:"Amazon launches new subscription service, drives Q3 sales growth" },
+  { symbol:"GOOGL", name:"Alphabet Inc.", price:2890.12, changePct:-1.20, volume:"27M", headline:"Google faces antitrust scrutiny, CEO outlines new privacy initiatives" },
+  { symbol:"META", name:"Meta Platforms, Inc.", price:290.75, changePct:-0.30, volume:"31M", headline:"Meta announces layoffs, pivots focus to AR/VR investments" },
+  { symbol:"AMD", name:"Advanced Micro Devices, Inc.", price:123.45, changePct:3.10, volume:"42M", headline:"AMD reports Q3 revenue surge, outpaces Intel in gaming market" }
+];
+
+function sortBy(mode, list) {
+  return list.slice().sort((a, b) => {
+    switch (mode) {
+      case 'gainers': return b.changePct - a.changePct;
+      case 'losers': return a.changePct - b.changePct;
+      case 'alpha': return a.symbol.localeCompare(b.symbol);
+      default: return Math.abs(b.changePct) - Math.abs(a.changePct);
+    }
+  });
+}
+
+function renderCards() {
+  const sortMode = document.getElementById('sort').value;
+  const sortedStocks = sortBy(sortMode, STOCKS);
+  const cards = document.getElementById('cards');
+  cards.innerHTML = '';
+  sortedStocks.forEach(stock => {
+    const card = document.createElement('div');
+    card.className = `card ${stock.changePct >= 0 ? 'up' : 'down'}`;
+    card.innerHTML = `
+      <h3>${stock.symbol}</h3>
+      <p>${stock.name}</p>
+      <p>Price: $${stock.price.toFixed(2)}</p>
+      <p class="change">${stock.changePct >= 0 ? '+' : ''}${stock.changePct.toFixed(2)}%</p>
+      <p>Volume: ${stock.volume}</p>
+      <p><strong>Headline:</strong> ${stock.headline}</p>
+    `;
+    cards.appendChild(card);
+  });
+}
+
+function renderAdvice() {
+  const upCount = STOCKS.filter(s => s.changePct >= 0).length;
+  const downCount = STOCKS.length - upCount;
+  const biggestGainer = STOCKS.reduce((a, b) => a.changePct > b.changePct ? a : b);
+  const biggestLoser = STOCKS.reduce((a, b) => a.changePct < b.changePct ? a : b);
+  const sentiment = upCount > downCount ? 'Bullish' : downCount > upCount ? 'Bearish' : 'Mixed';
+  document.getElementById('advice').innerHTML = `
+    ${upCount} of ${STOCKS.length} tracked stocks are up. Momentum leader: ${biggestGainer.symbol} (+${biggestGainer.changePct.toFixed(2)}%). Biggest drag: ${biggestLoser.symbol} (${biggestLoser.changePct.toFixed(2)}%). Trending sentiment: ${sentiment}.
+  `;
+}
+
+function animate() {
+  const ctx = document.getElementById('bg').getContext('2d');
+  ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+  // ... particle animation logic here ...
+  requestAnimationFrame(animate);
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  const savedSort = localStorage.getItem("stockpulse.sort");
+  if (savedSort && ['trending', 'gainers', 'losers', 'alpha'].includes(savedSort)) {
+    document.getElementById('sort').value = savedSort;
+  }
+  renderCards();
+  renderAdvice();
+  document.getElementById('sort').addEventListener('change', e => {
+    localStorage.setItem("stockpulse.sort", e.target.value);
+    renderCards();
+  });
+  animate();
+});
+
+window.addEventListener('resize', () => {
+  const canvas = document.getElementById('bg');
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+});
+</script>
+</body>
+</html>
