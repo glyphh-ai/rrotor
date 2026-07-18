@@ -39,6 +39,9 @@ export const CAPABILITIES = [
   "cowork.write",
   "memory.read",
   "net.read",
+  "net.write", // outward network effects: POST/PUT, webhooks, git push
+  "sys.read", // host introspection: os info, env (redacted), which
+  "app.open", // open the user's default browser / local preview servers
 ] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
@@ -140,9 +143,9 @@ export function grantSet(caps: Capability[]): ReadonlySet<Capability> {
 export const MODES = {
   /** Chat: read + recall + web, nothing that mutates. */
   chat: grantSet(["fs.read", "vcs.read", "memory.read", "net.read"]),
-  /** Co-work: chat + document/artifact authoring, still no shell or repo writes. */
-  cowork: grantSet(["fs.read", "fs.write", "vcs.read", "memory.read", "net.read", "doc.write", "cowork.write"]),
-  /** Code: the full workbench — files, shell, and version control. */
+  /** Co-work: chat + document/artifact authoring + preview, still no shell or repo writes. */
+  cowork: grantSet(["fs.read", "fs.write", "vcs.read", "memory.read", "net.read", "doc.write", "cowork.write", "app.open"]),
+  /** Code: the full workbench — files, shell, version control, network, host. */
   code: grantSet([
     "fs.read",
     "fs.write",
@@ -151,6 +154,9 @@ export const MODES = {
     "vcs.write",
     "memory.read",
     "net.read",
+    "net.write",
+    "sys.read",
+    "app.open",
     "doc.write",
     "cowork.write",
   ]),

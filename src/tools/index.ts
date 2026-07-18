@@ -26,6 +26,16 @@ import { gitPack } from "./git.js";
 import { docPack } from "./doc.js";
 import { coworkPack, type KvLike } from "./cowork.js";
 import { chatPack } from "./chat.js";
+import { webPack } from "./web.js";
+import { dataPack } from "./data.js";
+import { textPack } from "./text.js";
+import { cryptoPack } from "./crypto.js";
+import { calcPack } from "./calc.js";
+import { filesPack } from "./files.js";
+import { sysPack } from "./sys.js";
+import { gitxPack } from "./gitx.js";
+import { dbPack } from "./db.js";
+import { previewPack } from "./preview.js";
 
 export * from "./spec.js";
 export { fsPack } from "./fs.js";
@@ -34,6 +44,16 @@ export { gitPack } from "./git.js";
 export { docPack } from "./doc.js";
 export { coworkPack, type KvLike } from "./cowork.js";
 export { chatPack } from "./chat.js";
+export { webPack } from "./web.js";
+export { dataPack } from "./data.js";
+export { textPack } from "./text.js";
+export { cryptoPack } from "./crypto.js";
+export { calcPack } from "./calc.js";
+export { filesPack } from "./files.js";
+export { sysPack } from "./sys.js";
+export { gitxPack } from "./gitx.js";
+export { dbPack } from "./db.js";
+export { previewPack } from "./preview.js";
 
 export interface StdlibOptions {
   /** The workspace sandbox root for fs/exec/git/doc tools. */
@@ -52,7 +72,17 @@ export function buildStdlib(opts: StdlibOptions): ToolRegistry {
     .add(gitPack({ root: opts.root }))
     .add(docPack({ root: opts.root }))
     .add(coworkPack(opts.kv))
-    .add(chatPack({ memory: opts.memory }));
+    .add(chatPack({ memory: opts.memory }))
+    .add(webPack({ root: opts.root }))
+    .add(dataPack())
+    .add(textPack())
+    .add(cryptoPack())
+    .add(calcPack())
+    .add(filesPack({ root: opts.root }))
+    .add(sysPack())
+    .add(gitxPack({ root: opts.root }))
+    .add(dbPack({ root: opts.root }))
+    .add(previewPack({ root: opts.root }));
 }
 
 /**

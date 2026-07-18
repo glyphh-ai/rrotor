@@ -53,33 +53,57 @@ capabilities; the registry installs a tool for a run **iff all its grants are he
 So "read-only chat" simply never exposes a `mutating` tool — it isn't denied at call
 time, it *doesn't exist* for that run. Capabilities: `fs.read` · `fs.write` ·
 `shell.exec` · `vcs.read` · `vcs.write` · `doc.write` · `cowork.write` · `memory.read`
-· `net.read`.
+· `net.read` · `net.write` · `sys.read` · `app.open`.
 
 Built-in modes (`MODES` in `spec.ts`):
 
 | Mode | Capabilities | Gets |
 | --- | --- | --- |
-| **chat** | read + recall + web | `file.read`, `fs.grep`, `git.status`, `recall`, `web.fetch` — nothing that mutates |
-| **cowork** | + doc/artifact authoring | + `doc.write`, `todo.write`, `artifact.write` |
-| **code** | + shell + repo writes | the full workbench: `file.write`, `file.edit`, `shell.bash`, `git.commit` |
+| **chat** | read + recall + web + all pure | ~89 tools: reads, recall, web fetch/search, and every `pure` data/text/crypto/calc tool — nothing that mutates |
+| **cowork** | + doc/artifact authoring + preview | ~108 tools: + `doc.write`, `todo.write`, `file.write`, `preview.open` |
+| **code** | + shell + repo/net/host | all 125 tools: the full workbench incl. `shell.bash`, `git.push`, `sqlite.exec`, `http.request` |
 
 ---
 
 ## The standard library (batteries included)
 
-You do **not** hand-write hundreds of tools. A small first-class core covers the
-common, safe, structured path; `shell.bash` is the universal escape hatch for the OS
-long tail (`find`, `rg`, `sed`, `curl`…); MCP covers external integrations; custom
-tools cover domain packs.
+You do **not** hand-write your own core tools. **125 tools across 16 packs** ship
+built-in — the common, safe, structured path for almost any agent. `shell.bash` remains
+the universal escape hatch for the OS long tail; MCP covers external integrations;
+custom tools cover domain verticals. Every path-touching tool is sandboxed under the
+workspace root; every process spawn is `execFile` with an argument array (no shell
+injection); every result is bounded (capped arrays/strings with a `truncated` flag).
+
+**Core workbench**
 
 | Pack | Tools | Notes |
 | --- | --- | --- |
-| **fs** | `file.read` `file.write` `file.edit` `file.list` `fs.glob` `fs.grep` | sandboxed under a workspace root; glob/grep are **bounded + sorted** |
+| **fs** | `file.read/write/edit/list` `fs.glob/grep` | sandboxed; glob/grep are **bounded + sorted** |
+| **files** | append delete move copy mkdir stat touch head tail lines checksum `fs.tree` `fs.du` b64 IO `archive.tar/untar` | fs power tools; big-file-safe reads; tar with traversal guard |
 | **exec** | `shell.bash` | the escape hatch; `external`, heaviest grant, timed out + captured |
-| **git** | `git.status` `git.diff` `git.log` `git.show` `git.add` `git.commit` `git.branch` | structured (`--porcelain`), `execFile` (no shell injection) |
-| **doc** | `doc.outline` `doc.section` `doc.write` | token-smart: return a heading outline or one section, not the whole file |
-| **cowork** | `todo.write` `todo.read` `artifact.write` `artifact.read` | durable in the stator kv |
+| **git** | status diff log show add commit branch | structured (`--porcelain`), `execFile` |
+| **gitx** | checkout restore stash rm mv tag remote blame clone pull push | extended VCS; option-injection guarded; `push`/`pull` are `external` |
+| **db** | `sqlite.query/exec/tables/schema` | over sandboxed `.db` files; query is SELECT-only |
+
+**Data, text & compute (all `pure`, available in every mode)**
+
+| Pack | Tools | Notes |
+| --- | --- | --- |
+| **data** | json (parse/stringify/query/diff/patch) yaml csv xml jsonschema base64 hex url codecs | XML is XXE-guarded (DOCTYPE refused) |
+| **text** | head tail slice count replace `regex.extract` split join case dedent indent wrap sort `diff.lines` template chunk slug similarity | line-oriented + string ops |
+| **crypto** | sha256 sha1 md5 hmac `uuid.v5` `random.seeded` `jwt.decode` | deterministic; `jwt.decode` does **not** verify (and says so) |
+| **calc** | `calc.eval` (safe parser, no `eval`) `stats.describe` `convert.unit` time (now/parse/format/add/diff) `cron.next` `duration.parse` | UTC, host-independent |
+
+**Reach out (network, host, browser)**
+
+| Pack | Tools | Notes |
+| --- | --- | --- |
+| **web** | `http.get/request/download` `web.search` (keyless) html (text/links/meta) url (parse/build) `rss.read` `dns.resolve` | bounded bodies, redirect cap, scheme allow-list |
+| **sys** | `sys.info` `env.get` `env.list` `sys.which` | env values **redacted by name**; `env.list` is names-only |
+| **preview** | `preview.open` `serve.static` `serve.stop` | open the built page in the default browser / a local static server |
 | **chat** | `recall` `web.fetch` | semantic recall over turns; bounded web fetch |
+| **doc** | `doc.outline/section/write` | token-smart: outline or one section, not the whole file |
+| **cowork** | `todo.write/read` `artifact.write/read` | durable in the stator kv |
 
 ### Smart tools save tokens (the marketplace wedge)
 
@@ -141,5 +165,7 @@ args: { path, content } }`, with `idempotency: auto` on effectful ones.
   stays portable).
 - **Version pinning UX** — `version` is on every spec; a rotor pinning a tool version
   (reproducible) vs floating (latest-best) is a small follow-up.
-- **Domain packs** — office (pptx/docx), audio (music), image, browser: each is a pack
-  of a dozen tools, authored per vertical, on this same contract.
+- **Domain packs** — office (pptx/docx), audio (music), image, headless browser: each
+  is a pack of a dozen tools, authored per vertical, on this same contract.
+- **Live-network hardening** — `web.search`/`dns.resolve` have live tests marked skip;
+  SSRF policy (blocking link-local/metadata endpoints) is a follow-up config surface.
