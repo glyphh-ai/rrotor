@@ -157,17 +157,21 @@ export class BasicModels implements ModelsPlugin {
   // ── internals ──────────────────────────────────────────────────────────────
 
   private stub(request: ModelRequest, lane: string): ModelResult {
+    // A grounded decode (candidates present) is a DETERMINISTIC ranker — replay-safe,
+    // so it stays cacheable. A bare echo (no candidates) is a non-durable fallback the
+    // executor must not checkpoint; `grounded` on the frame is that discriminator.
+    const grounded = !!(request.candidates && request.candidates.length > 0);
     let text: string;
-    if (request.candidates && request.candidates.length > 0) {
+    if (grounded) {
       // Zero-model ranker: pick the first grounded continuation deterministically.
-      text = [...request.candidates].sort()[0];
+      text = [...request.candidates!].sort()[0];
     } else {
       text = `[stub:${lane}] ${request.prompt}`.slice(0, 2000);
     }
     const frames: Frame[] = [
       // A typed marker clients can read off the wire (frame TYPES stream on the
       // step event): this answer came from the deterministic stub, not a model.
-      { type: "stub", data: { lane } },
+      { type: "stub", data: { lane, grounded } },
       { type: "propose", data: { text } },
       { type: "done" },
     ];

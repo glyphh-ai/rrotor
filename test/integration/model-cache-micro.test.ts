@@ -9,8 +9,33 @@ import { describe, it, expect } from "vitest";
 
 import { execute } from "../../src/exec/executor.js";
 import { buildBasicPlugins } from "../../src/plugins/index.js";
+import { BasicModels } from "../../src/plugins/models.js";
 import { InProcessStore } from "../../src/exec/store.js";
+import { tokenish } from "../../src/exec/util.js";
+import type { ModelRequest, ModelResult, ModelsPlugin, Plugins } from "../../src/plugins/interfaces.js";
 import type { RotorDocument } from "../../src/types.js";
+
+/** A models plugin whose local lane actually answers (no `stub` frame), so model
+ *  steps are durable and prompt-cache accounting can be asserted off the tape. The
+ *  bare BasicModels would degrade to the stub here, which is intentionally
+ *  non-cacheable (see stub-no-replay.test.ts). */
+class LiveModels extends BasicModels {
+  async execute(request: ModelRequest): Promise<ModelResult> {
+    const text = `echo: ${request.prompt}`;
+    return {
+      text,
+      served: "local",
+      frames: [{ type: "propose", data: { text } }, { type: "done" }],
+      usage: { input: tokenish(request.prompt), output: tokenish(text), cost: 0 },
+    };
+  }
+}
+
+function livePlugins(store: InProcessStore): Plugins {
+  const plugins = buildBasicPlugins({ store });
+  (plugins as { models: ModelsPlugin }).models = new LiveModels();
+  return plugins;
+}
 
 /** ada's grounded city is `zebra`; bob/carol give the role vocabulary distractors
  *  that sort before it (apple, mango, zebra) so the micro rotor must backtrack. */
@@ -80,7 +105,7 @@ describe("prompt caching (§8.6) — usage only, output unchanged", () => {
   } as unknown as RotorDocument;
 
   it("writes the prefix on the first model call and hits on the second", async () => {
-    const r = await execute(twoModelDoc, {}, buildBasicPlugins());
+    const r = await execute(twoModelDoc, {}, livePlugins(new InProcessStore()));
     const m1 = r.history.find((h) => h.step_id === "m1");
     const m2 = r.history.find((h) => h.step_id === "m2");
     expect(m1?.usage?.cache_write).toBeGreaterThan(0);

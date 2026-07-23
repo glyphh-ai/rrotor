@@ -168,6 +168,10 @@ class RunSession {
   private budgetHandled = false;
   private interrupt?: { stepId: string; awaiting?: unknown };
   private lastError?: { name: string; cause?: string };
+  /** Flips true the first time a step falls back to the stub / a degraded lane
+   *  (§9). A fallback answer is not durable, so from that step onward the run is
+   *  non-replayable — its records are streamed but never checkpointed or cached. */
+  private tainted = false;
 
   constructor(
     private readonly doc: RotorDocument,
@@ -453,7 +457,16 @@ class RunSession {
     // payload. Recording it would make replay re-pause forever.
     if (result.status === "interrupted") return result;
 
-    if (cacheCfg && result.status === "ok") {
+    // A stubbed / degraded result is a FALLBACK, not a durable answer (§9): the model
+    // ran with no bound endpoint (a `stub` frame) or every lane under it degraded (a
+    // `degrade` frame). Checkpointing or caching it would let the NEXT identical run
+    // replay the fallback instead of re-running against a now-fixed binding — the bug
+    // that let dozens of pre-fix "hi" turns poison the CLI's cache. Taint the run from
+    // here on: this step and everything downstream of it derive from the fallback, so
+    // none of it is written to the replay tape (append) or the result cache.
+    if (this.tainted || isFallback(result.frames)) this.tainted = true;
+
+    if (cacheCfg && result.status === "ok" && !this.tainted) {
       await this.plugins.memory.cachePut(cacheKey, result.output, {
         ttlTicks: parseTicks(cacheCfg.ttl),
         scope: cacheCfg.scope,
@@ -524,7 +537,12 @@ class RunSession {
       // a rotor SHOWS ITS WORK unless the author dials it down.
       event_output: step.display?.output ?? this.doc.spec.events?.output ?? "full",
     };
-    await this.plugins.memory.appendStepRecord(rec);
+    // §5.4 checkpoint — UNLESS the run is tainted by a fallback (stub / degraded
+    // lane). A tainted step still streams live (drain.emit below) and still flows
+    // into this run's Context (recordToResult), so the CURRENT turn completes with a
+    // real answer — but it is never written to the replay tape, so the next identical
+    // run re-executes it fresh instead of replaying the stale fallback.
+    if (!this.tainted) await this.plugins.memory.appendStepRecord(rec);
     // Fan out to the log drain AFTER the durable write (§3.8). Fire-and-forget:
     // telemetry only, never affects the run (SPEC.md §17.6). Only fresh
     // executions reach here — replay short-circuits before append — so a replayed
@@ -713,6 +731,24 @@ function matchError<T extends Retrier | Catcher>(rules: T[] | undefined, name: s
 
 function cacheFrame(disposition: "hit" | "miss" | "write"): Frame {
   return { type: "cache", disposition };
+}
+
+/**
+ * Whether a result is a non-durable FALLBACK (§9) that must not be checkpointed or
+ * cached for replay:
+ *  - `degrade` — a lane degraded under the step; always non-durable.
+ *  - `stub` — no bound model answered. A GROUNDED stub decode (`data.grounded`) is a
+ *    deterministic ranker and stays replay-safe; only the bare echo (ungrounded) is a
+ *    non-durable fallback that the next run must re-issue against a now-bound model.
+ */
+function isFallback(frames: Frame[] | undefined): boolean {
+  return !!frames?.some(isFallbackFrame);
+}
+
+function isFallbackFrame(f: Frame): boolean {
+  if (f.type === "degrade") return true;
+  if (f.type === "stub") return !(f.data as { grounded?: boolean } | undefined)?.grounded;
+  return false;
 }
 
 function mergeFrames(result: StepResult, extra: Frame[]): StepResult {

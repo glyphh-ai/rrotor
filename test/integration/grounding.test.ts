@@ -75,6 +75,8 @@ describe("hard grounding gate on a model step (§6.3)", () => {
     const { store } = await seeded();
     const r = await execute(modelDoc("ada"), {}, buildBasicPlugins({ store }));
     expect(r.status).toBe("ok");
+    // A GROUNDED stub decode is deterministic + replay-safe, so it IS checkpointed
+    // (unlike the bare echo — see stub-no-replay.test.ts).
     const m = r.history.find((h) => h.step_id === "m");
     expect(String((m?.output as { text?: string }).text)).toContain("london");
   });
