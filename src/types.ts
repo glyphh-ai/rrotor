@@ -902,6 +902,10 @@ export interface RunContextEnvelope {
   context: RunContext;
   /** Advertised capability manifest for negotiation (§3.8). */
   capabilities?: Record<string, CapabilityStatus>;
+  /** The caller's cancellation signal (a user Esc-interrupt). The run loop checks
+   *  it between steps; the `model` step forwards it to the provider fetch so a
+   *  long in-flight call is cut, not just the loop stopped. */
+  signal?: AbortSignal;
 }
 
 /** What a step handler returns: its `out` values plus a frame stream

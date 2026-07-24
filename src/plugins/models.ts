@@ -188,6 +188,12 @@ export class BasicModels implements ModelsPlugin {
     const controller = new AbortController();
     const timeoutMs = request.timeout_ms ?? this.timeoutMs;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Link the caller's cancellation (a user Esc-interrupt) to this call's
+    // controller, so stopping a turn cuts the in-flight fetch immediately.
+    if (request.signal) {
+      if (request.signal.aborted) controller.abort();
+      else request.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
     try {
       // Provider translation (§8): the runtime speaks ONE request; the adapter
       // shapes it to whatever wire the endpoint talks.

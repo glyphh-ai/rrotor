@@ -24,6 +24,8 @@ export interface Prefs {
   frontierKey?: string;
   /** Per-role model bindings (the registry a control plane would inject). */
   roles?: Record<string, RoleBinding>;
+  /** The TUI palette name (dark | light | highvis | claude | aurora). */
+  theme?: string;
 }
 
 const prefsPath = (): string => join(homedir(), ".rrotor", "config.json");

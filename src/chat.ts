@@ -72,8 +72,9 @@ export interface ChatSession {
    *  trailing-newline contract per call). Never throws — failures render as
    *  taxonomy error lines. */
   turn(prompt: string, sink: (text: string) => void, opts?: TurnOptions): Promise<void>;
-  /** Run one turn streaming RAW wire events — the TUI/SDK face; no rendering. */
-  turnEvents(prompt: string, onEvent: (ev: WireEvent) => void, inputs?: Record<string, unknown>): Promise<void>;
+  /** Run one turn streaming RAW wire events — the TUI/SDK face; no rendering.
+   *  `signal` (a user Esc-interrupt) stops the turn mid-flight. */
+  turnEvents(prompt: string, onEvent: (ev: WireEvent) => void, inputs?: Record<string, unknown>, signal?: AbortSignal): Promise<void>;
   /** Stored size per retention tier: fact count + actual bytes of content. */
   memoryStats(): Promise<Record<"short" | "mid" | "long", { count: number; bytes: number }>>;
   close(): Promise<void>;
@@ -130,9 +131,9 @@ export async function openChat(file?: string, opts?: { models?: EmbedOptions["mo
         render.stop();
       }
     },
-    async turnEvents(prompt: string, onEvent: (ev: WireEvent) => void, extra?: Record<string, unknown>): Promise<void> {
+    async turnEvents(prompt: string, onEvent: (ev: WireEvent) => void, extra?: Record<string, unknown>, signal?: AbortSignal): Promise<void> {
       const runInputs = { ...(extra ?? {}), [inputs.primary]: prompt };
-      await runInProcess(doc, runInputs, onEvent, { store, session, runId: `run-${session}-t${++turnSeq}`, ...(workspace ? { workspace } : {}), ...(models ? { models } : {}) });
+      await runInProcess(doc, runInputs, onEvent, { store, session, runId: `run-${session}-t${++turnSeq}`, ...(workspace ? { workspace } : {}), ...(models ? { models } : {}), ...(signal ? { signal } : {}) });
     },
     async memoryStats(): Promise<Record<"short" | "mid" | "long", { count: number; bytes: number }>> {
       const facts = await store.snapshotFacts();

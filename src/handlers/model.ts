@@ -69,7 +69,7 @@ export const modelHandler: StepHandler = {
       served = "hdc";
     } else {
       const res = await plugins.models.execute(
-        { prompt: promptText, candidates, lane, model: cfg.model, temperature: cfg.temperature, seed: cfg.seed, timeout_ms: cfg.timeout_ms },
+        { prompt: promptText, candidates, lane, model: cfg.model, temperature: cfg.temperature, seed: cfg.seed, timeout_ms: cfg.timeout_ms, ...(env.signal ? { signal: env.signal } : {}) },
         lane,
       );
       text = res.text;

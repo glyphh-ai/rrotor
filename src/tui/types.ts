@@ -16,7 +16,7 @@ export interface ChatTurn {
   role: "user" | "assistant";
   text: string;
   steps: TurnStep[];
-  status: "running" | "done" | "refused" | "failed";
+  status: "running" | "done" | "refused" | "failed" | "stopped";
   durationMs?: number;
   tokensUp: number;
   tokensDown: number;

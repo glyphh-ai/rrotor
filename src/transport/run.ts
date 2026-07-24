@@ -46,6 +46,9 @@ export interface StreamContext {
   rotors?: (ref: string) => RotorDocument | undefined;
   /** Pin the run id (conversational turns pass a fresh one per invocation). */
   runId?: string;
+  /** The caller's cancellation signal (a user Esc-interrupt), threaded into the
+   *  executor so a turn can be stopped mid-flight. */
+  signal?: AbortSignal;
 }
 
 /** Called once per event as a run streams. */
@@ -128,6 +131,7 @@ async function streamExecution(
     const result = await execute(doc, inputs, plugins, {
       rotorResolver: ctx.rotors ?? bundledRotorResolver,
       pluginsFor: childPluginsFactory({ store: ctx.store, root: ctx.workspace, packs: ctx.packs }),
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
       ...execOpts,
     });
     emit(terminalEvent(result, seq++));

@@ -158,7 +158,7 @@ function NotesPanel({ memory, memoryHot, width }: { memory: HeaderProps["memory"
       <MemoryPanel memory={memory} memoryHot={memoryHot} width={width} />
       <Box marginTop={1}>
         <Text color={theme.dim} italic>
-          shift+tab cycles rotors · tab folds · ctrl+o all · /model · /store · /quit
+          Esc stops · shift+tab cycles rotors · tab folds · /model · /store · /theme · /quit
         </Text>
       </Box>
     </Box>

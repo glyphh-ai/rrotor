@@ -95,6 +95,10 @@ export interface ExecuteOptions {
    *  injecting `payload` into the interrupted step so it completes instead of
    *  pausing again. `timeout` routes the step via its `on_timeout`. */
   resume?: { stepId: string; payload?: Record<string, unknown>; timeout?: boolean };
+  /** The caller's cancellation signal (a user Esc-interrupt). Checked between
+   *  steps to stop the loop promptly, and forwarded to the `model` step so a
+   *  long provider call is cut mid-flight. An aborted run ends `interrupted`. */
+  signal?: AbortSignal;
 }
 
 export interface RunResult {
@@ -222,6 +226,7 @@ class RunSession {
       agent_identity: { ref: this.agentRef, run_id: this.runId },
       context,
       capabilities: manifest(plugins),
+      ...(opts.signal ? { signal: opts.signal } : {}),
     };
 
     this.engine = {
@@ -281,6 +286,16 @@ class RunSession {
         // stop | best-effort | escalate-with-no-ladder: end with the best so far.
         terminal = "__budget__";
         runStatus = exhausted.on === "best-effort" || exhausted.on === "stop" ? this.lastStatus : "refused";
+        break;
+      }
+
+      // Cooperative cancellation (a user Esc-interrupt): stop before the next
+      // step and end the run `interrupted`, recording the current cursor as the
+      // pause point. A model call already in flight is cut via env.signal.
+      if (this.opts.signal?.aborted) {
+        terminal = cursor;
+        runStatus = "interrupted";
+        this.interrupt = { stepId: cursor, awaiting: { reason: "aborted" } };
         break;
       }
 

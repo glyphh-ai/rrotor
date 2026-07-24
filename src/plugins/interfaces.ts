@@ -123,6 +123,9 @@ export interface ModelRequest {
   prompt: string;
   /** Per-call timeout override (ms) from the step's declared config. */
   timeout_ms?: number;
+  /** Caller's cancellation signal (a user Esc-interrupt). When it aborts, the
+   *  in-flight provider fetch is cut — the same path the per-call timeout uses. */
+  signal?: AbortSignal;
   /** Grounded continuations to rank when there is no live model (the zero-model
    *  ranker degrades to echoing a grounded filler, §3.3). */
   candidates?: string[];

@@ -47,6 +47,7 @@ export function SubFooter({ width, busy, elapsed, last, verb }: SubFooterProps):
     if (last.tokensUp + last.tokensDown > 0) cost.push(`${last.tokensUp}↑ ${last.tokensDown}↓ tok`);
     if (last.status === "refused") cost.push("refused");
     if (last.status === "failed") cost.push("failed");
+    if (last.status === "stopped") cost.push("stopped");
     return (
       <Box width={width} paddingX={1} flexDirection="column">
         <Text color={theme.dim} wrap="truncate-end">

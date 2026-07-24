@@ -47,8 +47,9 @@ export function wrap(text: string, width: number, indent: string): string[] {
   return out;
 }
 
+/** Typed input leads with the Glyphh accent bar `▌`. */
 export function userLines(text: string, width: number): Line[] {
-  const wrapped = wrap(`› ${text}`, width, "  ");
+  const wrapped = wrap(`▌ ${text}`, width, "  ");
   return [{ text: "", style: "blank" }, ...wrapped.map((t) => ({ text: t, style: "user" as const }))];
 }
 

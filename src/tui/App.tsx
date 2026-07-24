@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement } from "ink";
 import { openChat, type ChatSession } from "../chat.js";
 import type { WireEvent } from "../transport/events.js";
-import { theme } from "./theme.js";
+import { theme, applyTheme, THEMES } from "./theme.js";
 import { Header } from "./Header.js";
 import { InputBar } from "./InputBar.js";
 import { SubFooter } from "./SubFooter.js";
@@ -214,10 +214,12 @@ function TranscriptLine({ line }: { line: Line }): ReactElement {
       </Text>
     );
   }
-  if (line.style === "user" && line.text.startsWith("›")) {
+  if (line.style === "user" && line.text.startsWith("▌")) {
     return (
       <Text wrap="truncate-end">
-        <Text color={theme.accent}>› </Text>
+        <Text color={theme.accent} bold>
+          ▌{" "}
+        </Text>
         <Text color={theme.white}>{line.text.slice(2)}</Text>
       </Text>
     );
@@ -295,6 +297,9 @@ export function App({ version, rotorArg, ws, transcript }: AppProps): ReactEleme
   const [last, setLast] = useState<ChatTurn | undefined>(undefined);
   const [verb, setVerb] = useState<{ ing: string; past: string }>(VERBS[0]);
   const [elapsed, setElapsed] = useState(0);
+  // Setter-only: bumping it re-renders so render-time reads of the mutated
+  // `theme` palette repaint. The value itself is never read.
+  const [, setThemeVersion] = useState(0);
   const [expanded, setExpanded] = useState(false);
   /** Per-section fold overrides (item id → open?). Falls back to `expanded`. */
   const [folds, setFolds] = useState<Record<string, boolean>>({});
@@ -312,6 +317,8 @@ export function App({ version, rotorArg, ws, transcript }: AppProps): ReactEleme
   const nextId = useRef(0);
   const lastStepAt = useRef(0);
   const turnStartedAt = useRef(0);
+  /** Aborts the in-flight turn (Esc). Null when no turn is running. */
+  const turnAbort = useRef<AbortController | null>(null);
   const chatRef = useRef<ChatSession | null>(null);
   const currentRotor = useRef<string | undefined>(undefined);
   const pending = useRef<string[]>([]);
@@ -330,6 +337,12 @@ export function App({ version, rotorArg, ws, transcript }: AppProps): ReactEleme
       stdout.off("resize", onResize);
     };
   }, [stdout]);
+
+  // Apply the saved theme on mount — repaint the whole tree in that palette.
+  useEffect(() => {
+    applyTheme(readPrefs().theme);
+    setThemeVersion((v) => v + 1);
+  }, []);
 
   useEffect(() => {
     if (!busy) return;
@@ -414,11 +427,11 @@ export function App({ version, rotorArg, ws, transcript }: AppProps): ReactEleme
       title: "Welcome",
       body: [
         "rrotor — Recursive Reasoning on top of reasoning.",
-        "Every line you type is one full rotor turn: deterministic steps, streamed live, permanently on the record.",
+        "Just chat. Every line is one full rotor turn — plan, memory, and grounding run behind the scenes; tool actions land as receipts, the answer streams to ●.",
         loadedEnvFiles.length
           ? `env loaded: ${loadedEnvFiles.join(" · ")}`
           : "no .env found (looked in ./ and ~/.rrotor/) — see .env.example",
-        "shift+tab cycles rotors · tab browses/folds sections · /store · /model · /quit",
+        "Esc stops a turn · shift+tab cycles rotors · tab folds · /model · /store · /theme · /quit",
       ],
     });
     void openRotor(rotorArg);
@@ -451,44 +464,73 @@ export function App({ version, rotorArg, ws, transcript }: AppProps): ReactEleme
       };
       setLast({ ...turn });
       setBusy(true);
+      const abort = new AbortController();
+      turnAbort.current = abort;
       try {
-        await session.turnEvents(prompt, (ev: WireEvent) => {
-          if (ev.kind === "step") {
-            const now = Date.now();
-            const secs = (now - lastStepAt.current) / 1000;
-            lastStepAt.current = now;
-            const up = ev.usage?.input ?? 0;
-            const down = ev.usage?.output ?? 0;
-            if (up + down > 0) setTotals((t) => ({ up: t.up + up, down: t.down + down }));
-            const step: TurnStep = {
-              label: ev.display?.label ?? ev.step_id,
-              ok: !ev.error && ev.status !== "failed",
-              ...(secs >= 0.1 ? { secs } : {}),
-              ...(up + down > 0 ? { tokens: { up, down } } : {}),
-              details: stepDetails(ev.output),
-              ...(ev.error ? { error: ev.error } : {}),
-            };
-            turn.tokensUp += up;
-            turn.tokensDown += down;
-            turn.stubbed = turn.stubbed || ev.frames.includes("stub");
-            turn.degraded = turn.degraded || ev.frames.includes("degrade");
-            setLast({ ...turn });
-            push({ kind: "section", step });
-          } else if (ev.kind === "answer") {
-            turn.text = ev.text;
-            if (ev.text) push({ kind: "answer", text: ev.text });
-          } else if (ev.kind === "error") {
-            turn.text = `${ev.code}: ${ev.detail}`;
-            turn.status = "failed";
-            push({ kind: "answer", text: turn.text });
-          } else if (ev.kind === "done") {
-            if (turn.status !== "failed") {
-              turn.status = ev.status === "ok" ? "done" : ev.status === "refused" ? "refused" : "failed";
+        await session.turnEvents(
+          prompt,
+          (ev: WireEvent) => {
+            if (ev.kind === "step") {
+              // Every step's cost feeds the footer/sub-footer, but only REAL
+              // tool actions surface as receipts — the loop's own machinery
+              // (plan · gate · retrieve · memory · hdc.map · model · branch)
+              // runs behind the scenes, so the transcript reads as a chat.
+              const now = Date.now();
+              const secs = (now - lastStepAt.current) / 1000;
+              lastStepAt.current = now;
+              const up = ev.usage?.input ?? 0;
+              const down = ev.usage?.output ?? 0;
+              if (up + down > 0) setTotals((t) => ({ up: t.up + up, down: t.down + down }));
+              turn.tokensUp += up;
+              turn.tokensDown += down;
+              turn.stubbed = turn.stubbed || ev.frames.includes("stub");
+              turn.degraded = turn.degraded || ev.frames.includes("degrade");
+              setLast({ ...turn });
+              if (ev.type === "tool") {
+                const step: TurnStep = {
+                  label: ev.display?.label ?? ev.step_id,
+                  ok: !ev.error && ev.status !== "failed",
+                  ...(secs >= 0.1 ? { secs } : {}),
+                  ...(up + down > 0 ? { tokens: { up, down } } : {}),
+                  details: stepDetails(ev.output),
+                  ...(ev.error ? { error: ev.error } : {}),
+                };
+                push({ kind: "section", step });
+              }
+            } else if (ev.kind === "answer") {
+              turn.text = ev.text;
+              // The stub lane echoes the assembled prompt — never dump that into
+              // the chat. Say what happened and how to bind a real model instead.
+              if (turn.stubbed) {
+                push({
+                  kind: "note",
+                  text: "⚠ no model bound — the stub echoed the prompt. Bind one with /model local <url> (llama.cpp · Ollama · LM Studio), set ROTOR_MODEL_URL, or /model frontier <url> <key>.",
+                });
+              } else if (ev.text) {
+                push({ kind: "answer", text: ev.text });
+              }
+            } else if (ev.kind === "interrupt") {
+              // A user Esc-stop ends the run `interrupted`; a genuine wait step
+              // pauses (chat mode has no resume surface). Either way, the turn
+              // stops here.
+              const aborted = (ev.awaiting as { reason?: string } | undefined)?.reason === "aborted";
+              if (turn.status === "running") turn.status = aborted ? "stopped" : "done";
+              push({ kind: "note", text: aborted ? "⏹ Stopped." : `⏸ paused at ${ev.step_id} — resume isn't supported in chat` });
+            } else if (ev.kind === "error") {
+              turn.text = `${ev.code}: ${ev.detail}`;
+              turn.status = "failed";
+              push({ kind: "answer", text: turn.text });
+            } else if (ev.kind === "done") {
+              if (turn.status === "running") {
+                turn.status = ev.status === "ok" ? "done" : ev.status === "refused" ? "refused" : "failed";
+              }
+              turn.durationMs = Date.now() - startedAt;
+              setLast({ ...turn });
             }
-            turn.durationMs = Date.now() - startedAt;
-            setLast({ ...turn });
-          }
-        });
+          },
+          undefined,
+          abort.signal,
+        );
       } catch (err) {
         turn.status = "failed";
         turn.text = (err as Error).message;
@@ -496,12 +538,20 @@ export function App({ version, rotorArg, ws, transcript }: AppProps): ReactEleme
         push({ kind: "answer", text: turn.text });
         setLast({ ...turn });
       } finally {
+        turnAbort.current = null;
         setBusy(false);
       }
     },
     [push],
   );
   runTurnRef.current = runTurn;
+
+  /** Stop the in-flight turn (Esc). The signal cuts an in-flight model call and
+   *  the run loop ends `interrupted` at the next step — Ctrl+C still quits the
+   *  whole app, Esc is "stop this, stay here". */
+  const stopTurn = useCallback(() => {
+    turnAbort.current?.abort();
+  }, []);
 
   const submit = useCallback(() => {
     const line = inputRef.current.trim();
@@ -516,6 +566,23 @@ export function App({ version, rotorArg, ws, transcript }: AppProps): ReactEleme
       const name = line.split(/\s+/)[1];
       push({ kind: "note", text: `switching rotor → ${name ?? "router"}` });
       void openRotor(name);
+      return;
+    }
+    if (line.startsWith("/theme")) {
+      const name = line.split(/\s+/)[1];
+      if (!name) {
+        push({ kind: "note", text: `themes: ${THEMES.map((t) => t.name).join(" · ")} · /theme <name>` });
+        return;
+      }
+      const def = THEMES.find((t) => t.name === name);
+      if (!def) {
+        push({ kind: "note", text: `unknown theme '${name}' — ${THEMES.map((t) => t.name).join(" · ")}` });
+        return;
+      }
+      applyTheme(name);
+      writePrefs({ theme: name });
+      setThemeVersion((v) => v + 1);
+      push({ kind: "note", text: `theme → ${def.label}` });
       return;
     }
     if (line.startsWith("/model")) {
@@ -665,6 +732,12 @@ export function App({ version, rotorArg, ws, transcript }: AppProps): ReactEleme
   }, [folds, selId, uiMode, anchors, ensureVisible]);
 
   useInput((ch, key) => {
+    // Esc stops the RUNNING turn (cuts an in-flight model call, ends the run at
+    // the next step) and keeps the session. Ctrl+C still quits the whole app.
+    if (busy && key.escape) {
+      stopTurn();
+      return;
+    }
     if (key.ctrl && ch === "o") {
       setExpanded((e) => !e);
       setFolds({});

@@ -42,6 +42,9 @@ export interface EmbedOptions {
    *  content-address (doc+inputs) makes a REPEATED question replay the old
    *  tape (stale answer, zero steps) instead of running in today's context. */
   runId?: string;
+  /** The caller's cancellation signal (a user Esc-interrupt) — stops the run
+   *  mid-flight (between steps + cuts an in-flight model call). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -65,6 +68,7 @@ export async function runInProcess(
     ...(opts.tools ? { packs: opts.tools } : {}),
     ...(opts.rotors ? { rotors: opts.rotors } : {}),
     ...(opts.runId ? { runId: opts.runId } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
   };
   await executeToEvents(doc, inputs, ctx, emit);
 }
