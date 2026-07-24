@@ -15,5 +15,5 @@ resources:
   - hpa.yaml
   - pdb.yaml
 commonLabels:
-  app.kubernetes.io/name: openrotor
-  app.kubernetes.io/part-of: openrotor
+  app.kubernetes.io/name: rrotor
+  app.kubernetes.io/part-of: rrotor

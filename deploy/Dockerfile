@@ -1,4 +1,4 @@
-# OpenRotor runtime image — a stateless, fungible rotor pod (SPEC.md §17.1).
+# rrotor runtime image — a stateless, fungible rotor pod (SPEC.md §17.1).
 #
 # The image carries NO run-critical state: the Context, the append-only event
 # history, and the caches all live in the external stator backend (docs/runtime.md

@@ -45,7 +45,7 @@ real:
 | | **Reference runtime** (this repo) | **glyphh product** (glyphh-rotor) |
 | --- | --- | --- |
 | Language | Node / TypeScript | Python |
-| License | Proprietary (Glyphh AI LLC), closed | Proprietary, closed |
+| License | Apache-2.0 (Glyphh AI LLC), open | Proprietary, closed |
 | Role | The conformance demo — readable, installable, honest | The production runtime — HDC grounding, full stator, hosting, governance |
 | Grounding | Abstracted: exact-match / soft verify-then-refuse. **Does not practice the patent.** | The patented HDC method behind an opaque `grounding` plugin |
 | Memory | SQLite, zero-dep, bare-box | Postgres + pgvector, cascade consolidation, scaled 7×33 lattice |
@@ -627,7 +627,7 @@ reference runtime targets L2 out of the box and L3 with a durable stator.
 
 ## 4. The reference runtime (Node/TypeScript)
 
-The concrete build for **this repo.** Proprietary (Glyphh AI LLC). It abstracts
+The concrete build for **this repo.** Apache-2.0 (Glyphh AI LLC). It abstracts
 `hdc.map` — it **does not practice the patent.**
 
 ### 4.1 Module layout

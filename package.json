@@ -3,8 +3,25 @@
   "version": "0.0.1",
   "description": "rrotor — Recursive Reasoning on top of reasoning. The open runtime for RotorSpec, the standard for deterministic agent loops.",
   "type": "module",
-  "private": true,
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
+  "author": "Glyphh AI LLC",
+  "homepage": "https://github.com/glyphh-ai/rrotor#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/glyphh-ai/rrotor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/glyphh-ai/rrotor/issues"
+  },
+  "keywords": [
+    "rotorspec",
+    "agent",
+    "agent-loop",
+    "deterministic",
+    "llm",
+    "ai",
+    "runtime"
+  ],
   "bin": {
     "rrotor": "dist/cli.js"
   },
@@ -14,7 +31,10 @@
   "files": [
     "dist",
     "spec",
-    "rotors"
+    "rotors",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
   ],
   "engines": {
     "node": ">=20"

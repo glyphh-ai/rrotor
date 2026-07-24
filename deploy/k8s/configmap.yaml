@@ -8,26 +8,26 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: openrotor-config
+  name: rrotor-config
   labels:
-    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/name: rrotor
     app.kubernetes.io/component: runtime
 data:
   # The stator (memory) backend — the append-only event history + Context + caches
   # live here, NOT in the pod (SPEC.md §17.1, docs/runtime.md §3.2). For multi-node
   # this MUST be a shared, external Postgres+pgvector; the in-process store is
   # single-node only. Host/port only — credentials come from the Secret.
-  ROTOR_STATOR_URL: "postgres://openrotor-postgres:5432/openrotor"
+  ROTOR_STATOR_URL: "postgres://rrotor-postgres:5432/rrotor"
   ROTOR_STATOR_BACKEND: "postgres"
 
   # The model inference lane (SPEC.md §3.3) — an OpenAI-compatible endpoint the
   # gateway routes `model` steps to. Local-model warmth burns no frontier credits.
-  ROTOR_MODEL_URL: "http://openrotor-model:8000/v1"
+  ROTOR_MODEL_URL: "http://rrotor-model:8000/v1"
 
   # The pool-coordination channel (Redis) — the pending-rotors queue + warm-pool
   # bookkeeping the HPA's custom metric reads (SPEC.md §17.3). Shared across pods so
   # affinity/pool decisions are fleet-global, not per-pod.
-  ROTOR_CHANNEL: "redis://openrotor-redis:6379/0"
+  ROTOR_CHANNEL: "redis://rrotor-redis:6379/0"
 
   # The port startServer() binds — must match the container EXPOSE + probe ports.
   PORT: "8080"
@@ -43,7 +43,7 @@ data:
   # ROTOR_DRAIN_URL for the HTTP sink (bearer token in the Secret), or
   # ROTOR_DRAIN_FILE for a sidecar-tailed NDJSON file. Unset → no drain.
   ROTOR_DRAIN_URL: ""
-  # ROTOR_DRAIN_FILE: "/var/log/openrotor/drain.ndjson"
+  # ROTOR_DRAIN_FILE: "/var/log/rrotor/drain.ndjson"
   ROTOR_DRAIN_BATCH: "50"
   ROTOR_DRAIN_BUFFER: "10000"
   # Comma-separated StepRecord output field names to redact before egress.

@@ -13,15 +13,15 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: openrotor
+  name: rrotor
   labels:
-    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/name: rrotor
     app.kubernetes.io/component: runtime
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: openrotor
+    name: rrotor
   minReplicas: 3
   maxReplicas: 20
   metrics:

@@ -8,13 +8,13 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: openrotor
+  name: rrotor
   labels:
-    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/name: rrotor
     app.kubernetes.io/component: runtime
 spec:
   minAvailable: 2
   selector:
     matchLabels:
-      app.kubernetes.io/name: openrotor
+      app.kubernetes.io/name: rrotor
       app.kubernetes.io/component: runtime

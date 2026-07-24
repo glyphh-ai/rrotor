@@ -1,4 +1,4 @@
-# fly.io Machine config for a PER-SESSION OpenRotor runtime instance.
+# fly.io Machine config for a PER-SESSION rrotor runtime instance.
 #
 # The glyphh control plane creates/starts one Machine per code session (per message
 # thread) from this app, runs `glyphh serve`, and stops it when idle. The runtime is

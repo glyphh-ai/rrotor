@@ -8,14 +8,14 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: openrotor
+  name: rrotor
   labels:
-    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/name: rrotor
     app.kubernetes.io/component: runtime
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/name: rrotor
     app.kubernetes.io/component: runtime
   ports:
     - name: http

@@ -10,9 +10,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: openrotor
+  name: rrotor
   labels:
-    app.kubernetes.io/name: openrotor
+    app.kubernetes.io/name: rrotor
     app.kubernetes.io/component: runtime
 spec:
   # Baseline floor of 3 interchangeable pods — the HPA drives the actual count
@@ -20,7 +20,7 @@ spec:
   replicas: 3
   selector:
     matchLabels:
-      app.kubernetes.io/name: openrotor
+      app.kubernetes.io/name: rrotor
       app.kubernetes.io/component: runtime
   # Rolling update: swap pods a few at a time, never dropping below the fleet. Safe
   # precisely BECAUSE pods are fungible — a run in flight resumes on any surviving or
@@ -33,7 +33,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: openrotor
+        app.kubernetes.io/name: rrotor
         app.kubernetes.io/component: runtime
     spec:
       # Spread pods across NODES so one node failure cannot take the whole pool.
@@ -47,7 +47,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
                   matchLabels:
-                    app.kubernetes.io/name: openrotor
+                    app.kubernetes.io/name: rrotor
                     app.kubernetes.io/component: runtime
       # Give in-flight runs a beat to checkpoint to the stator on shutdown; the run
       # then resumes on another pod (SPEC.md §17.1 — wait/interrupt checkpoints).
@@ -57,9 +57,9 @@ spec:
         runAsUser: 1000
         fsGroup: 1000
       containers:
-        - name: openrotor
+        - name: rrotor
           # Replace with your registry/tag. Built from deploy/Dockerfile.
-          image: openrotor:latest
+          image: rrotor:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -68,9 +68,9 @@ spec:
           # every pod, pointing at the external stator/model/channel.
           envFrom:
             - configMapRef:
-                name: openrotor-config
+                name: rrotor-config
             - secretRef:
-                name: openrotor-secret
+                name: rrotor-secret
           resources:
             requests:
               cpu: "250m"

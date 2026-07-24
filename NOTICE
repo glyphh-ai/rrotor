@@ -1,13 +1,28 @@
-OpenRotor / RotorSpec
-Copyright (c) 2026 Glyphh AI LLC. All rights reserved.
+rrotor — the open reference runtime for RotorSpec
+Copyright 2026 Glyphh AI LLC
 
-PROPRIETARY AND CONFIDENTIAL. This repository and all of its contents are the
-proprietary property of Glyphh AI LLC and are licensed under the Glyphh
-Proprietary License (see the LICENSE file). This is a temporary, all-rights-
-reserved license; Glyphh may re-license all or part of this work under different
-terms in the future.
+This product is licensed under the Apache License, Version 2.0 (the
+"License"); you may not use it except in compliance with the License. A copy
+of the License is distributed with this work in the LICENSE file, and is also
+available at http://www.apache.org/licenses/LICENSE-2.0.
 
-The HDC grounding method is the subject of a pending U.S. patent application
-(No. 63/969,729). This repository abstracts or stubs the `hdc.map` step and does
-not disclose the patented method; the production grounding implementation is a
-separate proprietary work.
+--------------------------------------------------------------------------------
+
+Patent notice
+
+The hyperdimensional-computing (HDC) grounding method used by Glyphh's
+production runtime is the subject of a pending U.S. patent application
+(No. 63/969,729). That method is NOT disclosed or implemented in this
+repository: the `hdc.map` step is abstracted or stubbed here, and the
+production grounding implementation is a separate work that is not included.
+
+The patent license granted under Section 3 of the Apache License applies only
+to the contributions actually contained in this Work. It does not extend to
+the separate, unpublished production grounding implementation, and no license
+to the pending patent claims is granted beyond what Section 3 requires for the
+code in this repository.
+
+"Glyphh", "rrotor", and "RotorSpec" are trademarks of Glyphh AI LLC. As stated
+in Section 6 of the License, this license does not grant permission to use
+those marks except as required for reasonable and customary use in describing
+the origin of the Work.

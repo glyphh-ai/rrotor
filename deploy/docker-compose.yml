@@ -19,15 +19,15 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: openrotor
-      POSTGRES_PASSWORD: openrotor
-      POSTGRES_DB: openrotor
+      POSTGRES_USER: rrotor
+      POSTGRES_PASSWORD: rrotor
+      POSTGRES_DB: rrotor
     ports:
       - "5432:5432"
     volumes:
       - stator-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openrotor -d openrotor"]
+      test: ["CMD-SHELL", "pg_isready -U rrotor -d rrotor"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -54,9 +54,9 @@ services:
       PORT: "8080"
       ROTOR_PORT: "8080"
       ROTOR_STATOR_BACKEND: "postgres"
-      ROTOR_STATOR_URL: "postgres://postgres:5432/openrotor"
-      ROTOR_STATOR_USER: "openrotor"
-      ROTOR_STATOR_PASSWORD: "openrotor"
+      ROTOR_STATOR_URL: "postgres://postgres:5432/rrotor"
+      ROTOR_STATOR_USER: "rrotor"
+      ROTOR_STATOR_PASSWORD: "rrotor"
       ROTOR_CHANNEL: "redis://redis:6379/0"
     ports:
       - "8080:8080"
@@ -77,9 +77,9 @@ services:
       PORT: "8080"
       ROTOR_PORT: "8080"
       ROTOR_STATOR_BACKEND: "postgres"
-      ROTOR_STATOR_URL: "postgres://postgres:5432/openrotor"
-      ROTOR_STATOR_USER: "openrotor"
-      ROTOR_STATOR_PASSWORD: "openrotor"
+      ROTOR_STATOR_URL: "postgres://postgres:5432/rrotor"
+      ROTOR_STATOR_USER: "rrotor"
+      ROTOR_STATOR_PASSWORD: "rrotor"
       ROTOR_CHANNEL: "redis://redis:6379/0"
     ports:
       - "8081:8080"

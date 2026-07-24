@@ -2,7 +2,7 @@
 
 **The standard for deterministic AI agent loops.**
 
-Version 0.1 · Draft · Proprietary (Glyphh AI LLC) · Reference executor: [glyphh-rotor]
+Version 0.1 · Draft · Apache-2.0 (Glyphh AI LLC) · Reference executor: [glyphh-rotor]
 
 An AI agent is a loop. Today that loop lives inside a model's context window, is
 re-derived on every prompt, and can't be replayed, audited, or reasoned about.
@@ -39,6 +39,29 @@ npm install && npm run build && npm link   # once: the `rrotor` bin on your PATH
 make model     # serve a local GGUF via llama.cpp (or set MODEL_URL to any OpenAI-compatible endpoint)
 make tui       # the full-screen TUI · durable sqlite memory · live model
 ```
+
+### The TUI is a chat
+
+Just type. **Every line is one full rotor turn** — plan, memory recall, grounding,
+and gating all run *behind the scenes*; only real tool actions surface as
+collapsible receipts, and the answer streams to a `●` line. The loop's machinery
+is on the record (every turn is checkpointed and replayable) without cluttering
+the conversation.
+
+| Key / command | What |
+| --- | --- |
+| `Esc` | **stop the running turn** — cuts an in-flight model call, keeps the session (Ctrl+C quits the app) |
+| `shift+tab` | cycle rotors (`router` · `base-memory` · `code` · `base-single`) |
+| `tab` · `ctrl+o` | fold a tool receipt · expand them all |
+| `/model local <url>` | bind a model lane (see below) · `/model frontier <url> <key>` |
+| `/store sqlite [path]` | durable memory · `/store memory` for ephemeral |
+| `/theme <name>` | restyle (`dark` · `light` · `highvis` · `claude` · `aurora`) |
+| `/rotor <name>` · `/quit` | switch rotor · leave |
+
+Out of the box there's **no model bound**, so the loop still grounds, gates, and
+remembers — it just can't *think*. Bind one with `/model local <url>` (or
+`ROTOR_MODEL_URL`) and answers start streaming; until then the stub says so
+rather than dumping its prompt.
 
 `make help` lists every launcher — `chat` (readline harness), `serve` (HTTP
 runtime), `repl`, `dev-tui` (run the TUI from source). Every mode variable
@@ -133,13 +156,16 @@ pods, scaled horizontally.
 
 ## Status & license
 
-- **Proprietary — © 2026 Glyphh AI LLC, all rights reserved** (see [LICENSE](LICENSE),
-  [NOTICE](NOTICE)). This is a temporary, all-rights-reserved license for now; the
-  project may be re-licensed under different (including open) terms in the future.
+- **Open source — Apache-2.0** (see [LICENSE](LICENSE), [NOTICE](NOTICE)).
+  Copyright © 2026 Glyphh AI LLC. Contributions are accepted under the same
+  license — see [CONTRIBUTING.md](CONTRIBUTING.md).
 - Draft **v0.1**: the spec text ([SPEC.md](SPEC.md) + [docs/](docs/)) is written;
   the JSON Schema and reference rotors are in progress.
-- The patent-pending HDC grounding method is not disclosed here — this repository
-  abstracts or stubs the `hdc.map` step (see [NOTICE](NOTICE)).
+- The patent-pending HDC grounding method is **not** disclosed or implemented
+  here — this repository abstracts or stubs the `hdc.map` step. Apache-2.0's
+  patent grant covers only the code in this repo, not the separate production
+  grounding implementation (see [NOTICE](NOTICE)).
+- Security reports: see [SECURITY.md](SECURITY.md).
 
 ## Layout
 

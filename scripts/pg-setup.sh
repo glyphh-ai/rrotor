@@ -11,9 +11,9 @@
 set -euo pipefail
 
 PGBIN="$(pg_config --bindir)"
-PGDATA="${ROTOR_PGDATA:-/tmp/openrotor-pgdata}"
+PGDATA="${ROTOR_PGDATA:-/tmp/rrotor-pgdata}"
 PGPORT="${ROTOR_PGPORT:-54329}"
-PGDB="${ROTOR_PGDB:-openrotor_test}"
+PGDB="${ROTOR_PGDB:-rrotor_test}"
 PGSOCK="${ROTOR_PGSOCK:-${PGDATA}-sock}"
 URL="postgresql://postgres@localhost:${PGPORT}/${PGDB}?host=${PGSOCK}"
 
