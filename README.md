@@ -1,13 +1,41 @@
-# RotorSpec
+# rrotor
 
-**The standard for deterministic AI agent loops.**
+**Recursive Reasoning on top of reasoning.** rrotor lifts an AI agent's *loop* out
+of the model and turns it into a declarative, deterministic, replayable artifact —
+a *rotor*.
 
-Version 0.1 · Draft · Apache-2.0 (Glyphh AI LLC) · Reference executor: [glyphh-rotor]
+Version 0.1 · Draft · Apache-2.0 (Glyphh AI LLC) · The open reference runtime for
+[RotorSpec](SPEC.md) · Production runtime: [glyphh-rotor]
 
-An AI agent is a loop. Today that loop lives inside a model's context window, is
-re-derived on every prompt, and can't be replayed, audited, or reasoned about.
-**RotorSpec lifts the loop out of the model and makes it a declarative,
-deterministic artifact** — a *rotor*.
+## What "rrotor" means
+
+The doubled **r** is the whole idea. A model *reasons*; **rrotor is Recursive
+Reasoning — reasoning *about* that reasoning.** It wraps the model's stochastic step
+inside a deterministic control loop that decides what runs next, grounds every claim
+against memory, gates the result, and records the whole thing so it can be replayed
+and audited. The model thinks; the rotor decides. (It's also, yes, a rotor that
+rotates — hence the name.)
+
+## Why we built it
+
+An AI agent is a loop — and today that loop lives *inside* the model's context
+window. It's re-derived from scratch on every prompt, tangled up with the tokens,
+and impossible to replay, audit, or reason about. Change one line of a system prompt
+and you've silently changed the entire machine. That's fine for a demo and miserable
+for anything you have to operate, debug, or trust.
+
+rrotor takes the opposite stance: **the loop is the artifact, not the prompt.** You
+declare the steps an agent runs — `ask → plan → execute → test` — as a versioned
+document, and rrotor executes them deterministically. The *control flow* is
+replayable bit-for-bit; the model and tool outputs are checkpointed and never
+re-invoked on replay (honest determinism — reproducible *decisions*, not reproducible
+*tokens*). Memory is a first-class store (the **stator**), grounding is a gate where
+"I don't know" is a valid terminal answer, and every turn is permanently on the
+record.
+
+The result is an agent you can **inspect, pin to a version, reproduce, and reason
+about** — instead of a black box that happens to work today. rrotor is the open
+Node/TypeScript runtime; the standard it implements is **RotorSpec**.
 
 ## What's a rotor?
 
