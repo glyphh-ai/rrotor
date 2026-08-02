@@ -12,7 +12,8 @@ import type { CapabilityStatus } from "../runtime/registry.js";
 import type { StepRecord } from "../types.js";
 import { InProcessStore, type Fact, type Row, type Stator } from "../exec/store.js";
 import { visibleFacts, type MemoryTier } from "../exec/facts.js";
-import { cosine, embed } from "../exec/embedding.js";
+import { cosine } from "../exec/embedding.js";
+import { HashEmbedder, type Embedder } from "../exec/embedder.js";
 import type {
   GroundVerdict,
   MemoryPlugin,
@@ -26,7 +27,12 @@ const norm = (s: unknown): string => String(s ?? "").trim().toLowerCase();
 export class BasicMemory implements MemoryPlugin {
   readonly name = "memory";
 
-  constructor(readonly store: Stator = new InProcessStore()) {}
+  constructor(
+    readonly store: Stator = new InProcessStore(),
+    /** The turn embedder for semantic recall. Defaults to the deterministic hash
+     *  embedder (replay-safe); the fleet injects an HTTP one. */
+    private readonly embedder: Embedder = new HashEmbedder(),
+  ) {}
 
   status(): CapabilityStatus {
     return { ready: true, detail: "in-process maps; no pgvector", tier: "basic" };
@@ -39,11 +45,11 @@ export class BasicMemory implements MemoryPlugin {
   /** Deterministic-local semantic recall (§7.7): cosine over the hashed-ngram
    *  embedding of the query and each recorded turn. Replay-safe (pure). */
   async semanticRecall(query: string, topK: number, threshold: number): Promise<SemanticHit[]> {
-    const qv = embed(query);
     if (query.trim() === "") return [];
+    const qv = await this.embedder.embed(query);
     const scored: SemanticHit[] = [];
     for (const text of await this.store.turns()) {
-      const score = cosine(qv, embed(text));
+      const score = cosine(qv, await this.embedder.embed(text));
       if (score >= threshold) scored.push({ text, score });
     }
     return scored

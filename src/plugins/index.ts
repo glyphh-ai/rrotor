@@ -9,6 +9,7 @@
  */
 
 import { InProcessStore, type Stator } from "../exec/store.js";
+import type { Embedder } from "../exec/embedder.js";
 import { BasicGrounding } from "./grounding.js";
 import { BasicMemory } from "./memory.js";
 import { BasicModels, type BasicModelsOptions } from "./models.js";
@@ -39,6 +40,9 @@ export interface BuildBasicPluginsOptions {
   models?: BasicModelsOptions;
   /** A log drain (shared across runs). Defaults to a {@link NoopDrain}. */
   drain?: DrainPlugin;
+  /** The turn embedder for semantic recall. Defaults to the deterministic hash
+   *  embedder; the fleet injects an HTTP one (see {@link embedderFromEnv}). */
+  embedder?: Embedder;
   /** Install the tool standard library into `connections`, gated by permission
    *  mode. Off by default (bare bundle). `root` is the workspace sandbox; `packs`
    *  adds the host product's own tools behind the same contract + gating. */
@@ -50,7 +54,7 @@ export function buildBasicPlugins(opts: BuildBasicPluginsOptions = {}): Plugins 
   const store = opts.store ?? new InProcessStore();
   const plugins: Plugins = {
     grounding: new BasicGrounding(store),
-    memory: new BasicMemory(store),
+    memory: new BasicMemory(store, opts.embedder),
     models: new BasicModels(opts.models),
     connections: new BasicConnections(),
     gateway: new BasicGateway(),

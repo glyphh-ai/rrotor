@@ -27,7 +27,7 @@
  * "degrade, never raise" rule).
  */
 
-import { embed } from "./embedding.js";
+import { HashEmbedder, type Embedder } from "./embedder.js";
 import {
   currentFillers,
   lookupCurrentFact,
@@ -60,7 +60,12 @@ export interface PgVectorOptions {
   client?: PgLike;
   /** Postgres connection string; lazy-loads `pg` when no client is injected. */
   url?: string;
-  /** Turn-embedding dimension (must match the runtime's embedding, §7.7). */
+  /** The turn embedder (its `dim` sizes the `vector` column). Defaults to the
+   *  deterministic hash embedder; the fleet injects an HTTP one. */
+  embedder?: Embedder;
+  /** DEPRECATED shim: the turn-embedding dimension. Retained for back-compat —
+   *  when no `embedder` is given, builds a {@link HashEmbedder} of this width.
+   *  Defaults to 256. */
   embedDim?: number;
 }
 
@@ -136,21 +141,25 @@ function rowToFact(r: Record<string, unknown>): Fact {
 
 export class PgVectorStore implements Stator {
   private readonly db: PgLike;
+  private readonly embedder: Embedder;
   private readonly embedDim: number;
   private readonly indexable: boolean;
 
-  private constructor(db: PgLike, embedDim: number) {
+  private constructor(db: PgLike, embedder: Embedder) {
     this.db = db;
-    this.embedDim = embedDim;
-    this.indexable = embedDim <= INDEX_DIM_CAP;
+    this.embedder = embedder;
+    this.embedDim = embedder.dim;
+    this.indexable = embedder.dim <= INDEX_DIM_CAP;
   }
 
-  /** Connect (or adopt an injected client) and create the schema. */
+  /** Connect (or adopt an injected client) and create the schema. The column
+   *  width follows the embedder's `dim`; the legacy `embedDim` option still works
+   *  and maps to a {@link HashEmbedder} of that width for full back-compat. */
   static async create(opts: PgVectorOptions = {}): Promise<PgVectorStore> {
-    const embedDim = opts.embedDim ?? 256;
+    const embedder = opts.embedder ?? new HashEmbedder(opts.embedDim ?? 256);
     const db = opts.client ?? (await connectPg(opts.url));
-    const store = new PgVectorStore(db, embedDim);
-    await store.execScript(ddl(embedDim, store.indexable));
+    const store = new PgVectorStore(db, embedder);
+    await store.execScript(ddl(store.embedDim, store.indexable));
     return store;
   }
 
@@ -263,7 +272,7 @@ export class PgVectorStore implements Stator {
 
   // ── turns — the embedding corpus, stored with its ANN vector ────────────────
   async addTurn(text: string): Promise<void> {
-    const v = vec(embed(text, this.embedDim));
+    const v = vec(await this.embedder.embed(text));
     await this.db.query("INSERT INTO turns (text, embedding) VALUES ($1, $2::vector)", [text, v]);
   }
   async turns(): Promise<string[]> {
@@ -302,7 +311,7 @@ export class PgVectorStore implements Stator {
    * picks). This is the large-corpus retrieval path.
    */
   async semanticRecallDb(query: string, topK = 8, threshold = 0.0): Promise<Array<{ text: string; score: number }>> {
-    const q = vec(embed(query, this.embedDim));
+    const q = vec(await this.embedder.embed(query));
     const rows = (await this.db.query(
       "SELECT text, 1 - (embedding <=> $1::vector) AS score FROM turns " +
         "WHERE embedding IS NOT NULL ORDER BY embedding <=> $1::vector LIMIT $2",

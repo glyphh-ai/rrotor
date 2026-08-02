@@ -11,6 +11,7 @@
 import { InProcessStore, type Stator } from "./store.js";
 import { SqliteStore } from "./sqlite-store.js";
 import { PgVectorStore } from "./pgvector-store.js";
+import { embedderFromEnv, type Embedder } from "./embedder.js";
 
 export type StatorBackend = "memory" | "sqlite" | "pgvector";
 
@@ -19,9 +20,9 @@ export interface StatorOptions {
   /** For `sqlite`, a file path (or `:memory:`); for `pgvector`, a connection
    *  string. Ignored by `memory`. */
   url?: string;
-  /** For `pgvector`, the turn-embedding dimension (must match the runtime's
-   *  embedding, §7.7). Defaults to 256. */
-  embedDim?: number;
+  /** For `pgvector`, the turn embedder (its `dim` sizes the vector column, §7.7).
+   *  Defaults to the deterministic hash embedder (256) when omitted. */
+  embedder?: Embedder;
 }
 
 /** Construct a **synchronous** stator from explicit options. `pgvector` is async
@@ -42,7 +43,7 @@ export function createStator(opts: StatorOptions = {}): Stator {
  *  follows is deterministic). */
 export async function initStator(opts: StatorOptions = {}): Promise<Stator> {
   if (opts.backend === "pgvector") {
-    return PgVectorStore.create({ url: opts.url, embedDim: opts.embedDim });
+    return PgVectorStore.create({ url: opts.url, embedder: opts.embedder });
   }
   return createStator(opts);
 }
@@ -56,9 +57,12 @@ function backendFromEnv(env: NodeJS.ProcessEnv): StatorBackend {
 /** Construct a stator from the environment, awaiting async backends. Defaults to
  *  the in-process backend so nothing durable is created unless asked for. */
 export async function statorFromEnvAsync(env: NodeJS.ProcessEnv = process.env): Promise<Stator> {
-  const embedDim = env.ROTOR_EMBED_DIM ? Number(env.ROTOR_EMBED_DIM) : undefined;
+  const backend = backendFromEnv(env);
   const url = env.ROTOR_STATOR_URL?.replace(/^~(?=$|\/)/, process.env.HOME ?? "~");
-  return initStator({ backend: backendFromEnv(env), url, embedDim });
+  // Only the pgvector path stores the turn vector, so only it needs the embedder;
+  // built here (via `ROTOR_EMBED_*`) so the DB column width follows the model.
+  const embedder = backend === "pgvector" ? embedderFromEnv(env) : undefined;
+  return initStator({ backend, url, embedder });
 }
 
 /** Synchronous env construction (memory/sqlite only). Retained for callers on the

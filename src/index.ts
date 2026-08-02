@@ -66,6 +66,15 @@ export {
   type StatorOptions,
   type StatorBackend,
 } from "./exec/stator.js";
+export {
+  HashEmbedder,
+  HttpEmbedder,
+  embedderFromEnv,
+  DEFAULT_EMBED_DIM,
+  type Embedder,
+  type EmbedBackend,
+  type HttpEmbedderOptions,
+} from "./exec/embedder.js";
 export { SqliteStore } from "./exec/sqlite-store.js";
 export { InProcessStore } from "./exec/store.js";
 export type { Stator } from "./exec/store.js";
