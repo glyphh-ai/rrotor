@@ -1,6 +1,9 @@
 {
-  "name": "rrotor",
-  "version": "0.0.1",
+  "name": "@glyphh/rrotor",
+  "version": "1.1.2",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "rrotor — Recursive Reasoning on top of reasoning. The open runtime for RotorSpec, the standard for deterministic agent loops.",
   "type": "module",
   "license": "Apache-2.0",
