@@ -24,7 +24,7 @@ import { printBanner } from "./banner.js";
 import { loadRotor, validateRotor } from "./parser/index.js";
 import { execute } from "./exec/executor.js";
 import { buildBasicPlugins, childPluginsFactory } from "./plugins/index.js";
-import { startServer } from "./server.js";
+import { serve } from "./server.js";
 import { runRepl } from "./repl.js";
 import { VERSION } from "./version.js";
 import { describe, errorCatalog } from "./errors.js";
@@ -247,7 +247,9 @@ async function runSupport(rest: string[]): Promise<number> {
   return 0;
 }
 
-/** `rrotor serve [-p PORT]` — start the HTTP runtime and block. */
+/** `rrotor serve [-p PORT]` — start the HTTP runtime and block. Delegates to the
+ *  async {@link serve} so a `pgvector` stator connects + hydrates before serving
+ *  (the sync store path throws for pgvector on purpose). */
 function runServe(rest: string[]): Promise<number> {
   let port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? 8080);
   for (let i = 0; i < rest.length; i++) {
@@ -257,9 +259,8 @@ function runServe(rest: string[]): Promise<number> {
     }
   }
   if (!Number.isFinite(port)) port = 8080;
-  startServer(port);
   // Never resolves — the server owns the process until it is killed.
-  return new Promise<number>(() => {});
+  return serve(port);
 }
 
 export async function main(argv: string[]): Promise<number> {

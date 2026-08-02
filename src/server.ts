@@ -375,19 +375,29 @@ export async function shutdown(server: http.Server, store: Stator, drain: DrainP
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
+/**
+ * Boot the runtime for real: build the stator with the **async** factory (so a
+ * `pgvector` backend connects + hydrates before we serve — the sync default in
+ * {@link startServer} throws for pgvector on purpose), start the server, and wire
+ * graceful shutdown on SIGTERM/SIGINT. The single entry point for both the CLI
+ * `serve` command and direct `node dist/server.js` invocation. Never resolves —
+ * the server owns the process until a signal tears it down.
+ */
+export async function serve(port: number = DEFAULT_PORT): Promise<never> {
+  const store = await statorFromEnvAsync();
+  const drain = drainFromEnv();
+  const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain);
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    process.on(sig, () => {
+      log.info("shutting down", { signal: sig });
+      void shutdown(server, store, drain).then(() => process.exit(0));
+    });
+  }
+  return new Promise<never>(() => {});
+}
+
 // Run when invoked directly (as `node dist/server.js`), not when imported.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  void (async () => {
-    const port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? DEFAULT_PORT);
-    // Async builder so a `pgvector` backend connects + hydrates before serving.
-    const store = await statorFromEnvAsync();
-    const drain = drainFromEnv();
-    const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain);
-    for (const sig of ["SIGTERM", "SIGINT"] as const) {
-      process.on(sig, () => {
-        log.info("shutting down", { signal: sig });
-        void shutdown(server, store, drain).then(() => process.exit(0));
-      });
-    }
-  })();
+  const port = Number(process.env.PORT ?? process.env.ROTOR_PORT ?? DEFAULT_PORT);
+  void serve(port);
 }
