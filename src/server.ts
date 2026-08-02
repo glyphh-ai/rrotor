@@ -36,6 +36,8 @@ import { describe } from "./errors.js";
 import { toolModeFromLabels } from "./tools/index.js";
 import { streamRunLive, replayRun } from "./transport/sse.js";
 import { attachWebSocket } from "./transport/ws.js";
+import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "./auth/introspect.js";
+import type { Introspector } from "./auth/introspect.js";
 
 /** The per-session workspace sandbox for fs/exec/git tools (docs/hosting.md §3). */
 function workspaceRoot(): string {
@@ -101,6 +103,7 @@ function handle(
   drain: DrainPlugin,
   req: http.IncomingMessage,
   res: http.ServerResponse,
+  auth: Introspector = disabledIntrospector(),
 ): void {
   const method = req.method ?? "GET";
   // Strip any query string; probes hit bare paths.
@@ -127,6 +130,44 @@ function handle(
     return;
   }
 
+  // ── data-plane auth gate ─────────────────────────────────────────────────
+  // Probes above stay open (liveness/readiness/version must answer without a
+  // token). Everything below is a data-plane route (run/resume/events) — when an
+  // introspector is configured, the caller's bearer is validated against the
+  // control plane and bound to THIS worker's session before we route. When auth
+  // is disabled (the default), `authorize` allows immediately and this is a no-op.
+  if (auth.enabled) {
+    const bearer = bearerFromHeader(req.headers.authorization);
+    void auth
+      .authorize(bearer)
+      .then((decision) => {
+        if (!decision.ok) {
+          log.warn("auth denied", { path, method, reason: decision.reason ?? "denied" });
+          sendJson(res, decision.status, { error: "unauthorized", detail: decision.reason });
+          return;
+        }
+        dispatchDataPlane(rt, store, drain, req, res, method, path);
+      })
+      .catch((err: unknown) => {
+        log.error("auth check error", { detail: (err as Error).message });
+        sendJson(res, 401, { error: "unauthorized" });
+      });
+    return;
+  }
+  dispatchDataPlane(rt, store, drain, req, res, method, path);
+}
+
+/** Route the authenticated data-plane requests (run/resume/events). Reached only
+ *  after the auth gate in {@link handle} has allowed the caller. */
+function dispatchDataPlane(
+  rt: Runtime,
+  store: Stator,
+  drain: DrainPlugin,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  method: string,
+  path: string,
+): void {
   if (method === "POST" && path === "/run") {
     readBody(req)
       .then((raw) => {
@@ -338,11 +379,13 @@ export function startServer(
   rt: Runtime = new Runtime(),
   store: Stator = statorFromEnv(),
   drain: DrainPlugin = drainFromEnv(),
+  auth: Introspector = introspectorFromEnv(),
 ): http.Server {
-  const server = http.createServer((req, res) => handle(rt, store, drain, req, res));
+  const server = http.createServer((req, res) => handle(rt, store, drain, req, res, auth));
   // Bidirectional streaming transport (GET /ws upgrade) over the same event model as
   // the SSE lane — the client SDK can use either. Shares the pod's stator + drain.
-  attachWebSocket(server, { store, drain, workspace: workspaceRoot() });
+  // The upgrade is gated by the same introspector as the HTTP data plane.
+  attachWebSocket(server, { store, drain, workspace: workspaceRoot() }, "/ws", auth);
   server.listen(port, () => {
     log.info("runtime listening", { port, version: VERSION });
   });
@@ -386,7 +429,10 @@ export async function shutdown(server: http.Server, store: Stator, drain: DrainP
 export async function serve(port: number = DEFAULT_PORT): Promise<never> {
   const store = await statorFromEnvAsync();
   const drain = drainFromEnv();
-  const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain);
+  // OPTIONAL introspection auth (off unless ROTOR_AUTH_INTROSPECT_URL is set).
+  const auth = introspectorFromEnv();
+  if (auth.enabled) log.info("data-plane auth enabled (introspection)", {});
+  const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain, auth);
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, () => {
       log.info("shutting down", { signal: sig });

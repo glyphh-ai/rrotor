@@ -25,6 +25,8 @@ import { parseRotor, validateRotor } from "../parser/index.js";
 import { log } from "../obs/logger.js";
 import { WIRE_VERSION, type WireEvent } from "./events.js";
 import { executeToEvents, resumeToEvents, buildReplay, type StreamContext } from "./run.js";
+import { disabledIntrospector, bearerFromHeader } from "../auth/introspect.js";
+import type { Introspector } from "../auth/introspect.js";
 import type { Stator } from "../exec/store.js";
 import type { DrainPlugin } from "../plugins/interfaces.js";
 import type { RotorDocument } from "../types.js";
@@ -151,7 +153,12 @@ function coerceRotor(rotor: unknown): RotorDocument {
  * Attach a WebSocket endpoint at `path` to a running HTTP server. Handles the
  * upgrade handshake, then serves control messages over the connection.
  */
-export function attachWebSocket(server: http.Server, deps: WsDeps, path = "/ws"): void {
+export function attachWebSocket(
+  server: http.Server,
+  deps: WsDeps,
+  path = "/ws",
+  auth: Introspector = disabledIntrospector(),
+): void {
   server.on("upgrade", (req: http.IncomingMessage, socket: Duplex) => {
     if ((req.url ?? "").split("?", 1)[0] !== path) {
       socket.destroy();
@@ -162,14 +169,56 @@ export function attachWebSocket(server: http.Server, deps: WsDeps, path = "/ws")
       socket.destroy();
       return;
     }
-    socket.write(
-      "HTTP/1.1 101 Switching Protocols\r\n" +
-        "Upgrade: websocket\r\n" +
-        "Connection: Upgrade\r\n" +
-        `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
-    );
-    serve(socket, deps);
+    // Data-plane gate: /ws is a data-plane route, so when an introspector is
+    // configured the caller's bearer must validate + bind to this session BEFORE
+    // the socket opens. On deny we reject the upgrade with a 401 handshake and
+    // destroy the socket — the WebSocket never opens.
+    if (auth.enabled) {
+      const bearer = bearerFromHeader(req.headers.authorization);
+      void auth
+        .authorize(bearer)
+        .then((decision) => {
+          if (!decision.ok) {
+            log.warn("auth denied", { path, method: "GET", reason: decision.reason ?? "denied" });
+            rejectUpgrade(socket, decision.status, decision.reason);
+            return;
+          }
+          completeUpgrade(socket, key, deps);
+        })
+        .catch((err: unknown) => {
+          log.error("auth check error", { detail: (err as Error).message });
+          rejectUpgrade(socket, 401);
+        });
+      return;
+    }
+    completeUpgrade(socket, key, deps);
   });
+}
+
+/** Finish the RFC 6455 handshake and start serving control messages. */
+function completeUpgrade(socket: Duplex, key: string, deps: WsDeps): void {
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
+  );
+  serve(socket, deps);
+}
+
+/** Reject an upgrade before the socket opens: write a plain HTTP error handshake
+ *  (never the WS 101), then destroy the socket. */
+function rejectUpgrade(socket: Duplex, status: number, reason?: string): void {
+  const text = status === 403 ? "Forbidden" : "Unauthorized";
+  const body = JSON.stringify({ error: "unauthorized", detail: reason });
+  socket.write(
+    `HTTP/1.1 ${status} ${text}\r\n` +
+      "content-type: application/json; charset=utf-8\r\n" +
+      `content-length: ${Buffer.byteLength(body)}\r\n` +
+      "connection: close\r\n\r\n" +
+      body,
+  );
+  socket.destroy();
 }
 
 /** Serve one upgraded connection: decode frames, run control messages in order. */

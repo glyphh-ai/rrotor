@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import { startServer } from "../../src/server.js";
+import { introspectorFromEnv } from "../../src/auth/introspect.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const baseRotorYaml = readFileSync(resolve(ROOT, "rotors/base.rotor.yaml"), "utf8");
@@ -108,5 +109,44 @@ describe("POST /run", () => {
     expect(second.run_id).toBe(first.run_id);
     expect(second.outputs).toEqual(first.outputs);
     expect(second.history).toEqual(first.history);
+  });
+});
+
+describe("introspection auth enabled", () => {
+  let authServer: Server;
+  let authBase: string;
+
+  beforeAll(async () => {
+    // Auth on, but the introspect endpoint is unreachable — so any presented token
+    // fails closed (401). This proves the gate is wired without a live control plane.
+    const auth = introspectorFromEnv({
+      ROTOR_AUTH_INTROSPECT_URL: "http://127.0.0.1:1/introspect",
+      ROTOR_AUTH_SERVICE_TOKEN: "svc",
+      ROTOR_SESSION_ID: "sess-abc",
+    } as NodeJS.ProcessEnv);
+    authServer = startServer(0, undefined, undefined, undefined, auth);
+    await new Promise<void>((r) => authServer.once("listening", () => r()));
+    const port = (authServer.address() as AddressInfo).port;
+    authBase = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => authServer.close(() => r()));
+  });
+
+  it("probe /healthz stays open with no bearer", async () => {
+    const res = await fetch(`${authBase}/healthz`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "ok" });
+  });
+
+  it("POST /run with no bearer is 401", async () => {
+    const res = await fetch(`${authBase}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rotor: baseRotorYaml, inputs: {} }),
+    });
+    expect(res.status).toBe(401);
+    expect((await res.json()) as { error: string }).toMatchObject({ error: "unauthorized" });
   });
 });
