@@ -1,6 +1,6 @@
 # The glyphh Client SDK — Implementation Specification
 
-**Status:** v0.1 draft · **Package:** `@glyphh/client` · **Language:** TypeScript ·
+**Status:** v0.1 draft · **Package:** `@glyphh/sdk` · **Language:** TypeScript ·
 **License:** proprietary (not open source) · **Targets:** the rrotor runtime
 streaming transport `rotor.stream/v1`.
 
@@ -31,7 +31,7 @@ It exposes a small typed API; a client is a thin renderer on top of it.
 └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
        └─────────────────┼─────────────────┘
                   ┌───────┴────────┐
-                  │  @glyphh/client │                  session mechanics (this spec)
+                  │  @glyphh/sdk │                  session mechanics (this spec)
                   └───────┬────────┘
                           │  rotor.stream/v1 (SSE / WebSocket + HTTP control)
                   ┌───────┴────────┐
@@ -126,7 +126,7 @@ during implementation but the semantics are fixed.
 ### 3.1 Client + session
 
 ```ts
-import { createClient } from "@glyphh/client";
+import { createClient } from "@glyphh/sdk";
 
 const client = createClient({
   url: "http://127.0.0.1:8080",     // loopback local OR https://<session>.fly.dev
@@ -276,7 +276,7 @@ runtime dependency.
   not match the SDK's supported protocol, throw `ProtocolError` — do not guess.
 - SDK is semver; the protocol version (`rotor.stream/vN`) is independent and
   negotiated at runtime.
-- Package: `@glyphh/client`, dual ESM/CJS, `.d.ts` shipped, published to the private
+- Package: `@glyphh/sdk`, dual ESM/CJS, `.d.ts` shipped, published to the private
   registry. Proprietary license header on every file. No telemetry by default.
 
 ---
@@ -328,6 +328,6 @@ not a mock — the transport is cheap to run:
 7. Auth plumbing (§6); attachments/workspace stubs throwing `E_UNSUPPORTED` (§7).
 8. Package + publish to the private registry.
 
-**Tell:** when the runtime's own dev CLI can be re-implemented as a thin `@glyphh/client`
+**Tell:** when the runtime's own dev CLI can be re-implemented as a thin `@glyphh/sdk`
 consumer with a terminal renderer, the SDK is proven — and desktop/mobile are the
 same work with a different skin.
