@@ -105,6 +105,11 @@ export class TerminalSession {
 
   /** Attach a subscriber; sends `ready` (+ the `exit` if the shell already ended,
    *  so a late attacher learns the terminal is dead). Returns an unsubscribe fn. */
+  /** Attached client count — 0 means orphaned (the registry reaps it). */
+  get subscriberCount(): number {
+    return this.subs.size;
+  }
+
   subscribe(fn: (m: TerminalMessage) => void): () => void {
     this.subs.add(fn);
     fn({ type: "ready", panelId: this.panelId, wire: TERMINAL_WIRE_VERSION, cols: this.cols, rows: this.rows });
@@ -168,6 +173,30 @@ export interface OpenTerminalRequest {
 export class TerminalRegistry {
   private readonly terminals = new Map<string, TerminalSession>();
 
+  /** Reclaim a terminal whose last client disconnected (see PanelRegistry) — a
+   *  leaked pty is a live shell, so this matters more than a stray page. */
+  private readonly orphanTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  noteDetached(panelId: string): void {
+    const existing = this.orphanTimers.get(panelId);
+    if (existing) clearTimeout(existing);
+    const t = setTimeout(() => {
+      this.orphanTimers.delete(panelId);
+      const s = this.get(panelId);
+      if (!s) return;
+      if (s.subscriberCount > 0) return;      // re-attached
+      log.info("terminal reaped (orphaned)", { panel_id: panelId });
+      void this.close(panelId);
+    }, this.orphanGraceMs);
+    if (typeof t.unref === "function") t.unref();
+    this.orphanTimers.set(panelId, t);
+  }
+
+  noteAttached(panelId: string): void {
+    const t = this.orphanTimers.get(panelId);
+    if (t) { clearTimeout(t); this.orphanTimers.delete(panelId); }
+  }
+
   constructor(
     private readonly driver: TerminalDriver,
     private readonly maxTerminals = 16,
@@ -176,6 +205,9 @@ export class TerminalRegistry {
     private readonly sandboxRoot: string = process.env.PANEL_SANDBOX_ROOT ??
       process.env.HARNESS_HOME ??
       join(process.env.TMPDIR ?? "/tmp", "glyphh-panel-terminals"),
+    /** Grace period before an orphaned terminal (last client gone) is reaped —
+     *  LAST so existing positional callers keep their argument order. */
+    private readonly orphanGraceMs = 30_000,
   ) {}
 
   get(panelId: string): TerminalSession | undefined {

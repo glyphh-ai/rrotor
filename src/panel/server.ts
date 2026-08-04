@@ -383,7 +383,8 @@ function attachPanelWs(server: http.Server, regs: PanelRegs, auth: PanelAuth): v
           return;
         }
         accept();
-        serveTerminalSocket(socket, session);
+        regs.terminal.noteAttached(panelId);
+        serveTerminalSocket(socket, session, () => regs.terminal.noteDetached(panelId));
         return;
       }
       const session = regs.browser.get(panelId);
@@ -392,7 +393,8 @@ function attachPanelWs(server: http.Server, regs: PanelRegs, auth: PanelAuth): v
         return;
       }
       accept();
-      serveSocket(socket, session);
+      regs.browser.noteAttached(panelId);
+      serveSocket(socket, session, () => regs.browser.noteDetached(panelId));
     };
     if (authEnabled(auth)) {
       const bearer = wsBearer(req);
@@ -421,7 +423,11 @@ function rejectUpgrade(socket: Duplex, status: number, reason?: string): void {
 
 /** Serve one panel WS connection: fan the session's messages out, dispatch
  *  inbound input events. */
-function serveSocket(socket: Duplex, session: import("./session.js").PanelSession): void {
+function serveSocket(
+  socket: Duplex,
+  session: import("./session.js").PanelSession,
+  onDetached?: () => void,
+): void {
   const decoder = new FrameDecoder();
   const send = (msg: PanelMessage): void => {
     if (!socket.destroyed) socket.write(encodeFrame(Buffer.from(JSON.stringify(msg))));
@@ -468,16 +474,17 @@ function serveSocket(socket: Duplex, session: import("./session.js").PanelSessio
     }
   });
 
-  socket.on("close", unsubscribe);
+  const detach = (): void => { unsubscribe(); onDetached?.(); };
+  socket.on("close", detach);
   socket.on("error", () => {
-    unsubscribe();
+    detach();
     socket.destroy();
   });
 }
 
 /** Serve one TERMINAL WS connection: fan the pty's output out, feed inbound
  *  input/resize into the pty. Same frame codec + keepalive as the browser socket. */
-function serveTerminalSocket(socket: Duplex, session: TerminalSession): void {
+function serveTerminalSocket(socket: Duplex, session: TerminalSession, onDetached?: () => void): void {
   const decoder = new FrameDecoder();
   const send = (msg: TerminalMessage): void => {
     if (!socket.destroyed) socket.write(encodeFrame(Buffer.from(JSON.stringify(msg))));
@@ -524,9 +531,10 @@ function serveTerminalSocket(socket: Duplex, session: TerminalSession): void {
     }
   });
 
-  socket.on("close", unsubscribe);
+  const detach = (): void => { unsubscribe(); onDetached?.(); };
+  socket.on("close", detach);
   socket.on("error", () => {
-    unsubscribe();
+    detach();
     socket.destroy();
   });
 }
@@ -546,12 +554,16 @@ export function startPanelServer(port: number = DEFAULT_PORT, opts: PanelServerO
   const env = opts.env ?? process.env;
   const maxPanels = Math.max(1, opts.maxPanels ?? (Number(env.PANEL_MAX ?? 4) || 4));
   const maxTerminals = Math.max(1, opts.maxTerminals ?? (Number(env.PANEL_TERM_MAX ?? 16) || 16));
+  // Grace before an ORPHANED panel (last client disconnected) is reclaimed. Long
+  // enough to survive a page reload, short enough that abandoned panels never pin
+  // the pod at capacity. PANEL_ORPHAN_GRACE_MS overrides (tests use a small value).
+  const orphanGraceMs = Math.max(1000, Number(env.PANEL_ORPHAN_GRACE_MS ?? 30_000) || 30_000);
   const auth = resolvePanelAuth(opts, env);
   const driver = opts.driver ?? new PlaywrightBrowserPool(env.PANEL_CHROMIUM_PATH);
   const terminalDriver = opts.terminalDriver ?? new NodePtyDriver();
   const regs: PanelRegs = {
-    browser: new PanelRegistry(driver, maxPanels),
-    terminal: new TerminalRegistry(terminalDriver, maxTerminals),
+    browser: new PanelRegistry(driver, maxPanels, orphanGraceMs),
+    terminal: new TerminalRegistry(terminalDriver, maxTerminals, undefined, orphanGraceMs),
   };
   const server = http.createServer((req, res) => handle(regs, req, res, auth));
   attachPanelWs(server, regs, auth);

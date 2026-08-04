@@ -40,10 +40,40 @@ const DEFAULT_VIEWPORT = { width: 1024, height: 720 };
 export class PanelRegistry {
   private readonly panels = new Map<string, PanelSession>();
 
+  /** Reclaim a panel whose last client disconnected. A reload drops the WS for a
+   *  moment, so we wait out a grace period before closing — long enough to survive a
+   *  refresh, short enough that an abandoned panel (tab closed, client crashed) never
+   *  pins a Chromium page and wedges the pod at capacity. */
+  private readonly orphanTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   constructor(
     private readonly driver: BrowserDriver,
     private readonly maxPanels = 4,
+    private readonly orphanGraceMs = 30_000,
   ) {}
+
+  /** Called when a client detaches: start (or restart) the orphan countdown. A
+   *  re-attach cancels it. */
+  noteDetached(panelId: string): void {
+    const existing = this.orphanTimers.get(panelId);
+    if (existing) clearTimeout(existing);
+    const t = setTimeout(() => {
+      this.orphanTimers.delete(panelId);
+      const p = this.panels.get(panelId);
+      if (!p || p.status === "closed") return;
+      if (p.subscriberCount > 0) return;          // someone re-attached
+      log.info("panel reaped (orphaned)", { panel_id: panelId });
+      void this.close(panelId).catch(() => { /* already gone */ });
+    }, this.orphanGraceMs);
+    if (typeof t.unref === "function") t.unref();
+    this.orphanTimers.set(panelId, t);
+  }
+
+  /** Called when a client attaches: cancel any pending orphan reap. */
+  noteAttached(panelId: string): void {
+    const t = this.orphanTimers.get(panelId);
+    if (t) { clearTimeout(t); this.orphanTimers.delete(panelId); }
+  }
 
   get(panelId: string): PanelSession | undefined {
     return this.panels.get(panelId);

@@ -152,6 +152,12 @@ export class PanelSession {
    *  a url — the current `nav` (so a client attaching AFTER start() sees the
    *  address bar, since screencast frames are live-only with no replay). Returns
    *  an unsubscribe fn. */
+  /** How many clients are attached right now (0 → the panel is ORPHANED and the
+   *  registry's grace-period reaper will reclaim it). */
+  get subscriberCount(): number {
+    return this.subs.size;
+  }
+
   subscribe(fn: (m: PanelMessage) => void): () => void {
     this.subs.add(fn);
     fn({ type: "ready", panelId: this.panelId, wire: PANEL_WIRE_VERSION, viewport: { ...this.viewport } });
