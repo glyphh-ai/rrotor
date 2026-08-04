@@ -70,7 +70,7 @@ describe("PanelSession — screencast + nav", () => {
     await s.start();
     expect(s.status).toBe("live");
     expect(page.countSent("Page.startScreencast")).toBe(1);
-    expect(page.sent[0].params).toMatchObject({ format: "jpeg", quality: 60, maxWidth: 800, maxHeight: 600 });
+    expect(page.sent[0].params).toMatchObject({ format: "jpeg", quality: 80, maxWidth: 800, maxHeight: 600 });
     // ready (on subscribe) then nav (on start).
     expect(seen[0]).toMatchObject({ type: "ready", panelId: "pnl-test", viewport: { width: 800, height: 600 } });
     expect(seen.find((m) => m.type === "nav")).toMatchObject({ type: "nav", url: "https://example.com", title: "Fake Title" });

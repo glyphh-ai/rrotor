@@ -24,13 +24,15 @@
  */
 
 import * as http from "node:http";
+import * as crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { Duplex } from "node:stream";
 
 import { VERSION } from "../version.js";
 import { log } from "../obs/logger.js";
-import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "../auth/introspect.js";
-import type { Introspector } from "../auth/introspect.js";
+import { bearerFromHeader } from "../auth/introspect.js";
+import { panelIntrospectorFromEnv, disabledPanelIntrospector } from "./auth.js";
+import type { PanelIntrospector } from "./auth.js";
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
 import { PANEL_WIRE_VERSION } from "./frames.js";
 import type { PanelMessage } from "./frames.js";
@@ -43,11 +45,25 @@ import { DEMO_HTML } from "./demo.js";
 const DEFAULT_PORT = 8080;
 
 export interface PanelServerOptions {
-  auth?: Introspector;
+  auth?: PanelIntrospector;
   driver?: BrowserDriver;
   env?: NodeJS.ProcessEnv;
   /** Max concurrent panels; defaults from PANEL_MAX (min 1). */
   maxPanels?: number;
+  /**
+   * The SERVICE token the CONTROL PLANE presents on `POST /panel/browser` (opening a
+   * panel — no panel exists yet to scope a token to). Shared region secret. When auth is
+   * enabled and this is set, open is service-gated; the browser's subsequent WS + nav/
+   * close carry the PANEL-scoped token instead. Defaults from ROTOR_AUTH_SERVICE_TOKEN.
+   */
+  serviceToken?: string;
+}
+
+/** Constant-time string equality — never leaks length/prefix via timing. */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -78,7 +94,25 @@ function readBody(req: http.IncomingMessage, limit = 1_000_000): Promise<string>
   });
 }
 
-function handle(reg: PanelRegistry, req: http.IncomingMessage, res: http.ServerResponse, auth: Introspector): void {
+/** The panel data plane's auth: a panel-scoped introspector + the open-call service token. */
+export interface PanelAuth {
+  introspector: PanelIntrospector;
+  /** The service token the control plane presents on OPEN. Empty → open is not gated. */
+  serviceToken: string;
+}
+
+/** Whether enforcement is on at all (mirrors the introspector's enabled flag). */
+function authEnabled(auth: PanelAuth): boolean {
+  return auth.introspector.enabled;
+}
+
+/** Extract the panelId a request targets, or null for the open/collection route. */
+function routePanelId(path: string): string | null {
+  const m = /^\/panel\/browser\/([^/]+)(\/nav)?$/.exec(path);
+  return m ? decodeURIComponent(m[1]!) : null;
+}
+
+function handle(reg: PanelRegistry, req: http.IncomingMessage, res: http.ServerResponse, auth: PanelAuth): void {
   const method = req.method ?? "GET";
   const path = (req.url ?? "/").split("?", 1)[0];
 
@@ -96,24 +130,50 @@ function handle(reg: PanelRegistry, req: http.IncomingMessage, res: http.ServerR
     return;
   }
 
-  // Data-plane auth gate — same shape as harness/server.ts: probes + the demo
-  // page stay open, everything below validates the bearer when configured.
-  if (auth.enabled) {
+  // Auth gate. Probes + the demo page stay open. When enforcement is on:
+  //  • OPEN (POST /panel/browser) is SERVICE-token gated — the control plane opens
+  //    panels; no panel exists yet to scope a token to.
+  //  • Everything for a SPECIFIC panel (/panel/browser/:id[/nav]) requires a PANEL-
+  //    scoped token bound to THAT panelId (a valid token for another panel is 403).
+  if (authEnabled(auth)) {
     const bearer = bearerFromHeader(req.headers.authorization);
-    void auth
-      .authorize(bearer)
-      .then((decision) => {
-        if (!decision.ok) {
-          log.warn("auth denied", { path, method, reason: decision.reason ?? "denied" });
-          sendJson(res, decision.status, { error: "unauthorized", detail: decision.reason });
-          return;
-        }
+    const panelId = routePanelId(path);
+    if (method === "POST" && path === "/panel/browser") {
+      if (!auth.serviceToken || !bearer || !safeEqual(bearer, auth.serviceToken)) {
+        log.warn("panel open denied — service token required", { path, method });
+        sendJson(res, 401, { error: "unauthorized", detail: "service token required to open a panel" });
+        return;
+      }
+      dispatch(reg, req, res, method, path);
+      return;
+    }
+    if (panelId) {
+      // nav/close on a specific panel accept EITHER the trusted control plane's SERVICE
+      // token (the broker forwards nav/close on behalf of the owner it already authed) OR
+      // a PANEL-scoped token bound to this panelId. The browser's WS uses the panel token;
+      // the broker's HTTP forward uses the service token.
+      if (auth.serviceToken && bearer && safeEqual(bearer, auth.serviceToken)) {
         dispatch(reg, req, res, method, path);
-      })
-      .catch((err: unknown) => {
-        log.error("auth check error", { detail: (err as Error).message });
-        sendJson(res, 401, { error: "unauthorized" });
-      });
+        return;
+      }
+      void auth.introspector
+        .authorizePanel(bearer, panelId)
+        .then((decision) => {
+          if (!decision.ok) {
+            log.warn("panel auth denied", { path, method, reason: decision.reason ?? "denied" });
+            sendJson(res, decision.status, { error: "unauthorized", detail: decision.reason });
+            return;
+          }
+          dispatch(reg, req, res, method, path);
+        })
+        .catch((err: unknown) => {
+          log.error("panel auth check error", { detail: (err as Error).message });
+          sendJson(res, 401, { error: "unauthorized" });
+        });
+      return;
+    }
+    // Any other authed path with enforcement on — deny (no unscoped access).
+    sendJson(res, 404, { error: "not-found", detail: `no route for ${method} ${path}` });
     return;
   }
   dispatch(reg, req, res, method, path);
@@ -200,10 +260,25 @@ const OP_CLOSE = 0x8;
 const OP_PING = 0x9;
 const OP_PONG = 0xa;
 
+/** The WS bearer: browsers cannot set an Authorization header on a WebSocket, so the
+ *  panel token rides the query string (`?token=`) or the Authorization header (server-
+ *  side / demo callers). Header wins when both are present. */
+function wsBearer(req: http.IncomingMessage): string | undefined {
+  const header = bearerFromHeader(req.headers.authorization);
+  if (header) return header;
+  try {
+    const q = new URL(req.url ?? "", "http://x").searchParams.get("token");
+    return q ? q.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Attach the panel WS: the upgrade path IS the panel id (/panel/browser/:id).
  *  On connect the session's screencast + nav messages stream out; inbound text
- *  frames are input events dispatched into the page. */
-function attachPanelWs(server: http.Server, reg: PanelRegistry, auth: Introspector): void {
+ *  frames are input events dispatched into the page. The upgrade is gated by the
+ *  PANEL-scoped introspector bound to this panelId. */
+function attachPanelWs(server: http.Server, reg: PanelRegistry, auth: PanelAuth): void {
   server.on("upgrade", (req: http.IncomingMessage, socket: Duplex) => {
     const path = (req.url ?? "").split("?", 1)[0];
     const m = /^\/panel\/browser\/([^/]+)$/.exec(path);
@@ -231,10 +306,10 @@ function attachPanelWs(server: http.Server, reg: PanelRegistry, auth: Introspect
       );
       serveSocket(socket, session);
     };
-    if (auth.enabled) {
-      const bearer = bearerFromHeader(req.headers.authorization);
-      void auth
-        .authorize(bearer)
+    if (authEnabled(auth)) {
+      const bearer = wsBearer(req);
+      void auth.introspector
+        .authorizePanel(bearer, panelId)
         .then((decision) => (decision.ok ? complete() : rejectUpgrade(socket, decision.status, decision.reason)))
         .catch(() => rejectUpgrade(socket, 401));
       return;
@@ -314,18 +389,26 @@ function serveSocket(socket: Duplex, session: import("./session.js").PanelSessio
 
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
+/** Build the panel auth bundle from options/env: the panel-scoped introspector +
+ *  the service token that gates the open call. */
+function resolvePanelAuth(opts: PanelServerOptions, env: NodeJS.ProcessEnv): PanelAuth {
+  const introspector = opts.auth ?? panelIntrospectorFromEnv(env);
+  const serviceToken = opts.serviceToken ?? env.ROTOR_AUTH_SERVICE_TOKEN ?? "";
+  return { introspector, serviceToken };
+}
+
 /** Start the panel pod server. Returns the http.Server (tests close it). */
 export function startPanelServer(port: number = DEFAULT_PORT, opts: PanelServerOptions = {}): http.Server {
   const env = opts.env ?? process.env;
   const maxPanels = Math.max(1, opts.maxPanels ?? (Number(env.PANEL_MAX ?? 4) || 4));
-  const auth = opts.auth ?? introspectorFromEnv(env);
+  const auth = resolvePanelAuth(opts, env);
   const driver = opts.driver ?? new PlaywrightBrowserPool(env.PANEL_CHROMIUM_PATH);
   const reg = new PanelRegistry(driver, maxPanels);
   const server = http.createServer((req, res) => handle(reg, req, res, auth));
   attachPanelWs(server, reg, auth);
   (server as http.Server & { __registry?: PanelRegistry }).__registry = reg;
   server.listen(port, () => {
-    log.info("panel pod listening", { port, version: VERSION, wire: PANEL_WIRE_VERSION, max_panels: maxPanels });
+    log.info("panel pod listening", { port, version: VERSION, wire: PANEL_WIRE_VERSION, max_panels: maxPanels, auth: auth.introspector.enabled });
   });
   return server;
 }
@@ -333,9 +416,11 @@ export function startPanelServer(port: number = DEFAULT_PORT, opts: PanelServerO
 /** Boot the panel pod for real: start + graceful shutdown (close every panel +
  *  the browser so no Chromium is orphaned). Never resolves. */
 export async function servePanel(port: number = DEFAULT_PORT, opts: PanelServerOptions = {}): Promise<never> {
-  const auth = opts.auth ?? introspectorFromEnv(opts.env ?? process.env);
-  if (auth.enabled) log.info("panel data-plane auth enabled (introspection)", {});
-  const server = startPanelServer(port, { ...opts, auth });
+  const env = opts.env ?? process.env;
+  const auth = resolvePanelAuth(opts, env);
+  if (auth.introspector.enabled) log.info("panel data-plane auth enabled (introspection)", {});
+  else log.warn("panel data-plane auth DISABLED (no ROTOR_AUTH_INTROSPECT_URL) — dev only", {});
+  const server = startPanelServer(port, { ...opts, auth: auth.introspector, serviceToken: auth.serviceToken });
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, () => {
       log.info("panel shutting down", { signal: sig });
@@ -346,7 +431,7 @@ export async function servePanel(port: number = DEFAULT_PORT, opts: PanelServerO
   return new Promise<never>(() => {});
 }
 
-export { disabledIntrospector };
+export { disabledPanelIntrospector };
 
 // Run when invoked directly (`node dist/panel/server.js`), not when imported.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

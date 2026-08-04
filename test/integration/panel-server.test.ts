@@ -14,7 +14,7 @@ import WebSocket from "ws";
 
 import { startPanelServer } from "../../src/panel/server.js";
 import type { BrowserDriver, PanelPage, OpenPageOptions } from "../../src/panel/browser.js";
-import type { Introspector } from "../../src/auth/introspect.js";
+import type { PanelIntrospector } from "../../src/panel/auth.js";
 
 /** A fake CDP page whose screencast fires on demand via a test hook. */
 class FakePage implements PanelPage {
@@ -70,9 +70,14 @@ afterEach(async () => {
   for (const s of servers.splice(0)) await new Promise<void>((r) => s.close(() => r()));
 });
 
-async function boot(opts: { auth?: Introspector; driver?: BrowserDriver; maxPanels?: number } = {}): Promise<{ base: string; driver: BrowserDriver }> {
+async function boot(opts: { auth?: PanelIntrospector; serviceToken?: string; driver?: BrowserDriver; maxPanels?: number } = {}): Promise<{ base: string; driver: BrowserDriver }> {
   const driver = opts.driver ?? new FakeDriver();
-  const server = startPanelServer(0, { env: {} as NodeJS.ProcessEnv, driver, ...(opts.auth ? { auth: opts.auth } : {}), ...(opts.maxPanels ? { maxPanels: opts.maxPanels } : {}) });
+  const server = startPanelServer(0, {
+    env: {} as NodeJS.ProcessEnv, driver,
+    ...(opts.auth ? { auth: opts.auth } : {}),
+    ...(opts.serviceToken ? { serviceToken: opts.serviceToken } : {}),
+    ...(opts.maxPanels ? { maxPanels: opts.maxPanels } : {}),
+  });
   servers.push(server);
   await new Promise<void>((r) => server.once("listening", () => r()));
   return { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, driver };
@@ -189,15 +194,29 @@ describe("panel pod — WS stream", () => {
   });
 });
 
-describe("panel pod — auth (introspection)", () => {
-  const denyAll: Introspector = { enabled: true, authorize: () => Promise.resolve({ ok: false, status: 401, reason: "no token" }) };
-  const allowAll: Introspector = { enabled: true, authorize: () => Promise.resolve({ ok: true, status: 200 }) };
+describe("panel pod — panel-scoped auth (introspection)", () => {
+  const SERVICE = "svc-secret";
+  // A fake panel introspector: admits ONLY the token "good" and ONLY on the panel it
+  // was minted for (`good` is bound to whatever panelId the pod minted, recorded here).
+  function boundIntrospector(boundPanelId: () => string | null): PanelIntrospector {
+    return {
+      enabled: true,
+      authorizePanel: (bearer, panelId) => {
+        if (bearer !== "good") return Promise.resolve({ ok: false, status: 401, reason: "bad token" });
+        if (panelId !== boundPanelId()) return Promise.resolve({ ok: false, status: 403, reason: "panel mismatch" });
+        return Promise.resolve({ ok: true, status: 200 });
+      },
+    };
+  }
+  const denyAll: PanelIntrospector = { enabled: true, authorizePanel: () => Promise.resolve({ ok: false, status: 401, reason: "no token" }) };
 
   it("fails closed on the data plane; probes + demo stay open", async () => {
-    const { base } = await boot({ auth: denyAll });
+    const { base } = await boot({ auth: denyAll, serviceToken: SERVICE });
     expect((await fetch(`${base}/healthz`)).status).toBe(200);
     expect((await fetch(`${base}/panel/demo`)).status).toBe(200);
+    // Open without the service token → 401.
     expect((await fetch(`${base}/panel/browser`, { method: "POST", body: JSON.stringify({ url: "https://x" }) })).status).toBe(401);
+    // WS with no/invalid token → 401 (denyAll).
     await expect(
       new Promise((_, reject) => {
         const ws = new WebSocket(`${base.replace("http", "ws")}/panel/browser/pnl-any`);
@@ -206,9 +225,76 @@ describe("panel pod — auth (introspection)", () => {
     ).rejects.toThrow(/401/);
   });
 
-  it("admits an authorized caller", async () => {
-    const { base } = await boot({ auth: allowAll });
-    const res = await fetch(`${base}/panel/browser`, { method: "POST", headers: { authorization: "Bearer tok" }, body: JSON.stringify({ url: "https://x.example" }) });
-    expect(res.status).toBe(200);
+  it("opens with the SERVICE token, then admits the panel token ONLY on its own panel", async () => {
+    let panelId: string | null = null;
+    const { base } = await boot({ auth: boundIntrospector(() => panelId), serviceToken: SERVICE });
+
+    // Open is service-gated: the control plane's service token opens the panel.
+    const opened = await fetch(`${base}/panel/browser`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${SERVICE}` },
+      body: JSON.stringify({ url: "https://x.example" }),
+    });
+    expect(opened.status).toBe(200);
+    panelId = ((await opened.json()) as { panelId: string }).panelId;
+
+    // nav with the correct panel token → allowed.
+    const navOk = await fetch(`${base}/panel/browser/${panelId}/nav`, {
+      method: "POST",
+      headers: { authorization: "Bearer good" },
+      body: JSON.stringify({ url: "https://y.example" }),
+    });
+    expect(navOk.status).toBe(200);
+
+    // nav with the SERVICE token → also allowed (the broker forwards nav/close on the
+    // owner's behalf; only the browser's WS is restricted to the panel token).
+    const navSvc = await fetch(`${base}/panel/browser/${panelId}/nav`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${SERVICE}` },
+      body: JSON.stringify({ url: "https://z.example" }),
+    });
+    expect(navSvc.status).toBe(200);
+
+    // nav with a valid token but the WRONG panelId → 403 (token bound to another panel).
+    const navWrong = await fetch(`${base}/panel/browser/pnl-someone-else/nav`, {
+      method: "POST",
+      headers: { authorization: "Bearer good" },
+      body: JSON.stringify({ url: "https://y.example" }),
+    });
+    expect(navWrong.status).toBe(403);
+
+    // WS with the correct panel token via query param → upgrades.
+    await expect(
+      new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${base.replace("http", "ws")}/panel/browser/${panelId}?token=good`);
+        ws.on("open", () => { ws.close(); resolve(); });
+        ws.on("error", reject);
+      }),
+    ).resolves.toBeUndefined();
+
+    // WS with a valid token but wrong panel → rejected (403).
+    await expect(
+      new Promise((_, reject) => {
+        const ws = new WebSocket(`${base.replace("http", "ws")}/panel/browser/pnl-wrong?token=good`);
+        ws.on("error", reject);
+      }),
+    ).rejects.toThrow(/403/);
+
+    // WS with a bogus token → rejected (401).
+    await expect(
+      new Promise((_, reject) => {
+        const ws = new WebSocket(`${base.replace("http", "ws")}/panel/browser/${panelId}?token=nope`);
+        ws.on("error", reject);
+      }),
+    ).rejects.toThrow(/401/);
+
+    // The WS does NOT accept the SERVICE token — it never reaches a browser, so the
+    // stream is panel-token-only (the introspector treats "svc-secret" as a bad token).
+    await expect(
+      new Promise((_, reject) => {
+        const ws = new WebSocket(`${base.replace("http", "ws")}/panel/browser/${panelId}?token=${SERVICE}`);
+        ws.on("error", reject);
+      }),
+    ).rejects.toThrow(/401/);
   });
 });
