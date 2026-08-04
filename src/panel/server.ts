@@ -51,7 +51,10 @@ import type { PanelMessage } from "./frames.js";
 import type { InputEvent } from "./input.js";
 import { PanelRegistry, PanelAtCapacity, BadPanelRequest } from "./registry.js";
 import type { BrowserDriver } from "./browser.js";
-import { PlaywrightBrowserPool } from "./playwright-driver.js";
+import { AutoBrowserDriver } from "./driver-select.js";
+import { isSignalType, parseSignal } from "./signal.js";
+import { webrtcConfigFromEnv } from "./webrtc.js";
+import type { WebrtcConfig } from "./webrtc.js";
 import { DEMO_HTML } from "./demo.js";
 import { TerminalRegistry, TerminalAtCapacity, BadTerminalRequest, TERMINAL_WIRE_VERSION } from "./terminal.js";
 import type { TerminalSession, TerminalMessage, TerminalInput } from "./terminal.js";
@@ -70,6 +73,9 @@ export interface PanelServerOptions {
   maxPanels?: number;
   /** Max concurrent terminals; defaults from PANEL_TERM_MAX (min 1). */
   maxTerminals?: number;
+  /** WebRTC settings; defaults from env. Pass `null` to force screencast-only
+   *  (what the hermetic tests do, so no test can ever spawn an encoder). */
+  webrtc?: WebrtcConfig | null;
   /**
    * The SERVICE token the CONTROL PLANE presents on `POST /panel/browser` (opening a
    * panel — no panel exists yet to scope a token to). Shared region secret. When auth is
@@ -130,7 +136,7 @@ function authEnabled(auth: PanelAuth): boolean {
  *  Covers BOTH browser (`/panel/browser/:id[/nav]`) and terminal (`/panel/terminal/:id`)
  *  panel routes — a scoped token is bound to a panelId regardless of panel kind. */
 function routePanelId(path: string): string | null {
-  const m = /^\/panel\/(?:browser\/([^/]+)(?:\/nav)?|terminal\/([^/]+))$/.exec(path);
+  const m = /^\/panel\/(?:browser\/([^/]+)(?:\/nav|\/stats)?|terminal\/([^/]+))$/.exec(path);
   if (!m) return null;
   const id = m[1] ?? m[2];
   return id ? decodeURIComponent(id) : null;
@@ -283,13 +289,21 @@ function dispatch(regs: PanelRegs, req: http.IncomingMessage, res: http.ServerRe
     return;
   }
 
-  const m = /^\/panel\/browser\/([^/]+)(\/nav)?$/.exec(path);
+  const m = /^\/panel\/browser\/([^/]+)(\/nav|\/stats)?$/.exec(path);
   if (m) {
     const panelId = decodeURIComponent(m[1]);
     const isNav = m[2] === "/nav";
+    const isStats = m[2] === "/stats";
     const session = reg.get(panelId);
     if (!session) {
       sendJson(res, 404, { error: "no-such-panel", detail: `no panel ${panelId}` });
+      return;
+    }
+    // The transport a panel ACTUALLY ended up on, and what it has cost on the
+    // wire. Both transports count the same way (payload bytes out), which is what
+    // makes them comparable — and this is the seam bandwidth metering reads.
+    if (method === "GET" && isStats) {
+      sendJson(res, 200, { ...session.stats(), capabilities: session.capabilities() });
       return;
     }
     if (method === "POST" && isNav) {
@@ -317,7 +331,7 @@ function dispatch(regs: PanelRegs, req: http.IncomingMessage, res: http.ServerRe
         .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
       return;
     }
-    if (method === "DELETE" && !isNav) {
+    if (method === "DELETE" && !isNav && !isStats) {
       void reg.close(panelId).then((ok) => sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: "no-such-panel" }));
       return;
     }
@@ -422,7 +436,13 @@ function rejectUpgrade(socket: Duplex, status: number, reason?: string): void {
 }
 
 /** Serve one panel WS connection: fan the session's messages out, dispatch
- *  inbound input events. */
+ *  inbound input events, and carry the v2 WebRTC signaling.
+ *
+ *  Signaling and input share this one socket by design — a panel already has an
+ *  authenticated, panel-scoped, bidirectional channel, and adding a second one
+ *  just for SDP would mean a second thing to authorize and a second thing to
+ *  tear down. Inbound frames are routed by `type`: the three signaling verbs go
+ *  to the subscriber's peer, everything else is an input event exactly as in v1. */
 function serveSocket(
   socket: Duplex,
   session: import("./session.js").PanelSession,
@@ -432,7 +452,10 @@ function serveSocket(
   const send = (msg: PanelMessage): void => {
     if (!socket.destroyed) socket.write(encodeFrame(Buffer.from(JSON.stringify(msg))));
   };
-  const unsubscribe = session.subscribe(send);
+  const subscriber = session.attach(send);
+  const unsubscribe = (): void => {
+    void subscriber.close();
+  };
 
   socket.on("data", (chunk: Buffer) => {
     let frames;
@@ -466,8 +489,21 @@ function serveSocket(
         send({ type: "error", detail: "input event must be JSON" });
         continue;
       }
-      if ((ev as { type?: string }).type === "ping") {
+      const type = (ev as { type?: string }).type;
+      if (type === "ping") {
         send({ type: "pong" });
+        continue;
+      }
+      if (isSignalType(type)) {
+        const signal = parseSignal(ev);
+        // A malformed signaling frame is dropped, not fatal: a peer can send
+        // anything, and one bad SDP must never take a live panel down.
+        if (!signal) {
+          log.warn("panel signaling frame rejected", { panel_id: session.panelId, type });
+          send({ type: "error", detail: "invalid signaling message" });
+          continue;
+        }
+        void subscriber.signal(signal);
         continue;
       }
       void session.dispatch(ev as InputEvent);
@@ -559,17 +595,22 @@ export function startPanelServer(port: number = DEFAULT_PORT, opts: PanelServerO
   // the pod at capacity. PANEL_ORPHAN_GRACE_MS overrides (tests use a small value).
   const orphanGraceMs = Math.max(1000, Number(env.PANEL_ORPHAN_GRACE_MS ?? 30_000) || 30_000);
   const auth = resolvePanelAuth(opts, env);
-  const driver = opts.driver ?? new PlaywrightBrowserPool(env.PANEL_CHROMIUM_PATH);
+  const driver = opts.driver ?? new AutoBrowserDriver(env);
   const terminalDriver = opts.terminalDriver ?? new NodePtyDriver();
+  const webrtc = opts.webrtc === null ? undefined : (opts.webrtc ?? webrtcConfigFromEnv(env));
   const regs: PanelRegs = {
-    browser: new PanelRegistry(driver, maxPanels, orphanGraceMs),
+    browser: new PanelRegistry(driver, maxPanels, orphanGraceMs, webrtc),
     terminal: new TerminalRegistry(terminalDriver, maxTerminals, undefined, orphanGraceMs),
   };
   const server = http.createServer((req, res) => handle(regs, req, res, auth));
   attachPanelWs(server, regs, auth);
   (server as http.Server & { __registry?: PanelRegs }).__registry = regs;
   server.listen(port, () => {
-    log.info("panel pod listening", { port, version: VERSION, wire: PANEL_WIRE_VERSION, terminal_wire: TERMINAL_WIRE_VERSION, max_panels: maxPanels, max_terminals: maxTerminals, auth: auth.introspector.enabled });
+    log.info("panel pod listening", {
+      port, version: VERSION, wire: PANEL_WIRE_VERSION, terminal_wire: TERMINAL_WIRE_VERSION,
+      max_panels: maxPanels, max_terminals: maxTerminals, auth: auth.introspector.enabled,
+      video_codec: webrtc?.encoder.codec ?? "screencast-only",
+    });
   });
   return server;
 }

@@ -95,7 +95,7 @@ describe("panel pod — HTTP", () => {
     expect(await (await fetch(`${base}/healthz`)).json()).toEqual({ status: "ok", mode: "panel" });
     const v = (await (await fetch(`${base}/version`)).json()) as { mode: string; wire: string };
     expect(v.mode).toBe("panel");
-    expect(v.wire).toBe("glyphh.panel/v1");
+    expect(v.wire).toBe("glyphh.panel/v2");
     const demo = await fetch(`${base}/panel/demo`);
     expect(demo.headers.get("content-type")).toMatch(/text\/html/);
     expect(await demo.text()).toContain("<canvas");
@@ -162,7 +162,7 @@ describe("panel pod — WS stream", () => {
       });
       ws.on("error", reject);
     });
-    expect(msgs[0]).toMatchObject({ type: "ready", panelId, wire: "glyphh.panel/v1" });
+    expect(msgs[0]).toMatchObject({ type: "ready", panelId, wire: "glyphh.panel/v2" });
     expect(msgs.some((m) => m.type === "frame" && (m as { data: string }).data === "IMGDATA")).toBe(true);
     // the input reached the page
     const page = (driver as FakeDriver).pages[0];

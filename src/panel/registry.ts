@@ -17,6 +17,7 @@ import { log } from "../obs/logger.js";
 import type { BrowserDriver } from "./browser.js";
 import { clampDim } from "./input.js";
 import { PanelSession, mintPanelId } from "./session.js";
+import type { WebrtcConfig } from "./webrtc.js";
 
 export interface OpenPanelRequest {
   url: string;
@@ -50,6 +51,10 @@ export class PanelRegistry {
     private readonly driver: BrowserDriver,
     private readonly maxPanels = 4,
     private readonly orphanGraceMs = 30_000,
+    /** WebRTC settings for every panel this registry provisions. Absent → the
+     *  pod is screencast-only, which is also what happens when the driver says
+     *  it cannot support WebRTC. */
+    private readonly webrtc?: WebrtcConfig,
   ) {}
 
   /** Called when a client detaches: start (or restart) the orphan countdown. A
@@ -102,9 +107,21 @@ export class PanelRegistry {
     };
 
     const dpr = Math.min(3, Math.max(1, Number(req.deviceScaleFactor) || 1));
+    // Ask the driver, not the environment: the driver IS the capability (it is
+    // the thing that produces capturable pages), so the two can never disagree.
+    const webrtcAvailable = this.webrtc !== undefined && this.driver.supportsWebrtc !== undefined && (await this.driver.supportsWebrtc());
     const page = await this.driver.open({ viewport, deviceScaleFactor: dpr });
     const panelId = mintPanelId();
-    const session = new PanelSession({ panelId, page, viewport, deviceScaleFactor: dpr, ...(req.sessionId ? { sessionId: req.sessionId } : {}), ...(req.quality ? { quality: req.quality } : {}) });
+    const session = new PanelSession({
+      panelId,
+      page,
+      viewport,
+      deviceScaleFactor: dpr,
+      webrtcAvailable,
+      ...(this.webrtc ? { webrtc: this.webrtc } : {}),
+      ...(req.sessionId ? { sessionId: req.sessionId } : {}),
+      ...(req.quality ? { quality: req.quality } : {}),
+    });
     try {
       await page.goto(url);
       await session.start();
@@ -114,7 +131,12 @@ export class PanelRegistry {
       throw err;
     }
     this.panels.set(panelId, session);
-    log.info("panel opened", { panel_id: panelId, session: req.sessionId || undefined, live: this.count() });
+    log.info("panel opened", {
+      panel_id: panelId,
+      session: req.sessionId || undefined,
+      live: this.count(),
+      webrtc: session.capabilities().webrtc,
+    });
     return { panelId, session };
   }
 

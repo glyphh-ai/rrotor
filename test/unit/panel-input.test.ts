@@ -98,6 +98,6 @@ describe("redactUrl (log-only)", () => {
     expect(redactUrl("not a url")).toBe("not a url");
   });
   it("exposes the wire version", () => {
-    expect(PANEL_WIRE_VERSION).toBe("glyphh.panel/v1");
+    expect(PANEL_WIRE_VERSION).toBe("glyphh.panel/v2");
   });
 });
