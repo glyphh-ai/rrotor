@@ -21,6 +21,18 @@
  *   DELETE /panel/browser/:id     close the panel (context teardown)
  *   WS   /panel/browser/:id       server→client: frame/nav/closed/error;
  *                                 client→server: input events {type:'mouse'…}
+ *
+ * It ALSO hosts featherweight TERMINAL panels (architecture-engines-memory.md §7 —
+ * "terminal: pty BYTES over WS → xterm.js renders locally"), reusing the SAME
+ * panel-scoped token/auth/registry machinery so browser + terminal panels are one
+ * consistent capability:
+ *
+ *   POST /panel/terminal          { sessionId?, cols?, rows?, cwd?, shell? }
+ *                                 → { panelId, wsPath, wire } (spawn a pty in the
+ *                                   session sandbox)
+ *   DELETE /panel/terminal/:id    close the terminal (kill the pty — no orphan shell)
+ *   WS   /panel/terminal/:id      server→client: {type:'data'|'exit'|'error'|'pong'};
+ *                                 client→server: {type:'input'|'resize'|'ping'}
  */
 
 import * as http from "node:http";
@@ -41,15 +53,23 @@ import { PanelRegistry, PanelAtCapacity, BadPanelRequest } from "./registry.js";
 import type { BrowserDriver } from "./browser.js";
 import { PlaywrightBrowserPool } from "./playwright-driver.js";
 import { DEMO_HTML } from "./demo.js";
+import { TerminalRegistry, TerminalAtCapacity, BadTerminalRequest, TERMINAL_WIRE_VERSION } from "./terminal.js";
+import type { TerminalSession, TerminalMessage, TerminalInput } from "./terminal.js";
+import type { TerminalDriver } from "./terminal-driver.js";
+import { NodePtyDriver } from "./terminal-driver.js";
 
 const DEFAULT_PORT = 8080;
 
 export interface PanelServerOptions {
   auth?: PanelIntrospector;
   driver?: BrowserDriver;
+  /** The pty driver for terminal panels; defaults to node-pty (NodePtyDriver). */
+  terminalDriver?: TerminalDriver;
   env?: NodeJS.ProcessEnv;
   /** Max concurrent panels; defaults from PANEL_MAX (min 1). */
   maxPanels?: number;
+  /** Max concurrent terminals; defaults from PANEL_TERM_MAX (min 1). */
+  maxTerminals?: number;
   /**
    * The SERVICE token the CONTROL PLANE presents on `POST /panel/browser` (opening a
    * panel — no panel exists yet to scope a token to). Shared region secret. When auth is
@@ -106,13 +126,23 @@ function authEnabled(auth: PanelAuth): boolean {
   return auth.introspector.enabled;
 }
 
-/** Extract the panelId a request targets, or null for the open/collection route. */
+/** Extract the panelId a request targets, or null for the open/collection route.
+ *  Covers BOTH browser (`/panel/browser/:id[/nav]`) and terminal (`/panel/terminal/:id`)
+ *  panel routes — a scoped token is bound to a panelId regardless of panel kind. */
 function routePanelId(path: string): string | null {
-  const m = /^\/panel\/browser\/([^/]+)(\/nav)?$/.exec(path);
-  return m ? decodeURIComponent(m[1]!) : null;
+  const m = /^\/panel\/(?:browser\/([^/]+)(?:\/nav)?|terminal\/([^/]+))$/.exec(path);
+  if (!m) return null;
+  const id = m[1] ?? m[2];
+  return id ? decodeURIComponent(id) : null;
 }
 
-function handle(reg: PanelRegistry, req: http.IncomingMessage, res: http.ServerResponse, auth: PanelAuth): void {
+/** The registries the terminal + browser routes dispatch into. */
+interface PanelRegs {
+  browser: PanelRegistry;
+  terminal: TerminalRegistry;
+}
+
+function handle(reg: PanelRegs, req: http.IncomingMessage, res: http.ServerResponse, auth: PanelAuth): void {
   const method = req.method ?? "GET";
   const path = (req.url ?? "/").split("?", 1)[0];
 
@@ -138,7 +168,7 @@ function handle(reg: PanelRegistry, req: http.IncomingMessage, res: http.ServerR
   if (authEnabled(auth)) {
     const bearer = bearerFromHeader(req.headers.authorization);
     const panelId = routePanelId(path);
-    if (method === "POST" && path === "/panel/browser") {
+    if (method === "POST" && (path === "/panel/browser" || path === "/panel/terminal")) {
       if (!auth.serviceToken || !bearer || !safeEqual(bearer, auth.serviceToken)) {
         log.warn("panel open denied — service token required", { path, method });
         sendJson(res, 401, { error: "unauthorized", detail: "service token required to open a panel" });
@@ -179,7 +209,50 @@ function handle(reg: PanelRegistry, req: http.IncomingMessage, res: http.ServerR
   dispatch(reg, req, res, method, path);
 }
 
-function dispatch(reg: PanelRegistry, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
+function dispatch(regs: PanelRegs, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
+  const reg = regs.browser;
+  // ── terminal panel routes (pty over WS) ──────────────────────────────────────
+  if (method === "POST" && path === "/panel/terminal") {
+    readBody(req)
+      .then(async (raw) => {
+        let body: { sessionId?: unknown; cols?: unknown; rows?: unknown; cwd?: unknown; shell?: unknown };
+        try {
+          body = raw.length ? JSON.parse(raw) : {};
+        } catch {
+          sendJson(res, 400, { error: "invalid-json", detail: "POST /panel/terminal body must be JSON" });
+          return;
+        }
+        try {
+          const { panelId } = await regs.terminal.open({
+            ...(typeof body.sessionId === "string" ? { sessionId: body.sessionId } : {}),
+            ...(Number.isFinite(Number(body.cols)) ? { cols: Number(body.cols) } : {}),
+            ...(Number.isFinite(Number(body.rows)) ? { rows: Number(body.rows) } : {}),
+            ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
+            ...(typeof body.shell === "string" ? { shell: body.shell } : {}),
+          });
+          sendJson(res, 200, { panelId, wsPath: `/panel/terminal/${panelId}`, wire: TERMINAL_WIRE_VERSION });
+        } catch (err) {
+          if (err instanceof BadTerminalRequest) return sendJson(res, 400, { error: "bad-terminal", detail: err.message });
+          if (err instanceof TerminalAtCapacity) return sendJson(res, 409, { error: "at-capacity", detail: err.message });
+          log.error("terminal open failed", { detail: (err as Error).message });
+          return sendJson(res, 502, { error: "open-failed", detail: "could not open the terminal panel" });
+        }
+      })
+      .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
+    return;
+  }
+  const tm = /^\/panel\/terminal\/([^/]+)$/.exec(path);
+  if (tm) {
+    const panelId = decodeURIComponent(tm[1]);
+    if (method === "DELETE") {
+      const ok = regs.terminal.close(panelId);
+      sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: "no-such-panel" });
+      return;
+    }
+    sendJson(res, 404, { error: "not-found", detail: `no route for ${method} ${path}` });
+    return;
+  }
+
   if (method === "POST" && path === "/panel/browser") {
     readBody(req)
       .then(async (raw) => {
@@ -278,14 +351,17 @@ function wsBearer(req: http.IncomingMessage): string | undefined {
  *  On connect the session's screencast + nav messages stream out; inbound text
  *  frames are input events dispatched into the page. The upgrade is gated by the
  *  PANEL-scoped introspector bound to this panelId. */
-function attachPanelWs(server: http.Server, reg: PanelRegistry, auth: PanelAuth): void {
+function attachPanelWs(server: http.Server, regs: PanelRegs, auth: PanelAuth): void {
   server.on("upgrade", (req: http.IncomingMessage, socket: Duplex) => {
     const path = (req.url ?? "").split("?", 1)[0];
-    const m = /^\/panel\/browser\/([^/]+)$/.exec(path);
+    const bm = /^\/panel\/browser\/([^/]+)$/.exec(path);
+    const tm = /^\/panel\/terminal\/([^/]+)$/.exec(path);
+    const m = bm ?? tm;
     if (!m) {
       socket.destroy();
       return;
     }
+    const kind: "browser" | "terminal" = bm ? "browser" : "terminal";
     const panelId = decodeURIComponent(m[1]);
     const key = req.headers["sec-websocket-key"];
     if (typeof key !== "string") {
@@ -293,17 +369,29 @@ function attachPanelWs(server: http.Server, reg: PanelRegistry, auth: PanelAuth)
       return;
     }
     const complete = (): void => {
-      const session = reg.get(panelId);
+      const accept = (): void =>
+        void socket.write(
+          "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
+        );
+      if (kind === "terminal") {
+        const session = regs.terminal.get(panelId);
+        if (!session) {
+          rejectUpgrade(socket, 404, `no panel ${panelId}`);
+          return;
+        }
+        accept();
+        serveTerminalSocket(socket, session);
+        return;
+      }
+      const session = regs.browser.get(panelId);
       if (!session) {
         rejectUpgrade(socket, 404, `no panel ${panelId}`);
         return;
       }
-      socket.write(
-        "HTTP/1.1 101 Switching Protocols\r\n" +
-          "Upgrade: websocket\r\n" +
-          "Connection: Upgrade\r\n" +
-          `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
-      );
+      accept();
       serveSocket(socket, session);
     };
     if (authEnabled(auth)) {
@@ -387,6 +475,62 @@ function serveSocket(socket: Duplex, session: import("./session.js").PanelSessio
   });
 }
 
+/** Serve one TERMINAL WS connection: fan the pty's output out, feed inbound
+ *  input/resize into the pty. Same frame codec + keepalive as the browser socket. */
+function serveTerminalSocket(socket: Duplex, session: TerminalSession): void {
+  const decoder = new FrameDecoder();
+  const send = (msg: TerminalMessage): void => {
+    if (!socket.destroyed) socket.write(encodeFrame(Buffer.from(JSON.stringify(msg))));
+  };
+  const unsubscribe = session.subscribe(send);
+
+  socket.on("data", (chunk: Buffer) => {
+    let frames;
+    try {
+      frames = decoder.push(chunk);
+    } catch (err) {
+      log.warn("terminal ws decode failed", { detail: (err as Error).message });
+      unsubscribe();
+      socket.end(encodeFrame(Buffer.alloc(0), OP_CLOSE));
+      return;
+    }
+    for (const f of frames) {
+      if (f.opcode === OP_CLOSE) {
+        unsubscribe();
+        socket.end(encodeFrame(Buffer.alloc(0), OP_CLOSE));
+        return;
+      }
+      if (f.opcode === OP_PING) {
+        socket.write(encodeFrame(f.payload, OP_PONG));
+        continue;
+      }
+      if (f.opcode === OP_PONG) continue;
+      if (f.opcode !== OP_TEXT) {
+        send({ type: "error", detail: "binary frames are not supported" });
+        continue;
+      }
+      let ev: TerminalInput | { type?: string };
+      try {
+        ev = JSON.parse(f.payload.toString("utf8"));
+      } catch {
+        send({ type: "error", detail: "input event must be JSON" });
+        continue;
+      }
+      if ((ev as { type?: string }).type === "ping") {
+        send({ type: "pong" });
+        continue;
+      }
+      session.dispatch(ev as TerminalInput);
+    }
+  });
+
+  socket.on("close", unsubscribe);
+  socket.on("error", () => {
+    unsubscribe();
+    socket.destroy();
+  });
+}
+
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 /** Build the panel auth bundle from options/env: the panel-scoped introspector +
@@ -401,14 +545,19 @@ function resolvePanelAuth(opts: PanelServerOptions, env: NodeJS.ProcessEnv): Pan
 export function startPanelServer(port: number = DEFAULT_PORT, opts: PanelServerOptions = {}): http.Server {
   const env = opts.env ?? process.env;
   const maxPanels = Math.max(1, opts.maxPanels ?? (Number(env.PANEL_MAX ?? 4) || 4));
+  const maxTerminals = Math.max(1, opts.maxTerminals ?? (Number(env.PANEL_TERM_MAX ?? 16) || 16));
   const auth = resolvePanelAuth(opts, env);
   const driver = opts.driver ?? new PlaywrightBrowserPool(env.PANEL_CHROMIUM_PATH);
-  const reg = new PanelRegistry(driver, maxPanels);
-  const server = http.createServer((req, res) => handle(reg, req, res, auth));
-  attachPanelWs(server, reg, auth);
-  (server as http.Server & { __registry?: PanelRegistry }).__registry = reg;
+  const terminalDriver = opts.terminalDriver ?? new NodePtyDriver();
+  const regs: PanelRegs = {
+    browser: new PanelRegistry(driver, maxPanels),
+    terminal: new TerminalRegistry(terminalDriver, maxTerminals),
+  };
+  const server = http.createServer((req, res) => handle(regs, req, res, auth));
+  attachPanelWs(server, regs, auth);
+  (server as http.Server & { __registry?: PanelRegs }).__registry = regs;
   server.listen(port, () => {
-    log.info("panel pod listening", { port, version: VERSION, wire: PANEL_WIRE_VERSION, max_panels: maxPanels, auth: auth.introspector.enabled });
+    log.info("panel pod listening", { port, version: VERSION, wire: PANEL_WIRE_VERSION, terminal_wire: TERMINAL_WIRE_VERSION, max_panels: maxPanels, max_terminals: maxTerminals, auth: auth.introspector.enabled });
   });
   return server;
 }
@@ -424,8 +573,10 @@ export async function servePanel(port: number = DEFAULT_PORT, opts: PanelServerO
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, () => {
       log.info("panel shutting down", { signal: sig });
-      const reg = (server as http.Server & { __registry?: PanelRegistry }).__registry;
-      void (reg ? reg.closeAll() : Promise.resolve()).finally(() => server.close(() => process.exit(0)));
+      const regs = (server as http.Server & { __registry?: PanelRegs }).__registry;
+      // Tear down BOTH registries: no orphaned Chromium AND no orphaned shells.
+      const teardown = regs ? Promise.all([regs.browser.closeAll(), regs.terminal.closeAll()]) : Promise.resolve();
+      void teardown.finally(() => server.close(() => process.exit(0)));
     });
   }
   return new Promise<never>(() => {});
