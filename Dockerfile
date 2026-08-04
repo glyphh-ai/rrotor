@@ -55,3 +55,40 @@ USER node
 
 # One `rrotor serve` per container; the orchestrator injects env (stator + scope).
 CMD ["node", "dist/cli.js", "serve"]
+
+# ── panel (browser-streaming) image ───────────────────────────────────────────
+#
+# The browser-panel pod (ROTOR_MODE=panel, src/panel) streams a REAL headless
+# Chromium to the client (CDP screencast over WS + input back). Chromium + its
+# X/font/render system libraries add ~400–500MB to the image and want shared
+# memory, so this is a SEPARATE build target — the default `runtime` image above
+# stays lean for the rotor/harness modes. Build it explicitly:
+#
+#     docker build --target panel -t rrotor-panel .
+#
+# and provision the browser-panel pods from THIS image, not the base one. The
+# control plane decides which sessions get a panel pod; not every pod pays the
+# Chromium cost.
+#
+# Density/cost note (spike finding): headless Chromium is ~120–200MB RSS idle and
+# more per active tab; a panel pod is heavier than a rotor/harness pod and should
+# be sized + metered accordingly (pod time is the billing rail — §7).
+FROM runtime AS panel
+USER root
+
+# playwright-core is already in node_modules (a runtime dependency). Install the
+# matching Chromium + the system libraries headless Chromium needs in a slim
+# Debian base. `--with-deps` pulls the apt packages; we pin to chromium only.
+RUN npx --yes playwright-core@1.61.1 install --with-deps --no-shell chromium \
+  && rm -rf /var/lib/apt/lists/*
+
+# Container-headless-Chromium hygiene: a real /dev/shm is tiny in containers.
+# The driver already passes --disable-dev-shm-usage; run the pod with a larger
+# --shm-size (e.g. `docker run --shm-size=512m`) for heavy pages.
+ENV ROTOR_MODE=panel
+
+# Chromium runs as the non-root `node` user (matches the base image's USER).
+USER node
+
+# Same entry (`rrotor serve`), but ROTOR_MODE=panel routes to the panel server.
+CMD ["node", "dist/cli.js", "serve"]
