@@ -30,18 +30,4 @@ export default tseslint.config(
       "@typescript-eslint/no-non-null-assertion": "off",
     },
   },
-  {
-    // tools/ holds plain-JS operator scripts, not shipped source. They are Node
-    // programs that ALSO carry code evaluated inside a browser page (the panel
-    // measurement harness drives a real Chromium), so both global sets are in
-    // play and there is no type-checker here to prove the references.
-    files: ["tools/**/*.mjs"],
-    languageOptions: {
-      globals: {
-        process: "readonly", console: "readonly", fetch: "readonly",
-        setTimeout: "readonly", setInterval: "readonly", clearTimeout: "readonly",
-        window: "readonly", document: "readonly", WheelEvent: "readonly",
-      },
-    },
-  },
 );

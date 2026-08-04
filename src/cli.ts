@@ -248,7 +248,7 @@ async function runSupport(rest: string[]): Promise<number> {
 }
 
 /** `rrotor serve [-p PORT]` — start the HTTP runtime and block. Delegates to
- *  {@link servePod}, which dispatches on ROTOR_MODE (rotor | harness | panel) so
+ *  {@link servePod}, which dispatches on ROTOR_MODE (rotor | harness) so
  *  one image + one command serves any pod mode. The rotor path stays async so a
  *  `pgvector` stator connects + hydrates before serving. */
 function runServe(rest: string[]): Promise<number> {
