@@ -48,6 +48,15 @@ const MOUSE_TYPE: Record<"move" | "down" | "up", string> = {
   up: "mouseReleased",
 };
 
+/** Windows virtual-key codes for the NON-TEXT keys a panel must honor — the
+ *  renderer's editing/navigation commands key off these, not `key`/`code`. */
+const KEY_VIRTUAL_CODES: Record<string, number> = {
+  Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19,
+  CapsLock: 20, Escape: 27, " ": 32, PageUp: 33, PageDown: 34, End: 35, Home: 36,
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46,
+  Meta: 91, ContextMenu: 93,
+};
+
 const KEY_TYPE: Record<"down" | "up", string> = { down: "keyDown", up: "keyUp" };
 
 const VALID_BUTTONS: ReadonlySet<string> = new Set(["none", "left", "middle", "right", "back", "forward"]);
@@ -113,10 +122,26 @@ export function toCdp(ev: InputEvent): CdpCommand | null {
       const params: Record<string, unknown> = { type: t, modifiers: mods(ev.mods) };
       if (typeof ev.key === "string" && ev.key) params.key = ev.key;
       if (typeof ev.code === "string" && ev.code) params.code = ev.code;
+      // NON-TEXT keys (Backspace, Delete, arrows, Enter…) do NOTHING in Chromium
+      // without a windowsVirtualKeyCode — `key`/`code` alone are ignored by the
+      // renderer's editing commands. Printables never needed it because `text`
+      // drives insertion, which is why only these keys appeared broken.
+      const vk = typeof ev.key === "string" ? KEY_VIRTUAL_CODES[ev.key] : undefined;
+      if (vk !== undefined) {
+        params.windowsVirtualKeyCode = vk;
+        params.nativeVirtualKeyCode = vk;
+      }
       // `text` makes a keyDown produce a character (CDP inserts it); only on down.
-      if (ev.action === "down" && typeof ev.text === "string" && ev.text) {
-        params.text = ev.text;
-        params.unmodifiedText = ev.text;
+      // Enter's character is \r — without it a focused field gets the keydown but
+      // forms don't submit and textareas don't break lines.
+      if (ev.action === "down") {
+        if (typeof ev.text === "string" && ev.text) {
+          params.text = ev.text;
+          params.unmodifiedText = ev.text;
+        } else if (ev.key === "Enter") {
+          params.text = "\r";
+          params.unmodifiedText = "\r";
+        }
       }
       return { method: "Input.dispatchKeyEvent", params };
     }

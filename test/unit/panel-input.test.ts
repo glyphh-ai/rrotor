@@ -58,10 +58,29 @@ describe("toCdp — key", () => {
     expect(up?.params).not.toHaveProperty("text");
     expect(up?.params.type).toBe("keyUp");
   });
-  it("a non-printable key (Enter) needs no text", () => {
+  it("Enter carries \\r + its virtual key code (forms must submit)", () => {
     const c = toCdp({ type: "key", action: "down", key: "Enter", code: "Enter" });
-    expect(c?.params).toMatchObject({ type: "keyDown", key: "Enter" });
-    expect(c?.params).not.toHaveProperty("text");
+    expect(c?.params).toMatchObject({
+      type: "keyDown", key: "Enter", text: "\r", unmodifiedText: "\r",
+      windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+    });
+  });
+
+  it("editing keys carry their virtual key code (Backspace must delete)", () => {
+    const down = toCdp({ type: "key", action: "down", key: "Backspace", code: "Backspace" });
+    expect(down?.params).toMatchObject({ type: "keyDown", key: "Backspace", windowsVirtualKeyCode: 8 });
+    expect(down?.params).not.toHaveProperty("text");
+    const up = toCdp({ type: "key", action: "up", key: "Backspace", code: "Backspace" });
+    expect(up?.params).toMatchObject({ type: "keyUp", windowsVirtualKeyCode: 8 });
+    for (const [key, vk] of [["Delete", 46], ["ArrowLeft", 37], ["Tab", 9], ["Escape", 27]] as const) {
+      expect(toCdp({ type: "key", action: "down", key, code: String(key) })?.params).toMatchObject({ windowsVirtualKeyCode: vk });
+    }
+  });
+
+  it("printables carry NO virtual key code (text drives insertion, unchanged)", () => {
+    const c = toCdp({ type: "key", action: "down", key: "a", code: "KeyA", text: "a" });
+    expect(c?.params).toMatchObject({ type: "keyDown", text: "a" });
+    expect(c?.params).not.toHaveProperty("windowsVirtualKeyCode");
   });
 });
 
