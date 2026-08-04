@@ -37,6 +37,9 @@ export interface PanelPage {
 /** Options for opening a panel page. */
 export interface OpenPageOptions {
   viewport: { width: number; height: number };
+  /** Client devicePixelRatio (1–3). Renders at physical resolution so a Retina
+   *  or phone display is crisp instead of upscaled. */
+  deviceScaleFactor?: number;
 }
 
 /** The pod-wide browser: mints one isolated {@link PanelPage} per panel. */

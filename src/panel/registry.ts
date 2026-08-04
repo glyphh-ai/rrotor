@@ -23,6 +23,8 @@ export interface OpenPanelRequest {
   sessionId?: string;
   viewport?: { width?: number; height?: number };
   quality?: number;
+  /** Client devicePixelRatio (1–3) — renders at physical resolution. */
+  deviceScaleFactor?: number;
 }
 
 export interface OpenPanelResult {
@@ -69,9 +71,10 @@ export class PanelRegistry {
       height: clampDim(req.viewport?.height, DEFAULT_VIEWPORT.height),
     };
 
-    const page = await this.driver.open({ viewport });
+    const dpr = Math.min(3, Math.max(1, Number(req.deviceScaleFactor) || 1));
+    const page = await this.driver.open({ viewport, deviceScaleFactor: dpr });
     const panelId = mintPanelId();
-    const session = new PanelSession({ panelId, page, viewport, ...(req.sessionId ? { sessionId: req.sessionId } : {}), ...(req.quality ? { quality: req.quality } : {}) });
+    const session = new PanelSession({ panelId, page, viewport, deviceScaleFactor: dpr, ...(req.sessionId ? { sessionId: req.sessionId } : {}), ...(req.quality ? { quality: req.quality } : {}) });
     try {
       await page.goto(url);
       await session.start();

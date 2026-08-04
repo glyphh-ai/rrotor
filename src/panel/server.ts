@@ -123,7 +123,7 @@ function dispatch(reg: PanelRegistry, req: http.IncomingMessage, res: http.Serve
   if (method === "POST" && path === "/panel/browser") {
     readBody(req)
       .then(async (raw) => {
-        let body: { url?: unknown; sessionId?: unknown; viewport?: { width?: unknown; height?: unknown }; quality?: unknown };
+        let body: { url?: unknown; sessionId?: unknown; viewport?: { width?: unknown; height?: unknown; deviceScaleFactor?: unknown }; deviceScaleFactor?: unknown; quality?: unknown };
         try {
           body = raw.length ? JSON.parse(raw) : {};
         } catch {
@@ -136,6 +136,7 @@ function dispatch(reg: PanelRegistry, req: http.IncomingMessage, res: http.Serve
             ...(typeof body.sessionId === "string" ? { sessionId: body.sessionId } : {}),
             ...(body.viewport ? { viewport: { width: Number(body.viewport.width), height: Number(body.viewport.height) } } : {}),
             ...(Number.isFinite(Number(body.quality)) ? { quality: Number(body.quality) } : {}),
+            ...((() => { const d = Number(body.deviceScaleFactor ?? body.viewport?.deviceScaleFactor); return Number.isFinite(d) && d > 0 ? { deviceScaleFactor: d } : {}; })()),
           });
           sendJson(res, 200, { panelId, wsPath: `/panel/browser/${panelId}`, wire: PANEL_WIRE_VERSION });
         } catch (err) {

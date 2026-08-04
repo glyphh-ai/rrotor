@@ -41,8 +41,10 @@ export interface PanelSessionOptions {
   panelId: string;
   page: PanelPage;
   viewport: { width: number; height: number };
-  /** Screencast image quality 0–100 (jpeg). Default 60. */
+  /** Screencast image quality 0–100 (jpeg). Default 80. */
   quality?: number;
+  /** Client devicePixelRatio (1–3) — frames captured at physical resolution. */
+  deviceScaleFactor?: number;
   /** Injectable clock for deterministic `at` stamps in tests. */
   now?: () => number;
 }
@@ -60,6 +62,7 @@ export class PanelSession {
   private readonly page: PanelPage;
   private viewport: { width: number; height: number };
   private readonly quality: number;
+  private readonly dpr: number;
   private readonly now: () => number;
   private readonly logger;
 
@@ -73,7 +76,8 @@ export class PanelSession {
     this.sessionId = opts.sessionId ?? "";
     this.page = opts.page;
     this.viewport = { width: clampDim(opts.viewport.width, 1024), height: clampDim(opts.viewport.height, 720) };
-    this.quality = Math.min(100, Math.max(1, opts.quality ?? 60));
+    this.quality = Math.min(100, Math.max(1, opts.quality ?? 80));
+    this.dpr = Math.min(3, Math.max(1, opts.deviceScaleFactor ?? 1));
     this.now = opts.now ?? Date.now;
     this.logger = log.child({ panel_id: this.panelId });
   }
@@ -113,8 +117,10 @@ export class PanelSession {
     await this.page.send("Page.startScreencast", {
       format: "jpeg",
       quality: this.quality,
-      maxWidth: this.viewport.width,
-      maxHeight: this.viewport.height,
+      // Capture at PHYSICAL resolution (CSS px × devicePixelRatio) so a Retina/
+      // phone client is crisp; a DPR-1 desktop is unchanged.
+      maxWidth: Math.round(this.viewport.width * this.dpr),
+      maxHeight: Math.round(this.viewport.height * this.dpr),
       everyNthFrame: 1,
     });
   }
@@ -166,7 +172,7 @@ export class PanelSession {
         const height = clampDim(ev.height, this.viewport.height);
         if (width === this.viewport.width && height === this.viewport.height) return;
         this.viewport = { width, height };
-        const metrics = resizeMetrics(width, height);
+        const metrics = resizeMetrics(width, height, this.dpr);
         await this.page.send(metrics.method, metrics.params);
         // Restart the screencast so maxWidth/maxHeight track the new viewport.
         await this.page.send("Page.stopScreencast").catch(() => {});

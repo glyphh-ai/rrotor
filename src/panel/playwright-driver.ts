@@ -107,7 +107,7 @@ export class PlaywrightBrowserPool implements BrowserDriver {
 
   async open(opts: OpenPageOptions): Promise<PanelPage> {
     const browser = await this.ensureBrowser();
-    const context = await browser.newContext({ viewport: opts.viewport });
+    const context = await browser.newContext({ viewport: opts.viewport, deviceScaleFactor: opts.deviceScaleFactor ?? 1 });
     const page = await context.newPage();
     const cdp = await context.newCDPSession(page);
     return new PlaywrightPage(context, page, cdp);
