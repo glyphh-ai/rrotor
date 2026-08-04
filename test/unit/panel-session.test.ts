@@ -70,7 +70,10 @@ describe("PanelSession — screencast + nav", () => {
     await s.start();
     expect(s.status).toBe("live");
     expect(page.countSent("Page.startScreencast")).toBe(1);
-    expect(page.sent[0].params).toMatchObject({ format: "jpeg", quality: 80, maxWidth: 800, maxHeight: 600 });
+    // subscribe() now fires a keyframe (Page.captureScreenshot) before start()'s
+    // startScreencast, so find the screencast call by method rather than by index.
+    const sc = page.sent.find((c) => c.method === "Page.startScreencast");
+    expect(sc?.params).toMatchObject({ format: "jpeg", quality: 80, maxWidth: 800, maxHeight: 600 });
     // ready (on subscribe) then nav (on start).
     expect(seen[0]).toMatchObject({ type: "ready", panelId: "pnl-test", viewport: { width: 800, height: 600 } });
     expect(seen.find((m) => m.type === "nav")).toMatchObject({ type: "nav", url: "https://example.com", title: "Fake Title" });

@@ -156,9 +156,35 @@ export class PanelSession {
     this.subs.add(fn);
     fn({ type: "ready", panelId: this.panelId, wire: PANEL_WIRE_VERSION, viewport: { ...this.viewport } });
     if (this.lastNav) fn({ type: "nav", url: this.lastNav, title: this.lastTitle });
+    // KEYFRAME ON ATTACH: the screencast is change-driven, so a subscriber that
+    // attaches after a static page finished painting would see BLACK until the next
+    // visual change. Capture the current screen once and send it immediately so the
+    // panel shows the live page the instant it opens.
+    void this.sendKeyframe(fn);
     return () => {
       this.subs.delete(fn);
     };
+  }
+
+  /** Capture the current page as one jpeg frame and send it to a single subscriber —
+   *  the initial paint for a client that just attached. Best-effort; never throws. */
+  private async sendKeyframe(fn: (m: PanelMessage) => void): Promise<void> {
+    if (this.status === "closed") return;
+    try {
+      const shot = await this.page.send("Page.captureScreenshot", {
+        format: "jpeg", quality: this.quality, captureBeyondViewport: false,
+      }) as { data?: string };
+      if (!shot?.data || !this.subs.has(fn)) return;
+      fn({
+        type: "frame",
+        data: shot.data,
+        format: "jpeg",
+        meta: { deviceWidth: Math.round(this.viewport.width * this.dpr), deviceHeight: Math.round(this.viewport.height * this.dpr) },
+        at: this.now(),
+      });
+    } catch {
+      /* a page mid-navigation can refuse a screenshot — the screencast covers the next paint */
+    }
   }
 
   /** Dispatch one client input event into the page. `resize` re-emulates device
