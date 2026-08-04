@@ -76,15 +76,26 @@ CMD ["node", "dist/cli.js", "serve"]
 FROM runtime AS panel
 USER root
 
-# playwright-core is already in node_modules (a runtime dependency). Install the
-# matching Chromium + the system libraries headless Chromium needs in a slim
-# Debian base. `--with-deps` pulls the apt packages; we pin to chromium only.
-RUN npx --yes playwright-core@1.61.1 install --with-deps --no-shell chromium \
+# The browsers live at a SHARED path both root (which installs them) and the runtime
+# `node` user can read — NOT root's private ~/.cache (mode 700), which the `node` user
+# cannot reach → "Executable doesn't exist" at launch (the #1 panel deploy-breaker). Set
+# PLAYWRIGHT_BROWSERS_PATH for BOTH the install below AND the running process.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# playwright-core is already in node_modules (a runtime dependency). Install the matching
+# Chromium + the system libraries headless Chromium needs. `--with-deps` pulls the apt
+# packages. NOTE: install the FULL `chromium` bundle (NOT --no-shell): the driver launches
+# with `headless: true`, which Playwright ≥1.49 resolves to the `chromium_headless_shell`
+# binary — excluding the shell makes the launch fail. Then make the browser dir readable
+# by the non-root `node` user that actually runs the pod.
+RUN npx --yes playwright-core@1.61.1 install --with-deps chromium \
+  && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH" \
   && rm -rf /var/lib/apt/lists/*
 
-# Container-headless-Chromium hygiene: a real /dev/shm is tiny in containers.
-# The driver already passes --disable-dev-shm-usage; run the pod with a larger
-# --shm-size (e.g. `docker run --shm-size=512m`) for heavy pages.
+# Container-headless-Chromium hygiene: a real /dev/shm is tiny in containers (~64MB), which
+# crashes heavy pages. The driver already passes --disable-dev-shm-usage; ALSO run the pod
+# with a larger shared-memory segment — `docker run --shm-size=1g …`, or on Fly mount a
+# tmpfs at /dev/shm (deploy/fly.panel.toml). ~1GB+ for heavy pages.
 ENV ROTOR_MODE=panel
 
 # Chromium runs as the non-root `node` user (matches the base image's USER).
