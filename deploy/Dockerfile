@@ -1,13 +1,24 @@
-# rrotor runtime image — a stateless, fungible rotor pod (SPEC.md §17.1).
+# rrotor runtime image — ONE image, TWO modes (the convergence seed).
 #
-# The image carries NO run-critical state: the Context, the append-only event
-# history, and the caches all live in the external stator backend (docs/runtime.md
-# §5.3). Any pod built from this image can serve any run — which is exactly what
-# lets a Deployment of these pods scale horizontally behind one Service.
+#   ROTOR_MODE unset / "rotor" → the stateless, fungible rotor loop pod
+#                                (SPEC.md §17.1): no run-critical state in the
+#                                container, everything on the stator backend.
+#   ROTOR_MODE=harness         → the HOSTED HARNESS SESSION POD: interactive
+#                                Claude Agent SDK sessions (chat/work/code),
+#                                gateway-routed model calls, frame stream.
+#                                Per-session state (the sandbox workspace)
+#                                lives under $HARNESS_HOME inside the pod —
+#                                one pod ⇔ one session, provisioned by the
+#                                control plane.
+#
+# The harness needs node + @anthropic-ai/claude-agent-sdk in the image; the SDK
+# ships its `claude` CLI as a per-platform native binary via optionalDependencies,
+# so `npm ci` on the build platform installs the matching linux binary and
+# `npm prune --omit=dev` keeps it — nothing extra to COPY.
 #
 # Multi-stage: a `build` stage compiles TypeScript → dist, then a lean `runtime`
 # stage copies only dist + production deps. Node 20-slim, non-root, HEALTHCHECK via
-# node (no curl in the image), CMD runs the HTTP probe/run server.
+# node (no curl in the image), CMD runs the mode-dispatching pod entry.
 
 # ---- build stage -----------------------------------------------------------
 FROM node:20-slim AS build
@@ -48,5 +59,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
-# The runtime instance: the HTTP probe/run server. `startServer` reads $PORT.
-CMD ["node", "dist/server.js"]
+# The pod entry dispatches on ROTOR_MODE (default: the rotor loop server, so
+# existing deploys keep their behavior; ROTOR_MODE=harness serves the hosted
+# harness session pod). Both read $PORT.
+CMD ["node", "dist/pod.js"]
