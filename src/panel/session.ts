@@ -20,12 +20,31 @@
  *     no orphan ffmpeg, no orphan peer connection.
  *
  * ── two transports, one fallback rule ───────────────────────────────────────
- * The screencast is the FLOOR, not the legacy. It starts with the panel and runs
- * until every attached subscriber has proven a working peer connection; if a
- * peer fails, times out, or the encoder dies, that subscriber goes straight back
- * to receiving JPEG frames with no re-negotiation and no gap. The decision
- * itself is a pure function in panel/signal.ts — this class only supplies the
- * facts and acts on the verdict.
+ * The screencast is the FLOOR, not the legacy. It starts with the panel and
+ * NEVER stops; if a peer fails, times out, or the encoder dies, that subscriber
+ * goes straight back to receiving JPEG frames with no re-negotiation and no
+ * gap. When every subscriber is on proven WebRTC the cast drops to a thumbnail
+ * "probe" mode — no frame reaches the wire, it survives only as the motion
+ * sensor. The decisions are pure functions in panel/signal.ts — this class
+ * only supplies the facts and acts on the verdicts.
+ *
+ * ── the encoder idle gate ────────────────────────────────────────────────────
+ * A still page must cost NOTHING, on either transport — that is what makes
+ * WebRTC strictly better than JPEG instead of merely better under motion. The
+ * change-driven screencast is the motion signal (a frame arriving IS motion);
+ * the pure gate in panel/idle.ts turns that signal into encoder commands:
+ *
+ *   still for idleAfterMs → PAUSE: capture one freeze-frame, move the WebRTC
+ *     subscribers back onto the JPEG screencast (frame first, so the canvas
+ *     shows the same pixels the video froze on — a static page must never go
+ *     black), stop ffmpeg. Idle cost: zero encoder CPU, zero bytes.
+ *   motion returns → RESUME: the full-quality screencast is already carrying
+ *     the change to the parked subscribers while ffmpeg respawns (a respawn,
+ *     not SIGCONT: a resumed x11grab derails the RTP clock, while a fresh
+ *     process re-resolves geometry and opens on a clean IDR — the same seam
+ *     `resize` already trusts).
+ *   media re-proven (MEDIA_FLOWING_PACKETS since the restart) → REMUTE: the
+ *     parked subscribers go back on WebRTC and their JPEG is muted again.
  *
  * INPUT IS UNCHANGED by any of this. Mouse, keys, wheel and resize map to CDP
  * through panel/input.ts exactly as before, on both transports; only the pixels
@@ -46,9 +65,10 @@ import { PANEL_WIRE_VERSION, redactUrl } from "./frames.js";
 import type { PanelCapabilities, PanelMessage, PanelTransport } from "./frames.js";
 import { toCdp, resizeMetrics, clampDim } from "./input.js";
 import type { InputEvent } from "./input.js";
-import { screencastNeeded } from "./signal.js";
-import type { SignalMessage } from "./signal.js";
-import { PanelPeer, PanelVideoSource } from "./webrtc.js";
+import { EncoderIdleGate } from "./idle.js";
+import { screencastMode } from "./signal.js";
+import type { ScreencastMode, SignalMessage } from "./signal.js";
+import { MEDIA_FLOWING_PACKETS, PanelPeer, PanelVideoSource } from "./webrtc.js";
 import type { WebrtcConfig } from "./webrtc.js";
 
 export type PanelStatus = "starting" | "live" | "closed";
@@ -95,8 +115,24 @@ export interface PanelStats {
   transports: PanelTransport[];
   /** Whether the CDP screencast is currently running. */
   screencastRunning: boolean;
+  /** The screencast's current shape: `full` (wire-quality, fanned out) or
+   *  `probe` (motion-sensor thumbnails, never emitted). */
+  screencastMode: ScreencastMode;
   /** Whether the native encoder is currently running. */
   encoderRunning: boolean;
+  /** Geometry-driven encoder swaps (resize) — the thrash counter. A client
+   *  animating its size shows up here instead of in a port-exhaustion page. */
+  encoderRestarts: number;
+  /** The capture rect the running (or last) encoder grabs, `"WxH"`. */
+  captureSize: string | null;
+  /** Idle-gate verdict: `active` (encoder should run), `idle` (page still,
+   *  encoder paused), or `off` (no gate — screencast-only panel or
+   *  PANEL_IDLE_AFTER_MS=0). */
+  encoderGate: "active" | "idle" | "off";
+  /** Total idle⇄active gate transitions — the flap counter. */
+  gateTransitions: number;
+  /** Motion→first-RTP-packet latency of the most recent encoder resume (ms). */
+  lastResumeMs: number | null;
   uptimeMs: number;
 }
 
@@ -114,9 +150,32 @@ export interface PanelSubscriber {
 class Subscriber {
   transport: PanelTransport = "screencast";
   peer: PanelPeer | null = null;
+  /** On the screencast only because the idle gate parked it there — its peer is
+   *  alive and proven, and it goes back to WebRTC on the next remute. Cleared
+   *  the moment the peer itself falls back for any real reason. */
+  idleParked = false;
   closed = false;
   constructor(readonly send: (m: PanelMessage) => void) {}
 }
+
+/** Probe-mode screencast geometry/quality: big enough that Chromium still emits
+ *  a frame per visual change, small enough that encoding it is negligible next
+ *  to the video encoder it supervises. Never reaches the wire. */
+const PROBE_MAX_DIM = 96;
+const PROBE_QUALITY = 20;
+
+/** How long after a cast (re)start its frames are treated as settle repaints
+ *  rather than motion. Longer than Chromium's start-of-cast emission burst,
+ *  far shorter than any idle window worth configuring. */
+const CAST_SETTLE_MS = 250;
+
+/** Trailing settle for ENCODER restarts on resize. A client animating its panel
+ *  open fires a resize per frame (observed live: 6+ encoder restarts in 100ms,
+ *  each binding a fresh RTP port, at sliver sizes like 500×17); the pod must
+ *  defend itself regardless of client behaviour. The page resize and the
+ *  screencast re-shape stay immediate (cheap); only the ffmpeg swap — a whole
+ *  process spawn — coalesces to ONE restart at the settled geometry. */
+const RESIZE_SETTLE_MS = 300;
 
 /** Mint a panel id. */
 export function mintPanelId(): string {
@@ -142,6 +201,15 @@ export class PanelSession {
   private lastTitle = "";
 
   private screencastOn = false;
+  private castMode: ScreencastMode = "full";
+  /** Chromium emits the CURRENT frame (occasionally more than one) whenever a
+   *  screencast starts, changed or not. Those are repaints, not motion —
+   *  counting them would make the very reshape a pause performs (probe→full)
+   *  look like motion and flap the gate awake forever (observed live). Frames
+   *  inside a short settle window after every (re)start are therefore ignored
+   *  by the gate; they are still emitted to subscribers, which is exactly how
+   *  the pause transition gets its freeze-frame. */
+  private suppressMotionUntil = 0;
   private screencastBytes = 0;
   private screencastFrames = 0;
 
@@ -150,6 +218,16 @@ export class PanelSession {
   /** Set in start(): does THIS page have a capturable display. */
   private pageCanWebrtc = false;
   private source: PanelVideoSource | null = null;
+
+  /** The idle gate (decisions) + its one timer, and the serialized encoder-op
+   *  queue (effects). EVERY encoder lifecycle effect — pause, resume, resize
+   *  restart — goes through the one chain, so no two can ever interleave and
+   *  orphan an ffmpeg or its RTP ports. */
+  private gate: EncoderIdleGate | null = null;
+  private gateTimer: ReturnType<typeof setTimeout> | null = null;
+  private encoderOps: Promise<void> = Promise.resolve();
+  /** Trailing resize-settle timer for the debounced encoder restart. */
+  private resizeSettleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: PanelSessionOptions & { sessionId?: string }) {
     this.panelId = opts.panelId;
@@ -176,15 +254,22 @@ export class PanelSession {
     // Screencast frames → fan out + ACK (ACK is mandatory or Chromium stalls).
     this.unsubscribers.push(
       this.page.on("Page.screencastFrame", (p: ScreencastFramePayload) => {
-        this.screencastFrames++;
-        this.screencastBytes += p.data?.length ?? 0;
-        this.emitFrame({
-          type: "frame",
-          data: p.data,
-          format: "jpeg",
-          meta: { deviceWidth: p.metadata?.deviceWidth ?? this.viewport.width, deviceHeight: p.metadata?.deviceHeight ?? this.viewport.height },
-          at: this.now(),
-        });
+        // Every frame — full or probe — IS the motion signal for the idle gate,
+        // EXCEPT the settle repaints a freshly (re)started cast emits.
+        if (this.now() >= this.suppressMotionUntil) this.noteMotion();
+        // Probe frames exist only for that signal: they are never fanned out and
+        // never counted as wire bytes, because they never leave the pod.
+        if (this.castMode === "full") {
+          this.screencastFrames++;
+          this.screencastBytes += p.data?.length ?? 0;
+          this.emitFrame({
+            type: "frame",
+            data: p.data,
+            format: "jpeg",
+            meta: { deviceWidth: p.metadata?.deviceWidth ?? this.viewport.width, deviceHeight: p.metadata?.deviceHeight ?? this.viewport.height },
+            at: this.now(),
+          });
+        }
         void this.page.send("Page.screencastFrameAck", { sessionId: p.sessionId }).catch(() => {
           /* a dead session's ACK failing is expected on teardown */
         });
@@ -225,8 +310,16 @@ export class PanelSession {
       this.webrtcConfig,
       () => (this.page.capture ? this.page.capture() : Promise.resolve(null)),
       (reason) => this.onVideoFailure(reason),
+      { onStarted: () => this.onEncoderStarted(), onPacket: () => this.onEncoderPacket() },
     );
-    this.logger.info("panel webrtc available", { size: `${target.width}x${target.height}`, codec: this.webrtcConfig.encoder.codec });
+    if (this.webrtcConfig.idleAfterMs > 0) {
+      this.gate = new EncoderIdleGate({ idleAfterMs: this.webrtcConfig.idleAfterMs, proofPackets: MEDIA_FLOWING_PACKETS });
+    }
+    this.logger.info("panel webrtc available", {
+      size: `${target.width}x${target.height}`,
+      codec: this.webrtcConfig.encoder.codec,
+      idle_after_ms: this.webrtcConfig.idleAfterMs,
+    });
   }
 
   /** The encoder died. Every WebRTC subscriber is failed back to the screencast;
@@ -235,25 +328,34 @@ export class PanelSession {
   private onVideoFailure(reason: string): void {
     this.logger.warn("panel video source failed — falling back", { detail: reason });
     for (const sub of this.subs) {
+      sub.idleParked = false;
       if (sub.transport !== "webrtc") continue;
       sub.transport = "screencast";
       this.deliver(sub, { type: "transport", transport: "screencast", reason: `webrtc failed: ${reason}` });
+      // The screencast is change-driven, so a STILL page would leave this
+      // subscriber staring at a stale canvas until the next repaint. Same cure
+      // as attach: one keyframe, immediately.
+      void this.sendKeyframe(sub);
     }
     void this.syncScreencast();
   }
 
-  private async startScreencast(): Promise<void> {
+  private async startScreencast(mode: ScreencastMode = "full"): Promise<void> {
     if (this.screencastOn) return;
+    const probe = mode === "probe";
     await this.page.send("Page.startScreencast", {
       format: "jpeg",
-      quality: this.quality,
-      // Capture at PHYSICAL resolution (CSS px × devicePixelRatio) so a Retina/
-      // phone client is crisp; a DPR-1 desktop is unchanged.
-      maxWidth: Math.round(this.viewport.width * this.dpr),
-      maxHeight: Math.round(this.viewport.height * this.dpr),
+      quality: probe ? PROBE_QUALITY : this.quality,
+      // Full mode captures at PHYSICAL resolution (CSS px × devicePixelRatio) so
+      // a Retina/phone client is crisp; probe mode is a thumbnail — its frames
+      // exist only as the idle gate's motion signal and are never emitted.
+      maxWidth: probe ? PROBE_MAX_DIM : Math.round(this.viewport.width * this.dpr),
+      maxHeight: probe ? PROBE_MAX_DIM : Math.round(this.viewport.height * this.dpr),
       everyNthFrame: 1,
     });
     this.screencastOn = true;
+    this.castMode = mode;
+    this.suppressMotionUntil = this.now() + CAST_SETTLE_MS;
   }
 
   private async stopScreencast(): Promise<void> {
@@ -264,20 +366,154 @@ export class PanelSession {
     });
   }
 
-  /** Start or stop the CDP screencast to match what the subscribers need. This
-   *  is the ONLY place the screencast is turned on/off after start(), so the
+  /** Re-shape the CDP screencast to match what the subscribers need (full vs
+   *  probe — it never stops while the panel lives; it is the motion sensor).
+   *  This is the ONLY place the cast is reconfigured after start(), so the
    *  "JPEG must remain the fallback" rule cannot be violated by accident. */
   private async syncScreencast(): Promise<void> {
     // Before the panel is live, start() owns the screencast — syncing here would
     // race it and double-start the cast.
     if (this.status !== "live") return;
-    const needed = screencastNeeded([...this.subs].map((s) => s.transport));
+    const mode = screencastMode([...this.subs].map((s) => s.transport));
+    if (this.screencastOn && mode === this.castMode) return;
     try {
-      if (needed) await this.startScreencast();
-      else await this.stopScreencast();
+      await this.stopScreencast();
+      await this.startScreencast(mode);
     } catch (err) {
       this.logger.warn("panel screencast sync failed", { detail: (err as Error).message });
     }
+  }
+
+  // ── the encoder idle gate (decisions in panel/idle.ts; effects here) ────────
+
+  /** A screencast frame arrived — feed the gate its motion signal. */
+  private noteMotion(): void {
+    if (!this.gate) return;
+    if (this.gate.motion(this.now()) === "resume") {
+      this.logger.info("panel encoder resuming — motion after idle", { transitions: this.gate.transitions });
+      this.queueEncoderOp(() => this.gateResume());
+    }
+    this.armGateTimer();
+  }
+
+  /** PanelVideoSource tap: the encoder (re)started. */
+  private onEncoderStarted(): void {
+    this.gate?.started(this.now());
+  }
+
+  /** PanelVideoSource tap: one RTP packet out. Proof reached → remute. */
+  private onEncoderPacket(): void {
+    if (!this.gate) return;
+    if (this.gate.packet(this.now()) === "remute") {
+      this.gateRemute();
+      this.armGateTimer();
+    }
+  }
+
+  /** (Re)arm the single stillness timer from the gate's own deadline. */
+  private armGateTimer(): void {
+    if (this.gateTimer) {
+      clearTimeout(this.gateTimer);
+      this.gateTimer = null;
+    }
+    if (!this.gate || this.status === "closed") return;
+    const at = this.gate.nextCheckAt();
+    if (at === null) return;
+    this.gateTimer = setTimeout(() => {
+      this.gateTimer = null;
+      this.runGateCheck();
+    }, Math.max(16, at - this.now()));
+    if (typeof this.gateTimer.unref === "function") this.gateTimer.unref();
+  }
+
+  private runGateCheck(): void {
+    if (!this.gate || this.status !== "live") return;
+    if (this.gate.check(this.now()) === "pause") this.queueEncoderOp(() => this.gatePause());
+    else this.armGateTimer();
+  }
+
+  /** Serialize encoder lifecycle effects: pause, resume and resize restarts
+   *  must never interleave — that is what guarantees no ffmpeg (and no RTP
+   *  port pair) is ever orphaned by overlapping transitions. */
+  private queueEncoderOp(op: () => Promise<void>): void {
+    this.encoderOps = this.encoderOps.then(op).catch((err: unknown) => {
+      this.logger.warn("panel encoder transition failed", { detail: (err as Error).message });
+    });
+  }
+
+  /**
+   * A resize arrived: (re)arm the trailing settle and swap the encoder ONCE at
+   * the final geometry. An idle-gated panel schedules nothing — its encoder is
+   * paused, and resume re-measures the capture rect anyway. The restart itself
+   * re-resolves the rect at fire time, so a burst always lands on the size the
+   * client settled at, and a sliver rect is skipped inside the source.
+   */
+  private scheduleEncoderRestart(): void {
+    if (!this.source) return;
+    if (this.resizeSettleTimer) clearTimeout(this.resizeSettleTimer);
+    this.resizeSettleTimer = setTimeout(() => {
+      this.resizeSettleTimer = null;
+      if (this.status !== "live" || !this.source) return;
+      if (this.gate?.state === "idle") return;
+      this.queueEncoderOp(() => this.source?.restart() ?? Promise.resolve());
+    }, RESIZE_SETTLE_MS);
+    if (typeof this.resizeSettleTimer.unref === "function") this.resizeSettleTimer.unref();
+  }
+
+  /**
+   * The page has been still for the whole idle window: park every WebRTC
+   * subscriber back on the screencast and stop the encoder.
+   *
+   * The freeze-frame comes from the cast reshape itself: switching probe→full
+   * makes Chromium emit the current frame unprompted, and it is fanned to the
+   * just-parked subscribers like any full-mode frame — so the canvas each
+   * client switches to shows the exact pixels its video froze on, and a still
+   * page never goes black or stale across the transition. NOT a
+   * `Page.captureScreenshot`: a screenshot forces a compositor commit, the
+   * still-running cast captures that commit, and the gate reads its own
+   * freeze-frame as motion — the flap loop the live test caught.
+   */
+  private async gatePause(): Promise<void> {
+    if (this.status !== "live" || !this.source) return;
+    let parked = 0;
+    for (const sub of this.subs) {
+      if (sub.closed || sub.transport !== "webrtc") continue;
+      sub.transport = "screencast";
+      sub.idleParked = true;
+      this.deliver(sub, { type: "transport", transport: "screencast", reason: "encoder idle — page still" });
+      parked++;
+    }
+    await this.source.pause();
+    await this.syncScreencast();
+    this.logger.info("panel encoder paused — page still", { parked, transitions: this.gate?.transitions ?? 0 });
+  }
+
+  /** Motion while paused: respawn the encoder. The full-quality screencast is
+   *  already carrying the motion to the parked subscribers, so nothing waits. */
+  private async gateResume(): Promise<void> {
+    if (this.status !== "live" || !this.source) return;
+    try {
+      await this.source.resume();
+    } catch (err) {
+      this.logger.warn("panel encoder resume failed — parked subscribers stay on screencast", { detail: (err as Error).message });
+    }
+  }
+
+  /** The restarted encoder re-proved itself: promote the idle-parked
+   *  subscribers back onto WebRTC and mute their JPEG again. */
+  private gateRemute(): void {
+    let promoted = 0;
+    for (const sub of this.subs) {
+      if (!sub.idleParked || sub.closed || !sub.peer) continue;
+      sub.idleParked = false;
+      sub.transport = "webrtc";
+      this.deliver(sub, { type: "transport", transport: "webrtc", reason: "encoder resumed — media flowing" });
+      promoted++;
+    }
+    if (promoted > 0) {
+      this.logger.info("panel encoder proven — webrtc re-muted jpeg", { subscribers: promoted, resume_ms: this.gate?.lastResumeMs ?? null });
+    }
+    void this.syncScreencast();
   }
 
   /** Emit a `nav` message when the top-level url changed since the last report. */
@@ -403,7 +639,16 @@ export class PanelSession {
       config: this.webrtcConfig,
       send: (m) => this.deliver(sub, m),
       onTransport: (decision) => {
+        const was = sub.transport;
         sub.transport = decision.transport;
+        if (decision.transport !== "webrtc") {
+          // A real fallback (timeout, failure, peer death) outranks the idle
+          // gate's parking — this subscriber is no longer remute material.
+          sub.idleParked = false;
+          // Falling off webrtc onto a change-driven cast on a STILL page would
+          // freeze the client on stale pixels; paint the present, once.
+          if (was === "webrtc") void this.sendKeyframe(sub);
+        }
         void this.syncScreencast();
       },
     });
@@ -448,15 +693,18 @@ export class PanelSession {
         if (width === this.viewport.width && height === this.viewport.height) return;
         this.viewport = { width, height };
         await this.resizePage(width, height);
-        // Restart the screencast so maxWidth/maxHeight track the new viewport…
+        // Restart the screencast so maxWidth/maxHeight track the new viewport
+        // (in whatever mode it was already in)…
         if (this.screencastOn) {
+          const mode = this.castMode;
           this.screencastOn = false;
           await this.page.send("Page.stopScreencast").catch(() => {});
-          await this.startScreencast();
+          await this.startScreencast(mode);
         }
-        // …and the encoder, whose x11grab rect is fixed for the life of the
-        // process and now points at the wrong geometry.
-        if (this.source) await this.source.restart();
+        // …and schedule ONE encoder swap for when the geometry settles — a
+        // resize-per-frame animation must not burn an ffmpeg spawn per frame
+        // (and an idle-paused encoder stays paused; resume re-measures anyway).
+        this.scheduleEncoderRestart();
         return;
       }
       const cmd = toCdp(ev);
@@ -500,7 +748,13 @@ export class PanelSession {
       videoBytes: this.source?.bytesOut ?? 0,
       transports: [...this.subs].map((s) => s.transport),
       screencastRunning: this.screencastOn,
+      screencastMode: this.castMode,
       encoderRunning: this.source?.running === true,
+      encoderRestarts: this.source?.restarts ?? 0,
+      captureSize: this.source?.lastTarget ? `${this.source.lastTarget.width}x${this.source.lastTarget.height}` : null,
+      encoderGate: this.gate ? this.gate.state : "off",
+      gateTransitions: this.gate?.transitions ?? 0,
+      lastResumeMs: this.gate?.lastResumeMs ?? null,
       uptimeMs: Date.now() - this.startedAt,
     };
   }
@@ -511,6 +765,14 @@ export class PanelSession {
     if (this.status === "closed") return;
     const finalStats = this.stats();
     this.status = "closed";
+    if (this.gateTimer) {
+      clearTimeout(this.gateTimer);
+      this.gateTimer = null;
+    }
+    if (this.resizeSettleTimer) {
+      clearTimeout(this.resizeSettleTimer);
+      this.resizeSettleTimer = null;
+    }
     for (const un of this.unsubscribers.splice(0)) {
       try {
         un();

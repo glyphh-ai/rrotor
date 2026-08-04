@@ -43,7 +43,7 @@ import { log } from "../obs/logger.js";
 import type { PanelIceCandidate, PanelMessage } from "./frames.js";
 import { describeCandidate, decideTransport, announceCandidate, announceSdp } from "./signal.js";
 import type { TransportDecision } from "./signal.js";
-import { X11Encoder, DEFAULT_ENCODER, PAYLOAD_TYPES, hasFfmpeg } from "./encoder.js";
+import { X11Encoder, DEFAULT_ENCODER, PAYLOAD_TYPES, hasFfmpeg, viableCaptureTarget } from "./encoder.js";
 import type { CaptureTarget, EncoderConfig, VideoCodec } from "./encoder.js";
 
 /** Minimal structural view of what we use from werift, so this module type-checks
@@ -51,6 +51,17 @@ import type { CaptureTarget, EncoderConfig, VideoCodec } from "./encoder.js";
 interface WeriftTrack {
   writeRtp(packet: Buffer): void;
   stop(): void;
+  /** werift's source-swap seam: executing this makes the sender re-base its
+   *  outgoing sequence/timestamp offsets so a NEW RTP source (our restarted
+   *  ffmpeg) continues the old stream seamlessly. werift never fires it
+   *  itself — the application must. */
+  onSourceChanged: { execute(header: RtpBaseHeader): void };
+}
+
+/** The two header fields the re-base needs. */
+export interface RtpBaseHeader {
+  sequenceNumber: number;
+  timestamp: number;
 }
 interface WeriftPc {
   connectionState: string;
@@ -102,8 +113,22 @@ export interface WebrtcConfig {
    *  screencast. A few seconds: long enough for ICE+DTLS on a sane network,
    *  short enough that a UDP-blocked client is not staring at a stalled panel. */
   negotiationTimeoutMs: number;
+  /**
+   * Stillness window for the encoder idle gate (panel/idle.ts): no visual
+   * change for this long → ffmpeg is stopped and the (zero-cost-when-still)
+   * JPEG screencast takes the subscribers back until motion returns. This is
+   * what makes a STILL page cost nothing on the WebRTC path too — without it a
+   * still page measured ~59.5 kbit/s + ~0.42 core at 15fps, forever.
+   * `PANEL_IDLE_AFTER_MS`; `0` disables the gate.
+   */
+  idleAfterMs: number;
   ffmpegPath?: string | undefined;
 }
+
+/** Default stillness window before the encoder is paused. Long enough that a
+ *  reading pause between scrolls does not flap the encoder, short enough that a
+ *  parked article stops costing within a breath. */
+export const DEFAULT_IDLE_AFTER_MS = 2000;
 
 /** Build the WebRTC config from env, with defaults that work on a laptop. */
 export function webrtcConfigFromEnv(env: NodeJS.ProcessEnv): WebrtcConfig {
@@ -116,7 +141,9 @@ export function webrtcConfigFromEnv(env: NodeJS.ProcessEnv): WebrtcConfig {
     encoder: {
       codec,
       payloadType: PAYLOAD_TYPES[codec],
-      fps: Math.min(60, num(env.PANEL_WEBRTC_FPS, DEFAULT_ENCODER.fps)),
+      // PANEL_VIDEO_FPS is the knob's name; PANEL_WEBRTC_FPS is honoured as the
+      // spike-era spelling so an already-tuned deployment keeps its setting.
+      fps: Math.min(60, num(env.PANEL_VIDEO_FPS ?? env.PANEL_WEBRTC_FPS, DEFAULT_ENCODER.fps)),
       bitrateKbps: num(env.PANEL_WEBRTC_BITRATE_KBPS, DEFAULT_ENCODER.bitrateKbps),
       crf: Math.min(51, num(env.PANEL_WEBRTC_CRF, DEFAULT_ENCODER.crf)),
       keyint: num(env.PANEL_WEBRTC_KEYINT, DEFAULT_ENCODER.keyint),
@@ -130,6 +157,9 @@ export function webrtcConfigFromEnv(env: NodeJS.ProcessEnv): WebrtcConfig {
       iceServers: parseIceServers(env.PANEL_ICE_SERVERS),
     },
     negotiationTimeoutMs: num(env.PANEL_WEBRTC_TIMEOUT_MS, 6000),
+    // `0` is a legal value (gate off), which `num`'s positive-only fallback
+    // would otherwise swallow back to the default.
+    idleAfterMs: (env.PANEL_IDLE_AFTER_MS ?? "").trim() === "0" ? 0 : num(env.PANEL_IDLE_AFTER_MS, DEFAULT_IDLE_AFTER_MS),
     ffmpegPath: env.PANEL_FFMPEG_PATH,
   };
 }
@@ -158,6 +188,30 @@ export function parseIceServers(raw: string | undefined): Array<{ urls: string; 
     });
 }
 
+/**
+ * The re-base header for a NEW encoder generation, derived from the FIRST
+ * packet of that generation. PURE.
+ *
+ * Every ffmpeg restart (resize, idle resume) opens a fresh random RTP
+ * sequence/timestamp space. werift's sender normalizes SSRC and payload type
+ * but passes seq/timestamp through with a fixed offset — so an un-re-based
+ * generation swap reaches the browser as a wild seq/timestamp jump, its jitter
+ * buffer discards everything, and the video freezes on the last pre-restart
+ * frame while the pod's own counters look perfectly healthy (observed live).
+ *
+ * werift's `replaceRTP` computes offsets as (lastSent − given), so handing it
+ * (firstSeq−1, firstTs−Δ) makes the first forwarded packet of the new
+ * generation land at exactly lastSent+1 / lastTs+Δ: perfect wire continuity,
+ * with Δ = one frame interval so the decoder sees time move forward.
+ */
+export function sourceRebaseHeader(first: RtpBaseHeader, fps: number): RtpBaseHeader {
+  const tsStep = Math.max(1, Math.round(90_000 / Math.max(1, fps)));
+  return {
+    sequenceNumber: (first.sequenceNumber + 0xffff) % 0x1_0000,
+    timestamp: (((first.timestamp - tsStep) % 0x1_0000_0000) + 0x1_0000_0000) % 0x1_0000_0000,
+  };
+}
+
 // ── the per-panel video source ───────────────────────────────────────────────
 
 /**
@@ -170,22 +224,44 @@ export function parseIceServers(raw: string | undefined): Array<{ urls: string; 
 export class PanelVideoSource {
   private encoder: X11Encoder | null = null;
   private starting: Promise<void> | null = null;
-  private readonly consumers = new Set<(packet: Buffer) => void>();
+  private readonly consumers = new Set<(packet: Buffer, generation: number) => void>();
   private readonly logger;
+
+  /** Bumped on every encoder (re)start. Consumers receive it with each packet
+   *  so a peer can detect a generation swap and re-base its outgoing RTP —
+   *  without this, every restart freezes the browser's video (see
+   *  {@link sourceRebaseHeader}). */
+  generation = 0;
 
   constructor(
     private readonly panelId: string,
     private readonly config: WebrtcConfig,
     private readonly resolveTarget: () => Promise<CaptureTarget | null>,
     private readonly onFailure: (reason: string) => void,
+    /** Idle-gate taps: every encoder (re)start and every RTP packet, so the
+     *  session's gate (panel/idle.ts) can arm its countdown and count proof
+     *  without touching the refcount. */
+    private readonly hooks: { onStarted?: () => void; onPacket?: () => void } = {},
   ) {
     this.logger = log.child({ panel_id: panelId });
   }
 
-  /** Bytes the encoder has produced so far — the panel's real video cost. */
+  /** Bytes produced by encoders that have since stopped (idle pauses, resizes).
+   *  The stats counter must be CUMULATIVE across encoder lifetimes — metering
+   *  reads it, and a counter that resets on every idle pause under-bills. */
+  private bytesRetired = 0;
+
+  /** Bytes the encoder has produced so far — the panel's real video cost,
+   *  monotonic across restarts. */
   get bytesOut(): number {
-    return this.encoder?.bytesOut ?? 0;
+    return this.bytesRetired + (this.encoder?.bytesOut ?? 0);
   }
+
+  /** Geometry-driven encoder swaps ({@link restart}) — the resize-thrash
+   *  observability counter the stats endpoint reports. */
+  restarts = 0;
+  /** The capture rect the running (or last) encoder was started against. */
+  lastTarget: { width: number; height: number } | null = null;
 
   get running(): boolean {
     return this.encoder !== null;
@@ -193,7 +269,7 @@ export class PanelVideoSource {
 
   /** Attach a consumer, starting the encoder if this is the first one. Returns a
    *  detach fn that stops the encoder when the last consumer leaves. */
-  async attach(consumer: (packet: Buffer) => void): Promise<() => void> {
+  async attach(consumer: (packet: Buffer, generation: number) => void): Promise<() => void> {
     this.consumers.add(consumer);
     try {
       await this.ensureEncoder();
@@ -209,42 +285,76 @@ export class PanelVideoSource {
 
   /** Restart the encoder against a freshly measured capture rect — what a client
    *  `resize` needs, since the window moved and ffmpeg's grab geometry is fixed
-   *  for the life of the process. No-op when nothing is consuming. */
+   *  for the life of the process. No-op when nothing is consuming.
+   *
+   *  The rect is measured BEFORE the running encoder is stopped: a degenerate
+   *  rect (a mid-animation sliver, a window mid-move) SKIPS the restart and
+   *  keeps the healthy encoder running rather than swapping it for garbage —
+   *  the session's resize-settle debounce will land here again once the
+   *  geometry is real. */
   async restart(): Promise<void> {
     if (this.consumers.size === 0) return;
+    let target: CaptureTarget | null = null;
+    try {
+      target = await this.resolveTarget();
+    } catch (err) {
+      this.logger.warn("panel encoder restart probe failed — keeping current encoder", { detail: (err as Error).message });
+      return;
+    }
+    if (!target || !viableCaptureTarget(target)) {
+      this.logger.info("panel encoder restart skipped — capture rect not viable", {
+        size: target ? `${target.width}x${target.height}` : "none",
+      });
+      return;
+    }
     await this.stopEncoder();
-    await this.ensureEncoder().catch((err: unknown) => {
-      this.onFailure(`encoder restart failed: ${(err as Error).message}`);
-    });
+    await this.ensureEncoder(target)
+      .then(() => {
+        this.restarts++;
+      })
+      .catch((err: unknown) => {
+        this.onFailure(`encoder restart failed: ${(err as Error).message}`);
+      });
   }
 
-  private async ensureEncoder(): Promise<void> {
+  private async ensureEncoder(preResolved?: CaptureTarget): Promise<void> {
     if (this.encoder) return;
     if (this.starting) return this.starting;
     this.starting = (async () => {
-      const target = await this.resolveTarget();
+      const target = preResolved ?? (await this.resolveTarget());
       if (!target) throw new Error("no capturable display for this panel");
+      // A first start against a sliver is refused outright (there is no prior
+      // encoder to keep): the peer stays on the screencast and a settled resize
+      // brings the encoder up at a real size.
+      if (!viableCaptureTarget(target)) throw new Error(`capture rect ${target.width}x${target.height} is too small to encode`);
+      // A new generation begins BEFORE the first packet can arrive, so every
+      // packet of the new ffmpeg carries the new number.
+      const generation = ++this.generation;
       const encoder = new X11Encoder({
         config: this.config.encoder,
         target,
         ...(this.config.ffmpegPath ? { ffmpegPath: this.config.ffmpegPath } : {}),
         logFields: { panel_id: this.panelId },
         onRtp: (packet) => {
+          this.hooks.onPacket?.();
           for (const consumer of this.consumers) {
             try {
-              consumer(packet);
+              consumer(packet, generation);
             } catch (err) {
               this.logger.warn("panel rtp consumer failed", { detail: (err as Error).message });
             }
           }
         },
         onExit: (reason) => {
+          this.bytesRetired += this.encoder?.bytesOut ?? 0;
           this.encoder = null;
           this.onFailure(reason);
         },
       });
       await encoder.start();
       this.encoder = encoder;
+      this.lastTarget = { width: target.width, height: target.height };
+      this.hooks.onStarted?.();
     })().finally(() => {
       this.starting = null;
     });
@@ -252,9 +362,33 @@ export class PanelVideoSource {
   }
 
   private async stopEncoder(): Promise<void> {
+    // A start in flight must land before it can be stopped, or the freshly
+    // spawned ffmpeg would slip past the null-swap below and outlive its stop.
+    if (this.starting) await this.starting.catch(() => { /* a failed start left nothing to stop */ });
     const encoder = this.encoder;
     this.encoder = null;
-    if (encoder) await encoder.stop();
+    if (encoder) {
+      await encoder.stop();
+      this.bytesRetired += encoder.bytesOut;
+    }
+  }
+
+  /**
+   * IDLE GATE: stop the encoder but KEEP the consumers — the peers stay
+   * connected (werift keeps ICE consent + RTCP alive on its own), their RTP
+   * simply stops flowing while the page is still. The inverse of
+   * {@link resume}; a paused source costs zero CPU and zero bytes.
+   */
+  async pause(): Promise<void> {
+    await this.stopEncoder();
+  }
+
+  /** IDLE GATE: restart after {@link pause} — motion returned. Re-resolves the
+   *  capture target, so a resize that happened while paused comes back at the
+   *  right geometry for free. No-op with nothing consuming. */
+  async resume(): Promise<void> {
+    if (this.consumers.size === 0) return;
+    await this.ensureEncoder();
   }
 
   /** Stop the encoder and drop every consumer (panel teardown). */
@@ -278,8 +412,10 @@ export interface PanelPeerOptions {
 
 /** RTP packets a peer must have carried before we call it "media flowing".
  *  A handful, not one: a single packet can be in flight when a path is about to
- *  fail, and declaring WebRTC live would mute the fallback prematurely. */
-const MEDIA_FLOWING_PACKETS = 8;
+ *  fail, and declaring WebRTC live would mute the fallback prematurely. The
+ *  idle gate reuses the same threshold as its resume proof — one definition of
+ *  "media is really flowing", not two. */
+export const MEDIA_FLOWING_PACKETS = 8;
 
 /**
  * One subscriber's peer connection.
@@ -298,6 +434,10 @@ export class PanelPeer {
   private mediaFlowing = false;
   private failure: string | undefined;
   private closed = false;
+  /** The encoder generation the last forwarded packet came from; a change means
+   *  the track must be re-based before the packet is written. */
+  private lastGeneration: number | null = null;
+  private rtpParser: { deSerialize(buf: Buffer): { header: RtpBaseHeader } } | null = null;
   private readonly candidateTypes = new Map<string, number>();
   private readonly logger;
 
@@ -318,6 +458,7 @@ export class PanelPeer {
   async start(): Promise<void> {
     try {
       const werift = await loadWerift();
+      this.rtpParser = werift.RtpPacket;
       const codec = codecParameters(werift, this.opts.config.encoder);
       const pc = new werift.RTCPeerConnection({
         codecs: { video: [codec] },
@@ -410,7 +551,7 @@ export class PanelPeer {
     if (state === "connected") {
       try {
         // The encoder starts HERE, not at offer time: no peer, no encode.
-        this.detach = await this.opts.source.attach((packet) => this.writeRtp(packet));
+        this.detach = await this.opts.source.attach((packet, generation) => this.writeRtp(packet, generation));
       } catch (err) {
         this.failure = (err as Error).message;
         this.logger.warn("panel encoder unavailable — screencast only", { detail: this.failure });
@@ -420,13 +561,36 @@ export class PanelPeer {
     }
     if (state === "failed" || state === "closed" || state === "disconnected") {
       this.failure = `peer ${state}`;
+      // Release the encoder NOW, not at WS detach: a client that dropped its
+      // peer (stall watchdog, tab background) but kept the socket must not pin
+      // an ffmpeg encoding for nobody. `failure` is sticky, so this peer never
+      // carries media again — there is nothing left to consume for.
+      try {
+        this.detach?.();
+      } catch {
+        /* already detached */
+      }
+      this.detach = null;
       this.publish({});
     }
   }
 
-  private writeRtp(packet: Buffer): void {
+  private writeRtp(packet: Buffer, generation: number): void {
     if (this.closed || !this.track) return;
     try {
+      // ENCODER GENERATION SWAP (resize restart, idle resume): the new ffmpeg
+      // speaks a fresh random seq/timestamp space. Re-base the sender's offsets
+      // off this first packet so the wire stays continuous — without this the
+      // browser's jitter buffer discards the whole new generation and the video
+      // freezes on the last pre-restart frame.
+      if (generation !== this.lastGeneration) {
+        if (this.lastGeneration !== null && this.rtpParser) {
+          const header = this.rtpParser.deSerialize(packet).header;
+          this.track.onSourceChanged.execute(sourceRebaseHeader(header, this.opts.config.encoder.fps));
+          this.logger.info("panel rtp re-based — encoder generation swap", { generation });
+        }
+        this.lastGeneration = generation;
+      }
       this.track.writeRtp(packet);
     } catch (err) {
       this.logger.warn("panel rtp write failed", { detail: (err as Error).message });
@@ -482,6 +646,7 @@ interface WeriftModule {
   RTCPeerConnection: new (config: Record<string, unknown>) => unknown;
   MediaStreamTrack: new (props: { kind: string }) => unknown;
   RTCRtpCodecParameters: new (props: Record<string, unknown>) => unknown;
+  RtpPacket: { deSerialize(buf: Buffer): { header: RtpBaseHeader } };
 }
 
 let weriftModule: Promise<WeriftModule> | null = null;

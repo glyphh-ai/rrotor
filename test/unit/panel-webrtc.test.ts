@@ -20,7 +20,7 @@ import { describe, it, expect } from "vitest";
 
 import { ffmpegArgs, DEFAULT_ENCODER, PAYLOAD_TYPES } from "../../src/panel/encoder.js";
 import type { CaptureTarget } from "../../src/panel/encoder.js";
-import { parseSignal, describeCandidate, decideTransport, screencastNeeded, isSignalType, announceCandidate, announceSdp } from "../../src/panel/signal.js";
+import { parseSignal, describeCandidate, decideTransport, screencastMode, isSignalType, announceCandidate, announceSdp } from "../../src/panel/signal.js";
 import { parsePortRange, parseIceServers, webrtcConfigFromEnv } from "../../src/panel/webrtc.js";
 import { parseScreen, DEFAULT_SCREEN } from "../../src/panel/xvfb.js";
 import { PanelSession } from "../../src/panel/session.js";
@@ -183,17 +183,17 @@ describe("decideTransport — screencast is the floor", () => {
   });
 });
 
-describe("screencastNeeded — when the JPEG path may be switched off", () => {
-  it("stays on while any subscriber is still on it", () => {
-    expect(screencastNeeded(["webrtc", "screencast"])).toBe(true);
-    expect(screencastNeeded(["screencast"])).toBe(true);
+describe("screencastMode — the cast never stops, it changes shape", () => {
+  it("stays full while any subscriber still receives it", () => {
+    expect(screencastMode(["webrtc", "screencast"])).toBe("full");
+    expect(screencastMode(["screencast"])).toBe("full");
   });
-  it("switches off only when every subscriber has landed on webrtc", () => {
-    expect(screencastNeeded(["webrtc"])).toBe(false);
-    expect(screencastNeeded(["webrtc", "webrtc"])).toBe(false);
+  it("drops to the probe (motion-sensor) shape only when every subscriber has landed on webrtc", () => {
+    expect(screencastMode(["webrtc"])).toBe("probe");
+    expect(screencastMode(["webrtc", "webrtc"])).toBe("probe");
   });
-  it("stays on with no subscribers — v1's lifecycle is unchanged", () => {
-    expect(screencastNeeded([])).toBe(true);
+  it("is full with no subscribers — v1's lifecycle is unchanged", () => {
+    expect(screencastMode([])).toBe("full");
   });
 });
 
@@ -218,8 +218,13 @@ describe("webrtc network config", () => {
     const cfg = webrtcConfigFromEnv({});
     expect(cfg.encoder.codec).toBe("h264");
     expect(cfg.encoder.payloadType).toBe(PAYLOAD_TYPES.h264);
+    // The measured optimum: 15fps (encoder CPU sets pod density) at CRF 28 with
+    // the maxrate ceiling — quality-driven, never average-bitrate.
+    expect(cfg.encoder.fps).toBe(15);
+    expect(cfg.encoder.crf).toBe(28);
     expect(cfg.network.iceUseTcp).toBe(false);
     expect(cfg.negotiationTimeoutMs).toBeGreaterThan(1000);
+    expect(cfg.idleAfterMs).toBe(2000);
 
     const tuned = webrtcConfigFromEnv({
       PANEL_WEBRTC_CODEC: "vp8",
@@ -241,6 +246,19 @@ describe("webrtc network config", () => {
   it("clamps a nonsense framerate rather than handing it to ffmpeg", () => {
     expect(webrtcConfigFromEnv({ PANEL_WEBRTC_FPS: "999" }).encoder.fps).toBe(60);
     expect(webrtcConfigFromEnv({ PANEL_WEBRTC_FPS: "-1" }).encoder.fps).toBe(DEFAULT_ENCODER.fps);
+  });
+
+  it("PANEL_VIDEO_FPS is the fps knob and wins over the spike-era spelling", () => {
+    expect(webrtcConfigFromEnv({ PANEL_VIDEO_FPS: "30" }).encoder.fps).toBe(30);
+    expect(webrtcConfigFromEnv({ PANEL_VIDEO_FPS: "24", PANEL_WEBRTC_FPS: "30" }).encoder.fps).toBe(24);
+  });
+
+  it("PANEL_IDLE_AFTER_MS tunes the idle gate, and 0 (only) disables it", () => {
+    expect(webrtcConfigFromEnv({ PANEL_IDLE_AFTER_MS: "5000" }).idleAfterMs).toBe(5000);
+    expect(webrtcConfigFromEnv({ PANEL_IDLE_AFTER_MS: "0" }).idleAfterMs).toBe(0);
+    // Garbage falls back to the default rather than silently disabling gating.
+    expect(webrtcConfigFromEnv({ PANEL_IDLE_AFTER_MS: "nope" }).idleAfterMs).toBe(2000);
+    expect(webrtcConfigFromEnv({ PANEL_IDLE_AFTER_MS: "-5" }).idleAfterMs).toBe(2000);
   });
 });
 

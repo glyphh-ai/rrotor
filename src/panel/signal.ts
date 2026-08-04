@@ -212,20 +212,29 @@ export function decideTransport(i: TransportInputs): TransportDecision {
 }
 
 /**
- * Whether the CDP screencast still has to run at all.
+ * Which shape the CDP screencast must take right now. It NEVER stops: the
+ * screencast is both the fallback transport AND the panel's motion sensor —
+ * it is change-driven, so a frame arriving IS motion and its absence IS the
+ * stillness that lets the idle gate (panel/idle.ts) stop the encoder. A still
+ * page produces no frames on either mode, so "always on" costs nothing when
+ * nothing changes.
  *
- * The screencast is the fallback, so it stays on while ANY subscriber is on it —
- * including subscribers still negotiating. Only when every attached subscriber
- * has landed on WebRTC can `Page.stopScreencast` be issued, which is what makes
- * the WebRTC path's CPU and bandwidth numbers honest (no JPEG encoder quietly
- * running behind them).
- *
- * With NO subscribers it stays ON. That is deliberate, not an oversight: a panel
- * with no viewer is about to be reaped anyway, and keeping the v1 lifecycle
- * (start() casts, unconditionally) means nothing about the pre-existing path
- * changes shape just because v2 exists.
+ *   "full"   frames are wire-quality and fanned to subscribers. Required while
+ *            ANY subscriber is on the screencast — including subscribers still
+ *            negotiating, and the idle-parked ones (their JPEG is the picture
+ *            while the encoder sleeps). Also the no-subscriber shape: a panel
+ *            with no viewer is about to be reaped, and keeping the v1 lifecycle
+ *            (start() casts, unconditionally) means the pre-existing path never
+ *            changes shape just because v2 exists.
+ *   "probe"  every subscriber is on proven WebRTC, so no frame reaches the
+ *            wire — the cast is kept alive only as the motion signal, at a
+ *            thumbnail size/quality whose encode cost is negligible next to
+ *            the video encoder it supervises. Probe frames are never emitted
+ *            and never counted as wire bytes.
  */
-export function screencastNeeded(subscriberTransports: readonly PanelTransport[]): boolean {
-  if (subscriberTransports.length === 0) return true;
-  return subscriberTransports.some((t) => t !== "webrtc");
+export type ScreencastMode = "full" | "probe";
+
+export function screencastMode(subscriberTransports: readonly PanelTransport[]): ScreencastMode {
+  if (subscriberTransports.length === 0) return "full";
+  return subscriberTransports.some((t) => t !== "webrtc") ? "full" : "probe";
 }

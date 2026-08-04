@@ -54,7 +54,10 @@ export interface CaptureTarget {
 
 export interface EncoderConfig {
   codec: VideoCodec;
-  /** Capture/encode framerate. */
+  /** Capture/encode framerate. Default 15 (`PANEL_VIDEO_FPS`): the measured
+   *  sweet spot — encoder CPU is what sets pod density (0.42 core/panel at 15fps
+   *  vs 0.70 at 30), 15fps screen content reads as smooth for browsing, and a
+   *  session that needs more can turn the dial. */
   fps: number;
   /**
    * Bitrate CEILING in kbit/s — a VBV cap, not a target.
@@ -90,9 +93,13 @@ export interface EncoderConfig {
 
 export const DEFAULT_ENCODER: EncoderConfig = {
   codec: "h264",
-  fps: 30,
+  fps: 15,
   bitrateKbps: 2500,
-  crf: 26,
+  // CRF 28 + the maxrate ceiling is the measured optimum for screen content:
+  // text stays legible, motion still wins ~4.5-10.9x over JPEG, and a still page
+  // costs a fraction of CRF 26. NEVER replace this with `-b:v` alone — average-
+  // bitrate mode PADS still frames up to the target (a measured 4x error).
+  crf: 28,
   keyint: 300,
   payloadType: 96,
   pktSize: 1200,
@@ -178,6 +185,18 @@ export function ffmpegArgs(cfg: EncoderConfig, target: CaptureTarget, rtpPort: n
 function evenDim(n: number): number {
   const v = Math.max(2, Math.round(Number.isFinite(n) ? n : 2));
   return v % 2 === 0 ? v : v - 1;
+}
+
+/** Smallest capture dimension worth encoding. A client mid-animation reports
+ *  sliver rects (500×17, 500×11 — observed live from a panel enter-animation
+ *  firing a resize per frame); starting an encoder on one wastes a whole
+ *  ffmpeg spawn to stream garbage. Below this, keep whatever encoder is
+ *  already running and wait for a sane size. */
+export const MIN_CAPTURE_DIM = 80;
+
+/** Whether a capture rect is worth pointing an encoder at. PURE. */
+export function viableCaptureTarget(target: CaptureTarget): boolean {
+  return target.width >= MIN_CAPTURE_DIM && target.height >= MIN_CAPTURE_DIM;
 }
 
 /** Bind an even RTP port together with its RTCP sibling. Both sockets are held
