@@ -42,6 +42,10 @@ export interface AuthDecision {
   reason?: string;
   /** The token's owner, when introspection supplied one (allow only). */
   principal?: Principal;
+  /** The session the token is BOUND to, per introspection (allow only). On a
+   *  shared pod (no ROTOR_SESSION_ID) the harness enforces per-run binding
+   *  against this — a run's sessionId must be the token's. */
+  sessionId?: string;
 }
 
 /** The auth seam the HTTP server threads through its data-plane routes. */
@@ -86,7 +90,9 @@ export interface IntrospectorConfig {
   url: string;
   /** The service token rrotor presents to the introspect endpoint. */
   serviceToken: string;
-  /** The session id this worker serves; the token's session MUST equal this. */
+  /** The session id this worker serves (dedicated pod): the token's session
+   *  MUST equal it. EMPTY = shared pod: any active token is admitted and the
+   *  binding is enforced per run by the harness. */
   sessionId: string;
   /** Introspect request timeout, ms. Default 5000. */
   timeoutMs?: number;
@@ -141,13 +147,22 @@ class HttpIntrospector implements Introspector {
     }
 
     const active = payload.active === true;
-    const matches = payload.sessionId === this.cfg.sessionId;
+    // TWO BINDING MODES. DEDICATED pod: provisioned with ROTOR_SESSION_ID —
+    // only tokens bound to exactly that session are admitted (today's strict
+    // check). SHARED pod: ROTOR_SESSION_ID unset — any ACTIVE token is
+    // admitted, and the token's own sessionId rides the decision so the
+    // harness enforces the binding PER RUN instead (POST /run rejects a body
+    // sessionId that is not the token's — the same "session mismatch", moved
+    // to where a shared pod can judge it).
+    const matches = !this.cfg.sessionId || payload.sessionId === this.cfg.sessionId;
     if (active && matches) {
       const orgId = typeof payload.orgId === "string" ? payload.orgId : "";
       const userId = typeof payload.userId === "string" ? payload.userId : "";
+      const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
       const decision: AuthDecision = {
         ok: true,
         status: 200,
+        ...(sessionId ? { sessionId } : {}),
         ...(orgId && userId ? { principal: { orgId, userId } } : {}),
       };
       this.cache.set(bearer, { decision, expiresAt: this.cfg.now() + this.cfg.cacheTtlMs });
@@ -184,7 +199,8 @@ class HttpIntrospector implements Introspector {
  * Build an introspector from the environment. When `ROTOR_AUTH_INTROSPECT_URL` is
  * UNSET, auth is DISABLED and a pass-through is returned (current behavior). When
  * set, enforcement is on: `ROTOR_AUTH_SERVICE_TOKEN` is the token rrotor presents
- * and `ROTOR_SESSION_ID` is the session this worker serves.
+ * and `ROTOR_SESSION_ID` is the session this worker serves — leave it unset on a
+ * SHARED pod (any active token admits; the harness binds sessions per run).
  */
 export function introspectorFromEnv(env: NodeJS.ProcessEnv = process.env): Introspector {
   const url = env.ROTOR_AUTH_INTROSPECT_URL;

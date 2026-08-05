@@ -65,7 +65,7 @@ describe("introspectorFromEnv — enabled", () => {
     expect(auth.enabled).toBe(true);
 
     const decision = await auth.authorize("caller-token");
-    expect(decision).toEqual({ ok: true, status: 200 });
+    expect(decision).toEqual({ ok: true, status: 200, sessionId: SESSION });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
@@ -84,14 +84,32 @@ describe("introspectorFromEnv — enabled", () => {
     );
     const auth = introspectorFromEnv(enabledEnv());
     const decision = await auth.authorize("caller-token");
-    expect(decision).toEqual({ ok: true, status: 200, principal: { orgId: "org-1", userId: "user-1" } });
+    expect(decision).toEqual({ ok: true, status: 200, sessionId: SESSION, principal: { orgId: "org-1", userId: "user-1" } });
   });
 
   it("no principal when the payload names no org/user (allow still stands)", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { data: { active: true, sessionId: SESSION, orgId: "org-1" } }));
     const auth = introspectorFromEnv(enabledEnv());
     const decision = await auth.authorize("caller-token");
-    expect(decision).toEqual({ ok: true, status: 200 });
+    expect(decision).toEqual({ ok: true, status: 200, sessionId: SESSION });
+  });
+
+  it("SHARED-pod mode (no ROTOR_SESSION_ID): any ACTIVE token admits, its session rides the decision", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { active: true, sessionId: "sess-someone" } }));
+    const env = enabledEnv();
+    delete env.ROTOR_SESSION_ID;
+    const auth = introspectorFromEnv(env);
+    const decision = await auth.authorize("caller-token");
+    // The harness enforces the binding per run (POST /run) using this sessionId.
+    expect(decision).toEqual({ ok: true, status: 200, sessionId: "sess-someone" });
+  });
+
+  it("SHARED-pod mode still denies an INACTIVE token", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { active: false, sessionId: "sess-someone" } }));
+    const env = enabledEnv();
+    delete env.ROTOR_SESSION_ID;
+    const auth = introspectorFromEnv(env);
+    expect((await auth.authorize("caller-token")).ok).toBe(false);
   });
 
   it("inactive → denied 403", async () => {

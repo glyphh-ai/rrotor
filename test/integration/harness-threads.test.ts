@@ -356,3 +356,46 @@ describe("POST /run — the client's threadId", () => {
     expect(admitted.status).toBe(200);
   });
 });
+
+describe("POST /run — shared-pod per-run session binding", () => {
+  // A shared pod's introspector admits any ACTIVE token and surfaces the
+  // session the token is bound to; the harness enforces the binding per run.
+  const shared: Introspector = {
+    enabled: true,
+    authorize: () => Promise.resolve({ ok: true, status: 200, principal: ALICE, sessionId: "sess_tok" }),
+  };
+
+  it("rejects a body sessionId that isn't the token's; adopts the token's when absent", async () => {
+    const base = await boot(toolingQuery, null, shared);
+    const mismatch = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: as("alice"),
+      body: JSON.stringify({ prompt: "x", sessionId: "sess_other" }),
+    });
+    expect(mismatch.status).toBe(401);
+    expect(((await mismatch.json()) as { detail: string }).detail).toBe("session mismatch");
+
+    // No body sessionId → the run binds to (and reports) the token's session.
+    const adopted = await fetch(`${base}/run`, { method: "POST", headers: as("alice"), body: JSON.stringify({ prompt: "x" }) });
+    expect(adopted.status).toBe(200);
+    const { runId, sessionId } = (await adopted.json()) as { runId: string; sessionId: string };
+    expect(sessionId).toBe("sess_tok");
+    // Let it finish — the pod caps at one live run.
+    for (;;) {
+      const st = (await (await fetch(`${base}/runs/${runId}`, { headers: as("alice") })).json()) as { status: string; sessionId: string };
+      if (st.status !== "running") {
+        expect(st.sessionId).toBe("sess_tok");
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    // A matching body sessionId is redundant but welcome.
+    const matching = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: as("alice"),
+      body: JSON.stringify({ prompt: "x", sessionId: "sess_tok" }),
+    });
+    expect(matching.status).toBe(200);
+  });
+});

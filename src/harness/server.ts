@@ -52,7 +52,7 @@ import type { Duplex } from "node:stream";
 import { VERSION } from "../version.js";
 import { log } from "../obs/logger.js";
 import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "../auth/introspect.js";
-import type { Introspector, Principal } from "../auth/introspect.js";
+import type { Introspector, Principal, AuthDecision } from "../auth/introspect.js";
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
 import { HARNESS_WIRE_VERSION } from "./frames.js";
 import type { WireFrame } from "./frames.js";
@@ -169,7 +169,7 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<T
           sendJson(res, decision.status, { error: "unauthorized", detail: decision.reason });
           return;
         }
-        dispatch(reg, opts, threads, decision.principal, req, res, method, path);
+        dispatch(reg, opts, threads, { principal: decision.principal, sessionId: decision.sessionId }, req, res, method, path);
       })
       .catch((err: unknown) => {
         log.error("auth check error", { detail: (err as Error).message });
@@ -177,8 +177,12 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<T
       });
     return;
   }
-  dispatch(reg, opts, threads, undefined, req, res, method, path);
+  dispatch(reg, opts, threads, {}, req, res, method, path);
 }
+
+/** What the auth gate resolved for this request: the token's owner and the
+ *  session the token is bound to (both absent when auth is disabled). */
+type AuthContext = Pick<AuthDecision, "principal" | "sessionId">;
 
 /** Run a thread route against the store, owner-scoped — 503 when persistence
  *  is off or the caller resolved to no principal (threads are per-user; an
@@ -202,7 +206,7 @@ function withThreads(threads: Promise<ThreadStore | null>, principal: Principal 
     });
 }
 
-function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<ThreadStore | null>, principal: Principal | undefined, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
+function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<ThreadStore | null>, authn: AuthContext, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
   if (method === "POST" && path === "/run") {
     readBody(req)
       .then((raw) => {
@@ -219,6 +223,20 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         if (typeof body.runtimeToken !== "string" || !body.runtimeToken.trim()) {
           const bearer = bearerFromHeader(req.headers.authorization);
           if (bearer) body.runtimeToken = bearer;
+        }
+        // PER-RUN session binding (the shared-pod half of the introspector's
+        // two modes): the token names the session it is bound to; a body
+        // sessionId that disagrees is the dedicated pod's "session mismatch",
+        // judged here where a shared pod can. An absent body sessionId adopts
+        // the token's, so the run and its workspace key by the right session.
+        if (authn.sessionId) {
+          const bodySession = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+          if (bodySession && bodySession !== authn.sessionId) {
+            log.warn("run session mismatch", { run_session: bodySession });
+            sendJson(res, 401, { error: "unauthorized", detail: "session mismatch" });
+            return;
+          }
+          body.sessionId = authn.sessionId;
         }
         const runId = mintRunId();
         let cfg;
@@ -239,7 +257,7 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         // Record the run into its thread BEFORE the engine emits: the user
         // turn persists at start, frames stream into messages (threads.ts),
         // all owned by the caller's introspected principal.
-        new ThreadRecorder(threads, cfg, principal).attach(session);
+        new ThreadRecorder(threads, cfg, authn.principal).attach(session);
         // Fire the run; frames stream via /ws + /runs/:id/frames. Never throws.
         void runHarness(session, cfg, opts.engine ?? {});
         log.info("run accepted", { run_id: runId, session: cfg.sessionId || undefined, mode: cfg.mode });
@@ -305,14 +323,14 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
   }
 
   if (method === "GET" && path === "/threads") {
-    withThreads(threads, principal, res, async (s, p) => sendJson(res, 200, { threads: await s.list(p) }));
+    withThreads(threads, authn.principal, res, async (s, p) => sendJson(res, 200, { threads: await s.list(p) }));
     return;
   }
   const threadMatch = /^\/threads\/([^/]+)$/.exec(path);
   if (threadMatch) {
     const threadId = decodeURIComponent(threadMatch[1]);
     if (method === "GET") {
-      withThreads(threads, principal, res, async (s, p) => {
+      withThreads(threads, authn.principal, res, async (s, p) => {
         const thread = await s.get(p, threadId);
         if (!thread) sendJson(res, 404, { error: "no-such-thread", detail: `no thread ${threadId}` });
         else sendJson(res, 200, thread);
@@ -342,7 +360,7 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
             ...(messages ? { messages } : {}),
             updatedAt: body.updatedAt,
           };
-          withThreads(threads, principal, res, async (s, p) => {
+          withThreads(threads, authn.principal, res, async (s, p) => {
             const r = await s.put(p, threadId, patch);
             if (r.applied) sendJson(res, 200, { ok: true, updatedAt: r.updatedAt });
             // Another principal's id reads as absent — existence is not revealed.
@@ -354,7 +372,7 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
       return;
     }
     if (method === "DELETE") {
-      withThreads(threads, principal, res, async (s, p) => {
+      withThreads(threads, authn.principal, res, async (s, p) => {
         const ok = await s.tombstone(p, threadId, Date.now());
         if (ok) sendJson(res, 200, { ok: true });
         else sendJson(res, 404, { error: "no-such-thread", detail: `no thread ${threadId}` });
