@@ -57,7 +57,7 @@ import type { RunRequestBody } from "./config.js";
 import { HarnessSession, mintRunId } from "./session.js";
 import { runHarness } from "./engine.js";
 import type { EngineDeps } from "./engine.js";
-import { ThreadRecorder, threadStoreFromEnv, parseThreadMsgs, parseMode } from "./threads.js";
+import { ThreadRecorder, threadStoreFromEnv, warnIfUnrecordable, parseThreadMsgs, parseMode } from "./threads.js";
 import type { ThreadStore, ThreadPut } from "./threads.js";
 
 const DEFAULT_PORT = 8080;
@@ -208,6 +208,13 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         } catch {
           sendJson(res, 400, { error: "invalid-json", detail: "POST /run body must be JSON" });
           return;
+        }
+        // The Authorization bearer IS the session's runtime token — default
+        // the body field from it so callers don't send the same token twice
+        // (an explicit body `runtimeToken` still overrides).
+        if (typeof body.runtimeToken !== "string" || !body.runtimeToken.trim()) {
+          const bearer = bearerFromHeader(req.headers.authorization);
+          if (bearer) body.runtimeToken = bearer;
         }
         const runId = mintRunId();
         let cfg;
@@ -495,6 +502,7 @@ export function startHarnessServer(port: number = DEFAULT_PORT, opts: HarnessSer
   const auth = opts.auth ?? introspectorFromEnv(env);
   const reg = new RunRegistry(maxRuns);
   const threads = opts.threads !== undefined ? Promise.resolve(opts.threads) : threadStoreFromEnv(env);
+  warnIfUnrecordable(env, auth.enabled);
   const server = http.createServer((req, res) => handle(reg, opts, threads, req, res, auth));
   attachHarnessWs(server, reg, auth);
   (server as http.Server & { __registry?: RunRegistry }).__registry = reg;

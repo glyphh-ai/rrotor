@@ -342,12 +342,14 @@ export class PgVectorStore implements Stator {
 /** Lazy-load node-postgres only when a real connection is needed, so `pg` is not
  *  pulled into environments that use the in-process/SQLite/injected backends.
  *  Shared with every stator-backed store (harness/threads.ts) — ONE connection
- *  mechanism, never a second. */
-export async function connectPg(url?: string): Promise<PgLike> {
+ *  mechanism, never a second. `max` caps the pool: a store that pins
+ *  session-scoped state (`SET search_path`) passes 1 so every query rides the
+ *  same connection. */
+export async function connectPg(url?: string, opts: { max?: number } = {}): Promise<PgLike> {
   const mod: unknown = await import("pg");
   const Pool = (mod as { default?: { Pool: new (c: unknown) => unknown }; Pool?: new (c: unknown) => unknown }).Pool
     ?? (mod as { default: { Pool: new (c: unknown) => unknown } }).default.Pool;
-  const pool = new Pool({ connectionString: url }) as {
+  const pool = new Pool({ connectionString: url, ...(opts.max ? { max: opts.max } : {}) }) as {
     query(sql: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
     end(): Promise<void>;
   };

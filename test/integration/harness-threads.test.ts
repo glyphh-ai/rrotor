@@ -18,23 +18,28 @@ import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 
 import { startHarnessServer } from "../../src/harness/server.js";
-import { ThreadStore } from "../../src/harness/threads.js";
+import { ThreadStore, schemaForOrg, statorConfigured, warnIfUnrecordable } from "../../src/harness/threads.js";
 import type { ThreadMsg } from "../../src/harness/threads.js";
 import type { QueryFn } from "../../src/harness/engine.js";
 import type { PgLike } from "../../src/exec/pgvector-store.js";
 import type { Introspector, Principal } from "../../src/auth/introspect.js";
+import { createLogger } from "../../src/obs/logger.js";
 
 const ORG = "0f0e0d0c-0b0a-4908-8706-050403020100";
+const ORG_B = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const ALICE: Principal = { orgId: ORG, userId: "11111111-1111-4111-8111-111111111111" };
 const BOB: Principal = { orgId: ORG, userId: "22222222-2222-4222-8222-222222222222" };
+/** Carol lives in ANOTHER ORG — her rows must land in another schema. */
+const CAROL: Principal = { orgId: ORG_B, userId: "33333333-3333-4333-8333-333333333333" };
 
 /** An introspector that admits everyone AS Alice, or per-bearer when the
- *  caller sends `Bearer alice` / `Bearer bob` — the principal seam under test. */
+ *  caller sends `Bearer alice|bob|carol` — the principal seam under test. */
 const asUsers: Introspector = {
   enabled: true,
-  authorize: (bearer) => Promise.resolve({ ok: true, status: 200, principal: bearer === "bob" ? BOB : ALICE }),
+  authorize: (bearer) =>
+    Promise.resolve({ ok: true, status: 200, principal: bearer === "bob" ? BOB : bearer === "carol" ? CAROL : ALICE }),
 };
-const as = (who: "alice" | "bob"): { authorization: string } => ({ authorization: `Bearer ${who}` });
+const as = (who: "alice" | "bob" | "carol"): { authorization: string } => ({ authorization: `Bearer ${who}` });
 
 const open: PGlite[] = [];
 async function pglite(): Promise<PgLike> {
@@ -87,14 +92,49 @@ async function untilMessages(base: string, id: string, n: number, timeoutMs = 50
   }
 }
 
-describe("thread store — migration", () => {
-  it("applies idempotently over one database (a second create is a no-op)", async () => {
+describe("thread store — per-org schemas", () => {
+  it("first touch of an org creates its schema + tables (server convention), idempotently", async () => {
     const db = await pglite();
     const first = await ThreadStore.create({ client: db });
     await first.touch(ALICE, "c1", 100, { mode: "chat" });
-    // A second pod over the SAME database: schema already there, data intact.
+    // The schema exists under the server's deterministic name.
+    const schema = schemaForOrg(ORG);
+    expect(schema).toBe("org_0f0e0d0c0b0a49088706050403020100");
+    const found = await db.query("SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1", [schema]);
+    expect(found.rows).toHaveLength(1);
+    // A second pod over the SAME database re-ensures harmlessly, data intact.
     const second = await ThreadStore.create({ client: db });
     expect((await second.list(ALICE)).map((t) => t.id)).toEqual(["c1"]);
+  });
+
+  it("two orgs through ONE pod land in separate schemas — same thread id, no bleed", async () => {
+    const db = await pglite();
+    const store = await ThreadStore.create({ client: db });
+    const base = await boot(toolingQuery, store);
+    const putAs = (who: "alice" | "carol", title: string): Promise<Response> =>
+      fetch(`${base}/threads/cshared`, {
+        method: "PUT",
+        headers: as(who),
+        body: JSON.stringify({ title, messages: [{ role: "user", text: title, at: 1 }], updatedAt: 100 }),
+      });
+    expect((await putAs("alice", "A's thread")).status).toBe(200);
+    expect((await putAs("carol", "B's thread")).status).toBe(200); // same id, different org — no conflict
+
+    // Each org reads its OWN row through the API…
+    expect(((await (await fetch(`${base}/threads/cshared`, { headers: as("alice") })).json()) as { title: string }).title).toBe("A's thread");
+    expect(((await (await fetch(`${base}/threads/cshared`, { headers: as("carol") })).json()) as { title: string }).title).toBe("B's thread");
+
+    // …because the rows are PHYSICALLY separate, in the per-org schemas the
+    // server's tenantDb routing reads.
+    const inA = await db.query(`SELECT title FROM "${schemaForOrg(ORG)}".threads`);
+    const inB = await db.query(`SELECT title FROM "${schemaForOrg(ORG_B)}".threads`);
+    expect(inA.rows.map((r) => r.title)).toEqual(["A's thread"]);
+    expect(inB.rows.map((r) => r.title)).toEqual(["B's thread"]);
+  });
+
+  it("rejects an orgId that derives an unsafe schema name", () => {
+    expect(() => schemaForOrg("bad; DROP SCHEMA public")).toThrow(/unsafe schema name/);
+    expect(() => schemaForOrg("")).toThrow(/unsafe schema name/);
   });
 });
 
@@ -222,5 +262,40 @@ describe("thread routes — availability and auth", () => {
     const base = await boot(toolingQuery, store, denyAll);
     expect((await fetch(`${base}/threads`)).status).toBe(401);
     expect((await fetch(`${base}/threads/c1`, { method: "PUT", body: "{}" })).status).toBe(401);
+  });
+
+  it("warns LOUDLY at boot when the stator is configured but introspection is off", () => {
+    const statorEnv = { ROTOR_STATOR_BACKEND: "pgvector", ROTOR_STATOR_URL: "postgres://stator" } as NodeJS.ProcessEnv;
+    expect(statorConfigured(statorEnv)).toBe(true);
+    expect(statorConfigured({} as NodeJS.ProcessEnv)).toBe(false);
+
+    const lines: string[] = [];
+    const logger = createLogger({ level: "warn", write: (l) => lines.push(l) });
+    // Stator on + auth off → the warn fires and says threads will not persist.
+    expect(warnIfUnrecordable(statorEnv, false, logger)).toBe(true);
+    expect(lines.join("\n")).toMatch(/threads will NOT persist/);
+    // Auth on, or no stator → silent.
+    expect(warnIfUnrecordable(statorEnv, true, logger)).toBe(false);
+    expect(warnIfUnrecordable({} as NodeJS.ProcessEnv, false, logger)).toBe(false);
+    expect(lines).toHaveLength(1);
+  });
+});
+
+describe("POST /run — runtime token from the Authorization bearer", () => {
+  it("defaults `runtimeToken` from the header so callers don't send the token twice", async () => {
+    // No GLYPHH_RUNTIME_TOKEN in the env and none in the body: the bearer
+    // (which IS the session's runtime token) carries the run.
+    const env = { GLYPHH_GATEWAY_URL: "https://gw.test", HARNESS_HOME: mkdtempSync(join(tmpdir(), "pod-")) } as NodeJS.ProcessEnv;
+    const server = startHarnessServer(0, { env, engine: { queryFn: toolingQuery }, threads: null, auth: asUsers });
+    servers.push(server);
+    await new Promise<void>((r) => server.once("listening", () => r()));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const withBearer = await fetch(`${base}/run`, { method: "POST", headers: as("alice"), body: JSON.stringify({ prompt: "x" }) });
+    expect(withBearer.status).toBe(200);
+    // Without any token anywhere the run is still rejected.
+    const bare = await fetch(`${base}/run`, { method: "POST", body: JSON.stringify({ prompt: "x" }) });
+    expect(bare.status).toBe(400);
+    expect(((await bare.json()) as { detail: string }).detail).toMatch(/runtime token/);
   });
 });

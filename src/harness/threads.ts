@@ -10,9 +10,14 @@
  *     a {@link PgLike} client, `connectPg`, idempotent DDL at create). The
  *     SCHEMA IS THE SERVER'S: the server-side migration is the DDL authority
  *     and the ensure-DDL below byte-matches it — the pod only guarantees the
- *     tables exist on a fresh schema. The rotor stays TENANT-UNAWARE about
- *     WHERE: tables land in whatever database/schema the provisioned
- *     `ROTOR_STATOR_URL` DSN is scoped to. WHO owns a thread is explicit:
+ *     tables exist on first touch of an org. A SHARED pod serves many orgs
+ *     through ONE static DSN, so every operation is scoped to the caller's
+ *     org with the server's deterministic convention ({@link schemaForOrg},
+ *     mirroring server/src/db/tenant.ts): `SET search_path TO <org schema>,
+ *     public` pinned per operation on the store's single serialized
+ *     connection (pool max 1 + an op mutex — no interleaving between the SET
+ *     and the queries it scopes) — the server reads the same per-org schemas
+ *     via its tenantDb routing. WHO owns a thread within the org is explicit:
  *     every row carries `org_id`/`user_id` from the introspected runtime-token
  *     {@link Principal}, and every read/write here is owner-scoped so a pod
  *     shared by an org cannot leak threads across users.
@@ -38,6 +43,7 @@ import type { HarnessRunConfig, SessionMode } from "./config.js";
 import type { WireFrame } from "./frames.js";
 import type { HarnessSession } from "./session.js";
 import { log } from "../obs/logger.js";
+import type { Logger } from "../obs/logger.js";
 
 /** One transcript message — the desktop's CodeMsg, stored verbatim in jsonb.
  *  Extra fields (attachments/decline/connect) ride along untyped. */
@@ -89,6 +95,16 @@ const SESSION_MODES: SessionMode[] = ["chat", "cowork", "code"];
 /** How many of the LATEST messages a full read returns. */
 export const THREAD_MSG_CAP = 500;
 
+/** The server's deterministic per-org schema convention (server/src/db/
+ *  tenant.ts `schemaForOrg`): `org_` + the orgId with dashes stripped,
+ *  lowercased. Guarded exactly like the server's quoteSchema idiom — anything
+ *  outside ^[a-z0-9_]+$ is rejected, so the name is safe to interpolate. */
+export function schemaForOrg(orgId: string): string {
+  const schema = `org_${orgId.replace(/-/g, "")}`.toLowerCase();
+  if (schema === "org_" || !/^[a-z0-9_]+$/.test(schema)) throw new Error(`unsafe schema name: ${schema}`);
+  return schema;
+}
+
 // The server's migration is the DDL AUTHORITY — the table bodies below
 // byte-match it; the pod's ensure-DDL only creates them on a fresh schema.
 // Epoch-ms BIGINT stamps match CodeMsg.at, so LWW compares are plain numbers.
@@ -121,19 +137,51 @@ export interface ThreadStoreOptions {
 }
 
 export class ThreadStore {
+  /** Orgs whose schema + tables this store has already ensured. */
+  private readonly ensured = new Set<string>();
+  /** The op mutex: every operation (ensure + SET search_path + its queries)
+   *  runs alone on the single connection, so the pinned path never shifts
+   *  under an in-flight operation. */
+  private chain: Promise<unknown> = Promise.resolve();
+
   private constructor(
     private readonly db: PgLike,
     /** True when this store opened the connection (and must close it). */
     private readonly owned: boolean,
   ) {}
 
-  /** Connect (or adopt an injected client) and ensure the schema. */
+  /** Connect (or adopt an injected client). The pg pool is capped at ONE
+   *  connection — `SET search_path` is session-scoped, so every query must
+   *  ride the same session. Schemas/tables are ensured lazily per org
+   *  ({@link scoped}), not here: a shared pod does not know its orgs up
+   *  front, and a pod can see an org before the server's boot backfill. */
   static async create(opts: ThreadStoreOptions = {}): Promise<ThreadStore> {
-    const db = opts.client ?? (await connectPg(opts.url));
-    const store = new ThreadStore(db, !opts.client);
-    if (db.exec) await db.exec(DDL);
-    else await db.query(DDL); // node-postgres runs multi-statement simple queries
-    return store;
+    const db = opts.client ?? (await connectPg(opts.url, { max: 1 }));
+    return new ThreadStore(db, !opts.client);
+  }
+
+  /** Run one operation scoped to the principal's org schema: take the mutex,
+   *  ensure the schema + tables exist (first touch of the org), pin
+   *  `search_path` to it, then run the queries. The schema name is derived —
+   *  and guarded — by {@link schemaForOrg}. */
+  private scoped<T>(p: Principal, fn: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(async () => {
+      const schema = schemaForOrg(p.orgId);
+      if (!this.ensured.has(schema)) {
+        await this.db.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+        await this.db.query(`SET search_path TO "${schema}", public`);
+        if (this.db.exec) await this.db.exec(DDL);
+        else await this.db.query(DDL); // node-postgres runs multi-statement simple queries
+        this.ensured.add(schema);
+        log.info("thread schema ensured", { schema });
+      } else {
+        await this.db.query(`SET search_path TO "${schema}", public`);
+      }
+      return fn();
+    });
+    // The mutex survives a failed op; the failure still rejects `run`.
+    this.chain = run.catch(() => undefined);
+    return run;
   }
 
   /** Ensure the thread row exists for `p` and its stamp covers `at`. Never
@@ -141,11 +189,13 @@ export class ThreadStore {
    *  the run path only inserts defaults; the client's PUT is authoritative for
    *  those — and never touches a row another principal owns. */
   async touch(p: Principal, id: string, at: number, fields: { mode?: SessionMode; source?: unknown } = {}): Promise<void> {
-    await this.db.query(
-      "INSERT INTO threads (id, org_id, user_id, title, mode, source, created_at, updated_at) VALUES ($1,$2,$3,'',$4,$5,$6,$6) " +
-        "ON CONFLICT (id) DO UPDATE SET updated_at = GREATEST(threads.updated_at, excluded.updated_at) " +
-        "WHERE threads.org_id = excluded.org_id AND threads.user_id = excluded.user_id",
-      [id, p.orgId, p.userId, fields.mode ?? "code", fields.source != null ? JSON.stringify(fields.source) : null, at],
+    await this.scoped(p, () =>
+      this.db.query(
+        "INSERT INTO threads (id, org_id, user_id, title, mode, source, created_at, updated_at) VALUES ($1,$2,$3,'',$4,$5,$6,$6) " +
+          "ON CONFLICT (id) DO UPDATE SET updated_at = GREATEST(threads.updated_at, excluded.updated_at) " +
+          "WHERE threads.org_id = excluded.org_id AND threads.user_id = excluded.user_id",
+        [id, p.orgId, p.userId, fields.mode ?? "code", fields.source != null ? JSON.stringify(fields.source) : null, at],
+      ),
     );
   }
 
@@ -153,27 +203,31 @@ export class ThreadStore {
    *  Returns the ord so a streaming writer can {@link amend} the row in place,
    *  or null when `p` does not own thread `id` (nothing is written). */
   async append(p: Principal, id: string, msg: ThreadMsg): Promise<number | null> {
-    const rows = (
-      await this.db.query(
-        "INSERT INTO thread_messages (thread_id, ord, msg) " +
-          "SELECT t.id, COALESCE((SELECT MAX(m.ord) + 1 FROM thread_messages m WHERE m.thread_id = t.id), 0), $4 " +
-          "FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3 RETURNING ord",
-        [id, p.orgId, p.userId, JSON.stringify(msg)],
-      )
-    ).rows;
-    if (!rows.length) return null;
-    await this.stamp(p, id, msg.at);
-    return Number(rows[0].ord);
+    return this.scoped(p, async () => {
+      const rows = (
+        await this.db.query(
+          "INSERT INTO thread_messages (thread_id, ord, msg) " +
+            "SELECT t.id, COALESCE((SELECT MAX(m.ord) + 1 FROM thread_messages m WHERE m.thread_id = t.id), 0), $4 " +
+            "FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3 RETURNING ord",
+          [id, p.orgId, p.userId, JSON.stringify(msg)],
+        )
+      ).rows;
+      if (!rows.length) return null;
+      await this.stamp(p, id, msg.at);
+      return Number(rows[0].ord);
+    });
   }
 
   /** Replace a message in place (the live streamed row / tool-done rewrite). */
   async amend(p: Principal, id: string, ord: number, msg: ThreadMsg): Promise<void> {
-    await this.db.query(
-      "UPDATE thread_messages SET msg = $4 WHERE thread_id = $1 AND ord = $5 " +
-        "AND EXISTS (SELECT 1 FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3)",
-      [id, p.orgId, p.userId, JSON.stringify(msg), ord],
-    );
-    await this.stamp(p, id, msg.at);
+    await this.scoped(p, async () => {
+      await this.db.query(
+        "UPDATE thread_messages SET msg = $4 WHERE thread_id = $1 AND ord = $5 " +
+          "AND EXISTS (SELECT 1 FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3)",
+        [id, p.orgId, p.userId, JSON.stringify(msg), ord],
+      );
+      await this.stamp(p, id, msg.at);
+    });
   }
 
   private async stamp(p: Principal, id: string, at: number): Promise<void> {
@@ -186,14 +240,16 @@ export class ThreadStore {
   /** The principal's live threads, newest first — metadata only, tombstones
    *  hidden. Owner-scoped: another user's threads never appear. */
   async list(p: Principal): Promise<ThreadMeta[]> {
-    const rows = (
-      await this.db.query(
-        "SELECT t.id, t.title, t.mode, t.created_at, t.updated_at, " +
-          "(SELECT COUNT(*) FROM thread_messages m WHERE m.thread_id = t.id) AS n " +
-          "FROM threads t WHERE t.org_id = $1 AND t.user_id = $2 AND t.deleted_at IS NULL ORDER BY t.updated_at DESC",
-        [p.orgId, p.userId],
-      )
-    ).rows;
+    const rows = await this.scoped(p, async () =>
+      (
+        await this.db.query(
+          "SELECT t.id, t.title, t.mode, t.created_at, t.updated_at, " +
+            "(SELECT COUNT(*) FROM thread_messages m WHERE m.thread_id = t.id) AS n " +
+            "FROM threads t WHERE t.org_id = $1 AND t.user_id = $2 AND t.deleted_at IS NULL ORDER BY t.updated_at DESC",
+          [p.orgId, p.userId],
+        )
+      ).rows,
+    );
     return rows.map((r) => ({
       id: String(r.id),
       title: String(r.title),
@@ -207,6 +263,10 @@ export class ThreadStore {
   /** One full thread of the principal's (latest {@link THREAD_MSG_CAP}
    *  messages, in order), or undefined when absent, tombstoned, or not owned. */
   async get(p: Principal, id: string, cap = THREAD_MSG_CAP): Promise<ThreadFull | undefined> {
+    return this.scoped(p, () => this.getScoped(p, id, cap));
+  }
+
+  private async getScoped(p: Principal, id: string, cap: number): Promise<ThreadFull | undefined> {
     const rows = (
       await this.db.query(
         "SELECT id, title, mode, source, created_at, updated_at, deleted_at FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3",
@@ -241,6 +301,10 @@ export class ThreadStore {
    *  under `p` when it does not exist yet (client-generated ids like `c<ts36>`
    *  are the norm). Returns the winning stamp so a losing client can pull. */
   async put(p: Principal, id: string, patch: ThreadPut): Promise<PutResult> {
+    return this.scoped(p, () => this.putScoped(p, id, patch));
+  }
+
+  private async putScoped(p: Principal, id: string, patch: ThreadPut): Promise<PutResult> {
     const rows = (
       await this.db.query("SELECT org_id, user_id, title, mode, source, updated_at, deleted_at FROM threads WHERE id = $1", [id])
     ).rows;
@@ -271,13 +335,15 @@ export class ThreadStore {
   /** Tombstone a thread of the principal's (hides it from list; reads 404;
    *  later PUTs lose). Returns false when `p` owns no such thread. */
   async tombstone(p: Principal, id: string, at: number): Promise<boolean> {
-    const rows = (
-      await this.db.query(
-        "UPDATE threads SET deleted_at = $4, updated_at = GREATEST(updated_at, $4) WHERE id = $1 AND org_id = $2 AND user_id = $3 RETURNING id",
-        [id, p.orgId, p.userId, at],
-      )
-    ).rows;
-    return rows.length > 0;
+    return this.scoped(p, async () => {
+      const rows = (
+        await this.db.query(
+          "UPDATE threads SET deleted_at = $4, updated_at = GREATEST(updated_at, $4) WHERE id = $1 AND org_id = $2 AND user_id = $3 RETURNING id",
+          [id, p.orgId, p.userId, at],
+        )
+      ).rows;
+      return rows.length > 0;
+    });
   }
 
   /** Release the connection — only when this store opened it. */
@@ -288,12 +354,30 @@ export class ThreadStore {
   }
 }
 
-/** Build the pod's thread store from the stator env — same switch as the
- *  memory side (exec/stator.ts): pgvector backend + DSN, else persistence is
- *  off and the thread routes answer 503. Connect failures degrade (the pod
- *  still serves runs), never raise. */
+/** Whether the stator env is set for thread persistence — the same switch as
+ *  the memory side (exec/stator.ts): pgvector backend + DSN. */
+export function statorConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.ROTOR_STATOR_BACKEND === "pgvector" && Boolean(env.ROTOR_STATOR_URL);
+}
+
+/** Warn LOUDLY when the stator is configured but introspection auth is not:
+ *  without a principal every run records nothing, silently by design — this
+ *  line makes the misconfiguration visible at pod boot. Returns whether it
+ *  warned (the seam the test asserts). */
+export function warnIfUnrecordable(env: NodeJS.ProcessEnv, authEnabled: boolean, logger: Logger = log): boolean {
+  if (!statorConfigured(env) || authEnabled) return false;
+  logger.warn(
+    "stator configured but introspection auth is OFF — threads will NOT persist " +
+      "(runs have no principal; set ROTOR_AUTH_INTROSPECT_URL + ROTOR_AUTH_SERVICE_TOKEN)",
+  );
+  return true;
+}
+
+/** Build the pod's thread store from the stator env ({@link statorConfigured});
+ *  off → persistence off and the thread routes answer 503. Connect failures
+ *  degrade (the pod still serves runs), never raise. */
 export function threadStoreFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<ThreadStore | null> {
-  if (env.ROTOR_STATOR_BACKEND !== "pgvector" || !env.ROTOR_STATOR_URL) return Promise.resolve(null);
+  if (!statorConfigured(env)) return Promise.resolve(null);
   return ThreadStore.create({ url: env.ROTOR_STATOR_URL })
     .then((store) => {
       log.info("thread persistence enabled (stator)", {});
