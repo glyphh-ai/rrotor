@@ -78,6 +78,22 @@ describe("introspectorFromEnv — enabled", () => {
     expect(init.signal).toBeDefined();
   });
 
+  it("surfaces the token's principal (orgId/userId) on an allow", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { data: { active: true, sessionId: SESSION, orgId: "org-1", userId: "user-1" } }),
+    );
+    const auth = introspectorFromEnv(enabledEnv());
+    const decision = await auth.authorize("caller-token");
+    expect(decision).toEqual({ ok: true, status: 200, principal: { orgId: "org-1", userId: "user-1" } });
+  });
+
+  it("no principal when the payload names no org/user (allow still stands)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { active: true, sessionId: SESSION, orgId: "org-1" } }));
+    const auth = introspectorFromEnv(enabledEnv());
+    const decision = await auth.authorize("caller-token");
+    expect(decision).toEqual({ ok: true, status: 200 });
+  });
+
   it("inactive → denied 403", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { data: { active: false, sessionId: SESSION } }));
     const auth = introspectorFromEnv(enabledEnv());

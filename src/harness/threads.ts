@@ -8,9 +8,14 @@
  *   • {@link ThreadStore} — `threads` + `thread_messages` over the SAME
  *     connection mechanism as the pgvector stator (exec/pgvector-store.ts:
  *     a {@link PgLike} client, `connectPg`, idempotent DDL at create). The
- *     rotor stays TENANT-UNAWARE: tables land in whatever database/schema the
- *     provisioned `ROTOR_STATOR_URL` DSN is scoped to — tenancy is the control
- *     plane's concern, exactly like the memory tables.
+ *     SCHEMA IS THE SERVER'S: the server-side migration is the DDL authority
+ *     and the ensure-DDL below byte-matches it — the pod only guarantees the
+ *     tables exist on a fresh schema. The rotor stays TENANT-UNAWARE about
+ *     WHERE: tables land in whatever database/schema the provisioned
+ *     `ROTOR_STATOR_URL` DSN is scoped to. WHO owns a thread is explicit:
+ *     every row carries `org_id`/`user_id` from the introspected runtime-token
+ *     {@link Principal}, and every read/write here is owner-scoped so a pod
+ *     shared by an org cannot leak threads across users.
  *   • {@link ThreadRecorder} — subscribes to a {@link HarnessSession}'s frame
  *     stream and translates frames into messages with the DESKTOP'S transcript
  *     grammar (app/src/renderer/help/code.ts CodeMsg): the user turn lands at
@@ -20,13 +25,15 @@
  *
  * Messages are stored AS-IS in jsonb (role/text/at + optional kind/attachments/
  * decline/connect) — the CodeMsg shape is the contract; no normalization.
- * Sync is last-write-wins on `updated_at` (epoch ms, the same clock as
- * CodeMsg.at): a client PUT applies only when its stamp is newer, and a
- * tombstone (`deleted_at`) is terminal.
+ * Message order is an explicit `ord` (max+1 per thread, assigned at append —
+ * writes are serialized). Sync is last-write-wins on `updated_at` (epoch ms,
+ * the same clock as CodeMsg.at): a client PUT applies only when its stamp is
+ * newer, and a tombstone (`deleted_at`) is terminal.
  */
 
 import { connectPg, asJson } from "../exec/pgvector-store.js";
 import type { PgLike } from "../exec/pgvector-store.js";
+import type { Principal } from "../auth/introspect.js";
 import type { HarnessRunConfig, SessionMode } from "./config.js";
 import type { WireFrame } from "./frames.js";
 import type { HarnessSession } from "./session.js";
@@ -68,30 +75,42 @@ export interface ThreadPut {
   updatedAt: number;
 }
 
+/** A PUT's outcome: `owned` false = the id belongs to another principal (the
+ *  route answers 404 — existence is not revealed); `applied` false with
+ *  `owned` true = the incoming stamp lost LWW (409, `updatedAt` wins). */
+export interface PutResult {
+  applied: boolean;
+  owned: boolean;
+  updatedAt: number;
+}
+
 const SESSION_MODES: SessionMode[] = ["chat", "cowork", "code"];
 
 /** How many of the LATEST messages a full read returns. */
 export const THREAD_MSG_CAP = 500;
 
-// Same migration mechanism as the pgvector stator: idempotent DDL at create.
+// The server's migration is the DDL AUTHORITY — the table bodies below
+// byte-match it; the pod's ensure-DDL only creates them on a fresh schema.
 // Epoch-ms BIGINT stamps match CodeMsg.at, so LWW compares are plain numbers.
 const DDL = `
 CREATE TABLE IF NOT EXISTS threads (
-  id         TEXT PRIMARY KEY,
-  title      TEXT NOT NULL DEFAULT '',
-  mode       TEXT NOT NULL DEFAULT 'code',
-  source     JSONB,
+  id TEXT PRIMARY KEY,
+  org_id UUID NOT NULL,
+  user_id UUID NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'code',
+  source JSONB,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
   deleted_at BIGINT
 );
-CREATE INDEX IF NOT EXISTS ix_threads_updated ON threads(updated_at DESC);
 CREATE TABLE IF NOT EXISTS thread_messages (
-  seq       BIGSERIAL PRIMARY KEY,
-  thread_id TEXT NOT NULL,
-  msg       JSONB NOT NULL
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  ord BIGINT NOT NULL,
+  msg JSONB NOT NULL,
+  PRIMARY KEY (thread_id, ord)
 );
-CREATE INDEX IF NOT EXISTS ix_thread_messages_thread ON thread_messages(thread_id, seq);
+CREATE INDEX IF NOT EXISTS ix_threads_user_updated ON threads(user_id, updated_at DESC);
 `;
 
 export interface ThreadStoreOptions {
@@ -108,7 +127,7 @@ export class ThreadStore {
     private readonly owned: boolean,
   ) {}
 
-  /** Connect (or adopt an injected client) and apply the schema. */
+  /** Connect (or adopt an injected client) and ensure the schema. */
   static async create(opts: ThreadStoreOptions = {}): Promise<ThreadStore> {
     const db = opts.client ?? (await connectPg(opts.url));
     const store = new ThreadStore(db, !opts.client);
@@ -117,44 +136,62 @@ export class ThreadStore {
     return store;
   }
 
-  /** Ensure the thread row exists and its stamp covers `at`. Never overwrites
-   *  client-owned fields (title/mode/source) on an existing thread — the run
-   *  path only inserts defaults; the client's PUT is authoritative for those. */
-  async touch(id: string, at: number, fields: { mode?: SessionMode; source?: unknown } = {}): Promise<void> {
+  /** Ensure the thread row exists for `p` and its stamp covers `at`. Never
+   *  overwrites client-owned fields (title/mode/source) on an existing thread —
+   *  the run path only inserts defaults; the client's PUT is authoritative for
+   *  those — and never touches a row another principal owns. */
+  async touch(p: Principal, id: string, at: number, fields: { mode?: SessionMode; source?: unknown } = {}): Promise<void> {
     await this.db.query(
-      "INSERT INTO threads (id, title, mode, source, created_at, updated_at) VALUES ($1,'',$2,$3,$4,$4) " +
-        "ON CONFLICT (id) DO UPDATE SET updated_at = GREATEST(threads.updated_at, excluded.updated_at)",
-      [id, fields.mode ?? "code", fields.source != null ? JSON.stringify(fields.source) : null, at],
+      "INSERT INTO threads (id, org_id, user_id, title, mode, source, created_at, updated_at) VALUES ($1,$2,$3,'',$4,$5,$6,$6) " +
+        "ON CONFLICT (id) DO UPDATE SET updated_at = GREATEST(threads.updated_at, excluded.updated_at) " +
+        "WHERE threads.org_id = excluded.org_id AND threads.user_id = excluded.user_id",
+      [id, p.orgId, p.userId, fields.mode ?? "code", fields.source != null ? JSON.stringify(fields.source) : null, at],
     );
   }
 
-  /** Append one message; bumps the thread stamp. Returns the row's seq so a
-   *  streaming writer can {@link amend} it in place. */
-  async append(id: string, msg: ThreadMsg): Promise<number> {
+  /** Append one message at the thread's next `ord`; bumps the thread stamp.
+   *  Returns the ord so a streaming writer can {@link amend} the row in place,
+   *  or null when `p` does not own thread `id` (nothing is written). */
+  async append(p: Principal, id: string, msg: ThreadMsg): Promise<number | null> {
     const rows = (
-      await this.db.query("INSERT INTO thread_messages (thread_id, msg) VALUES ($1,$2) RETURNING seq", [id, JSON.stringify(msg)])
+      await this.db.query(
+        "INSERT INTO thread_messages (thread_id, ord, msg) " +
+          "SELECT t.id, COALESCE((SELECT MAX(m.ord) + 1 FROM thread_messages m WHERE m.thread_id = t.id), 0), $4 " +
+          "FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3 RETURNING ord",
+        [id, p.orgId, p.userId, JSON.stringify(msg)],
+      )
     ).rows;
-    await this.stamp(id, msg.at);
-    return Number(rows[0].seq);
+    if (!rows.length) return null;
+    await this.stamp(p, id, msg.at);
+    return Number(rows[0].ord);
   }
 
   /** Replace a message in place (the live streamed row / tool-done rewrite). */
-  async amend(id: string, seq: number, msg: ThreadMsg): Promise<void> {
-    await this.db.query("UPDATE thread_messages SET msg = $2 WHERE seq = $1", [seq, JSON.stringify(msg)]);
-    await this.stamp(id, msg.at);
+  async amend(p: Principal, id: string, ord: number, msg: ThreadMsg): Promise<void> {
+    await this.db.query(
+      "UPDATE thread_messages SET msg = $4 WHERE thread_id = $1 AND ord = $5 " +
+        "AND EXISTS (SELECT 1 FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3)",
+      [id, p.orgId, p.userId, JSON.stringify(msg), ord],
+    );
+    await this.stamp(p, id, msg.at);
   }
 
-  private async stamp(id: string, at: number): Promise<void> {
-    await this.db.query("UPDATE threads SET updated_at = GREATEST(updated_at, $2) WHERE id = $1", [id, at]);
+  private async stamp(p: Principal, id: string, at: number): Promise<void> {
+    await this.db.query(
+      "UPDATE threads SET updated_at = GREATEST(updated_at, $4) WHERE id = $1 AND org_id = $2 AND user_id = $3",
+      [id, p.orgId, p.userId, at],
+    );
   }
 
-  /** All live threads, newest first — metadata only, tombstones hidden. */
-  async list(): Promise<ThreadMeta[]> {
+  /** The principal's live threads, newest first — metadata only, tombstones
+   *  hidden. Owner-scoped: another user's threads never appear. */
+  async list(p: Principal): Promise<ThreadMeta[]> {
     const rows = (
       await this.db.query(
         "SELECT t.id, t.title, t.mode, t.created_at, t.updated_at, " +
           "(SELECT COUNT(*) FROM thread_messages m WHERE m.thread_id = t.id) AS n " +
-          "FROM threads t WHERE t.deleted_at IS NULL ORDER BY t.updated_at DESC",
+          "FROM threads t WHERE t.org_id = $1 AND t.user_id = $2 AND t.deleted_at IS NULL ORDER BY t.updated_at DESC",
+        [p.orgId, p.userId],
       )
     ).rows;
     return rows.map((r) => ({
@@ -167,17 +204,20 @@ export class ThreadStore {
     }));
   }
 
-  /** One full thread (latest {@link THREAD_MSG_CAP} messages, in order), or
-   *  undefined when absent or tombstoned. */
-  async get(id: string, cap = THREAD_MSG_CAP): Promise<ThreadFull | undefined> {
+  /** One full thread of the principal's (latest {@link THREAD_MSG_CAP}
+   *  messages, in order), or undefined when absent, tombstoned, or not owned. */
+  async get(p: Principal, id: string, cap = THREAD_MSG_CAP): Promise<ThreadFull | undefined> {
     const rows = (
-      await this.db.query("SELECT id, title, mode, source, created_at, updated_at, deleted_at FROM threads WHERE id = $1", [id])
+      await this.db.query(
+        "SELECT id, title, mode, source, created_at, updated_at, deleted_at FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3",
+        [id, p.orgId, p.userId],
+      )
     ).rows;
     if (!rows.length || rows[0].deleted_at != null) return undefined;
     const t = rows[0];
     const msgs = (
       await this.db.query(
-        "SELECT msg FROM (SELECT seq, msg FROM thread_messages WHERE thread_id = $1 ORDER BY seq DESC LIMIT $2) sub ORDER BY seq ASC",
+        "SELECT msg FROM (SELECT ord, msg FROM thread_messages WHERE thread_id = $1 ORDER BY ord DESC LIMIT $2) sub ORDER BY ord ASC",
         [id, cap],
       )
     ).rows;
@@ -196,39 +236,46 @@ export class ThreadStore {
   }
 
   /** The client-push seam (PUT): apply only when the incoming stamp is NEWER
-   *  than the stored one; a tombstone always wins. Creates the thread when it
-   *  does not exist yet (client-generated ids like `c<ts36>` are the norm).
-   *  Returns the winning stamp either way, so a losing client can pull. */
-  async put(id: string, patch: ThreadPut): Promise<{ applied: boolean; updatedAt: number }> {
+   *  than the stored one; a tombstone always wins; another principal's thread
+   *  is untouchable (`owned` false — the id is theirs). Creates the thread
+   *  under `p` when it does not exist yet (client-generated ids like `c<ts36>`
+   *  are the norm). Returns the winning stamp so a losing client can pull. */
+  async put(p: Principal, id: string, patch: ThreadPut): Promise<PutResult> {
     const rows = (
-      await this.db.query("SELECT title, mode, source, updated_at, deleted_at FROM threads WHERE id = $1", [id])
+      await this.db.query("SELECT org_id, user_id, title, mode, source, updated_at, deleted_at FROM threads WHERE id = $1", [id])
     ).rows;
     const cur = rows[0];
+    if (cur && (String(cur.org_id) !== p.orgId || String(cur.user_id) !== p.userId)) {
+      return { applied: false, owned: false, updatedAt: 0 };
+    }
     if (cur && (cur.deleted_at != null || Number(cur.updated_at) >= patch.updatedAt)) {
-      return { applied: false, updatedAt: Math.max(Number(cur.updated_at), Number(cur.deleted_at ?? 0)) };
+      return { applied: false, owned: true, updatedAt: Math.max(Number(cur.updated_at), Number(cur.deleted_at ?? 0)) };
     }
     const title = patch.title ?? (cur ? String(cur.title) : "");
     const mode = patch.mode ?? (cur ? (String(cur.mode) as SessionMode) : "code");
     const source = patch.source !== undefined ? patch.source : cur ? asJson(cur.source) : null;
     await this.db.query(
-      "INSERT INTO threads (id, title, mode, source, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$5) " +
+      "INSERT INTO threads (id, org_id, user_id, title, mode, source, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$7) " +
         "ON CONFLICT (id) DO UPDATE SET title = excluded.title, mode = excluded.mode, source = excluded.source, updated_at = excluded.updated_at",
-      [id, title, mode, source != null ? JSON.stringify(source) : null, patch.updatedAt],
+      [id, p.orgId, p.userId, title, mode, source != null ? JSON.stringify(source) : null, patch.updatedAt],
     );
     if (patch.messages) {
       await this.db.query("DELETE FROM thread_messages WHERE thread_id = $1", [id]);
-      for (const m of patch.messages) {
-        await this.db.query("INSERT INTO thread_messages (thread_id, msg) VALUES ($1,$2)", [id, JSON.stringify(m)]);
+      for (let i = 0; i < patch.messages.length; i++) {
+        await this.db.query("INSERT INTO thread_messages (thread_id, ord, msg) VALUES ($1,$2,$3)", [id, i, JSON.stringify(patch.messages[i])]);
       }
     }
-    return { applied: true, updatedAt: patch.updatedAt };
+    return { applied: true, owned: true, updatedAt: patch.updatedAt };
   }
 
-  /** Tombstone a thread (hides it from list; reads 404; later PUTs lose).
-   *  Returns false when no such thread exists. */
-  async tombstone(id: string, at: number): Promise<boolean> {
+  /** Tombstone a thread of the principal's (hides it from list; reads 404;
+   *  later PUTs lose). Returns false when `p` owns no such thread. */
+  async tombstone(p: Principal, id: string, at: number): Promise<boolean> {
     const rows = (
-      await this.db.query("UPDATE threads SET deleted_at = $2, updated_at = GREATEST(updated_at, $2) WHERE id = $1 RETURNING id", [id, at])
+      await this.db.query(
+        "UPDATE threads SET deleted_at = $4, updated_at = GREATEST(updated_at, $4) WHERE id = $1 AND org_id = $2 AND user_id = $3 RETURNING id",
+        [id, p.orgId, p.userId, at],
+      )
     ).rows;
     return rows.length > 0;
   }
@@ -286,10 +333,12 @@ export function parseMode(raw: unknown): SessionMode | undefined {
 const FLUSH_MS = 1500;
 
 /**
- * Records ONE run into its thread. Subscribes to the session's frame stream
- * and serializes all writes on an internal promise chain (frame order = row
- * order); a failing store never takes the run down. The transcript grammar is
- * the desktop renderer's, verbatim (help/code.ts onGlyphhAgentTool/Done/Error):
+ * Records ONE run into its thread, under the run's introspected principal.
+ * Subscribes to the session's frame stream and serializes all writes on an
+ * internal promise chain (frame order = row order); a failing store never
+ * takes the run down, and a run with NO principal (auth disabled, or the
+ * control plane sent none) records nothing. The transcript grammar is the
+ * desktop renderer's, verbatim (help/code.ts onGlyphhAgentTool/Done/Error):
  * text commits before each tool row, tool rows rewrite `⚙` → `✓/✕` in place,
  * errors append as `⚠ <error>`.
  */
@@ -298,14 +347,15 @@ export class ThreadRecorder {
   private store: ThreadStore | null = null;
   private q: Promise<unknown>;
   private text = "";
-  private liveSeq: number | null = null;
+  private liveOrd: number | null = null;
   private lastFlush = 0;
-  private lastTool: { seq: number; name: string } | null = null;
+  private lastTool: { ord: number; name: string } | null = null;
   private readonly logger;
 
   constructor(
     store: Promise<ThreadStore | null>,
     private readonly cfg: Pick<HarnessRunConfig, "runId" | "sessionId" | "prompt" | "mode">,
+    private readonly principal: Principal | undefined,
   ) {
     // Client-generated session ids (`c<ts36>`) ARE the thread ids; a blank
     // session still gets a thread keyed by the run.
@@ -319,10 +369,14 @@ export class ThreadRecorder {
   /** Persist the user turn and start translating frames. Call after the
    *  session is admitted, before the engine starts emitting. */
   attach(session: HarnessSession): void {
-    this.enqueue(async (s) => {
+    if (!this.principal) {
+      this.logger.debug("no principal on the run — thread persistence off");
+      return;
+    }
+    this.enqueue(async (s, p) => {
       const at = Date.now();
-      await s.touch(this.threadId, at, { mode: this.cfg.mode });
-      await s.append(this.threadId, { role: "user", text: this.cfg.prompt, at });
+      await s.touch(p, this.threadId, at, { mode: this.cfg.mode });
+      await this.appendOwned(s, p, { role: "user", text: this.cfg.prompt, at });
     });
     const unsubscribe = session.subscribe((f) => this.onFrame(f, unsubscribe));
   }
@@ -332,14 +386,15 @@ export class ThreadRecorder {
       this.text += f.delta;
       if (f.at - this.lastFlush >= FLUSH_MS) {
         this.lastFlush = f.at;
-        this.enqueue((s) => this.flushLive(s, f.at));
+        this.enqueue((s, p) => this.flushLive(s, p, f.at));
       }
     } else if (f.type === "tool" && f.phase === "start") {
       const row = `⚙ ${f.name}${f.thought ? ` — ${f.thought}` : ""}`;
       const name = f.name;
-      this.enqueue(async (s) => {
-        await this.commitText(s, f.at);
-        this.lastTool = { seq: await s.append(this.threadId, { role: "assistant", kind: "tool", text: row, at: f.at }), name };
+      this.enqueue(async (s, p) => {
+        await this.commitText(s, p, f.at);
+        const ord = await this.appendOwned(s, p, { role: "assistant", kind: "tool", text: row, at: f.at });
+        this.lastTool = ord == null ? null : { ord, name };
       });
     } else if (f.type === "tool") {
       // phase:done — the desktop's breadcrumb rewrite, byte for byte.
@@ -348,41 +403,52 @@ export class ThreadRecorder {
       const diff = !bad ? (/\[\+\d+ -\d+\]/.exec(String(f.preview || ""))?.[0] ?? "") : "";
       const text = `${bad ? "✕" : "✓"} ${f.title || f.name}${reason}${diff ? ` ${diff}` : ""}`;
       const name = f.name;
-      this.enqueue(async (s) => {
+      this.enqueue(async (s, p) => {
         const open = this.lastTool;
         this.lastTool = null;
-        if (open && open.name === name) await s.amend(this.threadId, open.seq, { role: "assistant", kind: "tool", text, at: f.at });
-        else await s.append(this.threadId, { role: "assistant", kind: "tool", text, at: f.at });
+        if (open && open.name === name) await s.amend(p, this.threadId, open.ord, { role: "assistant", kind: "tool", text, at: f.at });
+        else await this.appendOwned(s, p, { role: "assistant", kind: "tool", text, at: f.at });
       });
     } else if (f.type === "done") {
-      this.enqueue((s) => this.commitText(s, f.at));
+      this.enqueue((s, p) => this.commitText(s, p, f.at));
       unsubscribe();
     } else if (f.type === "error") {
       const err = `⚠ ${f.error}`;
       this.text = this.text ? `${this.text}\n\n${err}` : err;
-      this.enqueue((s) => this.commitText(s, f.at));
+      this.enqueue((s, p) => this.commitText(s, p, f.at));
       unsubscribe();
     }
   }
 
+  /** Append under the principal; an unowned thread (a foreign id collision)
+   *  turns persistence off for the rest of the run — never write into it. */
+  private async appendOwned(s: ThreadStore, p: Principal, msg: ThreadMsg): Promise<number | null> {
+    const ord = await s.append(p, this.threadId, msg);
+    if (ord == null) {
+      this.logger.warn("thread not owned by the run's principal — persistence off");
+      this.store = null;
+    }
+    return ord;
+  }
+
   /** Upsert the in-progress assistant row with the text streamed so far. */
-  private async flushLive(s: ThreadStore, at: number): Promise<void> {
+  private async flushLive(s: ThreadStore, p: Principal, at: number): Promise<void> {
     if (!this.text) return;
     const msg: ThreadMsg = { role: "assistant", text: this.text, at };
-    if (this.liveSeq == null) this.liveSeq = await s.append(this.threadId, msg);
-    else await s.amend(this.threadId, this.liveSeq, msg);
+    if (this.liveOrd == null) this.liveOrd = await this.appendOwned(s, p, msg);
+    else await s.amend(p, this.threadId, this.liveOrd, msg);
   }
 
   /** Commit the streamed text as a finished message and open a fresh block. */
-  private async commitText(s: ThreadStore, at: number): Promise<void> {
-    await this.flushLive(s, at);
-    this.liveSeq = null;
+  private async commitText(s: ThreadStore, p: Principal, at: number): Promise<void> {
+    await this.flushLive(s, p, at);
+    this.liveOrd = null;
     this.text = "";
   }
 
-  private enqueue(fn: (s: ThreadStore) => Promise<void>): void {
+  private enqueue(fn: (s: ThreadStore, p: Principal) => Promise<unknown>): void {
     this.q = this.q
-      .then(() => (this.store ? fn(this.store) : undefined))
+      .then(() => (this.store && this.principal ? fn(this.store, this.principal) : undefined))
       .catch((err: unknown) => {
         this.logger.warn("thread persist failed", { detail: (err as Error).message });
       });

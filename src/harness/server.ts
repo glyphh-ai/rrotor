@@ -25,7 +25,11 @@
  * Threads persist to the STATOR (harness/threads.ts) when the pgvector stator
  * is configured (ROTOR_STATOR_BACKEND=pgvector + ROTOR_STATOR_URL — the same
  * scoped DSN the memory side uses); without it the /threads routes answer 503
- * and runs are unrecorded.
+ * and runs are unrecorded. Every thread is OWNER-SCOPED to the introspected
+ * token's org/user (the Principal on the auth decision): runs record under it
+ * and the /threads routes filter by it, so a pod shared by an org never leaks
+ * threads across users. No principal (auth off, or the control plane sent
+ * none) → thread routes 503 and runs are unrecorded.
  *
  * Auth: the same OPTIONAL introspection gate as the rotor data plane
  * (ROTOR_AUTH_INTROSPECT_URL + service token + session binding; fail closed
@@ -44,7 +48,7 @@ import type { Duplex } from "node:stream";
 import { VERSION } from "../version.js";
 import { log } from "../obs/logger.js";
 import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "../auth/introspect.js";
-import type { Introspector } from "../auth/introspect.js";
+import type { Introspector, Principal } from "../auth/introspect.js";
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
 import { HARNESS_WIRE_VERSION } from "./frames.js";
 import type { WireFrame } from "./frames.js";
@@ -161,7 +165,7 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<T
           sendJson(res, decision.status, { error: "unauthorized", detail: decision.reason });
           return;
         }
-        dispatch(reg, opts, threads, req, res, method, path);
+        dispatch(reg, opts, threads, decision.principal, req, res, method, path);
       })
       .catch((err: unknown) => {
         log.error("auth check error", { detail: (err as Error).message });
@@ -169,18 +173,24 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<T
       });
     return;
   }
-  dispatch(reg, opts, threads, req, res, method, path);
+  dispatch(reg, opts, threads, undefined, req, res, method, path);
 }
 
-/** Run a thread route against the store — 503 when persistence is off. */
-function withThreads(threads: Promise<ThreadStore | null>, res: http.ServerResponse, fn: (s: ThreadStore) => Promise<void>): void {
+/** Run a thread route against the store, owner-scoped — 503 when persistence
+ *  is off or the caller resolved to no principal (threads are per-user; an
+ *  unattributed caller cannot be scoped). */
+function withThreads(threads: Promise<ThreadStore | null>, principal: Principal | undefined, res: http.ServerResponse, fn: (s: ThreadStore, p: Principal) => Promise<void>): void {
   void threads
     .then((s) => {
       if (!s) {
         sendJson(res, 503, { error: "no-thread-store", detail: "thread persistence needs the pgvector stator (ROTOR_STATOR_BACKEND=pgvector + ROTOR_STATOR_URL)" });
         return;
       }
-      return fn(s);
+      if (!principal) {
+        sendJson(res, 503, { error: "no-principal", detail: "thread routes need introspection auth — the token's org/user scopes every read and write" });
+        return;
+      }
+      return fn(s, principal);
     })
     .catch((err: unknown) => {
       log.error("thread route failed", { detail: (err as Error).message });
@@ -188,7 +198,7 @@ function withThreads(threads: Promise<ThreadStore | null>, res: http.ServerRespo
     });
 }
 
-function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<ThreadStore | null>, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
+function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<ThreadStore | null>, principal: Principal | undefined, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
   if (method === "POST" && path === "/run") {
     readBody(req)
       .then((raw) => {
@@ -216,8 +226,9 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
           return;
         }
         // Record the run into its thread BEFORE the engine emits: the user
-        // turn persists at start, frames stream into messages (threads.ts).
-        new ThreadRecorder(threads, cfg).attach(session);
+        // turn persists at start, frames stream into messages (threads.ts),
+        // all owned by the caller's introspected principal.
+        new ThreadRecorder(threads, cfg, principal).attach(session);
         // Fire the run; frames stream via /ws + /runs/:id/frames. Never throws.
         void runHarness(session, cfg, opts.engine ?? {});
         log.info("run accepted", { run_id: runId, session: cfg.sessionId || undefined, mode: cfg.mode });
@@ -283,15 +294,15 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
   }
 
   if (method === "GET" && path === "/threads") {
-    withThreads(threads, res, async (s) => sendJson(res, 200, { threads: await s.list() }));
+    withThreads(threads, principal, res, async (s, p) => sendJson(res, 200, { threads: await s.list(p) }));
     return;
   }
   const threadMatch = /^\/threads\/([^/]+)$/.exec(path);
   if (threadMatch) {
     const threadId = decodeURIComponent(threadMatch[1]);
     if (method === "GET") {
-      withThreads(threads, res, async (s) => {
-        const thread = await s.get(threadId);
+      withThreads(threads, principal, res, async (s, p) => {
+        const thread = await s.get(p, threadId);
         if (!thread) sendJson(res, 404, { error: "no-such-thread", detail: `no thread ${threadId}` });
         else sendJson(res, 200, thread);
       });
@@ -320,9 +331,11 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
             ...(messages ? { messages } : {}),
             updatedAt: body.updatedAt,
           };
-          withThreads(threads, res, async (s) => {
-            const r = await s.put(threadId, patch);
+          withThreads(threads, principal, res, async (s, p) => {
+            const r = await s.put(p, threadId, patch);
             if (r.applied) sendJson(res, 200, { ok: true, updatedAt: r.updatedAt });
+            // Another principal's id reads as absent — existence is not revealed.
+            else if (!r.owned) sendJson(res, 404, { error: "no-such-thread", detail: `no thread ${threadId}` });
             else sendJson(res, 409, { error: "stale", detail: "a newer write holds this thread", updatedAt: r.updatedAt });
           });
         })
@@ -330,8 +343,8 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
       return;
     }
     if (method === "DELETE") {
-      withThreads(threads, res, async (s) => {
-        const ok = await s.tombstone(threadId, Date.now());
+      withThreads(threads, principal, res, async (s, p) => {
+        const ok = await s.tombstone(p, threadId, Date.now());
         if (ok) sendJson(res, 200, { ok: true });
         else sendJson(res, 404, { error: "no-such-thread", detail: `no thread ${threadId}` });
       });

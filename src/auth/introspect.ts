@@ -25,6 +25,14 @@
 
 import { log } from "../obs/logger.js";
 
+/** The principal a verified token resolves to — the control plane's introspect
+ *  payload names the token's owner (`orgId`/`userId`). Thread persistence
+ *  scopes every read and write to it (harness/threads.ts). */
+export interface Principal {
+  orgId: string;
+  userId: string;
+}
+
 /** The outcome of an authorization check. `status` is the HTTP status the caller
  *  should receive on deny (401 = unauthenticated / unverifiable, 403 = verified
  *  but not bound to this session). `ok` true → allow the request. */
@@ -32,6 +40,8 @@ export interface AuthDecision {
   ok: boolean;
   status: number;
   reason?: string;
+  /** The token's owner, when introspection supplied one (allow only). */
+  principal?: Principal;
 }
 
 /** The auth seam the HTTP server threads through its data-plane routes. */
@@ -46,6 +56,8 @@ export interface Introspector {
 interface IntrospectPayload {
   active?: unknown;
   sessionId?: unknown;
+  orgId?: unknown;
+  userId?: unknown;
 }
 
 /** Unwrap the envelope: the payload may be at the top level OR under `data`. */
@@ -131,7 +143,13 @@ class HttpIntrospector implements Introspector {
     const active = payload.active === true;
     const matches = payload.sessionId === this.cfg.sessionId;
     if (active && matches) {
-      const decision: AuthDecision = { ok: true, status: 200 };
+      const orgId = typeof payload.orgId === "string" ? payload.orgId : "";
+      const userId = typeof payload.userId === "string" ? payload.userId : "";
+      const decision: AuthDecision = {
+        ok: true,
+        status: 200,
+        ...(orgId && userId ? { principal: { orgId, userId } } : {}),
+      };
       this.cache.set(bearer, { decision, expiresAt: this.cfg.now() + this.cfg.cacheTtlMs });
       return decision;
     }
