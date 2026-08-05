@@ -438,12 +438,13 @@ export class ThreadRecorder {
 
   constructor(
     store: Promise<ThreadStore | null>,
-    private readonly cfg: Pick<HarnessRunConfig, "runId" | "sessionId" | "prompt" | "mode">,
+    private readonly cfg: Pick<HarnessRunConfig, "runId" | "sessionId" | "threadId" | "prompt" | "mode">,
     private readonly principal: Principal | undefined,
   ) {
-    // Client-generated session ids (`c<ts36>`) ARE the thread ids; a blank
-    // session still gets a thread keyed by the run.
-    this.threadId = cfg.sessionId || cfg.runId;
+    // The CLIENT's thread id wins (clients mint `c<ts36>` chat ids while auth
+    // binds the token to the provisioned `sess_*` sessionId); without one the
+    // session id is the thread id, and a blank session keys by the run.
+    this.threadId = cfg.threadId || cfg.sessionId || cfg.runId;
     this.logger = log.child({ run_id: cfg.runId, thread: this.threadId });
     this.q = store.then((s) => {
       this.store = s;

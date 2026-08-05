@@ -11,6 +11,10 @@
  *   GET  /healthz              liveness (open)
  *   GET  /version              build identity + frame wire version (open)
  *   POST /run                  start a harness session run → { runId }
+ *                              (body `threadId` scopes the recorded transcript
+ *                              to the CLIENT's thread id — `c<ts36>` — while
+ *                              auth keeps binding `sessionId` to the token;
+ *                              absent → the transcript keys by sessionId)
  *   GET  /runs/:id             run status (+ pending ask/approval ids)
  *   GET  /runs/:id/frames      replay the frame tape (?from=<seq>, exclusive)
  *   POST /runs/:id/answer      resolve a paused ask/approval frame

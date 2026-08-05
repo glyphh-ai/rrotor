@@ -60,6 +60,11 @@ export interface ChatTurn {
 export interface HarnessRunConfig {
   runId: string;
   sessionId: string;
+  /** The CLIENT's thread id for transcript persistence (clients mint `c<ts36>`
+   *  chat ids; the provisioned session is `sess_*`). Absent → the recorder
+   *  falls back to sessionId. Auth is untouched by it: the runtime token
+   *  stays bound to `sessionId`. */
+  threadId?: string;
   prompt: string;
   history: ChatTurn[];
   system?: string;
@@ -91,6 +96,7 @@ export function harnessHome(env: NodeJS.ProcessEnv = process.env): string {
 export interface RunRequestBody {
   prompt?: unknown;
   sessionId?: unknown;
+  threadId?: unknown;
   history?: unknown;
   system?: unknown;
   model?: unknown;
@@ -104,6 +110,9 @@ export interface RunRequestBody {
 
 /** A validation failure the HTTP layer maps to 400. */
 export class BadRunRequest extends Error {}
+
+/** What a client-minted thread id may look like (`c<ts36>` and friends). */
+const THREAD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
  * Merge env + body into a run config. Body overrides env for gateway/model/
@@ -125,6 +134,14 @@ export function resolveRunConfig(
   if (!runtimeToken) throw new BadRunRequest("no runtime token: set GLYPHH_RUNTIME_TOKEN or pass `runtimeToken`");
 
   const sessionId = str(body.sessionId) ?? env.ROTOR_SESSION_ID ?? "";
+  // The client's thread id, when it differs from the provisioned session id
+  // (auth binds the token to sessionId; the transcript belongs to threadId).
+  let threadId: string | undefined;
+  if (body.threadId !== undefined) {
+    const t = typeof body.threadId === "string" ? body.threadId.trim() : "";
+    if (!THREAD_ID_RE.test(t)) throw new BadRunRequest("`threadId` must match ^[A-Za-z0-9_-]{1,64}$");
+    threadId = t;
+  }
   const modeRaw = str(body.mode) ?? "code";
   const permissionRaw = str(body.permission) ?? env.HARNESS_PERMISSION_MODE ?? "auto";
   const home = harnessHome(env);
@@ -138,6 +155,7 @@ export function resolveRunConfig(
   return {
     runId,
     sessionId,
+    ...(threadId ? { threadId } : {}),
     prompt,
     history: parseHistory(body.history),
     ...(str(body.system) ? { system: str(body.system) } : {}),

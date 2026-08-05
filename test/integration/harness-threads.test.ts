@@ -299,3 +299,60 @@ describe("POST /run — runtime token from the Authorization bearer", () => {
     expect(((await bare.json()) as { detail: string }).detail).toMatch(/runtime token/);
   });
 });
+
+describe("POST /run — the client's threadId", () => {
+  it("records the transcript under `threadId` while sessionId stays the token's session", async () => {
+    const store = await ThreadStore.create({ client: await pglite() });
+    const base = await boot(toolingQuery, store);
+    const res = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: as("alice"),
+      body: JSON.stringify({ prompt: "read a.ts", sessionId: "sess_prov1", threadId: "csmoke5", mode: "code" }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { sessionId: string }).sessionId).toBe("sess_prov1");
+
+    // The transcript lives under the CLIENT's id, not the provisioned session's.
+    const t = await untilMessages(base, "csmoke5", 3);
+    expect(t.messages[0]).toMatchObject({ role: "user", text: "read a.ts" });
+    const list = (await (await fetch(`${base}/threads`, { headers: as("alice") })).json()) as { threads: Array<{ id: string }> };
+    expect(list.threads.map((x) => x.id)).toEqual(["csmoke5"]);
+    expect((await fetch(`${base}/threads/sess_prov1`, { headers: as("alice") })).status).toBe(404);
+  });
+
+  it("400s an invalid threadId", async () => {
+    const base = await boot(toolingQuery, null);
+    for (const threadId of ["bad id!", "a".repeat(65), ""]) {
+      const res = await fetch(`${base}/run`, { method: "POST", headers: as("alice"), body: JSON.stringify({ prompt: "x", threadId }) });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { detail: string }).detail).toMatch(/threadId/);
+    }
+  });
+
+  it("threadId does not loosen auth — a token bound to another session still 401s", async () => {
+    // The real gate binds the bearer to the pod's provisioned session; a
+    // mismatched token is denied no matter what threadId rides the body.
+    const sessionBound: Introspector = {
+      enabled: true,
+      authorize: (bearer) =>
+        bearer === "sess-token"
+          ? Promise.resolve({ ok: true, status: 200, principal: ALICE })
+          : Promise.resolve({ ok: false, status: 401, reason: "session mismatch" }),
+    };
+    const store = await ThreadStore.create({ client: await pglite() });
+    const base = await boot(toolingQuery, store, sessionBound);
+    const denied = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: { authorization: "Bearer other-session" },
+      body: JSON.stringify({ prompt: "x", threadId: "csmoke5" }),
+    });
+    expect(denied.status).toBe(401);
+    expect(((await denied.json()) as { detail: string }).detail).toMatch(/session mismatch/);
+    const admitted = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: { authorization: "Bearer sess-token" },
+      body: JSON.stringify({ prompt: "x", threadId: "csmoke5" }),
+    });
+    expect(admitted.status).toBe(200);
+  });
+});
