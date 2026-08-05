@@ -25,6 +25,8 @@
  *   DELETE /threads/:id        tombstone (hidden from list; reads 404)
  *   GET  /ws (upgrade)         the live frame stream: send
  *                              {type:"attach",run_id,from?} → replay + live
+ *                              (bearer via Authorization header, or `?token=`
+ *                              for browser clients that cannot set WS headers)
  *
  * Threads persist to the STATOR (harness/threads.ts) when the pgvector stator
  * is configured (ROTOR_STATOR_BACKEND=pgvector + ROTOR_STATOR_URL — the same
@@ -415,7 +417,7 @@ function attachHarnessWs(server: http.Server, reg: RunRegistry, auth: Introspect
       serveSocket(socket, reg);
     };
     if (auth.enabled) {
-      const bearer = bearerFromHeader(req.headers.authorization);
+      const bearer = bearerFromUpgrade(req);
       void auth
         .authorize(bearer)
         .then((decision) => {
@@ -430,6 +432,18 @@ function attachHarnessWs(server: http.Server, reg: RunRegistry, auth: Introspect
     }
     complete();
   });
+}
+
+/** The upgrade's bearer: the Authorization header wins; browsers cannot set
+ *  WS headers, so `?token=` is accepted as a fallback (the control plane's
+ *  panel WS pattern — server attach/ws.ts `bearerFrom`). The same
+ *  introspection gate judges it either way, and the token is never logged. */
+function bearerFromUpgrade(req: http.IncomingMessage): string | undefined {
+  const header = bearerFromHeader(req.headers.authorization);
+  if (header) return header;
+  const query = (req.url ?? "").split("?", 2)[1] ?? "";
+  const token = new URLSearchParams(query).get("token")?.trim();
+  return token || undefined;
 }
 
 function rejectUpgrade(socket: Duplex, status: number, reason?: string): void {

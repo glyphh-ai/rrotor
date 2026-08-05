@@ -274,4 +274,46 @@ describe("harness pod — auth (introspection)", () => {
     const res = await fetch(`${base}/run`, { method: "POST", headers: { authorization: "Bearer tok" }, body: JSON.stringify({ prompt: "x" }) });
     expect(res.status).toBe(200);
   });
+
+  it("WS upgrade accepts the bearer as ?token= (browsers cannot set WS headers); bad or absent still rejects", async () => {
+    const requireTok: Introspector = {
+      enabled: true,
+      authorize: (bearer) =>
+        Promise.resolve(bearer === "tok" ? { ok: true, status: 200 } : { ok: false, status: 401, reason: "bad token" }),
+    };
+    const base = await boot(happyQuery, { auth: requireTok });
+    // A run to stream (header auth on the HTTP side, unchanged).
+    const { runId } = (await (
+      await fetch(`${base}/run`, { method: "POST", headers: { authorization: "Bearer tok" }, body: JSON.stringify({ prompt: "x" }) })
+    ).json()) as { runId: string };
+
+    // The query-token socket admits, then replay-from--1 + live carry it to
+    // done regardless of how far the run has already streamed.
+    const msgs: Record<string, unknown>[] = [];
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(`${base.replace("http", "ws")}/ws?token=tok`);
+      ws.on("message", (data) => {
+        const m = JSON.parse(data.toString()) as Record<string, unknown>;
+        msgs.push(m);
+        if (m.type === "ready") ws.send(JSON.stringify({ type: "attach", run_id: runId, from: -1 }));
+        if (m.type === "done") {
+          ws.close();
+          resolve();
+        }
+      });
+      ws.on("error", reject);
+    });
+    expect(msgs[0]).toMatchObject({ type: "ready", wire: "glyphh.harness/v1" });
+    expect(msgs.some((m) => m.type === "delta")).toBe(true);
+
+    // A wrong query token — and no token at all — still reject pre-open.
+    for (const suffix of ["/ws?token=wrong", "/ws"]) {
+      await expect(
+        new Promise((_, reject) => {
+          const ws = new WebSocket(`${base.replace("http", "ws")}${suffix}`);
+          ws.on("error", reject);
+        }),
+      ).rejects.toThrow(/401/);
+    }
+  });
 });
