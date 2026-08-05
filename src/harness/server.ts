@@ -15,8 +15,17 @@
  *   GET  /runs/:id/frames      replay the frame tape (?from=<seq>, exclusive)
  *   POST /runs/:id/answer      resolve a paused ask/approval frame
  *   POST /runs/:id/stop        abort the run (emits done{stopped:true})
+ *   GET  /threads              thread list, newest first (metadata only)
+ *   GET  /threads/:id          full transcript (latest 500 messages)
+ *   PUT  /threads/:id          client LWW push (applies only when newer)
+ *   DELETE /threads/:id        tombstone (hidden from list; reads 404)
  *   GET  /ws (upgrade)         the live frame stream: send
  *                              {type:"attach",run_id,from?} → replay + live
+ *
+ * Threads persist to the STATOR (harness/threads.ts) when the pgvector stator
+ * is configured (ROTOR_STATOR_BACKEND=pgvector + ROTOR_STATOR_URL — the same
+ * scoped DSN the memory side uses); without it the /threads routes answer 503
+ * and runs are unrecorded.
  *
  * Auth: the same OPTIONAL introspection gate as the rotor data plane
  * (ROTOR_AUTH_INTROSPECT_URL + service token + session binding; fail closed
@@ -44,6 +53,8 @@ import type { RunRequestBody } from "./config.js";
 import { HarnessSession, mintRunId } from "./session.js";
 import { runHarness } from "./engine.js";
 import type { EngineDeps } from "./engine.js";
+import { ThreadRecorder, threadStoreFromEnv, parseThreadMsgs, parseMode } from "./threads.js";
+import type { ThreadStore, ThreadPut } from "./threads.js";
 
 const DEFAULT_PORT = 8080;
 const FINISHED_KEEP = 8;
@@ -55,6 +66,9 @@ export interface HarnessServerOptions {
   env?: NodeJS.ProcessEnv;
   /** Concurrent-run cap; defaults from HARNESS_MAX_RUNS (min 1). */
   maxRuns?: number;
+  /** Inject a thread store (tests) — pass null to force persistence off.
+   *  Omitted → built from the stator env (threadStoreFromEnv). */
+  threads?: ThreadStore | null;
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -122,7 +136,7 @@ class RunRegistry {
   }
 }
 
-function handle(reg: RunRegistry, opts: HarnessServerOptions, req: http.IncomingMessage, res: http.ServerResponse, auth: Introspector): void {
+function handle(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<ThreadStore | null>, req: http.IncomingMessage, res: http.ServerResponse, auth: Introspector): void {
   const method = req.method ?? "GET";
   const path = (req.url ?? "/").split("?", 1)[0];
 
@@ -147,7 +161,7 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, req: http.Incoming
           sendJson(res, decision.status, { error: "unauthorized", detail: decision.reason });
           return;
         }
-        dispatch(reg, opts, req, res, method, path);
+        dispatch(reg, opts, threads, req, res, method, path);
       })
       .catch((err: unknown) => {
         log.error("auth check error", { detail: (err as Error).message });
@@ -155,10 +169,26 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, req: http.Incoming
       });
     return;
   }
-  dispatch(reg, opts, req, res, method, path);
+  dispatch(reg, opts, threads, req, res, method, path);
 }
 
-function dispatch(reg: RunRegistry, opts: HarnessServerOptions, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
+/** Run a thread route against the store — 503 when persistence is off. */
+function withThreads(threads: Promise<ThreadStore | null>, res: http.ServerResponse, fn: (s: ThreadStore) => Promise<void>): void {
+  void threads
+    .then((s) => {
+      if (!s) {
+        sendJson(res, 503, { error: "no-thread-store", detail: "thread persistence needs the pgvector stator (ROTOR_STATOR_BACKEND=pgvector + ROTOR_STATOR_URL)" });
+        return;
+      }
+      return fn(s);
+    })
+    .catch((err: unknown) => {
+      log.error("thread route failed", { detail: (err as Error).message });
+      sendJson(res, 500, { error: "thread-store-error" });
+    });
+}
+
+function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<ThreadStore | null>, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
   if (method === "POST" && path === "/run") {
     readBody(req)
       .then((raw) => {
@@ -185,6 +215,9 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, req: http.Incomi
           sendJson(res, 409, { error: "at-capacity", detail: "this pod is serving its maximum concurrent runs" });
           return;
         }
+        // Record the run into its thread BEFORE the engine emits: the user
+        // turn persists at start, frames stream into messages (threads.ts).
+        new ThreadRecorder(threads, cfg).attach(session);
         // Fire the run; frames stream via /ws + /runs/:id/frames. Never throws.
         void runHarness(session, cfg, opts.engine ?? {});
         log.info("run accepted", { run_id: runId, session: cfg.sessionId || undefined, mode: cfg.mode });
@@ -245,6 +278,63 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, req: http.Incomi
     if (method === "POST" && sub === "stop") {
       session.stop();
       sendJson(res, 200, { ok: true, status: session.status });
+      return;
+    }
+  }
+
+  if (method === "GET" && path === "/threads") {
+    withThreads(threads, res, async (s) => sendJson(res, 200, { threads: await s.list() }));
+    return;
+  }
+  const threadMatch = /^\/threads\/([^/]+)$/.exec(path);
+  if (threadMatch) {
+    const threadId = decodeURIComponent(threadMatch[1]);
+    if (method === "GET") {
+      withThreads(threads, res, async (s) => {
+        const thread = await s.get(threadId);
+        if (!thread) sendJson(res, 404, { error: "no-such-thread", detail: `no thread ${threadId}` });
+        else sendJson(res, 200, thread);
+      });
+      return;
+    }
+    if (method === "PUT") {
+      readBody(req)
+        .then((raw) => {
+          let body: { title?: unknown; mode?: unknown; source?: unknown; messages?: unknown; updatedAt?: unknown };
+          try {
+            body = raw.length ? JSON.parse(raw) : {};
+          } catch {
+            sendJson(res, 400, { error: "invalid-json", detail: "thread body must be JSON" });
+            return;
+          }
+          if (typeof body.updatedAt !== "number" || !Number.isFinite(body.updatedAt)) {
+            sendJson(res, 400, { error: "bad-thread", detail: "`updatedAt` (epoch ms) is required — it is the LWW stamp" });
+            return;
+          }
+          const mode = parseMode(body.mode);
+          const messages = parseThreadMsgs(body.messages);
+          const patch: ThreadPut = {
+            ...(typeof body.title === "string" ? { title: body.title } : {}),
+            ...(mode ? { mode } : {}),
+            ...(body.source !== undefined ? { source: body.source } : {}),
+            ...(messages ? { messages } : {}),
+            updatedAt: body.updatedAt,
+          };
+          withThreads(threads, res, async (s) => {
+            const r = await s.put(threadId, patch);
+            if (r.applied) sendJson(res, 200, { ok: true, updatedAt: r.updatedAt });
+            else sendJson(res, 409, { error: "stale", detail: "a newer write holds this thread", updatedAt: r.updatedAt });
+          });
+        })
+        .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
+      return;
+    }
+    if (method === "DELETE") {
+      withThreads(threads, res, async (s) => {
+        const ok = await s.tombstone(threadId, Date.now());
+        if (ok) sendJson(res, 200, { ok: true });
+        else sendJson(res, 404, { error: "no-such-thread", detail: `no thread ${threadId}` });
+      });
       return;
     }
   }
@@ -391,9 +481,15 @@ export function startHarnessServer(port: number = DEFAULT_PORT, opts: HarnessSer
   const maxRuns = Math.max(1, opts.maxRuns ?? (Number(env.HARNESS_MAX_RUNS ?? 1) || 1));
   const auth = opts.auth ?? introspectorFromEnv(env);
   const reg = new RunRegistry(maxRuns);
-  const server = http.createServer((req, res) => handle(reg, opts, req, res, auth));
+  const threads = opts.threads !== undefined ? Promise.resolve(opts.threads) : threadStoreFromEnv(env);
+  const server = http.createServer((req, res) => handle(reg, opts, threads, req, res, auth));
   attachHarnessWs(server, reg, auth);
   (server as http.Server & { __registry?: RunRegistry }).__registry = reg;
+  server.on("close", () => {
+    // Release the stator connection with the pod (injected stores stay the
+    // injector's to close — ThreadStore only ends connections it opened).
+    void threads.then((s) => s?.close()).catch(() => {});
+  });
   server.listen(port, () => {
     log.info("harness pod listening", { port, version: VERSION, wire: HARNESS_WIRE_VERSION, max_runs: maxRuns });
   });
