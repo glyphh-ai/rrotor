@@ -13,11 +13,14 @@
  *    ride a personal Anthropic subscription instead of the org's metered path.
  *
  * 2. GATEWAY-ONLY MODEL ROUTING. `ANTHROPIC_BASE_URL` points at the Glyphh
- *    control-plane gateway and nowhere else; `ANTHROPIC_API_KEY` carries the
- *    SESSION'S RUNTIME TOKEN (the gateway resolves the real provider key
- *    server-side — no provider credential ever exists in the pod); and
- *    `ANTHROPIC_CUSTOM_HEADERS` tags every model call `x-glyphh-run: <runId>`
- *    so metering attributes usage to this run.
+ *    control-plane gateway and nowhere else; `ANTHROPIC_AUTH_TOKEN` carries
+ *    the SESSION'S RUNTIME TOKEN — the Anthropic client sends AUTH_TOKEN as
+ *    `Authorization: Bearer`, which is the ONLY credential channel the
+ *    gateway's bearer() middleware reads (API_KEY would ride the `x-api-key`
+ *    header and 401 "missing bearer token"). The gateway resolves the real
+ *    provider key server-side — no provider credential ever exists in the
+ *    pod. `ANTHROPIC_CUSTOM_HEADERS` tags every model call
+ *    `x-glyphh-run: <runId>` so metering attributes usage to this run.
  *
  * Secrets (the runtime token) are never logged — `redactSecrets` scrubs any
  * diagnostic string that could embed one.
@@ -224,9 +227,12 @@ function parseAttachments(raw: unknown): AttachmentRef[] {
  *
  *   ANTHROPIC_BASE_URL        → the Glyphh gateway (the ONLY model egress)
  *   ANTHROPIC_CUSTOM_HEADERS  → `x-glyphh-run: <runId>` (metering attribution)
- *   ANTHROPIC_API_KEY         → the session's runtime token (gateway auth;
- *                               the real provider key never reaches the pod)
- *   ANTHROPIC_AUTH_TOKEN      → cleared (must not shadow the key)
+ *   ANTHROPIC_AUTH_TOKEN      → the session's runtime token, sent as
+ *                               `Authorization: Bearer` — the only header the
+ *                               gateway reads (the real provider key never
+ *                               reaches the pod)
+ *   ANTHROPIC_API_KEY         → cleared (it would ride `x-api-key`, which the
+ *                               gateway ignores — must not shadow the bearer)
  *   CLAUDE_CONFIG_DIR         → the run's isolated config home (see module doc)
  *   CLAUDE_CODE_USE_BEDROCK/VERTEX → cleared (gateway only, no cloud bypass)
  *   telemetry/nonessential traffic → off
@@ -248,8 +254,8 @@ export function buildAgentEnv(
     ...env,
     ANTHROPIC_BASE_URL: cfg.gatewayUrl,
     ANTHROPIC_CUSTOM_HEADERS: `x-glyphh-run: ${cfg.runId}`,
-    ANTHROPIC_API_KEY: cfg.runtimeToken,
-    ANTHROPIC_AUTH_TOKEN: undefined,
+    ANTHROPIC_AUTH_TOKEN: cfg.runtimeToken,
+    ANTHROPIC_API_KEY: undefined,
     CLAUDE_CONFIG_DIR: cfg.configDir,
     CLAUDE_CODE_USE_BEDROCK: undefined,
     CLAUDE_CODE_USE_VERTEX: undefined,

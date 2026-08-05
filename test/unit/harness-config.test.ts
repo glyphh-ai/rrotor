@@ -101,8 +101,10 @@ describe("buildAgentEnv — the isolation + routing invariants", () => {
     const env = buildAgentEnv(cfg, {});
     expect(env.ANTHROPIC_BASE_URL).toBe("https://gw.glyphh.test/v1");
     expect(env.ANTHROPIC_CUSTOM_HEADERS).toBe("x-glyphh-run: run-77");
-    expect(env.ANTHROPIC_API_KEY).toBe("gy_rt_secret_token_123");
-    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    // AUTH_TOKEN rides Authorization: Bearer — the only header the gateway
+    // reads; API_KEY (x-api-key) is cleared so it can never shadow it.
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("gy_rt_secret_token_123");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
     expect(env.CLAUDE_CODE_USE_VERTEX).toBeUndefined();
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
@@ -127,7 +129,8 @@ describe("buildAgentEnv — the isolation + routing invariants", () => {
     });
     expect(env.PATH).toBe("/usr/bin");
     expect(env.ANTHROPIC_BASE_URL).toBe("https://gw.glyphh.test/v1");
-    expect(env.ANTHROPIC_API_KEY).toBe("gy_rt_secret_token_123");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("gy_rt_secret_token_123");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined(); // the ambient sk-personal is gone
     expect(env.CLAUDE_CONFIG_DIR).toBe(cfg.configDir);
     expect(env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
   });
