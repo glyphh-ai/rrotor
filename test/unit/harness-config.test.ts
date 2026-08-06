@@ -17,6 +17,7 @@ import {
   brandError,
   sanitizeSegment,
   harnessHome,
+  parseMcpServers,
   BadRunRequest,
 } from "../../src/harness/config.js";
 
@@ -86,6 +87,47 @@ describe("resolveRunConfig", () => {
     expect(cfg.workdir).not.toContain("..");
     expect(sanitizeSegment("../../x")).not.toContain("/");
     expect(sanitizeSegment("")).toBe("_");
+  });
+});
+
+describe("parseMcpServers — the caller-lent tool surface", () => {
+  it("accepts https anywhere and http on loopback only; headers keep string values", () => {
+    const refs = parseMcpServers([
+      { name: "desktop", url: "http://127.0.0.1:4820/mcp", headers: { authorization: "Bearer x", junk: 42 } },
+      { name: "org-tools", url: "https://tools.glyphh.app/mcp" },
+      { name: "local2", url: "http://localhost:9000/mcp" },
+    ]);
+    expect(refs.map((r) => r.name)).toEqual(["desktop", "org-tools", "local2"]);
+    expect(refs[0].headers).toEqual({ authorization: "Bearer x" }); // non-string dropped
+    expect(refs[1].headers).toBeUndefined();
+    expect(parseMcpServers(undefined)).toEqual([]);
+  });
+
+  it("rejects bad names — wrong charset, oversize, and the reserved `glyphh`", () => {
+    for (const name of ["Desk Top", "UPPER", "x".repeat(33), "", "glyphh"]) {
+      expect(() => parseMcpServers([{ name, url: "https://ok.example/mcp" }])).toThrow(BadRunRequest);
+    }
+  });
+
+  it("rejects bad urls — unparseable, non-http schemes, and plaintext off-loopback", () => {
+    for (const url of ["not a url", "ftp://x.example", "http://pod.internal:8080/mcp", "http://10.0.0.5/mcp"]) {
+      expect(() => parseMcpServers([{ name: "d", url }])).toThrow(BadRunRequest);
+    }
+  });
+
+  it("caps at 4 servers", () => {
+    const many = Array.from({ length: 5 }, (_, i) => ({ name: `s${i}`, url: "https://ok.example/mcp" }));
+    expect(() => parseMcpServers(many)).toThrow(/at most 4/);
+  });
+
+  it("rides resolveRunConfig into the run config (absent → omitted)", () => {
+    const cfg = resolveRunConfig(
+      "run-m",
+      { prompt: "x", mcpServers: [{ name: "desktop", url: "http://127.0.0.1:4820/mcp" }] },
+      ENV,
+    );
+    expect(cfg.mcpServers).toEqual([{ name: "desktop", url: "http://127.0.0.1:4820/mcp" }]);
+    expect(resolveRunConfig("run-m2", { prompt: "x" }, ENV).mcpServers).toBeUndefined();
   });
 });
 

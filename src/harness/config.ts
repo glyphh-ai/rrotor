@@ -58,6 +58,17 @@ export interface ChatTurn {
   content: string;
 }
 
+/** One caller-lent HTTP MCP server (streamable-http). This is how the DESKTOP
+ *  lends a LOCAL pod its full tool surface — its loopback MCP server exposes
+ *  connectors, update_app, and machine tools while the loop runs in the pod.
+ *  Plaintext http is loopback-only ({@link parseMcpServers}); a cloud pod is
+ *  never pointed at an arbitrary plaintext url. */
+export interface McpServerRef {
+  name: string;
+  url: string;
+  headers?: Record<string, string>;
+}
+
 /** Everything one harness run needs. Built by {@link resolveRunConfig} from
  *  env + request body (body wins where both speak). */
 export interface HarnessRunConfig {
@@ -68,6 +79,9 @@ export interface HarnessRunConfig {
    *  falls back to sessionId. Auth is untouched by it: the runtime token
    *  stays bound to `sessionId`. */
   threadId?: string;
+  /** Caller-lent HTTP MCP servers, wired into the SDK loop alongside the
+   *  sandbox toolset + ask_user (cowork/code only; chat stays tool-less). */
+  mcpServers?: McpServerRef[];
   prompt: string;
   history: ChatTurn[];
   system?: string;
@@ -100,6 +114,7 @@ export interface RunRequestBody {
   prompt?: unknown;
   sessionId?: unknown;
   threadId?: unknown;
+  mcpServers?: unknown;
   history?: unknown;
   system?: unknown;
   model?: unknown;
@@ -116,6 +131,50 @@ export class BadRunRequest extends Error {}
 
 /** What a client-minted thread id may look like (`c<ts36>` and friends). */
 const THREAD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+const MCP_NAME_RE = /^[a-z0-9_-]{1,32}$/;
+const MCP_SERVER_CAP = 4;
+
+/**
+ * Validate the caller-lent MCP servers (max {@link MCP_SERVER_CAP}). Names are
+ * short slugs (and never `glyphh` — that name is the pod's own ask_user
+ * server); urls must parse as http(s), and plaintext http is allowed ONLY for
+ * loopback hosts (127.0.0.1 / localhost) — the desktop's loopback MCP is the
+ * whole point, but a cloud pod must never be pointed at an arbitrary
+ * plaintext url. Throws {@link BadRunRequest} on any violation.
+ */
+export function parseMcpServers(raw: unknown): McpServerRef[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new BadRunRequest("`mcpServers` must be an array");
+  if (raw.length > MCP_SERVER_CAP) throw new BadRunRequest(`\`mcpServers\` allows at most ${MCP_SERVER_CAP} servers`);
+  const refs: McpServerRef[] = [];
+  for (const s of raw) {
+    const name = (s as { name?: unknown })?.name;
+    const url = (s as { url?: unknown })?.url;
+    if (typeof name !== "string" || !MCP_NAME_RE.test(name) || name === "glyphh") {
+      throw new BadRunRequest("`mcpServers[].name` must match ^[a-z0-9_-]{1,32}$ (and not be `glyphh`)");
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(String((url as string) ?? ""));
+    } catch {
+      throw new BadRunRequest("`mcpServers[].url` must be a valid http(s) URL");
+    }
+    const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
+      throw new BadRunRequest("`mcpServers[].url` must be https, or http on a loopback host (127.0.0.1/localhost)");
+    }
+    const headersRaw = (s as { headers?: unknown })?.headers;
+    const headers: Record<string, string> = {};
+    if (headersRaw && typeof headersRaw === "object") {
+      for (const [k, v] of Object.entries(headersRaw as Record<string, unknown>)) {
+        if (typeof v === "string") headers[k] = v;
+      }
+    }
+    refs.push({ name, url: parsed.toString(), ...(Object.keys(headers).length ? { headers } : {}) });
+  }
+  return refs;
+}
 
 /**
  * Merge env + body into a run config. Body overrides env for gateway/model/
@@ -155,10 +214,13 @@ export function resolveRunConfig(
   const workdir = join(home, "sessions", sanitizeSegment(scope), "workspace");
   const configDir = join(home, "sessions", sanitizeSegment(scope), "agent-config");
 
+  const mcpServers = parseMcpServers(body.mcpServers);
+
   return {
     runId,
     sessionId,
     ...(threadId ? { threadId } : {}),
+    ...(mcpServers.length ? { mcpServers } : {}),
     prompt,
     history: parseHistory(body.history),
     ...(str(body.system) ? { system: str(body.system) } : {}),

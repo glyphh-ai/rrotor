@@ -223,6 +223,21 @@ describe("buildQueryArgs — the SDK wiring", () => {
     expect(buildQueryArgs(cfg({ maxTurns: 12 }), new HarnessSession({}), []).options.maxTurns).toBe(12);
     expect(buildQueryArgs(cfg(), new HarnessSession({}), []).options.maxTurns).toBeUndefined();
   });
+
+  it("caller-lent mcpServers become HTTP MCP servers, allowed wholesale as mcp__<name>", () => {
+    const lent = [
+      { name: "desktop", url: "http://127.0.0.1:4820/mcp", headers: { authorization: "Bearer x" } },
+      { name: "org-tools", url: "https://tools.glyphh.app/mcp" },
+    ];
+    const { options } = buildQueryArgs(cfg({ mcpServers: lent }), new HarnessSession({}), []);
+    const servers = options.mcpServers as Record<string, { type: string; url?: string; headers?: Record<string, string> }>;
+    expect(servers.glyphh).toMatchObject({ type: "sdk" }); // ask_user survives alongside
+    expect(servers.desktop).toEqual({ type: "http", url: "http://127.0.0.1:4820/mcp", headers: { authorization: "Bearer x" } });
+    expect(servers["org-tools"]).toEqual({ type: "http", url: "https://tools.glyphh.app/mcp" });
+    expect(options.allowedTools).toEqual([...SANDBOX_TOOLS, "mcp__glyphh__ask_user", "mcp__desktop", "mcp__org-tools"]);
+    // chat stays tool-less even with servers lent.
+    expect(buildQueryArgs(cfg({ mode: "chat", mcpServers: lent }), new HarnessSession({}), []).options.mcpServers).toBeUndefined();
+  });
 });
 
 describe("assemblePrompt", () => {

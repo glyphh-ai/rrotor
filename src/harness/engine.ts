@@ -16,12 +16,16 @@
  *   result                       → authoritative usage → `progress`; then
  *                                  `done` or `error`
  *
- * Tool surface v1 — CLOUD-SAFE ONLY: the SDK's own sandbox toolset (Bash/
- * Read/Write/Edit/Glob/Grep/…) anchored at the per-session workspace, plus
- * ONE in-process MCP tool, `ask_user`, which drives the Ask flow (an `ask`
- * frame parks the run; POST /runs/:id/answer resumes it). No connector
- * tools, no desktop reach, no native dialogs. `query` is injectable so the
- * translation/pause seams unit-test with the SDK faked.
+ * Tool surface v1 — CLOUD-SAFE by default: the SDK's own sandbox toolset
+ * (Bash/Read/Write/Edit/Glob/Grep/…) anchored at the per-session workspace,
+ * plus ONE in-process MCP tool, `ask_user`, which drives the Ask flow (an
+ * `ask` frame parks the run; POST /runs/:id/answer resumes it). No connector
+ * tools, no desktop reach, no native dialogs — UNLESS the caller lends them:
+ * body `mcpServers` (validated in config.parseMcpServers, loopback-or-https)
+ * are wired in as streamable-HTTP MCP servers, which is how the desktop's
+ * loopback MCP hands a LOCAL pod its connectors/update_app/machine tools.
+ * `query` is injectable so the translation/pause seams unit-test with the
+ * SDK faked.
  */
 
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -158,6 +162,7 @@ export function buildQueryArgs(
 ): { prompt: string; options: Record<string, unknown> } {
   const chat = cfg.mode === "chat";
   const mcp = chat ? null : buildAskServer(session);
+  const lent = cfg.mcpServers ?? [];
   return {
     prompt: assemblePrompt(cfg.history, cfg.prompt, attachments),
     options: {
@@ -165,13 +170,20 @@ export function buildQueryArgs(
       ...(cfg.model ? { model: cfg.model } : {}),
       systemPrompt: cfg.system ?? DEFAULT_SYSTEM,
       settingSources: [],
-      // chat = a tool-less streamed turn; cowork/code = the sandbox toolset.
+      // chat = a tool-less streamed turn; cowork/code = the sandbox toolset
+      // plus any caller-lent HTTP MCP servers (streamable-http — the desktop's
+      // loopback tool surface), each allowed wholesale as `mcp__<name>`.
       ...(chat
         ? { tools: [] as string[] }
         : {
             tools: { type: "preset", preset: "claude_code" },
-            mcpServers: { glyphh: { type: "sdk", name: "glyphh", instance: mcp as never } },
-            allowedTools: [...SANDBOX_TOOLS, "mcp__glyphh__ask_user"],
+            mcpServers: {
+              glyphh: { type: "sdk", name: "glyphh", instance: mcp as never },
+              ...Object.fromEntries(
+                lent.map((s) => [s.name, { type: "http", url: s.url, ...(s.headers ? { headers: s.headers } : {}) }]),
+              ),
+            },
+            allowedTools: [...SANDBOX_TOOLS, "mcp__glyphh__ask_user", ...lent.map((s) => `mcp__${s.name}`)],
           }),
       // The gate: mode model + approval frames (gate.ts). The SDK's own
       // prompt layer always defers to it.
