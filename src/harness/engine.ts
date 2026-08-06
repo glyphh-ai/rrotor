@@ -41,6 +41,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 
 import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
+import { appsServerRef, withPublishPolicy } from "./glyphh-apps.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
 import type { MaterializedAttachment } from "./sandbox.js";
@@ -251,13 +252,21 @@ export function buildQueryArgs(
 ): { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> } {
   const chat = cfg.mode === "chat";
   const mcp = chat ? null : buildAskServer(session);
-  const lent = cfg.mcpServers ?? [];
+  // The control plane's app tools, derived from the run's OWN gateway config.
+  // This is what lets a CLOUD pod publish an app at all, and what makes a
+  // desktop-local pod publish it in exactly the same way. A caller that already
+  // lent a server under this name wins — an explicit lend is never overridden.
+  const apps = chat ? null : appsServerRef(cfg);
+  const caller = cfg.mcpServers ?? [];
+  const lent = apps && !caller.some((s) => s.name === apps.name) ? [...caller, apps] : caller;
+  // The publish policy rides WITH the tools: no app tools, no policy.
+  const system = cfg.system ?? DEFAULT_SYSTEM;
   return {
     prompt: buildPrompt(assemblePrompt(cfg.history, cfg.prompt, attachments), cfg.images ?? []),
     options: {
       cwd: cfg.workdir,
       ...(cfg.model ? { model: cfg.model } : {}),
-      systemPrompt: cfg.system ?? DEFAULT_SYSTEM,
+      systemPrompt: apps ? withPublishPolicy(system) : system,
       settingSources: [],
       // chat = a tool-less streamed turn; cowork/code = the sandbox toolset
       // plus any caller-lent HTTP MCP servers (streamable-http — the desktop's

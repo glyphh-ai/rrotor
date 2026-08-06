@@ -102,6 +102,10 @@ export interface HarnessRunConfig {
   permission: PermissionMode;
   /** The Glyphh gateway's Anthropic-compatible base URL. REQUIRED. */
   gatewayUrl: string;
+  /** The control plane's origin, for the app tool surface the pod lends itself
+   *  (see glyphh-apps.ts). Optional: it is derived from {@link gatewayUrl} when
+   *  absent, which is the case for every caller today. */
+  controlUrl?: string;
   /** The session's runtime token — the pod's ONLY credential. REQUIRED. */
   runtimeToken: string;
   /** The run's cwd. Normally the per-session sandbox dir INSIDE the pod; on a
@@ -141,6 +145,7 @@ export interface RunRequestBody {
   permission?: unknown;
   attachments?: unknown;
   gatewayUrl?: unknown;
+  controlUrl?: unknown;
   runtimeToken?: unknown;
   maxTurns?: unknown;
 }
@@ -310,6 +315,9 @@ export function resolveRunConfig(
     mode: SESSION_MODES.includes(modeRaw as SessionMode) ? (modeRaw as SessionMode) : "code",
     permission: MODES.includes(permissionRaw as PermissionMode) ? (permissionRaw as PermissionMode) : "auto",
     gatewayUrl: gatewayUrl.replace(/\/+$/, ""),
+    ...(str(body.controlUrl) ?? env.GLYPHH_CONTROL_URL
+      ? { controlUrl: (str(body.controlUrl) ?? env.GLYPHH_CONTROL_URL ?? "").replace(/\/+$/, "") }
+      : {}),
     runtimeToken,
     workdir: named ?? sandbox,
     attachDir: sandbox,
