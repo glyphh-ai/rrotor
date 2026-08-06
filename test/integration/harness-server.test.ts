@@ -390,4 +390,30 @@ describe("harness pod — bind address (local-mode loopback safety)", () => {
     });
     expect(ok.status).toBe(200);
   });
+
+  it("workdir: a LOCAL pod (auth off) honors it; an auth-ON pod rejects it 400", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "user-folder-"));
+    // Auth off → local mode → the caller's own folder becomes the run's cwd.
+    const local = await boot(happyQuery);
+    const ok = await fetch(`${local}/run`, { method: "POST", body: JSON.stringify({ prompt: "x", workdir: dir }) });
+    expect(ok.status).toBe(200);
+
+    // Auth on → a shared/cloud pod must never be pointed at a host path.
+    const allowAll: Introspector = { enabled: true, authorize: () => Promise.resolve({ ok: true, status: 200 }) };
+    const cloud = await boot(happyQuery, { auth: allowAll });
+    const denied = await fetch(`${cloud}/run`, {
+      method: "POST",
+      headers: { authorization: "Bearer tok" },
+      body: JSON.stringify({ prompt: "x", workdir: dir }),
+    });
+    expect(denied.status).toBe(400);
+    expect(((await denied.json()) as { detail: string }).detail).toMatch(/local pod/);
+
+    // A nonexistent path is refused even locally.
+    const missing = await fetch(`${local}/run`, {
+      method: "POST",
+      body: JSON.stringify({ prompt: "x", workdir: join(dir, "nope") }),
+    });
+    expect(missing.status).toBe(400);
+  });
 });

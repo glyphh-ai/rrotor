@@ -82,6 +82,8 @@ import type { ThreadStore, ThreadPut } from "./threads.js";
 
 const DEFAULT_PORT = 8080;
 const FINISHED_KEEP = 8;
+/** POST /run body ceiling — generous because a turn may carry base64 images. */
+const RUN_BODY_LIMIT = 24_000_000;
 
 /** Injectable seams for tests + the pod entry. */
 export interface HarnessServerOptions {
@@ -205,7 +207,7 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<T
           sendJson(res, decision.status, { error: "unauthorized", detail: decision.reason });
           return;
         }
-        dispatch(reg, opts, threads, { principal: decision.principal, sessionId: decision.sessionId }, req, res, method, path);
+        dispatch(reg, opts, threads, { principal: decision.principal, sessionId: decision.sessionId, enabled: true }, req, res, method, path);
       })
       .catch((err: unknown) => {
         log.error("auth check error", { detail: (err as Error).message });
@@ -213,12 +215,14 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<T
       });
     return;
   }
-  dispatch(reg, opts, threads, {}, req, res, method, path);
+  dispatch(reg, opts, threads, { enabled: false }, req, res, method, path);
 }
 
 /** What the auth gate resolved for this request: the token's owner and the
- *  session the token is bound to (both absent when auth is disabled). */
-type AuthContext = Pick<AuthDecision, "principal" | "sessionId">;
+ *  session the token is bound to (both absent when auth is disabled), plus
+ *  whether enforcement is on at all — auth OFF means LOCAL mode, the only
+ *  mode that may honor a caller-named `workdir`. */
+type AuthContext = Pick<AuthDecision, "principal" | "sessionId"> & { enabled: boolean };
 
 /** Run a thread route against the store, owner-scoped — 503 when persistence
  *  is off or the caller resolved to no principal (threads are per-user; an
@@ -244,7 +248,9 @@ function withThreads(threads: Promise<ThreadStore | null>, principal: Principal 
 
 function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<ThreadStore | null>, authn: AuthContext, req: http.IncomingMessage, res: http.ServerResponse, method: string, path: string): void {
   if (method === "POST" && path === "/run") {
-    readBody(req)
+    // A turn may carry pasted images (base64), so /run takes a larger body
+    // than the rest of the surface.
+    readBody(req, RUN_BODY_LIMIT)
       .then((raw) => {
         let body: RunRequestBody;
         try {
@@ -277,7 +283,9 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         const runId = mintRunId();
         let cfg;
         try {
-          cfg = resolveRunConfig(runId, body, opts.env ?? process.env);
+          // A caller-named `workdir` is honored ONLY in local mode (auth off,
+          // loopback-bound, the user's own machine); a cloud pod rejects it.
+          cfg = resolveRunConfig(runId, body, opts.env ?? process.env, { allowWorkdir: !authn.enabled });
         } catch (err) {
           if (err instanceof BadRunRequest) {
             sendJson(res, 400, { error: "bad-run", detail: err.message });
@@ -296,7 +304,15 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         new ThreadRecorder(threads, cfg, authn.principal).attach(session);
         // Fire the run; frames stream via /ws + /runs/:id/frames. Never throws.
         void runHarness(session, cfg, opts.engine ?? {});
-        log.info("run accepted", { run_id: runId, session: cfg.sessionId || undefined, mode: cfg.mode });
+        log.info("run accepted", {
+          run_id: runId,
+          session: cfg.sessionId || undefined,
+          mode: cfg.mode,
+          permission: cfg.permission,
+          // The cwd the run's tools act on — a local run names the user's own
+          // folder, so it is logged explicitly.
+          workdir: cfg.workdir,
+        });
         sendJson(res, 200, { runId, sessionId: cfg.sessionId, wire: HARNESS_WIRE_VERSION });
       })
       .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));

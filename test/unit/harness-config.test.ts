@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, sep } from "node:path";
 
@@ -18,6 +18,7 @@ import {
   sanitizeSegment,
   harnessHome,
   parseMcpServers,
+  parseImages,
   BadRunRequest,
 } from "../../src/harness/config.js";
 
@@ -87,6 +88,56 @@ describe("resolveRunConfig", () => {
     expect(cfg.workdir).not.toContain("..");
     expect(sanitizeSegment("../../x")).not.toContain("/");
     expect(sanitizeSegment("")).toBe("_");
+  });
+});
+
+describe("workdir — honored ONLY in local mode", () => {
+  it("a cloud/auth-ON pod REJECTS a caller-named workdir", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wd-"));
+    expect(() => resolveRunConfig("run-w", { prompt: "x", workdir: dir }, ENV)).toThrow(BadRunRequest);
+    expect(() => resolveRunConfig("run-w", { prompt: "x", workdir: dir }, ENV, { allowWorkdir: false })).toThrow(/local pod/);
+    // Without one, the pod's own per-session sandbox stands.
+    const cfg = resolveRunConfig("run-w", { prompt: "x" }, ENV);
+    expect(cfg.workdir.startsWith(join(HOME, "sessions") + sep)).toBe(true);
+  });
+
+  it("a local pod adopts it as the run's cwd, canonicalized", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wd-"));
+    const cfg = resolveRunConfig("run-w", { prompt: "x", workdir: join(dir, "sub", "..") }, ENV, { allowWorkdir: true });
+    // Symlinks and `..` are resolved before use (macOS /var → /private/var).
+    expect(cfg.workdir).toBe(realpathSync(dir));
+    expect(cfg.workdir).not.toContain("..");
+    // Attachments still land in the POD's sandbox — never the user's folder.
+    expect(cfg.attachDir.startsWith(join(HOME, "sessions") + sep)).toBe(true);
+    expect(cfg.attachDir).not.toBe(cfg.workdir);
+  });
+
+  it("rejects a path that is relative, missing, or not a directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wd-"));
+    const file = join(dir, "a-file.txt");
+    writeFileSync(file, "x");
+    const local = { allowWorkdir: true };
+    expect(() => resolveRunConfig("r", { prompt: "x", workdir: "relative/path" }, ENV, local)).toThrow(/absolute/);
+    expect(() => resolveRunConfig("r", { prompt: "x", workdir: join(dir, "nope") }, ENV, local)).toThrow(/does not exist/);
+    expect(() => resolveRunConfig("r", { prompt: "x", workdir: file }, ENV, local)).toThrow(/not a directory/);
+  });
+});
+
+describe("parseImages — pasted screenshots reach the model", () => {
+  const png = { mediaType: "image/png", data: "iVBORw0KGgo=" };
+
+  it("accepts the known image types and rides into the run config", () => {
+    expect(parseImages([png, { mediaType: "image/jpeg", data: "/9j/4AAQ" }])).toHaveLength(2);
+    expect(parseImages(undefined)).toEqual([]);
+    expect(resolveRunConfig("run-i", { prompt: "what is this?", images: [png] }, ENV).images).toEqual([png]);
+    expect(resolveRunConfig("run-i", { prompt: "x" }, ENV).images).toBeUndefined();
+  });
+
+  it("rejects unknown media types, non-base64 payloads, and oversize batches", () => {
+    expect(() => parseImages([{ mediaType: "image/svg+xml", data: "PHN2Zz4=" }])).toThrow(/mediaType/);
+    expect(() => parseImages([{ mediaType: "image/png", data: "data:image/png;base64,AAAA" }])).toThrow(/base64/);
+    expect(() => parseImages([{ mediaType: "image/png", data: "" }])).toThrow(/base64/);
+    expect(() => parseImages(Array.from({ length: 9 }, () => png))).toThrow(/at most 8/);
   });
 });
 

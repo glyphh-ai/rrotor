@@ -40,7 +40,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
-import type { HarnessRunConfig, ChatTurn } from "./config.js";
+import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
 import type { MaterializedAttachment } from "./sandbox.js";
@@ -50,7 +50,7 @@ import type { AskQuestion } from "./frames.js";
 import { log } from "../obs/logger.js";
 
 /** The injectable SDK seam: the real `query` in production, a fake in tests. */
-export type QueryFn = (args: { prompt: string; options: Record<string, unknown> }) => AsyncIterable<unknown>;
+export type QueryFn = (args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }) => AsyncIterable<unknown>;
 
 export interface EngineDeps {
   queryFn?: QueryFn;
@@ -87,7 +87,7 @@ export const SANDBOX_TOOLS = [
 const DEFAULT_SYSTEM =
   "You are Glyphh, the user's agent, running in a hosted session workspace. " +
   "Work happens INSIDE your workspace directory: create files, run commands, and build there. " +
-  "Files the user attached are under attachments/ in the workspace. " +
+  "Files the user attached are listed with their absolute paths — read them there. " +
   "Use ask_user when a decision is genuinely the user's. Answer directly and concisely.";
 
 /** Assemble the per-run prompt the way the desktop does (persistSession is
@@ -106,6 +106,34 @@ export function assemblePrompt(history: ChatTurn[], prompt: string, attachments:
     );
   }
   return parts.join("\n\n");
+}
+
+/**
+ * The prompt as the SDK takes it. Text-only turns pass a plain string (the
+ * long-standing path, untouched). A turn carrying IMAGES must use the SDK's
+ * streaming-input form — `query({prompt: AsyncIterable<SDKUserMessage>})` —
+ * because only a message's `content` may hold blocks; a string prompt has
+ * nowhere to put an image. One user message is yielded, then the iterable
+ * ends, which is what closes the turn.
+ */
+export function buildPrompt(text: string, images: ImageRef[]): string | AsyncIterable<unknown> {
+  if (!images.length) return text;
+  return (async function* () {
+    yield {
+      type: "user" as const,
+      parent_tool_use_id: null,
+      message: {
+        role: "user" as const,
+        content: [
+          ...images.map((img) => ({
+            type: "image" as const,
+            source: { type: "base64" as const, media_type: img.mediaType, data: img.data },
+          })),
+          { type: "text" as const, text },
+        ],
+      },
+    };
+  })();
 }
 
 /** The in-process MCP server carrying the pod's ONE custom tool: `ask_user`.
@@ -173,12 +201,12 @@ export function buildQueryArgs(
   session: HarnessSession,
   attachments: MaterializedAttachment[],
   deps: EngineDeps = {},
-): { prompt: string; options: Record<string, unknown> } {
+): { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> } {
   const chat = cfg.mode === "chat";
   const mcp = chat ? null : buildAskServer(session);
   const lent = cfg.mcpServers ?? [];
   return {
-    prompt: assemblePrompt(cfg.history, cfg.prompt, attachments),
+    prompt: buildPrompt(assemblePrompt(cfg.history, cfg.prompt, attachments), cfg.images ?? []),
     options: {
       cwd: cfg.workdir,
       ...(cfg.model ? { model: cfg.model } : {}),
@@ -240,7 +268,10 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   let attachments: MaterializedAttachment[] = [];
   try {
     await ensureWorkspace(cfg.workdir);
-    attachments = await materializeAttachments(cfg.workdir, cfg.attachments, cfg.attachmentMaxBytes, deps.fetchFn);
+    // Attachments always land in the POD's sandbox (cfg.attachDir), never in a
+    // caller-named local workdir — a run must not litter the user's folder.
+    // The prompt names them by ABSOLUTE path, so the agent reads them either way.
+    attachments = await materializeAttachments(cfg.attachDir, cfg.attachments, cfg.attachmentMaxBytes, deps.fetchFn);
   } catch (err) {
     runLog.error("run setup failed", { detail: redactSecrets((err as Error).message, secrets) });
     fail((err as Error).message);
@@ -264,7 +295,15 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   // Correlate tool_use ids → names so tool_result frames name their tool.
   const toolNames = new Map<string, string>();
 
-  runLog.info("run start", { mode: cfg.mode, permission: cfg.permission, model: cfg.model ?? "(default)", attachments: attachments.length });
+  runLog.info("run start", {
+    mode: cfg.mode,
+    permission: cfg.permission,
+    model: cfg.model ?? "(default)",
+    attachments: attachments.length,
+    images: (cfg.images ?? []).length,
+    // The cwd the agent's tools act on — a local run names the user's folder.
+    workdir: cfg.workdir,
+  });
 
   try {
     const q = queryFn(buildQueryArgs(cfg, session, attachments, deps));

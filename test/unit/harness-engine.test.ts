@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runHarness, buildQueryArgs, assemblePrompt, SANDBOX_TOOLS } from "../../src/harness/engine.js";
+import { runHarness, buildQueryArgs, buildPrompt, assemblePrompt, SANDBOX_TOOLS } from "../../src/harness/engine.js";
 import type { QueryFn } from "../../src/harness/engine.js";
 import { HarnessSession } from "../../src/harness/session.js";
 import type { HarnessRunConfig } from "../../src/harness/config.js";
@@ -28,6 +28,7 @@ function cfg(over: Partial<HarnessRunConfig> = {}): HarnessRunConfig {
     gatewayUrl: "https://gw.test",
     runtimeToken: "gy_rt_engine_secret",
     workdir: join(home, "workspace"),
+    attachDir: join(home, "workspace"),
     configDir: join(home, "agent-config"),
     attachments: [],
     attachmentMaxBytes: 1024,
@@ -382,6 +383,42 @@ describe("runHarness — a gated run cannot write in plan mode", () => {
     const s2 = new HarnessSession({});
     await runHarness(s2, cfg({ permission: "auto" }), { queryFn: attempt(allowed) });
     expect(existsSync(allowed)).toBe(true);
+  });
+});
+
+describe("buildPrompt — images ride as vision blocks", () => {
+  const png = { mediaType: "image/png", data: "iVBORw0KGgo=" };
+
+  it("a text-only turn stays a plain string prompt", () => {
+    expect(buildPrompt("just words", [])).toBe("just words");
+    expect(buildQueryArgs(cfg(), new HarnessSession({}), []).prompt).toBe("do the thing");
+  });
+
+  it("an image turn becomes the SDK's streaming-input form, images before the text", async () => {
+    const prompt = buildPrompt("what is this?", [png, { mediaType: "image/jpeg", data: "/9j/4AAQ" }]);
+    expect(typeof prompt).not.toBe("string");
+    const msgs = [];
+    for await (const m of prompt as AsyncIterable<Record<string, unknown>>) msgs.push(m);
+    expect(msgs).toHaveLength(1); // one user message, then the turn closes
+    const msg = msgs[0] as { type: string; parent_tool_use_id: null; message: { role: string; content: Array<Record<string, unknown>> } };
+    expect(msg.type).toBe("user");
+    expect(msg.parent_tool_use_id).toBeNull();
+    expect(msg.message.role).toBe("user");
+    expect(msg.message.content).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "/9j/4AAQ" } },
+      { type: "text", text: "what is this?" },
+    ]);
+  });
+
+  it("buildQueryArgs uses the block form when the run carries images", async () => {
+    const { prompt } = buildQueryArgs(cfg({ images: [png] }), new HarnessSession({}), []);
+    expect(typeof prompt).not.toBe("string");
+    for await (const m of prompt as AsyncIterable<{ message: { content: Array<{ type: string; text?: string }> } }>) {
+      // The assembled text (history + ask + manifest) is the trailing block.
+      expect(m.message.content[0].type).toBe("image");
+      expect(m.message.content[1]).toEqual({ type: "text", text: "do the thing" });
+    }
   });
 });
 

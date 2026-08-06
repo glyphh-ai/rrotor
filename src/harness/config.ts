@@ -26,7 +26,8 @@
  * diagnostic string that could embed one.
  */
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -69,6 +70,15 @@ export interface McpServerRef {
   headers?: Record<string, string>;
 }
 
+/** One inline image for THIS turn — base64, ridden to the model as a vision
+ *  content block ({@link parseImages}). The body's `prompt` is text, so this
+ *  is the only path a pasted screenshot reaches the model. */
+export interface ImageRef {
+  mediaType: string;
+  /** Base64 payload (no `data:` prefix). */
+  data: string;
+}
+
 /** Everything one harness run needs. Built by {@link resolveRunConfig} from
  *  env + request body (body wins where both speak). */
 export interface HarnessRunConfig {
@@ -82,6 +92,8 @@ export interface HarnessRunConfig {
   /** Caller-lent HTTP MCP servers, wired into the SDK loop alongside the
    *  sandbox toolset + ask_user (cowork/code only; chat stays tool-less). */
   mcpServers?: McpServerRef[];
+  /** Inline images for THIS turn — carried to the model as vision blocks. */
+  images?: ImageRef[];
   prompt: string;
   history: ChatTurn[];
   system?: string;
@@ -92,8 +104,13 @@ export interface HarnessRunConfig {
   gatewayUrl: string;
   /** The session's runtime token — the pod's ONLY credential. REQUIRED. */
   runtimeToken: string;
-  /** Per-session sandbox dir INSIDE the pod — the run's cwd. */
+  /** The run's cwd. Normally the per-session sandbox dir INSIDE the pod; on a
+   *  LOCAL pod (auth off) the caller may name its own folder — see
+   *  {@link resolveRunConfig}'s `allowWorkdir`. */
   workdir: string;
+  /** Where attachments materialize. Always the POD's sandbox — never a
+   *  caller-named workdir, so a run cannot litter the user's own folder. */
+  attachDir: string;
   /** The subprocess's isolated config home (inside the harness home). */
   configDir: string;
   attachments: AttachmentRef[];
@@ -115,6 +132,8 @@ export interface RunRequestBody {
   sessionId?: unknown;
   threadId?: unknown;
   mcpServers?: unknown;
+  images?: unknown;
+  workdir?: unknown;
   history?: unknown;
   system?: unknown;
   model?: unknown;
@@ -143,6 +162,57 @@ const MCP_SERVER_CAP = 4;
  * whole point, but a cloud pod must never be pointed at an arbitrary
  * plaintext url. Throws {@link BadRunRequest} on any violation.
  */
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const IMAGE_CAP = 8;
+/** Per-image base64 ceiling (~7.5 MiB decoded) — a pasted screenshot fits far
+ *  under it; anything larger is a mistake, not a turn. */
+const IMAGE_B64_MAX = 10_000_000;
+
+/** Validate inline turn images: known media types, plausible base64, capped
+ *  count and size. Throws {@link BadRunRequest} on any violation. */
+export function parseImages(raw: unknown): ImageRef[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new BadRunRequest("`images` must be an array");
+  if (raw.length > IMAGE_CAP) throw new BadRunRequest(`\`images\` allows at most ${IMAGE_CAP} images`);
+  return raw.map((i) => {
+    const mediaType = (i as { mediaType?: unknown })?.mediaType;
+    const data = (i as { data?: unknown })?.data;
+    if (typeof mediaType !== "string" || !IMAGE_TYPES.includes(mediaType)) {
+      throw new BadRunRequest(`\`images[].mediaType\` must be one of ${IMAGE_TYPES.join(", ")}`);
+    }
+    if (typeof data !== "string" || !data || !/^[A-Za-z0-9+/\r\n]+={0,2}$/.test(data)) {
+      throw new BadRunRequest("`images[].data` must be base64 (no `data:` prefix)");
+    }
+    if (data.length > IMAGE_B64_MAX) throw new BadRunRequest("`images[].data` exceeds the per-image size cap");
+    return { mediaType, data };
+  });
+}
+
+/**
+ * Validate a caller-named working directory. HONORED ONLY IN LOCAL MODE
+ * (`allowWorkdir`, i.e. auth OFF — the loopback-bound pod on the user's own
+ * machine, where naming a host path is the entire point). A cloud/auth-ON pod
+ * REJECTS it: a shared tenant pod must never let a caller point the sandbox
+ * at a host path. Must be absolute, exist, and be a directory; symlinks and
+ * `..` are resolved (realpath) so the value used downstream is canonical.
+ */
+export function resolveWorkdir(raw: unknown, allowWorkdir: boolean): string | undefined {
+  if (raw === undefined) return undefined;
+  const given = typeof raw === "string" ? raw.trim() : "";
+  if (!allowWorkdir) {
+    throw new BadRunRequest("`workdir` is only honored on a local pod (auth disabled); this pod runs the sandbox workspace");
+  }
+  if (!given || !isAbsolute(given)) throw new BadRunRequest("`workdir` must be an absolute path");
+  let real: string;
+  try {
+    real = realpathSync(given);
+  } catch {
+    throw new BadRunRequest(`\`workdir\` does not exist: ${given}`);
+  }
+  if (!statSync(real).isDirectory()) throw new BadRunRequest(`\`workdir\` is not a directory: ${given}`);
+  return real;
+}
+
 export function parseMcpServers(raw: unknown): McpServerRef[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) throw new BadRunRequest("`mcpServers` must be an array");
@@ -181,11 +251,16 @@ export function parseMcpServers(raw: unknown): McpServerRef[] {
  * session so the control plane can provision generic pods and bind at /run
  * time; env alone also works (per-session pods provisioned pre-bound).
  * Throws {@link BadRunRequest} on a missing prompt or missing gateway config.
+ *
+ * `allowWorkdir` is the LOCAL-MODE switch (the server passes `!auth.enabled`):
+ * only a loopback-bound, auth-off pod on the user's own machine may honor a
+ * caller-named `workdir`. See {@link resolveWorkdir}.
  */
 export function resolveRunConfig(
   runId: string,
   body: RunRequestBody,
   env: NodeJS.ProcessEnv = process.env,
+  opts: { allowWorkdir?: boolean } = {},
 ): HarnessRunConfig {
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   if (!prompt) throw new BadRunRequest("`prompt` is required");
@@ -211,16 +286,23 @@ export function resolveRunConfig(
   // files; sessions never see each other's). A blank session id still gets an
   // isolated area keyed by the run.
   const scope = sessionId || runId;
-  const workdir = join(home, "sessions", sanitizeSegment(scope), "workspace");
+  const sandbox = join(home, "sessions", sanitizeSegment(scope), "workspace");
   const configDir = join(home, "sessions", sanitizeSegment(scope), "agent-config");
+  // LOCAL MODE: the caller's own folder becomes the run's cwd, so the SDK's
+  // preset tools (Bash/Read/Edit/Glob/Grep) act on the user's real files
+  // instead of an empty pod sandbox. Attachments still land in the POD's
+  // sandbox — a run never litters the user's folder.
+  const named = resolveWorkdir(body.workdir, opts.allowWorkdir === true);
 
   const mcpServers = parseMcpServers(body.mcpServers);
+  const images = parseImages(body.images);
 
   return {
     runId,
     sessionId,
     ...(threadId ? { threadId } : {}),
     ...(mcpServers.length ? { mcpServers } : {}),
+    ...(images.length ? { images } : {}),
     prompt,
     history: parseHistory(body.history),
     ...(str(body.system) ? { system: str(body.system) } : {}),
@@ -229,7 +311,8 @@ export function resolveRunConfig(
     permission: MODES.includes(permissionRaw as PermissionMode) ? (permissionRaw as PermissionMode) : "auto",
     gatewayUrl: gatewayUrl.replace(/\/+$/, ""),
     runtimeToken,
-    workdir,
+    workdir: named ?? sandbox,
+    attachDir: sandbox,
     configDir,
     attachments: parseAttachments(body.attachments),
     attachmentMaxBytes: intEnv(env.HARNESS_ATTACH_MAX_MB, 50) * 1024 * 1024,
