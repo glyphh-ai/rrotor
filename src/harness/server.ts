@@ -54,10 +54,14 @@
  * locally → thread recording is off, silently — the client's LWW push owns
  * persistence.
  *
- * One pod = one session at a time for v1 (HARNESS_MAX_RUNS, default 1) — the
- * control plane provisions per-session — but the registry is a map, so
- * multi-run is a config change, not a redesign. Finished runs stay replayable
- * until evicted (last 8) — the in-memory stand-in for stator-backed history.
+ * CONCURRENCY follows the pod's SHAPE: a shared pod (auth on, no bound
+ * ROTOR_SESSION_ID) defaults to 24 concurrent runs because it serves every
+ * user of its region; a dedicated or local pod defaults to 1, matching the
+ * one session it exists for. HARNESS_MAX_RUNS overrides either. At 1 a shared
+ * pod 409s every concurrent turn — and a PARKED approval holds the only slot
+ * for its full timeout, which reads to users as "the runtime is down".
+ * Finished runs stay replayable until evicted (last 8) — the in-memory
+ * stand-in for stator-backed history.
  */
 
 import * as http from "node:http";
@@ -600,8 +604,15 @@ export function resolveBind(env: NodeJS.ProcessEnv, authEnabled: boolean, logger
 /** Start the harness pod server. Returns the http.Server (tests close it). */
 export function startHarnessServer(port: number = DEFAULT_PORT, opts: HarnessServerOptions = {}): http.Server {
   const env = opts.env ?? process.env;
-  const maxRuns = Math.max(1, opts.maxRuns ?? (Number(env.HARNESS_MAX_RUNS ?? 1) || 1));
   const auth = opts.auth ?? introspectorFromEnv(env);
+  // CONCURRENCY: a DEDICATED pod serves one provisioned session, so 1 was the
+  // right v1 default — but a SHARED pod (auth on, many users) 409s every
+  // concurrent turn at 1, and a PARKED approval holds the slot for its whole
+  // timeout, locking everyone else out. So the default follows the pod's
+  // shape: shared → 24, dedicated/local → 1. HARNESS_MAX_RUNS overrides both.
+  const sharedPod = auth.enabled && !env.ROTOR_SESSION_ID;
+  const defaultRuns = sharedPod ? 24 : 1;
+  const maxRuns = Math.max(1, opts.maxRuns ?? (Number(env.HARNESS_MAX_RUNS ?? defaultRuns) || defaultRuns));
   const reg = new RunRegistry(maxRuns);
   const threads = opts.threads !== undefined ? Promise.resolve(opts.threads) : threadStoreFromEnv(env);
   warnIfUnrecordable(env, auth.enabled);
@@ -615,7 +626,7 @@ export function startHarnessServer(port: number = DEFAULT_PORT, opts: HarnessSer
     void threads.then((s) => s?.close()).catch(() => {});
   });
   server.listen(port, bind, () => {
-    log.info("harness pod listening", { port, bind, version: VERSION, wire: HARNESS_WIRE_VERSION, max_runs: maxRuns });
+    log.info("harness pod listening", { port, bind, version: VERSION, wire: HARNESS_WIRE_VERSION, max_runs: maxRuns, shared: sharedPod });
   });
   return server;
 }

@@ -417,3 +417,33 @@ describe("harness pod — bind address (local-mode loopback safety)", () => {
     expect(missing.status).toBe(400);
   });
 });
+
+// ── Concurrency follows the pod's SHAPE ────────────────────────────────────
+// A shared pod (auth on, no bound session) serves a whole region: at 1 it 409s
+// every concurrent turn, and a PARKED approval holds the only slot for its full
+// timeout — which reads to users as "the runtime is down". A dedicated/local
+// pod keeps 1, matching the one session it exists for.
+describe("harness pod concurrency defaults", () => {
+  const allowAll = { enabled: true, authorize: async () => ({ ok: true as const, status: 200 }) };
+
+  it("a SHARED pod (auth on, no bound session) admits many runs by default", () => {
+    const server = startHarnessServer(0, { env: {}, auth: allowAll as never });
+    const reg = (server as never as { __registry: { capacity?: number; max?: number } }).__registry;
+    server.close();
+    expect(JSON.stringify(reg)).toMatch(/24/);
+  });
+
+  it("a DEDICATED pod (bound session) keeps 1", () => {
+    const server = startHarnessServer(0, { env: { ROTOR_SESSION_ID: "sess_x" }, auth: allowAll as never });
+    const reg = (server as never as { __registry: unknown }).__registry;
+    server.close();
+    expect(JSON.stringify(reg)).not.toMatch(/24/);
+  });
+
+  it("HARNESS_MAX_RUNS overrides either shape", () => {
+    const server = startHarnessServer(0, { env: { HARNESS_MAX_RUNS: "7" }, auth: allowAll as never });
+    const reg = (server as never as { __registry: unknown }).__registry;
+    server.close();
+    expect(JSON.stringify(reg)).toMatch(/7/);
+  });
+});
