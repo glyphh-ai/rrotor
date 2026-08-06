@@ -48,6 +48,7 @@ import { HarnessSession } from "./session.js";
 import { ASK_TIMEOUT_MS } from "./gate.js";
 import type { AskQuestion } from "./frames.js";
 import { log } from "../obs/logger.js";
+import type { Logger } from "../obs/logger.js";
 
 /** The injectable SDK seam: the real `query` in production, a fake in tests. */
 export type QueryFn = (args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }) => AsyncIterable<unknown>;
@@ -57,6 +58,52 @@ export interface EngineDeps {
   fetchFn?: typeof fetch;
   /** Approval wait override (tests shorten it). */
   approvalTimeoutMs?: number;
+  /** Credits-lookup timeout override (tests shorten it). */
+  creditsTimeoutMs?: number;
+}
+
+/** How long the turn's price lookup may take before we give up on it. The
+ *  terminal frame waits at most this long — and only when the probe has not
+ *  already resolved (it is fired at `result`, so usually it has). */
+const CREDITS_TIMEOUT_MS = 3000;
+
+/**
+ * The turn's METERED PRICE, from the gateway's per-run usage endpoint
+ * (`GET {gatewayUrl}/runs/:runId/usage`, bearer = the run's runtime token).
+ * The gateway attributes usage by the `x-glyphh-run: <runId>` header that
+ * every model call already carries (config.buildAgentEnv).
+ *
+ * Advisory by construction: it never throws and never fails a turn. A 404
+ * (unknown run), a 401, a timeout, or a dead socket all resolve `null`, which
+ * means "emit no credits frame" — the turn still ends normally.
+ */
+async function fetchCreditsMicro(
+  cfg: Pick<HarnessRunConfig, "runId" | "gatewayUrl" | "runtimeToken">,
+  deps: EngineDeps,
+  logger: Logger,
+): Promise<number | null> {
+  if (!cfg.gatewayUrl || !cfg.runtimeToken) return null;
+  const fetchFn = deps.fetchFn ?? fetch;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), deps.creditsTimeoutMs ?? CREDITS_TIMEOUT_MS);
+  timer.unref?.();
+  try {
+    const res = await fetchFn(`${cfg.gatewayUrl}/runs/${encodeURIComponent(cfg.runId)}/usage`, {
+      headers: { authorization: `Bearer ${cfg.runtimeToken}` },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      logger.debug("credits lookup declined", { status: res.status });
+      return null;
+    }
+    const micro = ((await res.json()) as { data?: { creditsMicro?: unknown } })?.data?.creditsMicro;
+    return typeof micro === "number" && Number.isFinite(micro) ? micro : null;
+  } catch (err) {
+    logger.debug("credits lookup failed", { detail: (err as Error).message });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -292,6 +339,9 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   let outCur = 0;
   const outTok = (): number => outDone + outCur;
   let lastProgressAt = 0;
+  // The turn's price lookup, fired at `result` and awaited before the terminal
+  // frame. Null until the turn produces a result (an aborted run never asks).
+  let creditsProbe: Promise<number | null> | null = null;
   // Correlate tool_use ids → names so tool_result frames name their tool.
   const toolNames = new Map<string, string>();
 
@@ -396,6 +446,10 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
           runError = `run ended: ${r.subtype.replaceAll("_", " ")}`;
         }
         if (typeof r.num_turns === "number") turnsUsed = r.num_turns;
+        // The turn's usage is final here, so start the price lookup NOW — it
+        // overlaps the loop's drain and has normally resolved by the time the
+        // terminal frame goes out, costing the run nothing.
+        creditsProbe = fetchCreditsMicro(cfg, deps, runLog);
         // The result's usage is the run's authoritative total.
         const ru = (msg as unknown as { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }).usage;
         if (ru) {
@@ -412,12 +466,18 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
       return;
     }
     session.emit({ type: "progress", inTokens: inTok, outTokens: outTok() });
+    // The metered price, BEFORE the terminal frame: consumers map `credits` to
+    // their price display and `done` to turn end, so credits-then-done is the
+    // order they expect. A failed/slow lookup simply yields no frame — it can
+    // delay `done` by at most the probe timeout and can never lose it.
+    const creditsMicro = creditsProbe ? await creditsProbe : null;
+    if (creditsMicro !== null) session.emit({ type: "credits", creditsMicro });
     if (runError) {
       fail(runError);
       runLog.warn("run failed", { detail: runError, turns: turnsUsed });
     } else {
       session.emit({ type: "done", stopped: false });
-      runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok() });
+      runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok(), credits_micro: creditsMicro ?? undefined });
     }
   } catch (err) {
     if (session.ctrl.signal.aborted) {

@@ -386,6 +386,115 @@ describe("runHarness — a gated run cannot write in plan mode", () => {
   });
 });
 
+/**
+ * The turn's metered price. The pod has no interceptor, so the engine reads it
+ * back from the gateway's per-run usage endpoint at turn end. It is advisory:
+ * a turn must never be delayed, failed, or lost because pricing was slow.
+ */
+describe("runHarness — the credits frame", () => {
+  const finished: QueryFn = stream(
+    { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "hi" } } },
+    { type: "result", subtype: "success", result: "hi", usage: { input_tokens: 10, output_tokens: 2 } },
+  );
+  const jsonRes = (status: number, body: unknown): Response =>
+    ({ ok: status >= 200 && status < 300, status, json: async () => body }) as unknown as Response;
+
+  it("emits credits from a 200 — correct URL + bearer, ordered BEFORE done", async () => {
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    const fetchFn = (async (url: unknown, init: unknown) => {
+      calls.push([String(url), init as RequestInit]);
+      return jsonRes(200, { data: { runId: "run-t", requests: 2, creditsMicro: 12_345, inputTokens: 10, outputTokens: 2 } });
+    }) as unknown as typeof fetch;
+
+    const s = new HarnessSession({ runId: "run-t" });
+    await runHarness(s, cfg({ runId: "run-t" }), { queryFn: finished, fetchFn });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe("https://gw.test/runs/run-t/usage");
+    expect((calls[0][1]?.headers as Record<string, string>).authorization).toBe("Bearer gy_rt_engine_secret");
+
+    const credits = frames(s).find((f) => f.type === "credits") as Extract<WireFrame, { type: "credits" }>;
+    expect(credits.creditsMicro).toBe(12_345);
+    // credits → price, done → turn end: the desktop consumes them in that order.
+    const seq = types(s);
+    expect(seq.indexOf("credits")).toBeLessThan(seq.indexOf("done"));
+    expect(seq[seq.length - 1]).toBe("done");
+  });
+
+  it("stays silent — and still finishes the turn — on 404, 401, and a dead socket", async () => {
+    for (const responder of [
+      async () => jsonRes(404, { error: "not-found" }),
+      async () => jsonRes(401, { error: "unauthorized" }),
+      async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    ]) {
+      const s = new HarnessSession({});
+      await runHarness(s, cfg(), { queryFn: finished, fetchFn: responder as unknown as typeof fetch });
+      expect(types(s)).not.toContain("credits");
+      expect(types(s)[types(s).length - 1]).toBe("done"); // the turn still ends cleanly
+    }
+  });
+
+  it("a hung gateway cannot hold the turn open — it times out and done still lands", async () => {
+    // Never resolves on its own; only the probe's abort signal ends it.
+    const hung = ((_url: unknown, init: unknown) =>
+      new Promise((_resolve, reject) => {
+        const signal = (init as { signal?: AbortSignal }).signal;
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      })) as unknown as typeof fetch;
+
+    const s = new HarnessSession({});
+    const started = Date.now();
+    await runHarness(s, cfg(), { queryFn: finished, fetchFn: hung, creditsTimeoutMs: 30 });
+    expect(Date.now() - started).toBeLessThan(2000); // bounded by the probe timeout, not the socket
+    expect(types(s)).not.toContain("credits");
+    expect(types(s)[types(s).length - 1]).toBe("done");
+  });
+
+  it("never looks up a price without a gateway or a token", async () => {
+    for (const over of [{ gatewayUrl: "" }, { runtimeToken: "" }]) {
+      let called = false;
+      const fetchFn = (async () => {
+        called = true;
+        return jsonRes(200, { data: { creditsMicro: 1 } });
+      }) as unknown as typeof fetch;
+      const s = new HarnessSession({});
+      await runHarness(s, cfg(over), { queryFn: finished, fetchFn });
+      expect(called).toBe(false);
+      expect(types(s)).not.toContain("credits");
+    }
+  });
+
+  it("ignores a malformed payload, and an aborted run never asks at all", async () => {
+    const s1 = new HarnessSession({});
+    const junk = (async () => jsonRes(200, { data: { creditsMicro: "free" } })) as unknown as typeof fetch;
+    await runHarness(s1, cfg(), { queryFn: finished, fetchFn: junk });
+    expect(types(s1)).not.toContain("credits");
+
+    // A stopped run ends immediately — no price lookup stands between the user
+    // pressing stop and the done frame.
+    let called = false;
+    const fetchFn = (async () => {
+      called = true;
+      return jsonRes(200, { data: { creditsMicro: 5 } });
+    }) as unknown as typeof fetch;
+    const s2 = new HarnessSession({});
+    const parked: QueryFn = (args) =>
+      (async function* () {
+        const ctrl = (args.options as { abortController: AbortController }).abortController;
+        yield { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "…" } } };
+        await new Promise<void>((r) => ctrl.signal.addEventListener("abort", () => r(), { once: true }));
+      })();
+    const run = runHarness(s2, cfg(), { queryFn: parked, fetchFn });
+    await new Promise((r) => setTimeout(r, 10));
+    s2.stop();
+    await run;
+    expect(called).toBe(false);
+    expect(frames(s2)[frames(s2).length - 1]).toMatchObject({ type: "done", stopped: true });
+  });
+});
+
 describe("buildPrompt — images ride as vision blocks", () => {
   const png = { mediaType: "image/png", data: "iVBORw0KGgo=" };
 

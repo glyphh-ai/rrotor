@@ -31,9 +31,11 @@
  *
  * Credits note: on desktop, `credits` frames come from the local interceptor's
  * usage stream. The pod has no interceptor — the gateway meters server-side by
- * the `x-glyphh-run` tag — so v1 emits no `credits` frames; the type stays in
- * the vocabulary so the bridge dispatch is complete when the control plane
- * starts pushing them.
+ * the `x-glyphh-run` tag every model call carries — so the engine reads the
+ * turn's price back from the gateway's per-run usage endpoint at turn end and
+ * emits ONE `credits` frame immediately BEFORE the terminal frame. The lookup
+ * is advisory: if it 404s, 401s, or times out the turn ends normally with no
+ * `credits` frame at all, so consumers must treat the frame as optional.
  *
  * On the wire every frame is enveloped with a monotonic `seq` (the replay
  * cursor), the `runId` it belongs to, and an `at` timestamp. A late subscriber
