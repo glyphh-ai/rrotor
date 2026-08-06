@@ -14,9 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
 
-import { startHarnessServer } from "../../src/harness/server.js";
+import { startHarnessServer, resolveBind } from "../../src/harness/server.js";
 import type { QueryFn } from "../../src/harness/engine.js";
 import type { Introspector } from "../../src/auth/introspect.js";
+import { createLogger } from "../../src/obs/logger.js";
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -315,5 +316,78 @@ describe("harness pod — auth (introspection)", () => {
         }),
       ).rejects.toThrow(/401/);
     }
+  });
+});
+
+describe("harness pod — CORS (browser clients call cross-origin)", () => {
+  it("OPTIONS preflight answers 204 with the CORS grant, before the auth gate", async () => {
+    const denyAll: Introspector = { enabled: true, authorize: () => Promise.resolve({ ok: false, status: 401, reason: "no token" }) };
+    const base = await boot(happyQuery, { auth: denyAll });
+    const res = await fetch(`${base}/run`, { method: "OPTIONS" });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-methods")).toBe("GET, POST, PUT, DELETE, OPTIONS");
+    expect(res.headers.get("access-control-allow-headers")).toBe("authorization, content-type");
+    expect(res.headers.get("access-control-max-age")).toBe("86400");
+  });
+
+  it("every response carries ACAO — success and auth failure alike", async () => {
+    const base = await boot(happyQuery);
+    const ok = await fetch(`${base}/run`, { method: "POST", body: JSON.stringify({ prompt: "x" }) });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("access-control-allow-origin")).toBe("*");
+
+    const denyAll: Introspector = { enabled: true, authorize: () => Promise.resolve({ ok: false, status: 401, reason: "no token" }) };
+    const gated = await boot(happyQuery, { auth: denyAll });
+    const denied = await fetch(`${gated}/run`, { method: "POST", body: JSON.stringify({ prompt: "x" }) });
+    expect(denied.status).toBe(401);
+    expect(denied.headers.get("access-control-allow-origin")).toBe("*"); // a 401 must read as auth, not a CORS mystery
+  });
+});
+
+describe("harness pod — bind address (local-mode loopback safety)", () => {
+  it("auth OFF binds loopback only; auth ON binds wide", async () => {
+    const local = startHarnessServer(0, { env: podEnv(), engine: { queryFn: happyQuery } }); // no introspect env → auth off
+    servers.push(local);
+    await new Promise<void>((r) => local.once("listening", () => r()));
+    expect((local.address() as AddressInfo).address).toBe("127.0.0.1");
+
+    const allowAll: Introspector = { enabled: true, authorize: () => Promise.resolve({ ok: true, status: 200 }) };
+    const cloud = startHarnessServer(0, { env: podEnv(), engine: { queryFn: happyQuery }, auth: allowAll });
+    servers.push(cloud);
+    await new Promise<void>((r) => cloud.once("listening", () => r()));
+    expect((cloud.address() as AddressInfo).address).toBe("0.0.0.0");
+  });
+
+  it("ROTOR_BIND overrides — binding wide with auth off warns loudly", () => {
+    const lines: string[] = [];
+    const logger = createLogger({ level: "warn", write: (l) => lines.push(l) });
+    expect(resolveBind({ ROTOR_BIND: "0.0.0.0" } as NodeJS.ProcessEnv, false, logger)).toBe("0.0.0.0");
+    expect(lines.join("\n")).toMatch(/bound WIDE with auth OFF/);
+    // The quiet paths: defaults and auth-on overrides never warn.
+    expect(resolveBind({} as NodeJS.ProcessEnv, false, logger)).toBe("127.0.0.1");
+    expect(resolveBind({} as NodeJS.ProcessEnv, true, logger)).toBe("0.0.0.0");
+    expect(resolveBind({ ROTOR_BIND: "10.0.0.7" } as NodeJS.ProcessEnv, true, logger)).toBe("10.0.0.7");
+    expect(lines).toHaveLength(1);
+  });
+
+  it("rejects malformed mcpServers with 400 (validation lives in resolveRunConfig)", async () => {
+    const base = await boot(happyQuery);
+    const bad = [
+      [{ name: "Desk Top", url: "https://ok.example/mcp" }],
+      [{ name: "d", url: "http://pod.internal/mcp" }],
+      "not-an-array",
+    ];
+    for (const mcpServers of bad) {
+      const res = await fetch(`${base}/run`, { method: "POST", body: JSON.stringify({ prompt: "x", mcpServers }) });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { detail: string }).detail).toMatch(/mcpServers/);
+    }
+    // A loopback-http lend is accepted.
+    const ok = await fetch(`${base}/run`, {
+      method: "POST",
+      body: JSON.stringify({ prompt: "x", mcpServers: [{ name: "desktop", url: "http://127.0.0.1:4820/mcp" }] }),
+    });
+    expect(ok.status).toBe(200);
   });
 });

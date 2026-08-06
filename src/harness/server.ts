@@ -14,7 +14,10 @@
  *                              (body `threadId` scopes the recorded transcript
  *                              to the CLIENT's thread id — `c<ts36>` — while
  *                              auth keeps binding `sessionId` to the token;
- *                              absent → the transcript keys by sessionId)
+ *                              absent → the transcript keys by sessionId.
+ *                              body `mcpServers` lends the run HTTP MCP
+ *                              servers — loopback-or-https, cap 4 — the
+ *                              desktop's loopback tool surface in LOCAL mode)
  *   GET  /runs/:id             run status (+ pending ask/approval ids)
  *   GET  /runs/:id/frames      replay the frame tape (?from=<seq>, exclusive)
  *   POST /runs/:id/answer      resolve a paused ask/approval frame
@@ -39,7 +42,17 @@
  *
  * Auth: the same OPTIONAL introspection gate as the rotor data plane
  * (ROTOR_AUTH_INTROSPECT_URL + service token + session binding; fail closed
- * when configured; probes stay open).
+ * when configured; probes stay open). CORS is wildcard on the whole surface
+ * (bearer-authed, no cookies): OPTIONS preflights 204 pre-gate, and every
+ * response — errors included — carries Access-Control-Allow-Origin.
+ *
+ * LOCAL MODE (desktop/CLI turns): the pod runs auth-OFF on the user's machine
+ * (it cannot hold the service token) and therefore BINDS LOOPBACK ONLY
+ * (resolveBind; ROTOR_BIND overrides, loudly). Runs there pass the USER's
+ * `gy_at_` access token as the runtime token (metering lands on the user) and
+ * lend the desktop's loopback MCP server via body `mcpServers`. No stator
+ * locally → thread recording is off, silently — the client's LWW push owns
+ * persistence.
  *
  * One pod = one session at a time for v1 (HARNESS_MAX_RUNS, default 1) — the
  * control plane provisions per-session — but the registry is a map, so
@@ -53,6 +66,7 @@ import type { Duplex } from "node:stream";
 
 import { VERSION } from "../version.js";
 import { log } from "../obs/logger.js";
+import type { Logger } from "../obs/logger.js";
 import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "../auth/introspect.js";
 import type { Introspector, Principal, AuthDecision } from "../auth/introspect.js";
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
@@ -81,12 +95,27 @@ export interface HarnessServerOptions {
   threads?: ThreadStore | null;
 }
 
+// CORS: web clients call the data plane cross-origin by design (browser at
+// the app origin → POST {pod}/run). Auth is bearer-only — no cookies — so a
+// wildcard origin is correct. EVERY response carries ACAO, errors included:
+// a 401 without it reads as a CORS mystery in the browser, not an auth
+// failure. Preflights answer 204 before the auth gate (they carry no
+// Authorization by design).
+const CORS_ORIGIN = { "access-control-allow-origin": "*" };
+const CORS_PREFLIGHT = {
+  ...CORS_ORIGIN,
+  "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type",
+  "access-control-max-age": "86400",
+};
+
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(payload),
     "cache-control": "no-store",
+    ...CORS_ORIGIN,
   });
   res.end(payload);
 }
@@ -150,6 +179,11 @@ function handle(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise<T
   const method = req.method ?? "GET";
   const path = (req.url ?? "/").split("?", 1)[0];
 
+  if (method === "OPTIONS") {
+    res.writeHead(204, CORS_PREFLIGHT);
+    res.end();
+    return;
+  }
   if (method === "GET" && path === "/healthz") {
     sendJson(res, 200, { status: "ok", mode: "harness" });
     return;
@@ -531,6 +565,22 @@ function serveSocket(socket: Duplex, reg: RunRegistry): void {
 
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
+const LOOPBACK_BINDS = ["127.0.0.1", "localhost", "::1"];
+
+/** The pod's bind address. Auth ON → wide (0.0.0.0): the introspection gate is
+ *  the boundary. Auth OFF → LOOPBACK ONLY: this is the LOCAL desktop/CLI pod
+ *  (a user machine cannot hold the service token) and the loopback bind IS
+ *  its security boundary. ROTOR_BIND overrides explicitly — binding wide with
+ *  auth off warns loudly, because then anything that reaches the host drives
+ *  the pod. Exported for tests (inject a logger to capture the warn). */
+export function resolveBind(env: NodeJS.ProcessEnv, authEnabled: boolean, logger: Logger = log): string {
+  const bind = env.ROTOR_BIND ?? (authEnabled ? "0.0.0.0" : "127.0.0.1");
+  if (!authEnabled && !LOOPBACK_BINDS.includes(bind)) {
+    logger.warn("harness bound WIDE with auth OFF — anything that reaches this host can drive the pod (set ROTOR_BIND=127.0.0.1 or enable introspection)", { bind });
+  }
+  return bind;
+}
+
 /** Start the harness pod server. Returns the http.Server (tests close it). */
 export function startHarnessServer(port: number = DEFAULT_PORT, opts: HarnessServerOptions = {}): http.Server {
   const env = opts.env ?? process.env;
@@ -539,6 +589,7 @@ export function startHarnessServer(port: number = DEFAULT_PORT, opts: HarnessSer
   const reg = new RunRegistry(maxRuns);
   const threads = opts.threads !== undefined ? Promise.resolve(opts.threads) : threadStoreFromEnv(env);
   warnIfUnrecordable(env, auth.enabled);
+  const bind = resolveBind(env, auth.enabled);
   const server = http.createServer((req, res) => handle(reg, opts, threads, req, res, auth));
   attachHarnessWs(server, reg, auth);
   (server as http.Server & { __registry?: RunRegistry }).__registry = reg;
@@ -547,8 +598,8 @@ export function startHarnessServer(port: number = DEFAULT_PORT, opts: HarnessSer
     // injector's to close — ThreadStore only ends connections it opened).
     void threads.then((s) => s?.close()).catch(() => {});
   });
-  server.listen(port, () => {
-    log.info("harness pod listening", { port, version: VERSION, wire: HARNESS_WIRE_VERSION, max_runs: maxRuns });
+  server.listen(port, bind, () => {
+    log.info("harness pod listening", { port, bind, version: VERSION, wire: HARNESS_WIRE_VERSION, max_runs: maxRuns });
   });
   return server;
 }
