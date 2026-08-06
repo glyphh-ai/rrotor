@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -174,7 +174,7 @@ describe("buildQueryArgs — the SDK wiring", () => {
     const s = new HarnessSession({});
     const { options } = buildQueryArgs(c, s, []);
     expect(options.cwd).toBe(c.workdir);
-    expect(options.allowedTools).toEqual([...SANDBOX_TOOLS, "mcp__glyphh__ask_user"]);
+    expect(options.tools).toEqual(SANDBOX_TOOLS);
     expect(options.settingSources).toEqual([]);
     expect(options.persistSession).toBe(false);
     expect(options.includePartialMessages).toBe(true);
@@ -224,7 +224,7 @@ describe("buildQueryArgs — the SDK wiring", () => {
     expect(buildQueryArgs(cfg(), new HarnessSession({}), []).options.maxTurns).toBeUndefined();
   });
 
-  it("caller-lent mcpServers become HTTP MCP servers, allowed wholesale as mcp__<name>", () => {
+  it("caller-lent mcpServers become HTTP MCP servers (never pre-approved)", () => {
     const lent = [
       { name: "desktop", url: "http://127.0.0.1:4820/mcp", headers: { authorization: "Bearer x" } },
       { name: "org-tools", url: "https://tools.glyphh.app/mcp" },
@@ -234,9 +234,154 @@ describe("buildQueryArgs — the SDK wiring", () => {
     expect(servers.glyphh).toMatchObject({ type: "sdk" }); // ask_user survives alongside
     expect(servers.desktop).toEqual({ type: "http", url: "http://127.0.0.1:4820/mcp", headers: { authorization: "Bearer x" } });
     expect(servers["org-tools"]).toEqual({ type: "http", url: "https://tools.glyphh.app/mcp" });
-    expect(options.allowedTools).toEqual([...SANDBOX_TOOLS, "mcp__glyphh__ask_user", "mcp__desktop", "mcp__org-tools"]);
+    // Lent tools are NOT pre-approved: they route through the gate like the
+    // built-ins (their own host may gate them too, but the pod never waives).
+    expect(options.allowedTools).toBeUndefined();
     // chat stays tool-less even with servers lent.
     expect(buildQueryArgs(cfg({ mode: "chat", mcpServers: lent }), new HarnessSession({}), []).options.mcpServers).toBeUndefined();
+  });
+});
+
+/**
+ * REGRESSION: the permission gate must actually gate. These fail against the
+ * pre-approving build, where `allowedTools` listed the whole toolset — the SDK
+ * treats that list as "auto-allow without prompting", so `canUseTool` was
+ * never consulted: plan mode wrote files and ask mode never asked.
+ */
+describe("buildQueryArgs — the gate is the decision point (never pre-approved)", () => {
+  const mutating = ["Write", "Edit", "NotebookEdit", "Bash", "KillShell"];
+
+  it("NO tool is pre-approved — allowedTools is unset in every mode", () => {
+    for (const permission of ["ask", "plan", "acceptEdits", "auto", "bypass"] as const) {
+      const { options } = buildQueryArgs(cfg({ permission }), new HarnessSession({}), []);
+      expect(options.allowedTools).toBeUndefined();
+      // Availability is `tools`; it must never double as an allowance.
+      expect(options.tools).toEqual(SANDBOX_TOOLS);
+    }
+  });
+
+  it("the mutating tools are available but not waived, and canUseTool is wired", () => {
+    const { options } = buildQueryArgs(cfg(), new HarnessSession({}), []);
+    for (const t of mutating) expect(options.tools as string[]).toContain(t);
+    expect(typeof options.canUseTool).toBe("function");
+    expect(options.permissionMode).toBe("default"); // the mode that consults canUseTool
+  });
+
+  it("plan mode REFUSES every mutating tool through the gate", async () => {
+    const { options } = buildQueryArgs(cfg({ permission: "plan" }), new HarnessSession({}), []);
+    const canUse = options.canUseTool as (t: string, i: unknown) => Promise<{ behavior: string; message?: string }>;
+    for (const tool of mutating) {
+      const d = await canUse(tool, { file_path: "/tmp/x", command: "echo hi > /tmp/x" });
+      expect(d.behavior).toBe("deny");
+      expect(d.message).toMatch(/read-only/);
+    }
+    // Reads stay free even in plan mode — planning needs to look around.
+    expect((await canUse("Read", { file_path: "/tmp/x" })).behavior).toBe("allow");
+  });
+
+  it("ask mode emits an approval frame for BOTH Bash and Write, and parks until answered", async () => {
+    for (const [tool, input, kind] of [
+      ["Bash", { command: "npm run build" }, "command"],
+      ["Write", { file_path: "/tmp/out.txt" }, "edit"],
+    ] as const) {
+      const s = new HarnessSession({});
+      const { options } = buildQueryArgs(cfg({ permission: "ask" }), s, [], { approvalTimeoutMs: 5000 });
+      const canUse = options.canUseTool as (t: string, i: unknown) => Promise<{ behavior: string; message?: string }>;
+
+      const pending = canUse(tool, input);
+      await new Promise((r) => setTimeout(r, 0));
+      const frame = s.framesSince(-1).find((f) => f.type === "approval") as Extract<WireFrame, { type: "approval" }>;
+      expect(frame, `${tool} must raise an approval frame`).toBeDefined();
+      expect(frame.kind).toBe(kind);
+
+      // Deny → the model sees a refusal it can re-plan around.
+      s.answer(frame.id, { allow: false });
+      const denied = await pending;
+      expect(denied.behavior).toBe("deny");
+
+      // Allow → the same tool proceeds.
+      const second = canUse(tool, input);
+      await new Promise((r) => setTimeout(r, 0));
+      const frame2 = s.framesSince(-1).filter((f) => f.type === "approval").pop() as Extract<WireFrame, { type: "approval" }>;
+      s.answer(frame2.id, { allow: true });
+      expect((await second).behavior).toBe("allow");
+    }
+  });
+
+  it("auto mode runs clean (no approval frames) but still routes through the gate", async () => {
+    const s = new HarnessSession({});
+    const { options } = buildQueryArgs(cfg({ permission: "auto" }), s, []);
+    const canUse = options.canUseTool as (t: string, i: unknown) => Promise<{ behavior: string }>;
+    expect((await canUse("Write", { file_path: "/tmp/x" })).behavior).toBe("allow");
+    expect((await canUse("Bash", { command: "npm test" })).behavior).toBe("allow");
+    expect(s.framesSince(-1).filter((f) => f.type === "approval")).toHaveLength(0);
+    // …and a DANGEROUS command still stops to ask, even on auto.
+    const pending = canUse("Bash", { command: "sudo rm -rf /" });
+    await new Promise((r) => setTimeout(r, 0));
+    const frame = s.framesSince(-1).find((f) => f.type === "approval") as Extract<WireFrame, { type: "approval" }>;
+    expect(frame).toMatchObject({ kind: "dangerous" });
+    s.answer(frame.id, { allow: false });
+    expect((await pending).behavior).toBe("deny");
+  });
+
+  it("a lent MCP tool is gated too — plan refuses it, ask asks", async () => {
+    const lent = [{ name: "desktop", url: "http://127.0.0.1:4820/mcp" }];
+    const planned = buildQueryArgs(cfg({ permission: "plan", mcpServers: lent }), new HarnessSession({}), []);
+    const planCanUse = planned.options.canUseTool as (t: string, i: unknown) => Promise<{ behavior: string }>;
+    expect((await planCanUse("mcp__desktop__write_file", { path: "/x" })).behavior).toBe("deny");
+
+    const s = new HarnessSession({});
+    const asked = buildQueryArgs(cfg({ permission: "ask", mcpServers: lent }), s, [], { approvalTimeoutMs: 5000 });
+    const askCanUse = asked.options.canUseTool as (t: string, i: unknown) => Promise<{ behavior: string }>;
+    const pending = askCanUse("mcp__desktop__write_file", { path: "/x" });
+    await new Promise((r) => setTimeout(r, 0));
+    const frame = s.framesSince(-1).find((f) => f.type === "approval") as Extract<WireFrame, { type: "approval" }>;
+    expect(frame).toBeDefined();
+    s.answer(frame.id, { allow: true });
+    expect((await pending).behavior).toBe("allow");
+  });
+
+  it("ask_user is never gated — the Ask channel must not need approval to ask", async () => {
+    const s = new HarnessSession({});
+    const { options } = buildQueryArgs(cfg({ permission: "ask" }), s, []);
+    const canUse = options.canUseTool as (t: string, i: unknown) => Promise<{ behavior: string }>;
+    expect((await canUse("mcp__glyphh__ask_user", { questions: [] })).behavior).toBe("allow");
+    expect(s.framesSince(-1).filter((f) => f.type === "approval")).toHaveLength(0);
+  });
+});
+
+/**
+ * The gate's decision must actually bind the tool. The SDK is faked with a
+ * generator that HONORS canUseTool the way the real subprocess does — allow →
+ * perform the write, deny → report the refusal — so a mode that must not write
+ * provably leaves the disk untouched.
+ */
+describe("runHarness — a gated run cannot write in plan mode", () => {
+  const attempt = (file: string): QueryFn => (args) =>
+    (async function* () {
+      const canUse = (args.options as { canUseTool: (t: string, i: unknown) => Promise<{ behavior: string; message?: string }> }).canUseTool;
+      const decision = await canUse("Write", { file_path: file, content: "written" });
+      if (decision.behavior === "allow") {
+        writeFileSync(file, "written");
+        yield { type: "assistant", message: { content: [{ type: "text", text: "wrote it" }] } };
+      } else {
+        yield { type: "assistant", message: { content: [{ type: "text", text: `refused: ${decision.message ?? ""}` }] } };
+      }
+      yield { type: "result", subtype: "success", result: "" };
+    })();
+
+  it("plan mode: the file is NOT created; auto mode: it is", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gate-"));
+    const planned = join(dir, "plan.txt");
+    const s1 = new HarnessSession({});
+    await runHarness(s1, cfg({ permission: "plan" }), { queryFn: attempt(planned) });
+    expect(existsSync(planned)).toBe(false);
+    expect(frames(s1).some((f) => f.type === "delta" && /refused/.test(String((f as { delta?: string }).delta)))).toBe(true);
+
+    const allowed = join(dir, "auto.txt");
+    const s2 = new HarnessSession({});
+    await runHarness(s2, cfg({ permission: "auto" }), { queryFn: attempt(allowed) });
+    expect(existsSync(allowed)).toBe(true);
   });
 });
 

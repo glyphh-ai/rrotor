@@ -19,8 +19,15 @@
  * Tool surface v1 — CLOUD-SAFE by default: the SDK's own sandbox toolset
  * (Bash/Read/Write/Edit/Glob/Grep/…) anchored at the per-session workspace,
  * plus ONE in-process MCP tool, `ask_user`, which drives the Ask flow (an
- * `ask` frame parks the run; POST /runs/:id/answer resumes it). No connector
- * tools, no desktop reach, no native dialogs — UNLESS the caller lends them:
+ * `ask` frame parks the run; POST /runs/:id/answer resumes it).
+ *
+ * EVERY tool call is gated: `canUseTool` → `gateAction` (gate.ts) decides by
+ * the run's permission mode. The SDK's `allowedTools` is deliberately NOT set
+ * — it means "auto-allow without prompting", so listing the toolset there
+ * made the SDK skip the gate entirely (plan mode wrote files; ask mode never
+ * asked). Availability lives in `tools`; permission lives in the gate.
+ *
+ * No connector tools, no desktop reach, no native dialogs — UNLESS lent:
  * body `mcpServers` (validated in config.parseMcpServers, loopback-or-https)
  * are wired in as streamable-HTTP MCP servers, which is how the desktop's
  * loopback MCP hands a LOCAL pod its connectors/update_app/machine tools.
@@ -52,9 +59,16 @@ export interface EngineDeps {
   approvalTimeoutMs?: number;
 }
 
-/** The pod's built-in tool allow-list (v1 sandbox surface). Everything else —
- *  connectors, desktop panels, app deploys, Ada recall — is deliberately
- *  absent until later phases. */
+/**
+ * The pod's AVAILABLE built-in toolset (v1 sandbox surface) — passed as the
+ * SDK's `tools`, which is what governs availability. Everything else —
+ * connectors, desktop panels, app deploys, Ada recall — is deliberately absent
+ * until later phases.
+ *
+ * This list does NOT mean "allowed": nothing here is pre-approved. Whether a
+ * given call may proceed is decided per call by `canUseTool` → `gateAction`
+ * (gate.ts) according to the run's permission mode.
+ */
 export const SANDBOX_TOOLS = [
   "Bash",
   "BashOutput",
@@ -172,18 +186,25 @@ export function buildQueryArgs(
       settingSources: [],
       // chat = a tool-less streamed turn; cowork/code = the sandbox toolset
       // plus any caller-lent HTTP MCP servers (streamable-http — the desktop's
-      // loopback tool surface), each allowed wholesale as `mcp__<name>`.
+      // loopback tool surface).
+      //
+      // NOTHING IS PRE-APPROVED. `allowedTools` is the SDK's "auto-allow
+      // without prompting" list — naming a tool there makes the SDK skip
+      // `canUseTool` entirely, which silently disabled the permission gate
+      // (plan mode still wrote files; ask mode never asked). Availability is
+      // `tools`; the DECISION belongs to canUseTool → gateAction, per call,
+      // for built-ins and lent MCP tools alike. `ask_user` needs no allowance:
+      // the gate classifies it as a read, which is free in every mode.
       ...(chat
         ? { tools: [] as string[] }
         : {
-            tools: { type: "preset", preset: "claude_code" },
+            tools: SANDBOX_TOOLS,
             mcpServers: {
               glyphh: { type: "sdk", name: "glyphh", instance: mcp as never },
               ...Object.fromEntries(
                 lent.map((s) => [s.name, { type: "http", url: s.url, ...(s.headers ? { headers: s.headers } : {}) }]),
               ),
             },
-            allowedTools: [...SANDBOX_TOOLS, "mcp__glyphh__ask_user", ...lent.map((s) => `mcp__${s.name}`)],
           }),
       // The gate: mode model + approval frames (gate.ts). The SDK's own
       // prompt layer always defers to it.
