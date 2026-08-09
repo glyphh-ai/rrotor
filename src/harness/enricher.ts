@@ -43,6 +43,9 @@ const SYSTEM = [
   "- Extract STANDING DIRECTIVES (always/never/from now on…) as role \"directive\", tier \"long\".",
   "- Resolve pronouns from the turn itself when unambiguous; otherwise skip.",
   "- No facts worth keeping → []",
+  // qwen3 soft switch: skip the <think> pass — extraction needs speed, not
+  // deliberation. Harmless noise to models that don't know it.
+  "/no_think",
 ].join("\n");
 
 /** Extract facts from `text` with the configured local model. Returns null when
@@ -85,8 +88,11 @@ export async function enrichFacts(text: string, entity: string, env: NodeJS.Proc
 /** Parse + validate the model's output into facts. Null on anything malformed —
  *  a hallucinated shape must fall back to the deterministic floor, not persist. */
 export function parseFacts(raw: string, defaultEntity: string): EnrichedFact[] | null {
+  // Reasoning models (qwen3) may prefix a <think> block whose prose can contain
+  // brackets — strip it (closed or unterminated) before hunting for the array.
+  const cleaned = raw.replace(/<think>[\s\S]*?(<\/think>|$)/gi, "");
   // Tolerate a fenced block or leading prose around the array.
-  const m = /\[[\s\S]*\]/.exec(raw);
+  const m = /\[[\s\S]*\]/.exec(cleaned);
   if (!m) return null;
   let arr: unknown;
   try { arr = JSON.parse(m[0]); } catch { return null; }
