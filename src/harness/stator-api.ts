@@ -45,7 +45,13 @@ async function withScopedMemory<T>(
   if (!url) throw new Error("stator not configured (ROTOR_STATOR_URL)");
   const client = await connectPg(url, { max: 1 });
   try {
-    await client.query(`SET search_path TO "${schemaForOrg(principal.orgId)}", public`);
+    const schema = schemaForOrg(principal.orgId);
+    // CREATE the schema before pinning — Postgres SILENTLY drops a nonexistent
+    // schema from search_path, so without this every op falls through to
+    // public: a SHARED bucket across orgs. (ThreadStore.scoped does the same;
+    // omitting it here was a real cross-tenant bug, caught in test.)
+    await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+    await client.query(`SET search_path TO "${schema}", public`);
     const store = await PgVectorStore.create({ client });
     const memory = new BasicMemory(store);
     const grounding = new BasicGrounding(store);
