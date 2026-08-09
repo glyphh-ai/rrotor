@@ -72,6 +72,7 @@ import { VERSION } from "../version.js";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
 import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "../auth/introspect.js";
+import { statorRecall, statorWrite, type RecallRequest, type WriteRequest } from "./stator-api.js";
 import type { Introspector, Principal, AuthDecision } from "../auth/introspect.js";
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
 import { HARNESS_WIRE_VERSION } from "./frames.js";
@@ -376,6 +377,32 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
       sendJson(res, 200, { ok: true, status: session.status });
       return;
     }
+  }
+
+  // ── the STATOR API (recall/write the regional memory plane; owner-scoped) ────
+  if (method === "POST" && (path === "/stator/recall" || path === "/stator/write")) {
+    const principal = authn.principal;
+    if (!principal) {
+      sendJson(res, 503, { error: "no-principal", detail: "the stator API needs introspection auth — the token's org/user scopes every read and write" });
+      return;
+    }
+    readBody(req, RUN_BODY_LIMIT)
+      .then(async (raw) => {
+        let body: Record<string, unknown>;
+        try { body = raw.length ? (JSON.parse(raw) as Record<string, unknown>) : {}; }
+        catch { sendJson(res, 400, { error: "invalid-json", detail: "body must be JSON" }); return; }
+        try {
+          const result = path === "/stator/recall"
+            ? await statorRecall(principal, body as RecallRequest)
+            : await statorWrite(principal, body as WriteRequest);
+          sendJson(res, 200, result);
+        } catch (err) {
+          log.error("stator api failed", { path, detail: (err as Error).message });
+          sendJson(res, 500, { error: "stator-error", detail: (err as Error).message });
+        }
+      })
+      .catch(() => sendJson(res, 500, { error: "stator-error" }));
+    return;
   }
 
   if (method === "GET" && path === "/threads") {
