@@ -370,8 +370,12 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   // turns and fold them into the system prompt. Owner-scoped by the principal;
   // best-effort, so a memory miss never blocks the turn.
   let runCfg = cfg;
-  if (principal) {
-    const block = await recallForTurn(principal, cfg.threadId ?? cfg.sessionId, cfg.prompt);
+  if (principal && cfg.memory?.recall !== false) {
+    const block = await recallForTurn(principal, cfg.threadId ?? cfg.sessionId, cfg.prompt, {
+      ...(cfg.memory?.topK !== undefined ? { topK: cfg.memory.topK } : {}),
+      ...(cfg.memory?.threshold !== undefined ? { threshold: cfg.memory.threshold } : {}),
+      ...(cfg.memory?.entity ? { entity: cfg.memory.entity } : {}),
+    });
     if (block) {
       runCfg = { ...cfg, system: `${cfg.system ?? DEFAULT_SYSTEM}\n\n<memory>\n${block}\n</memory>` };
       runLog.info("recall injected", { chars: block.length });
@@ -501,7 +505,7 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
     } else {
       // Persist the exchange to the stator so the NEXT turn recalls it: log both
       // turns + absorb the user turn into facts. Best-effort; never fails the run.
-      if (principal) await persistTurn(principal, cfg.threadId ?? cfg.sessionId, cfg.prompt, finalText);
+      if (principal && cfg.memory?.write !== false) await persistTurn(principal, cfg.threadId ?? cfg.sessionId, cfg.prompt, finalText, cfg.memory?.entity);
       session.emit({ type: "done", stopped: false });
       runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok(), credits_micro: creditsMicro ?? undefined });
     }

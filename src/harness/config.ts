@@ -122,6 +122,26 @@ export interface HarnessRunConfig {
   attachmentMaxBytes: number;
   /** Hard cap on agent turns (0 = SDK default). */
   maxTurns: number;
+  /** The LOOP's memory policy for this turn — whether the turn rotates around the
+   *  stator and how. Absent ⇒ the default (recall + write on, deterministic
+   *  enricher). This is the seam that hands the memory decision back to the loop
+   *  instead of it being hardcoded in the engine. */
+  memory?: MemoryPolicy;
+}
+
+/** How a loop wants a turn to use memory. All optional; absent fields take the
+ *  engine default (recall + write on, assembleRecall's own topK/threshold). */
+export interface MemoryPolicy {
+  /** Recall + inject before the loop. Default true. */
+  recall?: boolean;
+  /** Persist the exchange after the loop. Default true. */
+  write?: boolean;
+  /** Semantic-recall breadth (overrides the default). */
+  topK?: number;
+  /** Minimum cosine for a semantic hit (overrides the default). */
+  threshold?: number;
+  /** The fact-owning entity (default `user`). */
+  entity?: string;
 }
 
 /** The pod's harness home: sandboxes + config dirs live under it. Writable by
@@ -148,6 +168,7 @@ export interface RunRequestBody {
   controlUrl?: unknown;
   runtimeToken?: unknown;
   maxTurns?: unknown;
+  memory?: unknown;
 }
 
 /** A validation failure the HTTP layer maps to 400. */
@@ -325,7 +346,24 @@ export function resolveRunConfig(
     attachments: parseAttachments(body.attachments),
     attachmentMaxBytes: intEnv(env.HARNESS_ATTACH_MAX_MB, 50) * 1024 * 1024,
     maxTurns: num(body.maxTurns) ?? intEnv(env.HARNESS_MAX_TURNS, 0),
+    ...(parseMemory(body.memory) ? { memory: parseMemory(body.memory) } : {}),
   };
+}
+
+/** Parse the loop's memory policy from the body. Returns undefined when nothing
+ *  is specified, so the engine falls back to its defaults. */
+function parseMemory(v: unknown): MemoryPolicy | undefined {
+  if (v == null || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  const p: MemoryPolicy = {};
+  if (typeof o.recall === "boolean") p.recall = o.recall;
+  if (typeof o.write === "boolean") p.write = o.write;
+  const tk = num(o.topK);
+  if (tk !== undefined) p.topK = tk;
+  if (typeof o.threshold === "number" && Number.isFinite(o.threshold)) p.threshold = o.threshold;
+  const e = str(o.entity);
+  if (e) p.entity = e;
+  return Object.keys(p).length ? p : undefined;
 }
 
 function str(v: unknown): string | undefined {
