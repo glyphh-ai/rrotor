@@ -308,7 +308,9 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         // all owned by the caller's introspected principal.
         new ThreadRecorder(threads, cfg, authn.principal).attach(session);
         // Fire the run; frames stream via /ws + /runs/:id/frames. Never throws.
-        void runHarness(session, cfg, opts.engine ?? {});
+        // The principal (when introspected) lets the engine rotate the turn
+        // around the stator — recall before, write after — owner-scoped.
+        void runHarness(session, cfg, opts.engine ?? {}, authn.principal);
         log.info("run accepted", {
           run_id: runId,
           session: cfg.sessionId || undefined,

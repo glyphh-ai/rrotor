@@ -50,6 +50,8 @@ import { ASK_TIMEOUT_MS } from "./gate.js";
 import type { AskQuestion } from "./frames.js";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
+import type { Principal } from "../auth/introspect.js";
+import { recallForTurn, persistTurn } from "./stator-api.js";
 
 /** The injectable SDK seam: the real `query` in production, a fake in tests. */
 export type QueryFn = (args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }) => AsyncIterable<unknown>;
@@ -314,7 +316,7 @@ export function buildQueryArgs(
  * the SDK loop, translate every message into frames. Resolves when the run
  * has emitted its terminal frame; never throws.
  */
-export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig, deps: EngineDeps = {}): Promise<void> {
+export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig, deps: EngineDeps = {}, principal?: Principal): Promise<void> {
   const runLog = log.child({ run_id: cfg.runId, session: cfg.sessionId || undefined });
   const secrets = [cfg.runtimeToken];
   const fail = (message: string): void => {
@@ -364,8 +366,20 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
     workdir: cfg.workdir,
   });
 
+  // ROTATE THE TURN AROUND THE STATOR: recall prior facts/directives + similar
+  // turns and fold them into the system prompt. Owner-scoped by the principal;
+  // best-effort, so a memory miss never blocks the turn.
+  let runCfg = cfg;
+  if (principal) {
+    const block = await recallForTurn(principal, cfg.threadId ?? cfg.sessionId, cfg.prompt);
+    if (block) {
+      runCfg = { ...cfg, system: `${cfg.system ?? DEFAULT_SYSTEM}\n\n<memory>\n${block}\n</memory>` };
+      runLog.info("recall injected", { chars: block.length });
+    }
+  }
+
   try {
-    const q = queryFn(buildQueryArgs(cfg, session, attachments, deps));
+    const q = queryFn(buildQueryArgs(runCfg, session, attachments, deps));
     for await (const raw of q) {
       if (session.ctrl.signal.aborted) break;
       const msg = raw as SDKMessage;
@@ -485,6 +499,9 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
       fail(runError);
       runLog.warn("run failed", { detail: runError, turns: turnsUsed });
     } else {
+      // Persist the exchange to the stator so the NEXT turn recalls it: log both
+      // turns + absorb the user turn into facts. Best-effort; never fails the run.
+      if (principal) await persistTurn(principal, cfg.threadId ?? cfg.sessionId, cfg.prompt, finalText);
       session.emit({ type: "done", stopped: false });
       runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok(), credits_micro: creditsMicro ?? undefined });
     }

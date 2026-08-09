@@ -101,3 +101,30 @@ export async function statorWrite(principal: Principal, body: WriteRequest): Pro
     return { written, mode };
   });
 }
+
+/** The recall block for a turn — plain text to fold into the system prompt.
+ *  Best-effort: any failure yields "" so a turn NEVER fails on memory. */
+export async function recallForTurn(principal: Principal, threadId: string | undefined, prompt: string): Promise<string> {
+  try {
+    const r = (await statorRecall(principal, { threadId, query: prompt })) as { block?: string };
+    return r.block ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Persist a completed exchange: log both turns (recency + similarity corpus) and
+ *  absorb the USER turn into facts. Best-effort — a memory write never fails a turn. */
+export async function persistTurn(
+  principal: Principal, threadId: string | undefined, userText: string, assistantText: string,
+): Promise<void> {
+  try {
+    await statorWrite(principal, { threadId, mode: "turn", speaker: "user", text: userText });
+    await statorWrite(principal, { threadId, mode: "absorb", entity: "user", text: userText });
+    if (assistantText.trim()) {
+      await statorWrite(principal, { threadId, mode: "turn", speaker: "assistant", text: assistantText });
+    }
+  } catch {
+    /* memory is best-effort */
+  }
+}
