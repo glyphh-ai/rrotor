@@ -73,7 +73,18 @@ export async function statorRecall(principal: Principal, body: RecallRequest): P
       ...(typeof body.threshold === "number" ? { threshold: body.threshold } : {}),
     });
     const facts = await memory.recall({ entity, spaceId, ...(session ? { session } : {}) });
-    return { directives: ctx.directives, recalled: ctx.recalled, facts, block: recallBlock(ctx) };
+    // The injected block carries the FACT NODE too — a name or preference must
+    // reach the model by right, not by semantic luck (directives + similar turns
+    // alone made "what's my name" depend on cosine overlap). Directives are
+    // already their own section; skip them here. Bounded to keep prompts sane.
+    const factLines = facts
+      .filter((f) => f.role !== "directive" && f.filler)
+      .slice(-40)
+      .map((f) => `- ${f.entity} ${f.role}: ${f.filler}`);
+    const block = [recallBlock(ctx), factLines.length ? `Known facts:\n${factLines.join("\n")}` : ""]
+      .filter(Boolean)
+      .join("\n\n");
+    return { directives: ctx.directives, recalled: ctx.recalled, facts, block };
   });
 }
 

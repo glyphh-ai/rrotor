@@ -30,19 +30,29 @@ export interface EnrichedFact {
   key?: string;
 }
 
+// Small models need WORKED EXAMPLES, not rules — the few-shot pairs below are
+// what makes a 1.7b produce whole-value fillers and catch directives.
 const SYSTEM = [
-  "You extract durable memory facts from one conversational turn.",
-  "Return ONLY a JSON array (no prose, no markdown fence). Each element:",
+  "You extract memory facts about the USER from one message they wrote.",
+  "Return ONLY a JSON array (no prose, no fence). Each element:",
   '{"entity": string, "role": string, "filler": string, "tier": "short"|"mid"|"long"}',
   "Rules:",
-  "- entity: who/what the fact is about — the speaker is \"user\".",
-  "- role: a short snake_case slot (name, employer, preference, deadline, directive, project, decision…).",
-  "- filler: the value, concise, from the text only — never invent.",
-  "- tier: \"long\" for standing directives, identity and durable preferences;",
-  "  \"mid\" for task/project facts that matter for days; \"short\" for this-session-only detail.",
-  "- Extract STANDING DIRECTIVES (always/never/from now on…) as role \"directive\", tier \"long\".",
-  "- Resolve pronouns from the turn itself when unambiguous; otherwise skip.",
+  '- entity is "user" unless the fact is clearly about a named other person/thing.',
+  "- role: one snake_case slot — name, preference, directive, project, deadline, decision, location, tool…",
+  "- filler: the COMPLETE value as a readable phrase, taken from the text — never a fragment, never invented.",
+  '- Standing instructions (always/never/from now on/sign as/use X not Y) → role "directive", tier "long".',
+  '- Identity + durable preferences → "long". Task/project facts → "mid". Session-only detail → "short".',
   "- No facts worth keeping → []",
+  "",
+  'Example — message: "My name is Ada and I always want replies in Spanish. The retro is Thursday."',
+  'Output: [{"entity":"user","role":"name","filler":"Ada","tier":"long"},',
+  '{"entity":"user","role":"directive","filler":"always reply in Spanish","tier":"long"},',
+  '{"entity":"user","role":"deadline","filler":"the retro is Thursday","tier":"short"}]',
+  "",
+  'Example — message: "We decided to move the billing service to Postgres; ping Sam about the keys."',
+  'Output: [{"entity":"billing service","role":"decision","filler":"move to Postgres","tier":"mid"},',
+  '{"entity":"user","role":"task","filler":"ping Sam about the keys","tier":"short"}]',
+  "",
   // qwen3 soft switch: skip the <think> pass — extraction needs speed, not
   // deliberation. Harmless noise to models that don't know it.
   "/no_think",
