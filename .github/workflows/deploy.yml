@@ -1,0 +1,40 @@
+name: Deploy glyphh-ai-runtime
+
+# Ships the SHARED NAM HARNESS RUNTIME (deploy/fly.nam.toml → Fly app
+# glyphh-ai-runtime, iad, flycast-private). Deploys ride CI — never a laptop
+# (server devops law). Gated on the same verify the publish workflow trusts;
+# `publish.yml` keeps pushing the GHCR image for control-plane-minted machines,
+# this workflow deploys the ALWAYS-ON shared runtime.
+#
+# One-time infra (app create, private IP, stator PG, fly secrets) is provisioned
+# out-of-band; this only deploys code. Secrets live in `fly secrets`, not here.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+      - run: npm test
+
+  deploy-fly:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to Fly
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only -c deploy/fly.nam.toml
