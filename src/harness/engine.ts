@@ -376,6 +376,8 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   // Best-effort either way; a memory miss never blocks the turn.
   const statorBase = principal ? null : controlBaseFromGateway(cfg.gatewayUrl);
   const memoryOn = !!(principal || (statorBase && cfg.runtimeToken));
+  // Memory silently unarmed is the failure mode that burns hours — say WHY once.
+  if (!memoryOn) runLog.info("memory unarmed", { principal: !!principal, stator_base: !!statorBase, token: !!cfg.runtimeToken });
   const recallOpts = {
     ...(cfg.memory?.topK !== undefined ? { topK: cfg.memory.topK } : {}),
     ...(cfg.memory?.threshold !== undefined ? { threshold: cfg.memory.threshold } : {}),
@@ -520,6 +522,7 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
         const thread = cfg.threadId ?? cfg.sessionId;
         if (principal) await persistTurn(principal, thread, cfg.prompt, finalText, cfg.memory?.entity);
         else await persistTurnViaApi(statorBase!, cfg.runtimeToken, thread, cfg.prompt, finalText, cfg.memory?.entity);
+        runLog.info("turn persisted to stator", { via: principal ? "store" : "api" });
       }
       session.emit({ type: "done", stopped: false });
       runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok(), credits_micro: creditsMicro ?? undefined });

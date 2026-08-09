@@ -156,8 +156,15 @@ class HttpIntrospector implements Introspector {
     // to where a shared pod can judge it).
     const matches = !this.cfg.sessionId || payload.sessionId === this.cfg.sessionId;
     if (active && matches) {
-      const orgId = typeof payload.orgId === "string" ? payload.orgId : "";
-      const userId = typeof payload.userId === "string" ? payload.userId : "";
+      // TWO response shapes from one endpoint: runtime/API-key credentials
+      // introspect as {userId, orgId}; a USER SESSION token (gy_at_ — what the
+      // control plane's turn proxy forwards) answers OAuth-style {sub, org}.
+      // Accept both, or a front-door turn carries no principal and memory
+      // silently never arms.
+      const orgId = typeof payload.orgId === "string" ? payload.orgId
+        : typeof (payload as { org?: unknown }).org === "string" ? (payload as { org: string }).org : "";
+      const userId = typeof payload.userId === "string" ? payload.userId
+        : typeof (payload as { sub?: unknown }).sub === "string" ? (payload as { sub: string }).sub : "";
       const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
       const decision: AuthDecision = {
         ok: true,
