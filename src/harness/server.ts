@@ -82,7 +82,7 @@ import type { RunRequestBody } from "./config.js";
 import { HarnessSession, mintRunId } from "./session.js";
 import { runHarness } from "./engine.js";
 import type { EngineDeps } from "./engine.js";
-import { ThreadRecorder, threadStoreFromEnv, warnIfUnrecordable, parseThreadMsgs, parseMode } from "./threads.js";
+import { ThreadRecorder, FrameTape, threadStoreFromEnv, warnIfUnrecordable, parseThreadMsgs, parseMode } from "./threads.js";
 import type { ThreadStore, ThreadPut } from "./threads.js";
 
 const DEFAULT_PORT = 8080;
@@ -307,6 +307,10 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         // turn persists at start, frames stream into messages (threads.ts),
         // all owned by the caller's introspected principal.
         new ThreadRecorder(threads, cfg, authn.principal).attach(session);
+        // …and onto the FRAME TAPE (stator-backed replay): durable + readable
+        // from ANY machine, so /runs/:id/frames answers after a restart or on a
+        // sibling pod. Best-effort; the in-memory ring stays the fast path.
+        new FrameTape(threads, runId, authn.principal).attach(session);
         // Fire the run; frames stream via /ws + /runs/:id/frames. Never throws.
         // The principal (when introspected) lets the engine rotate the turn
         // around the stator — recall before, write after — owner-scoped.
@@ -332,6 +336,29 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
     const sub = runMatch[3] ?? "";
     const session = reg.get(runId);
     if (!session) {
+      // Not on THIS machine's registry — a sibling machine's run, or a pod
+      // restart mid-poll. The FRAME TAPE (stator) still has the frames, so a
+      // frames poll answers durably; status derives from the tape's tail
+      // (terminal frame ⇒ settled, else the run is live elsewhere).
+      if (method === "GET" && sub === "frames" && authn.principal) {
+        const query = (req.url ?? "").split("?", 2)[1] ?? "";
+        const from = Number(new URLSearchParams(query).get("from") ?? -1);
+        const principal = authn.principal;
+        void threads
+          .then(async (s) => {
+            if (!s) { sendJson(res, 404, { error: "no-such-run", detail: `no run ${runId}` }); return; }
+            const cursor = Number.isFinite(from) ? from : -1;
+            const frames = await s.framesSince(principal, runId, cursor);
+            // A from-scratch read with NOTHING on the tape = the run never
+            // existed (for this owner) — 404, not an empty live page.
+            if (!frames.length && cursor < 0) { sendJson(res, 404, { error: "no-such-run", detail: `no run ${runId}` }); return; }
+            const last = frames[frames.length - 1];
+            const status = last && (last.type === "done" || last.type === "error") ? (last.type === "done" ? "done" : "error") : "running";
+            sendJson(res, 200, { runId, status, frames });
+          })
+          .catch(() => sendJson(res, 404, { error: "no-such-run", detail: `no run ${runId}` }));
+        return;
+      }
       sendJson(res, 404, { error: "no-such-run", detail: `no run ${runId}` });
       return;
     }

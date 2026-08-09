@@ -40,7 +40,7 @@ import { connectPg, asJson } from "../exec/pgvector-store.js";
 import type { PgLike } from "../exec/pgvector-store.js";
 import type { Principal } from "../auth/introspect.js";
 import type { HarnessRunConfig, SessionMode } from "./config.js";
-import type { WireFrame } from "./frames.js";
+import { isTerminal, type WireFrame } from "./frames.js";
 import type { HarnessSession } from "./session.js";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
@@ -127,6 +127,15 @@ CREATE TABLE IF NOT EXISTS thread_messages (
   PRIMARY KEY (thread_id, ord)
 );
 CREATE INDEX IF NOT EXISTS ix_threads_user_updated ON threads(user_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS run_frames (
+  run_id TEXT NOT NULL,
+  seq BIGINT NOT NULL,
+  user_id UUID NOT NULL,
+  at BIGINT NOT NULL,
+  frame JSONB NOT NULL,
+  PRIMARY KEY (run_id, seq)
+);
+CREATE INDEX IF NOT EXISTS ix_run_frames_at ON run_frames(at);
 `;
 
 export interface ThreadStoreOptions {
@@ -234,6 +243,50 @@ export class ThreadStore {
     await this.db.query(
       "UPDATE threads SET updated_at = GREATEST(updated_at, $4) WHERE id = $1 AND org_id = $2 AND user_id = $3",
       [id, p.orgId, p.userId, at],
+    );
+  }
+
+  // ── the FRAME TAPE (the stator-backed replay store) ─────────────────────────
+  // The in-memory FrameRing serves same-pod reconnects; the tape makes frames
+  // DURABLE and CROSS-MACHINE: a poll landing on a different machine (or a pod
+  // restarted mid-run) reads the run's frames from here. Owner-scoped like
+  // everything else — org by schema, user by column.
+
+  /** Append a batch of frames (idempotent — replays skip on conflict). */
+  async appendFrames(p: Principal, runId: string, frames: WireFrame[]): Promise<void> {
+    if (!frames.length) return;
+    await this.scoped(p, async () => {
+      const cols: string[] = [];
+      const vals: unknown[] = [];
+      frames.forEach((f, i) => {
+        const b = i * 5;
+        cols.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5})`);
+        vals.push(runId, f.seq, p.userId, f.at, JSON.stringify(f));
+      });
+      await this.db.query(
+        `INSERT INTO run_frames (run_id, seq, user_id, at, frame) VALUES ${cols.join(",")} ON CONFLICT (run_id, seq) DO NOTHING`,
+        vals,
+      );
+    });
+  }
+
+  /** Frames with seq > `from` for a run the caller owns, seq-ordered. */
+  async framesSince(p: Principal, runId: string, from: number): Promise<WireFrame[]> {
+    return this.scoped(p, async () => {
+      const rows = (
+        await this.db.query(
+          "SELECT frame FROM run_frames WHERE run_id = $1 AND user_id = $2 AND seq > $3 ORDER BY seq",
+          [runId, p.userId, from],
+        )
+      ).rows as Array<{ frame: unknown }>;
+      return rows.map((r) => (typeof r.frame === "string" ? JSON.parse(r.frame) : r.frame) as WireFrame);
+    });
+  }
+
+  /** Drop frames older than `olderThanMs` (retention; called opportunistically). */
+  async pruneFrames(p: Principal, olderThanMs: number): Promise<void> {
+    await this.scoped(p, () =>
+      this.db.query("DELETE FROM run_frames WHERE at < $1", [Date.now() - olderThanMs]),
     );
   }
 
@@ -537,5 +590,53 @@ export class ThreadRecorder {
       .catch((err: unknown) => {
         this.logger.warn("thread persist failed", { detail: (err as Error).message });
       });
+  }
+}
+
+/**
+ * FrameTape — persists a run's WireFrames to the stator (batched), making the
+ * replay stream DURABLE and CROSS-MACHINE: `GET /runs/:id/frames` can answer
+ * from the tape when the run lives on another machine or the pod restarted.
+ * Deltas dominate, so writes batch (size/time) and flush IMMEDIATELY on the
+ * frames where latency matters across machines: approval/ask (a parked run) and
+ * the terminals. Best-effort like the recorder — a tape failure never touches
+ * the run; the in-memory ring still serves same-pod reconnects.
+ */
+const TAPE_BATCH = 50;
+const TAPE_FLUSH_MS = 300;
+
+export class FrameTape {
+  private store: ThreadStore | null = null;
+  private q: Promise<unknown>;
+  private buf: WireFrame[] = [];
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private readonly logger;
+
+  constructor(store: Promise<ThreadStore | null>, private readonly runId: string, private readonly principal: Principal | undefined) {
+    this.logger = log.child({ run_id: runId });
+    this.q = store.then((s) => { this.store = s; });
+  }
+
+  attach(session: HarnessSession): void {
+    if (!this.principal) return;
+    const unsubscribe = session.subscribe((f) => {
+      this.buf.push(f);
+      const urgent = isTerminal(f) || f.type === "approval" || f.type === "ask";
+      if (urgent || this.buf.length >= TAPE_BATCH) this.flush();
+      else if (!this.timer) {
+        this.timer = setTimeout(() => this.flush(), TAPE_FLUSH_MS);
+        (this.timer as { unref?: () => void }).unref?.();
+      }
+      if (isTerminal(f)) unsubscribe();
+    });
+  }
+
+  private flush(): void {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    const batch = this.buf.splice(0);
+    if (!batch.length) return;
+    this.q = this.q
+      .then(() => (this.store && this.principal ? this.store.appendFrames(this.principal, this.runId, batch) : undefined))
+      .catch((err: unknown) => { this.logger.warn("frame tape write failed", { detail: (err as Error).message }); });
   }
 }
