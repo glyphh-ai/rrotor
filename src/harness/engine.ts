@@ -51,7 +51,7 @@ import type { AskQuestion } from "./frames.js";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
 import type { Principal } from "../auth/introspect.js";
-import { recallForTurn, persistTurn } from "./stator-api.js";
+import { recallForTurn, persistTurn, recallForTurnViaApi, persistTurnViaApi, controlBaseFromGateway } from "./stator-api.js";
 
 /** The injectable SDK seam: the real `query` in production, a fake in tests. */
 export type QueryFn = (args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }) => AsyncIterable<unknown>;
@@ -367,18 +367,29 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   });
 
   // ROTATE THE TURN AROUND THE STATOR: recall prior facts/directives + similar
-  // turns and fold them into the system prompt. Owner-scoped by the principal;
-  // best-effort, so a memory miss never blocks the turn.
+  // turns and fold them into the system prompt; write the exchange back after.
+  // TWO paths to ONE regional memory plane (docs/runtime-stator-split.md):
+  //   cloud pod  — principal present → the org-scoped store, direct.
+  //   local pod  — auth off (no principal) → the control plane's /api/stator/*,
+  //                bearer = the run's runtimeToken (the user's access token),
+  //                control base derived from the gatewayUrl the run carries.
+  // Best-effort either way; a memory miss never blocks the turn.
+  const statorBase = principal ? null : controlBaseFromGateway(cfg.gatewayUrl);
+  const memoryOn = !!(principal || (statorBase && cfg.runtimeToken));
+  const recallOpts = {
+    ...(cfg.memory?.topK !== undefined ? { topK: cfg.memory.topK } : {}),
+    ...(cfg.memory?.threshold !== undefined ? { threshold: cfg.memory.threshold } : {}),
+    ...(cfg.memory?.entity ? { entity: cfg.memory.entity } : {}),
+  };
   let runCfg = cfg;
-  if (principal && cfg.memory?.recall !== false) {
-    const block = await recallForTurn(principal, cfg.threadId ?? cfg.sessionId, cfg.prompt, {
-      ...(cfg.memory?.topK !== undefined ? { topK: cfg.memory.topK } : {}),
-      ...(cfg.memory?.threshold !== undefined ? { threshold: cfg.memory.threshold } : {}),
-      ...(cfg.memory?.entity ? { entity: cfg.memory.entity } : {}),
-    });
+  if (memoryOn && cfg.memory?.recall !== false) {
+    const thread = cfg.threadId ?? cfg.sessionId;
+    const block = principal
+      ? await recallForTurn(principal, thread, cfg.prompt, recallOpts)
+      : await recallForTurnViaApi(statorBase!, cfg.runtimeToken, thread, cfg.prompt, recallOpts);
     if (block) {
       runCfg = { ...cfg, system: `${cfg.system ?? DEFAULT_SYSTEM}\n\n<memory>\n${block}\n</memory>` };
-      runLog.info("recall injected", { chars: block.length });
+      runLog.info("recall injected", { chars: block.length, via: principal ? "store" : "api" });
     }
   }
 
@@ -505,7 +516,11 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
     } else {
       // Persist the exchange to the stator so the NEXT turn recalls it: log both
       // turns + absorb the user turn into facts. Best-effort; never fails the run.
-      if (principal && cfg.memory?.write !== false) await persistTurn(principal, cfg.threadId ?? cfg.sessionId, cfg.prompt, finalText, cfg.memory?.entity);
+      if (memoryOn && cfg.memory?.write !== false) {
+        const thread = cfg.threadId ?? cfg.sessionId;
+        if (principal) await persistTurn(principal, thread, cfg.prompt, finalText, cfg.memory?.entity);
+        else await persistTurnViaApi(statorBase!, cfg.runtimeToken, thread, cfg.prompt, finalText, cfg.memory?.entity);
+      }
       session.emit({ type: "done", stopped: false });
       runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok(), credits_micro: creditsMicro ?? undefined });
     }

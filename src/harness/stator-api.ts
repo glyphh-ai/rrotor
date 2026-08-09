@@ -136,3 +136,53 @@ export async function persistTurn(
     /* memory is best-effort */
   }
 }
+
+// ── the API path: a LOCAL (auth-off) pod recalls/writes the REGIONAL stator over
+//    the control plane (/api/stator/*), bearer = the run's runtimeToken (the
+//    user's access token on a local pod). Zero new config: the control base is
+//    derived from the gatewayUrl every run already carries. ──────────────────────
+
+/** `<control>/api/gateway` → `<control>`, or null when the shape is unknown. */
+export function controlBaseFromGateway(gatewayUrl: string | undefined): string | null {
+  if (!gatewayUrl) return null;
+  const m = /^(.*)\/api\/gateway\/?$/.exec(gatewayUrl.trim());
+  return m ? m[1] : null;
+}
+
+async function postStator(base: string, bearer: string, path: string, body: unknown): Promise<unknown> {
+  const res = await fetch(`${base}/api/stator/${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`stator api ${path}: HTTP ${res.status}`);
+  return res.json();
+}
+
+/** recallForTurn over the control-plane stator API. Best-effort → "" on failure. */
+export async function recallForTurnViaApi(
+  base: string, bearer: string, threadId: string | undefined, prompt: string,
+  opts: { topK?: number; threshold?: number; entity?: string } = {},
+): Promise<string> {
+  try {
+    const r = (await postStator(base, bearer, "recall", { threadId, query: prompt, ...opts })) as { block?: string };
+    return r.block ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** persistTurn over the control-plane stator API. Best-effort. */
+export async function persistTurnViaApi(
+  base: string, bearer: string, threadId: string | undefined, userText: string, assistantText: string, entity = "user",
+): Promise<void> {
+  try {
+    await postStator(base, bearer, "write", { threadId, mode: "turn", speaker: "user", text: userText });
+    await postStator(base, bearer, "write", { threadId, mode: "absorb", entity, text: userText });
+    if (assistantText.trim()) {
+      await postStator(base, bearer, "write", { threadId, mode: "turn", speaker: "assistant", text: assistantText });
+    }
+  } catch {
+    /* memory is best-effort */
+  }
+}
