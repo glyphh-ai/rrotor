@@ -22,6 +22,7 @@ import { BasicMemory } from "../plugins/memory.js";
 import { BasicGrounding } from "../plugins/grounding.js";
 import { assembleRecall, recallBlock } from "../exec/recall.js";
 import { absorbText } from "../handlers/memory.js";
+import { enrichFacts } from "./enricher.js";
 import type { MemoryTier } from "../exec/facts.js";
 
 // The ONE space every runtime shares (base-memory.rotor.yaml). Drift = recall misses.
@@ -89,8 +90,10 @@ export async function statorWrite(principal: Principal, body: WriteRequest): Pro
       await memory.recordTurn(`${speaker}: ${text}`);
       return { written: text.trim() ? 1 : 0, mode };
     }
-    const facts = absorbText(text, entity);
-    const written = await memory.write(facts, {
+    // Schema-on-write: the LLM enricher (qwen3 via the local model host) when
+    // configured, the deterministic absorbText floor otherwise or on any failure.
+    const facts = (await enrichFacts(text, entity)) ?? absorbText(text, entity);
+    const written = await memory.write(facts as Array<Record<string, unknown>>, {
       key: entity,
       mode: "absorb",
       speaker,
