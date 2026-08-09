@@ -14,6 +14,7 @@
  */
 
 import type { MemoryPlugin, SemanticHit } from "../plugins/interfaces.js";
+import type { Fact } from "./facts.js";
 
 export interface RecallOptions {
   /** The directive-owning entity (the user/session). Default `user`. */
@@ -60,4 +61,65 @@ export function recallBlock(ctx: RecalledContext): string {
     parts.push("Relevant earlier context:\n" + ctx.recalled.map((h) => `- ${h.text}`).join("\n"));
   }
   return parts.join("\n\n");
+}
+
+/** The FULL recall context for a turn: directives + semantic hits + the entity's
+ *  fact node, rendered as one prompt block. The fact node reaches the model BY
+ *  RIGHT (a name/degree/preference must not depend on cosine luck).
+ *
+ *  Two properties the raw fact table doesn't give you:
+ *   - **Relevance-first, not recency-truncated.** The old block kept the last N
+ *     facts by write order, so a fact stated early in a long history fell off the
+ *     end. Here facts are ranked by overlap with the query, so the fact the turn
+ *     is *about* is surfaced regardless of when it was stated. HDC already encodes
+ *     a role's fillers no matter how many times they were stated; recall should
+ *     not throw that away with a tail slice.
+ *   - **Latest temporal value front and center.** Ties (and the residual after
+ *     relevance) are ordered most-recent-first, so the current value of a role
+ *     (e.g. an updated deadline/decision) leads.
+ */
+export interface FullRecall extends RecalledContext {
+  facts: Fact[];
+  block: string;
+}
+
+const _tok = (s: string): Set<string> =>
+  new Set(s.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter((w) => w.length > 2));
+
+function _rel(q: Set<string>, text: string): number {
+  const t = _tok(text);
+  let n = 0;
+  for (const w of q) if (t.has(w)) n++;
+  return n;
+}
+
+export async function recallContext(
+  memory: MemoryPlugin,
+  query: string,
+  opts: RecallOptions & { factCap?: number } = {},
+): Promise<FullRecall> {
+  const entity = opts.entity ?? "user";
+  const ctx = await assembleRecall(memory, query, opts);
+  const facts = await memory.recall({
+    entity,
+    ...(opts.spaceId ? { spaceId: opts.spaceId } : {}),
+    ...(opts.session ? { session: opts.session } : {}),
+    ...(opts.midWindow !== undefined ? { midWindow: opts.midWindow } : {}),
+  });
+  const cap = opts.factCap ?? 60;
+  const q = _tok(query);
+  // Directives are already their own section. Rank the rest: relevance desc, then
+  // most-recent-first (write order is recency; later index = more recent).
+  const ranked = facts
+    .map((f, i) => ({ f, i }))
+    .filter((x) => x.f.role !== "directive" && x.f.filler)
+    .sort((a, b) => _rel(q, `${b.f.role} ${b.f.filler}`) - _rel(q, `${a.f.role} ${a.f.filler}`) || b.i - a.i);
+  const factLines = ranked.slice(0, cap).map(({ f }) => `- ${f.entity} ${f.role}: ${f.filler}`);
+  const block = [
+    recallBlock(ctx),
+    factLines.length ? `Known facts (most relevant / most recent first):\n${factLines.join("\n")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return { directives: ctx.directives, recalled: ctx.recalled, facts, block };
 }

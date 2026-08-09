@@ -20,7 +20,7 @@ import { connectPg, PgVectorStore } from "../exec/pgvector-store.js";
 import { schemaForOrg } from "./threads.js";
 import { BasicMemory } from "../plugins/memory.js";
 import { BasicGrounding } from "../plugins/grounding.js";
-import { assembleRecall, recallBlock } from "../exec/recall.js";
+import { recallContext } from "../exec/recall.js";
 import { absorbText } from "../handlers/memory.js";
 import { enrichFacts } from "./enricher.js";
 import type { MemoryTier } from "../exec/facts.js";
@@ -63,34 +63,23 @@ async function withScopedMemory<T>(
 }
 
 export interface RecallRequest { threadId?: string; query?: string; entity?: string; topK?: number; threshold?: number }
-export interface WriteRequest { threadId?: string; entity?: string; mode?: "turn" | "absorb"; text?: string; speaker?: string; tier?: MemoryTier }
+export interface WriteRequest { threadId?: string; entity?: string; mode?: "turn" | "absorb"; text?: string; speaker?: string; tier?: MemoryTier; date?: string }
 
-/** POST /stator/recall — the recall block + the entity's fact node for a turn. */
+/** POST /stator/recall — the recall block + the entity's fact node for a turn.
+ *  Fact selection is relevance-ranked and latest-first (see recallContext), so an
+ *  early-stated fact isn't lost to a recency cap and the current value leads. */
 export async function statorRecall(principal: Principal, body: RecallRequest): Promise<unknown> {
   const entity = (body.entity ?? "").trim() || DEFAULT_ENTITY;
   const session = (body.threadId ?? "").trim() || undefined;
   const query = String(body.query ?? "");
   return withScopedMemory(principal, async (memory, spaceId) => {
-    const ctx = await assembleRecall(memory, query, {
+    return recallContext(memory, query, {
       entity,
       spaceId,
       ...(session ? { session } : {}),
       ...(typeof body.topK === "number" ? { topK: body.topK } : {}),
       ...(typeof body.threshold === "number" ? { threshold: body.threshold } : {}),
     });
-    const facts = await memory.recall({ entity, spaceId, ...(session ? { session } : {}) });
-    // The injected block carries the FACT NODE too — a name or preference must
-    // reach the model by right, not by semantic luck (directives + similar turns
-    // alone made "what's my name" depend on cosine overlap). Directives are
-    // already their own section; skip them here. Bounded to keep prompts sane.
-    const factLines = facts
-      .filter((f) => f.role !== "directive" && f.filler)
-      .slice(-40)
-      .map((f) => `- ${f.entity} ${f.role}: ${f.filler}`);
-    const block = [recallBlock(ctx), factLines.length ? `Known facts:\n${factLines.join("\n")}` : ""]
-      .filter(Boolean)
-      .join("\n\n");
-    return { directives: ctx.directives, recalled: ctx.recalled, facts, block };
   });
 }
 
@@ -103,8 +92,12 @@ export async function statorWrite(principal: Principal, body: WriteRequest): Pro
   const mode: "turn" | "absorb" = body.mode === "absorb" ? "absorb" : "turn";
   return withScopedMemory(principal, async (memory, spaceId) => {
     if (mode === "turn") {
+      // Stamp the turn with its occurrence date when provided, so temporal
+      // questions ("how many days between…") can be answered from recalled
+      // context — facts carry no absolute date, the corpus does.
+      const stamp = (body.date ?? "").trim();
       await memory.appendConversation(session ?? "default", speaker, text);
-      await memory.recordTurn(`${speaker}: ${text}`);
+      await memory.recordTurn(`${stamp ? `[${stamp}] ` : ""}${speaker}: ${text}`);
       return { written: text.trim() ? 1 : 0, mode };
     }
     // Schema-on-write: the LLM enricher (qwen3 via the local model host) when
