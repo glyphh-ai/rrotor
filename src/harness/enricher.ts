@@ -14,9 +14,14 @@
  * a turn on the enricher.
  *
  * Config:
- *   ROTOR_ENRICH_MODEL_URL — OpenAI-compatible base (falls back to
- *                            ROTOR_LOCAL_MODEL_URL, e.g. http://models:11434/v1)
- *   ROTOR_ENRICH_MODEL_ID  — model id (default `qwen3:14b`)
+ *   ROTOR_ENRICH_MODEL_URL — model base. Anthropic (…anthropic.com, or a claude-*
+ *                            model id) uses the Messages API; anything else is
+ *                            OpenAI-compatible /chat/completions. Falls back to
+ *                            ROTOR_LOCAL_MODEL_URL (e.g. http://models:11434/v1).
+ *   ROTOR_ENRICH_MODEL_ID  — model id (default `qwen3:14b`). A `claude-*` id routes
+ *                            to the Anthropic branch (premium extraction).
+ *   ROTOR_ENRICH_API_KEY   — bearer for the enrich endpoint (Anthropic: falls back
+ *                            to ANTHROPIC_API_KEY).
  *   ROTOR_ENRICH_TIMEOUT   — ms budget for the extraction call (default 20000)
  */
 
@@ -67,34 +72,68 @@ export async function enrichFacts(text: string, entity: string, env: NodeJS.Proc
   if (!base || !text.trim()) return null;
   const model = env.ROTOR_ENRICH_MODEL_ID ?? "qwen3:14b";
   const timeoutMs = Number(env.ROTOR_ENRICH_TIMEOUT) || 20_000;
+  const input = text.slice(0, 8000);
+  const anthropic = /anthropic\.com/i.test(base) || /^claude/i.test(model);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   (timer as { unref?: () => void }).unref?.();
   try {
-    const res = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      signal: ctrl.signal,
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        max_tokens: 800,
-        messages: [
-          { role: "system", content: SYSTEM },
-          { role: "user", content: text.slice(0, 8000) },
-        ],
-      }),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const raw = data.choices?.[0]?.message?.content ?? "";
-    return parseFacts(raw, entity);
+    const raw = anthropic
+      ? await callAnthropic(base, model, input, env, ctrl.signal)
+      : await callOpenAI(base, model, input, env, ctrl.signal);
+    return raw === null ? null : parseFacts(raw, entity);
   } catch (err) {
     log.debug("enricher declined", { detail: (err as Error).message });
     return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** OpenAI-compatible /chat/completions (local qwen/Ollama/vLLM, or a hosted
+ *  provider like Mistral). ROTOR_ENRICH_API_KEY adds Bearer auth when the endpoint
+ *  needs it; a keyless local host works without it. */
+async function callOpenAI(base: string, model: string, input: string, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<string | null> {
+  const key = (env.ROTOR_ENRICH_API_KEY ?? "").trim();
+  const res = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+    signal,
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      max_tokens: 800,
+      messages: [
+        { role: "system", content: SYSTEM },
+        { role: "user", content: input },
+      ],
+    }),
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
+/** Anthropic Messages API — the premium extraction tier (e.g. claude-haiku-4-5). */
+async function callAnthropic(base: string, model: string, input: string, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<string | null> {
+  const key = (env.ROTOR_ENRICH_API_KEY ?? env.ANTHROPIC_API_KEY ?? "").trim();
+  if (!key) return null;
+  const url = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+    signal,
+    body: JSON.stringify({
+      model,
+      max_tokens: 800,
+      temperature: 0,
+      system: SYSTEM,
+      messages: [{ role: "user", content: input }],
+    }),
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
+  return (data.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
 }
 
 /** Parse + validate the model's output into facts. Null on anything malformed —

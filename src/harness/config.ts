@@ -142,6 +142,24 @@ export interface MemoryPolicy {
   threshold?: number;
   /** The fact-owning entity (default `user`). */
   entity?: string;
+  /**
+   * The MEMORY ROTOR (opt-in, org-governed): when enabled, a cheap assembler LLM
+   * builds the worker's system prompt from the recalled memory instead of raw-
+   * injecting it (docs/recursive-memory.md). Off by default — a rotor with no
+   * `rotor.enabled` behaves exactly as before. The model is the org's chosen,
+   * catalog-governed assembler; the call rides the metered gateway.
+   */
+  rotor?: {
+    enabled?: boolean;
+    /** The reasoner / assembler model id (an org-supported catalog model). */
+    model?: string;
+    /** The ATTENTION loop's model (defaults to `model` when unset). */
+    attentionModel?: string;
+    /** The GOVERNOR / dream-loop model. */
+    governorModel?: string;
+    /** Cached mid-tier standards/rules text (the shipped baseline / org rules). */
+    standards?: string;
+  };
 }
 
 /** The pod's harness home: sandboxes + config dirs live under it. Writable by

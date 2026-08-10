@@ -79,6 +79,23 @@ export { SqliteStore } from "./exec/sqlite-store.js";
 export { InProcessStore } from "./exec/store.js";
 export type { Stator } from "./exec/store.js";
 
+// The memory rotor — builds the worker's per-turn system prompt from short/mid/
+// long-term memory (docs/recursive-memory.md). Opt-in, stochastic-data.
+export {
+  MemoryRotor,
+  MEMORY_ROTOR_SYSTEM,
+  ATTENTION_SYSTEM,
+  constructSystemPrompt,
+  attentionCheck,
+  renderFocus,
+  type MemoryRotorOptions,
+  type ConstructedPrompt,
+  type ConstructInput,
+  type AttentionState,
+  type MemoryUsage,
+  type Turn,
+} from "./harness/memory-rotor.js";
+
 // The tool SDK surface — a host product (desktop, CLI) defines its own tools behind
 // the same contract as the stdlib and passes them to `runInProcess({tools})` /
 // `executeToEvents(ctx.packs)`; the rotor's permission mode gates them identically.

@@ -20,6 +20,7 @@ import { connectPg, PgVectorStore } from "../exec/pgvector-store.js";
 import { schemaForOrg } from "./threads.js";
 import { BasicMemory } from "../plugins/memory.js";
 import { BasicGrounding } from "../plugins/grounding.js";
+import { embedderFromEnv } from "../exec/embedder.js";
 import { recallContext } from "../exec/recall.js";
 import { absorbText } from "../handlers/memory.js";
 import { enrichFacts } from "./enricher.js";
@@ -53,7 +54,10 @@ async function withScopedMemory<T>(
     await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
     await client.query(`SET search_path TO "${schema}", public`);
     const store = await PgVectorStore.create({ client });
-    const memory = new BasicMemory(store);
+    // Inject the env-configured embedder (ROTOR_EMBED_BACKEND=http → neural, else
+    // the default hash). Was defaulting to hash regardless — neural recall was
+    // built but never reached the stator.
+    const memory = new BasicMemory(store, embedderFromEnv());
     const grounding = new BasicGrounding(store);
     const spaceId = grounding.computeSpaceId(SPACE_DIM, SPACE_SEED, SPACE_ROLES);
     return await fn(memory, spaceId);

@@ -52,6 +52,7 @@ import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
 import type { Principal } from "../auth/introspect.js";
 import { recallForTurn, persistTurn, recallForTurnViaApi, persistTurnViaApi, controlBaseFromGateway } from "./stator-api.js";
+import { constructSystemPrompt, attentionCheck, renderFocus } from "./memory-rotor.js";
 
 /** The injectable SDK seam: the real `query` in production, a fake in tests. */
 export type QueryFn = (args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }) => AsyncIterable<unknown>;
@@ -384,12 +385,57 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
     ...(cfg.memory?.entity ? { entity: cfg.memory.entity } : {}),
   };
   let runCfg = cfg;
-  if (memoryOn && cfg.memory?.recall !== false) {
+  const rotorOn = memoryOn && cfg.memory?.rotor?.enabled === true;
+  if (memoryOn && (rotorOn || cfg.memory?.recall !== false)) {
     const thread = cfg.threadId ?? cfg.sessionId;
     const block = principal
       ? await recallForTurn(principal, thread, cfg.prompt, recallOpts)
       : await recallForTurnViaApi(statorBase!, cfg.runtimeToken, thread, cfg.prompt, recallOpts);
-    if (block) {
+    // MEMORY ROTOR: when the rotor is enabled, an assembler LLM builds the worker's
+    // system prompt from the recalled memory (docs/recursive-memory.md). Off-clock
+    // metering rides the gateway. Best-effort — any failure falls back to the raw
+    // recall injection below, so a bad assemble never breaks the turn.
+    if (rotorOn) {
+      try {
+        const model = cfg.memory!.rotor!.model ?? "claude-haiku-4-5";
+        // The WORKING PLANE: the last few turns — BOTH prompts and responses — so the
+        // rotor carries the live thread and can hold the goal, not just recall facts.
+        const recent = (cfg.history ?? []).slice(-6).map((t) => `${t.role}: ${t.content}`).join("\n");
+        // THE ATTENTION LOOP — its own call, sees ONLY the conversation, keeps true north
+        // and flags rabbit-holes. Config-driven model (defaults to the reasoner). NOTE:
+        // true-north is derived from the recent window here; durable per-thread persistence
+        // (so it holds across a long horizon) is the next increment — a stator keyed-store.
+        const attentionModel = cfg.memory!.rotor!.attentionModel ?? model;
+        const attn = recent
+          ? await attentionCheck(recent, "", attentionModel, {
+              ...(cfg.gatewayUrl ? { gatewayUrl: cfg.gatewayUrl } : {}),
+              ...(cfg.runtimeToken ? { gatewayToken: cfg.runtimeToken } : {}),
+              ...(cfg.runId ? { runId: cfg.runId } : {}),
+            })
+          : null;
+        if (attn) runLog.info("attention", { onTrack: attn.onTrack, progress: attn.progress, rabbitHole: attn.rabbitHole || undefined });
+        const { systemPrompt, usage } = await constructSystemPrompt({
+          userPrompt: cfg.prompt,
+          model,
+          ...(attn ? { goal: renderFocus(attn) } : {}),
+          ...(recent ? { recent } : {}),
+          longTerm: block ?? "",
+          ...(cfg.memory!.rotor!.standards ? { standards: cfg.memory!.rotor!.standards } : {}),
+          baseSystem: cfg.system ?? DEFAULT_SYSTEM,
+          ...(cfg.sessionId ? { sessionId: cfg.sessionId } : {}),
+          ...(cfg.gatewayUrl ? { gatewayUrl: cfg.gatewayUrl } : {}),
+          ...(cfg.runtimeToken ? { gatewayToken: cfg.runtimeToken } : {}),
+          ...(cfg.runId ? { runId: cfg.runId } : {}),
+        });
+        runCfg = { ...cfg, system: systemPrompt };
+        runLog.info("memory rotor: system prompt constructed", {
+          chars: systemPrompt.length, model, in: usage.inputTokens, out: usage.outputTokens,
+        });
+      } catch (err) {
+        runLog.warn("memory rotor failed; raw recall fallback", { detail: (err as Error).message });
+      }
+    }
+    if (runCfg === cfg && block) {
       runCfg = { ...cfg, system: `${cfg.system ?? DEFAULT_SYSTEM}\n\n<memory>\n${block}\n</memory>` };
       runLog.info("recall injected", { chars: block.length, via: principal ? "store" : "api" });
     }

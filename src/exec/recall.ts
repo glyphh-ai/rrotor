@@ -15,6 +15,7 @@
 
 import type { MemoryPlugin, SemanticHit } from "../plugins/interfaces.js";
 import type { Fact } from "./facts.js";
+import { decompose } from "./glyph/primes.js";
 
 export interface RecallOptions {
   /** The directive-owning entity (the user/session). Default `user`. */
@@ -93,6 +94,16 @@ function _rel(q: Set<string>, text: string): number {
   return n;
 }
 
+function _cos(a: number[], b: number[]): number {
+  let d = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    d += a[i]! * b[i]!;
+    na += a[i]! * a[i]!;
+    nb += b[i]! * b[i]!;
+  }
+  return na && nb ? d / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+
 export async function recallContext(
   memory: MemoryPlugin,
   query: string,
@@ -107,14 +118,41 @@ export async function recallContext(
     ...(opts.midWindow !== undefined ? { midWindow: opts.midWindow } : {}),
   });
   const cap = opts.factCap ?? 60;
-  const q = _tok(query);
-  // Directives are already their own section. Rank the rest: relevance desc, then
-  // most-recent-first (write order is recency; later index = more recent).
-  const ranked = facts
-    .map((f, i) => ({ f, i }))
-    .filter((x) => x.f.role !== "directive" && x.f.filler)
-    .sort((a, b) => _rel(q, `${b.f.role} ${b.f.filler}`) - _rel(q, `${a.f.role} ${a.f.filler}`) || b.i - a.i);
-  const factLines = ranked.slice(0, cap).map(({ f }) => `- ${f.entity} ${f.role}: ${f.filler}`);
+  // Directives are their own section. Rank the rest in the SAME embedding space as
+  // the turns — schema-on-write + embeddings compose: a fact is surfaced because it
+  // MEANS the query, not because it shares a word. Falls back to lexical overlap if
+  // the embedder is unavailable. Ties → most-recent-first (later index = newer).
+  const nonDir = facts.map((f, i) => ({ f, i })).filter((x) => x.f.role !== "directive" && x.f.filler);
+  // Prime lane: decompose the query to its NSM primes; a fact that shares primes
+  // with the query is *about* the same thing (the fact tree), independent of
+  // lexical or embedding overlap. Boost by the fraction of query primes the fact
+  // covers. RROTOR_PRIME_WEIGHT tunes its pull relative to the neural cosine.
+  const qPrimes = new Set(decompose(query));
+  const primeWeight = Number(process.env.RROTOR_PRIME_WEIGHT) || 0.15;
+  const primeBoost = (f: Fact): number => {
+    if (qPrimes.size === 0) return 0;
+    const fp = decompose(`${f.role} ${f.filler}`);
+    let ov = 0;
+    for (const p of fp) if (qPrimes.has(p)) ov++;
+    return primeWeight * (ov / qPrimes.size);
+  };
+  let ordered = nonDir;
+  if (nonDir.length > 0 && query.trim()) {
+    try {
+      const [qv, ...fvs] = await memory.embedBatch([query, ...nonDir.map((x) => `${x.f.role}: ${x.f.filler}`)]);
+      ordered = nonDir
+        .map((x, j) => ({ ...x, s: _cos(qv!, fvs[j]!) + primeBoost(x.f) }))
+        .sort((a, b) => b.s - a.s || b.i - a.i);
+    } catch {
+      const q = _tok(query);
+      ordered = [...nonDir].sort(
+        (a, b) => _rel(q, `${b.f.role} ${b.f.filler}`) - _rel(q, `${a.f.role} ${a.f.filler}`) || b.i - a.i,
+      );
+    }
+  } else {
+    ordered = [...nonDir].sort((a, b) => b.i - a.i);
+  }
+  const factLines = ordered.slice(0, cap).map(({ f }) => `- ${f.entity} ${f.role}: ${f.filler}`);
   const block = [
     recallBlock(ctx),
     factLines.length ? `Known facts (most relevant / most recent first):\n${factLines.join("\n")}` : "",

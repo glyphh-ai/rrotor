@@ -46,15 +46,26 @@ export class BasicMemory implements MemoryPlugin {
    *  embedding of the query and each recorded turn. Replay-safe (pure). */
   async semanticRecall(query: string, topK: number, threshold: number): Promise<SemanticHit[]> {
     if (query.trim() === "") return [];
-    const qv = await this.embedder.embed(query);
+    const turns = await this.store.turns();
+    if (turns.length === 0) return [];
+    // ONE batched embed for the query + all turns. The hash backend maps in-process;
+    // an HTTP (neural) backend batches into a few requests instead of N sequential
+    // round-trips — the difference between usable and unusable at scale.
+    const [qv, ...tvs] = await this.embedder.embedBatch([query, ...turns]);
     const scored: SemanticHit[] = [];
-    for (const text of await this.store.turns()) {
-      const score = cosine(qv, await this.embedder.embed(text));
-      if (score >= threshold) scored.push({ text, score });
+    for (let i = 0; i < turns.length; i++) {
+      const score = cosine(qv, tvs[i]!);
+      if (score >= threshold) scored.push({ text: turns[i]!, score });
     }
     return scored
       .sort((a, b) => b.score - a.score || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0))
       .slice(0, topK);
+  }
+
+  /** Embed a batch with the bound embedder — the seam recall uses to rank facts
+   *  in the same semantic space as turns. */
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    return this.embedder.embedBatch(texts);
   }
 
   async recordTurn(text: string): Promise<void> {

@@ -179,6 +179,20 @@ make overload safe rather than dangerous:
 Auto-dimensioning (raise `vector_dim` when an entity's fact count approaches the
 envelope) is a clean future improvement, not a correctness fix.
 
+**HDC as a recall lane (design):** today HDC grounds a model's decoded filler (the
+hard gate). The **associative-resilience** design promotes it to a third *recall*
+lane — every fact triple-encoded on write (structural + multi-facet HDC record +
+neural), recall fusing all three, with HDC providing content-addressable recall from
+partial cues, graceful degradation, and the margin gate for grounding/abstention. See
+[`hdc-resilience.md`](./hdc-resilience.md).
+
+**Reconstruction over recall (north star):** the longer arc — memory as a
+**forest of saturating fact-trees** with per-turn **short-term → long-term fidelity
+ladder** (n+x raw turns + a fact tree with confidence), a **memory rotor** that
+constructs the worker's prompt, and a predict-forward beam. Memory's product becomes
+the *constructed prompt*, not recalled facts; the KPI becomes *time-to-ground*. See
+[`recursive-memory.md`](./recursive-memory.md).
+
 ## What's bounded (documented, not cut)
 
 - **Semantic recall quality** — the deterministic embedding is strong on

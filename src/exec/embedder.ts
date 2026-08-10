@@ -57,12 +57,20 @@ export interface HttpEmbedderOptions {
 /**
  * An HTTP embedder that POSTs to an OpenAI-compatible embeddings endpoint:
  * `POST ${url}` with `{ model, input }`, reading `data[0].embedding` back. Uses
- * the global `fetch` (Node 20). Errors are thrown with a clear message and no
- * retry — the caller decides, so a dead endpoint fails fast rather than storming.
+ * the global `fetch` (Node 20).
+ *
+ * Transient failures (429 rate-limit, 5xx, network) are retried with bounded
+ * backoff honouring `Retry-After`, because hosted embedding APIs impose tight
+ * request-rate caps (e.g. Mistral's 60 req/min): under batch ingest a 429 must
+ * pace-and-continue, not fail the whole write. Non-transient errors (auth,
+ * bad request, malformed response) still throw immediately — a dead endpoint
+ * fails fast rather than storming. Tune with `ROTOR_EMBED_RETRIES` (default 6).
  *
  * NOTE: a neural embedding is NOT replay-safe on its own; the fleet checkpoints it
  * at the embedding boundary (§7.7). This class is just the transport.
  */
+const EMBED_RETRYABLE = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
+
 export class HttpEmbedder implements Embedder {
   readonly dim: number;
   private readonly url: string;
@@ -83,40 +91,72 @@ export class HttpEmbedder implements Embedder {
 
   async embedBatch(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-    return this.post(texts);
+    // Chunk so a large recall (hundreds of turns) doesn't exceed the endpoint's
+    // per-request input/token cap. ROTOR_EMBED_BATCH overrides the chunk size.
+    const chunk = Number(process.env.ROTOR_EMBED_BATCH) || 64;
+    if (texts.length <= chunk) return this.post(texts);
+    const out: number[][] = [];
+    for (let i = 0; i < texts.length; i += chunk) {
+      const vecs = await this.post(texts.slice(i, i + chunk));
+      for (const v of vecs) out.push(v);
+    }
+    return out;
   }
 
-  /** One POST for a batch of inputs → the ordered embedding vectors. */
+  /** One POST for a batch of inputs → the ordered embedding vectors. Retries
+   *  transient failures (rate-limit / 5xx / network) with backoff; throws on
+   *  non-transient errors and after the attempt budget is exhausted. */
   private async post(input: string[]): Promise<number[][]> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
+    const body = JSON.stringify({ model: this.model, input });
+    const maxAttempts = Number(process.env.ROTOR_EMBED_RETRIES) || 6;
 
-    let res: Response;
-    try {
-      res = await fetch(this.url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ model: this.model, input }),
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      let res: Response;
+      try {
+        res = await fetch(this.url, { method: "POST", headers, body });
+      } catch (e) {
+        // Network-level failure: transient, retry with backoff.
+        lastErr = new Error(`embedding request to ${this.url} failed: ${(e as Error).message}`);
+        if (attempt < maxAttempts - 1) {
+          await sleep(embedBackoff(attempt));
+          continue;
+        }
+        throw lastErr;
+      }
+      if (!res.ok) {
+        if (EMBED_RETRYABLE.has(res.status) && attempt < maxAttempts - 1) {
+          const ra = Number(res.headers.get("retry-after"));
+          await sleep(Number.isFinite(ra) && ra > 0 ? ra * 1000 : embedBackoff(attempt));
+          continue;
+        }
+        const errBody = await res.text().catch(() => "");
+        throw new Error(`embedding endpoint ${this.url} returned ${res.status}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`);
+      }
+
+      const json = (await res.json()) as { data?: Array<{ embedding?: number[] }> };
+      const data = json.data;
+      if (!Array.isArray(data) || data.length < input.length) {
+        throw new Error(`embedding endpoint ${this.url} returned ${data?.length ?? 0} vectors for ${input.length} inputs`);
+      }
+      return data.map((d, i) => {
+        const v = d?.embedding;
+        if (!Array.isArray(v)) throw new Error(`embedding endpoint ${this.url} returned no embedding at index ${i}`);
+        return v;
       });
-    } catch (e) {
-      throw new Error(`embedding request to ${this.url} failed: ${(e as Error).message}`);
     }
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`embedding endpoint ${this.url} returned ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-    }
-
-    const json = (await res.json()) as { data?: Array<{ embedding?: number[] }> };
-    const data = json.data;
-    if (!Array.isArray(data) || data.length < input.length) {
-      throw new Error(`embedding endpoint ${this.url} returned ${data?.length ?? 0} vectors for ${input.length} inputs`);
-    }
-    return data.map((d, i) => {
-      const v = d?.embedding;
-      if (!Array.isArray(v)) throw new Error(`embedding endpoint ${this.url} returned no embedding at index ${i}`);
-      return v;
-    });
+    throw lastErr instanceof Error ? lastErr : new Error(`embedding endpoint ${this.url} failed after ${maxAttempts} attempts`);
   }
+}
+
+function embedBackoff(attempt: number): number {
+  return Math.min(1000 * 2 ** attempt, 30_000) + Math.floor(Math.random() * 500);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /** Embedder backend selector — the mirror of `ROTOR_STATOR_BACKEND`. */

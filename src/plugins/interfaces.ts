@@ -74,6 +74,10 @@ export interface MemoryPlugin extends Capability {
   /** Embed + rank over recorded turns (§7.7); basic tier is deterministic-local
    *  cosine over the hashed-ngram embedding. */
   semanticRecall(query: string, topK: number, threshold: number): Promise<SemanticHit[]>;
+  /** Embed a batch of texts with the bound embedder (hash or neural). Lets recall
+   *  rank the extracted FACTS by the same semantic space as the turns, not just by
+   *  lexical overlap — so schema-on-write + embeddings compose. */
+  embedBatch(texts: string[]): Promise<number[][]>;
   /** Record a turn into short-term memory (inbound prompt / outbound completion),
    *  the corpus `semanticRecall` ranks over. */
   recordTurn(text: string): Promise<void>;
