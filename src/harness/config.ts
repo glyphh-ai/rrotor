@@ -105,6 +105,10 @@ export interface HarnessRunConfig {
   /** The session's GitHub repo (`owner/repo`) — the cloud workspace's source.
    *  The engine tells the agent and instructs clone-if-absent. */
   repo?: string;
+  /** Short-lived clone credential for {@link repo}, minted server-side (the
+   *  front door). ENGINE-ONLY: used for the pre-run clone, scrubbed from the
+   *  remote afterwards, NEVER logged, never in the transcript. */
+  repoToken?: string;
   system?: string;
   model?: string;
   mode: SessionMode;
@@ -142,6 +146,10 @@ export interface HarnessRunConfig {
    *  engine defaults (transcript.CONTEXT_DEFAULTS). Body `context` overrides
    *  env (HARNESS_CONTEXT_BUDGET_TOKENS / HARNESS_CONTEXT_KEEP_TURNS). */
   context?: { budgetTokens?: number; keepTurns?: number };
+  /** ENGINE-INTERNAL (never body-parsed): the pre-run clone's outcome note,
+   *  appended to the WORKSPACE system line so the agent knows the repo state
+   *  without a token ever entering the transcript. */
+  repoNote?: string;
   /** ENGINE-INTERNAL (never body-parsed): the pre-rendered full-conversation
    *  block. When present, {@link import("./engine.js").assemblePrompt} carries
    *  it as the COMPLETE `<conversation_so_far>` instead of rendering (and
@@ -217,6 +225,7 @@ export interface RunRequestBody {
   sessionId?: unknown;
   threadId?: unknown;
   repo?: unknown;
+  repoToken?: unknown;
   mcpServers?: unknown;
   images?: unknown;
   workdir?: unknown;
@@ -408,6 +417,7 @@ export function resolveRunConfig(
     sessionId,
     ...(threadId ? { threadId } : {}),
     ...(repo ? { repo } : {}),
+    ...(repo && typeof body.repoToken === "string" && body.repoToken.trim() ? { repoToken: body.repoToken.trim() } : {}),
     ...(mcpServers.length ? { mcpServers } : {}),
     ...(images.length ? { images } : {}),
     prompt,

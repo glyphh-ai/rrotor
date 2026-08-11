@@ -49,6 +49,9 @@ import { HarnessSession } from "./session.js";
 import { ASK_TIMEOUT_MS } from "./gate.js";
 import { toolTitle } from "./frames.js";
 import type { AskQuestion } from "./frames.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readdir } from "node:fs/promises";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
 import type { Principal } from "../auth/introspect.js";
@@ -231,6 +234,43 @@ export function buildInputStream(text: string, images: ImageRef[], session: Harn
 
 /** The in-process MCP server carrying the pod's ONE custom tool: `ask_user`.
  *  Same wire pattern as the desktop's glyphh MCP surface. */
+const execFileP = promisify(execFile);
+
+async function readdirSafe(dir: string): Promise<string[]> {
+  try { return await readdir(dir); } catch { return []; }
+}
+
+/**
+ * Clone the session's repo into an EMPTY workspace — ENGINE-SIDE, before the
+ * model runs, so a private repo's short-lived token never rides the
+ * transcript, a tool title, or the workspace's git config (the remote is
+ * scrubbed back to the tokenless URL right after). Returns a note for the
+ * system prompt; failures degrade to a note the agent can act on.
+ */
+export async function ensureRepoClone(cfg: { repo?: string; repoToken?: string; workdir: string }): Promise<string> {
+  if (!cfg.repo) return "";
+  const cleanUrl = `https://github.com/${cfg.repo}`;
+  try {
+    const entries = await readdirSafe(cfg.workdir);
+    if (entries.includes(".git")) return `The workspace already contains the repo (${cfg.repo}).`;
+    if (entries.length > 0) return `The workspace has files but no git repo — clone ${cfg.repo} into a subfolder if needed.`;
+    const cloneUrl = cfg.repoToken
+      ? `https://x-access-token:${cfg.repoToken}@github.com/${cfg.repo}`
+      : cleanUrl;
+    await execFileP("git", ["clone", "--", cloneUrl, "."], { cwd: cfg.workdir, timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
+    // Scrub the credential from the remote — the workspace is user-browsable.
+    if (cfg.repoToken) {
+      await execFileP("git", ["remote", "set-url", "origin", cleanUrl], { cwd: cfg.workdir, timeout: 10_000 }).catch(() => { /* best-effort scrub */ });
+    }
+    return `The repo ${cfg.repo} is already cloned into the workspace root — do not clone again.`;
+  } catch (err) {
+    const raw = (err as Error).message || String(err);
+    const detail = cfg.repoToken ? raw.split(cfg.repoToken).join("[redacted]") : raw;
+    log.warn("pre-run clone failed", { repo: cfg.repo, detail: detail.slice(0, 300) });
+    return `Cloning ${cfg.repo} failed before the run (${detail.slice(0, 200)}). It may be private without access — tell the user if you cannot proceed.`;
+  }
+}
+
 function buildAskServer(session: HarnessSession): McpServer {
   const mcp = new McpServer({ name: "glyphh", version: "1.0.0" }, { capabilities: { tools: {} } });
   mcp.server.setRequestHandler(ListToolsRequestSchema, () =>
@@ -342,7 +382,7 @@ export function buildQueryArgs(
   // agent never has to ask which repo, and never calls the workspace
   // "throwaway": it persists for this conversation.
   if (cfg.repo) {
-    system += `\n\nWORKSPACE: this session's GitHub repo is ${cfg.repo}. Your working folder persists across this conversation's turns. If it does not already contain the repo, clone it first: git clone https://github.com/${cfg.repo} . (a private repo may need credentials the user must provide). Work on the code there.`;
+    system += `\n\nWORKSPACE: this session's GitHub repo is ${cfg.repo}. Your working folder persists across this conversation's turns. Work on the code there.${cfg.repoNote ? ` ${cfg.repoNote}` : ""}`;
   } else if (cfg.mode !== "chat") {
     system += "\n\nWORKSPACE: your working folder persists across this conversation's turns — files you leave there are still there next turn, and the user can browse them in their Files panel.";
   }
@@ -439,8 +479,15 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   };
 
   let attachments: MaterializedAttachment[] = [];
+  let repoNote = "";
   try {
     await ensureWorkspace(cfg.workdir);
+    // The session's repo lands BEFORE the model runs — a private repo's token
+    // never enters the transcript (see ensureRepoClone).
+    if (cfg.repo) {
+      session.emit({ type: "setup", phase: "clone" });
+      repoNote = await ensureRepoClone(cfg);
+    }
     // Attachments always land in the POD's sandbox (cfg.attachDir), never in a
     // caller-named local workdir — a run must not litter the user's folder.
     // The prompt names them by ABSOLUTE path, so the agent reads them either way.
@@ -600,6 +647,7 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   }
 
   try {
+    if (repoNote) runCfg = { ...runCfg, repoNote };
     const q = queryFn(buildQueryArgs(runCfg, session, attachments, deps));
     for await (const raw of q) {
       if (session.ctrl.signal.aborted) break;
