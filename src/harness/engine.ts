@@ -337,7 +337,15 @@ export function buildQueryArgs(
   const caller = cfg.mcpServers ?? [];
   const lent = apps && !caller.some((s) => s.name === apps.name) ? [...caller, apps] : caller;
   // The publish policy rides WITH the tools: no app tools, no policy.
-  const system = cfg.system ?? DEFAULT_SYSTEM;
+  let system = cfg.system ?? DEFAULT_SYSTEM;
+  // The session's GitHub repo — the workspace's SOURCE. Said plainly so the
+  // agent never has to ask which repo, and never calls the workspace
+  // "throwaway": it persists for this conversation.
+  if (cfg.repo) {
+    system += `\n\nWORKSPACE: this session's GitHub repo is ${cfg.repo}. Your working folder persists across this conversation's turns. If it does not already contain the repo, clone it first: git clone https://github.com/${cfg.repo} . (a private repo may need credentials the user must provide). Work on the code there.`;
+  } else if (cfg.mode !== "chat") {
+    system += "\n\nWORKSPACE: your working folder persists across this conversation's turns — files you leave there are still there next turn, and the user can browse them in their Files panel.";
+  }
   return {
     // CHAT stays single-shot (one turn, no tools, nothing to steer). The
     // tool-bearing modes take the streaming form so the user can inject

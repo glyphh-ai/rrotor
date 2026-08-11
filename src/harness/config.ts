@@ -102,6 +102,9 @@ export interface HarnessRunConfig {
   images?: ImageRef[];
   prompt: string;
   history: ChatTurn[];
+  /** The session's GitHub repo (`owner/repo`) — the cloud workspace's source.
+   *  The engine tells the agent and instructs clone-if-absent. */
+  repo?: string;
   system?: string;
   model?: string;
   mode: SessionMode;
@@ -213,6 +216,7 @@ export interface RunRequestBody {
   prompt?: unknown;
   sessionId?: unknown;
   threadId?: unknown;
+  repo?: unknown;
   mcpServers?: unknown;
   images?: unknown;
   workdir?: unknown;
@@ -364,6 +368,15 @@ export function resolveRunConfig(
     if (!THREAD_ID_RE.test(t)) throw new BadRunRequest("`threadId` must match ^[A-Za-z0-9_-]{1,64}$");
     threadId = t;
   }
+  // The session's GitHub repo — the cloud workspace's source. Validated to the
+  // one shape a clone URL is built from; anything else is refused, not passed
+  // to a shell.
+  let repo: string | undefined;
+  if (body.repo !== undefined) {
+    const r = typeof body.repo === "string" ? body.repo.trim() : "";
+    if (r && !/^[\w.-]+\/[\w.-]+$/.test(r)) throw new BadRunRequest("`repo` must be owner/repo");
+    if (r) repo = r;
+  }
   const modeRaw = str(body.mode) ?? "code";
   const permissionRaw = str(body.permission) ?? env.HARNESS_PERMISSION_MODE ?? "auto";
   const home = harnessHome(env);
@@ -394,6 +407,7 @@ export function resolveRunConfig(
     runId,
     sessionId,
     ...(threadId ? { threadId } : {}),
+    ...(repo ? { repo } : {}),
     ...(mcpServers.length ? { mcpServers } : {}),
     ...(images.length ? { images } : {}),
     prompt,
