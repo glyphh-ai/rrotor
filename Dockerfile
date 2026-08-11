@@ -35,7 +35,16 @@ FROM node:20-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
-# Compiled deps + build output from the builder (no toolchain in this layer).
+# The agent's WORKSPACE toolchain (distinct from the builder stage, which only
+# compiles rrotor itself): git makes GitHub source a first-class cloud
+# workspace (clone/branch/commit, git-URL npm deps); python3/make/g++ let a
+# project's node-gyp deps compile; ca-certificates keeps both talking TLS.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git python3 make g++ ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# Compiled deps + build output from the builder (rrotor's own compile still
+# happens only in the builder layer).
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 # Bundled specs + built-in rotors the engine loads at runtime (package.json "files").
