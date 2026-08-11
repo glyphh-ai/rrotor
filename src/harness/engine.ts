@@ -254,6 +254,10 @@ export function buildQueryArgs(
   deps: EngineDeps = {},
 ): { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> } {
   const chat = cfg.mode === "chat";
+  // Seed the session's LIVE permission from the run config's start snapshot.
+  // From here the gate reads `session.permission` (not `cfg.permission`), so a
+  // mid-run POST /runs/:id/permission takes effect on the next decision.
+  if (session.permission === undefined) session.permission = cfg.permission;
   const mcp = chat ? null : buildAskServer(session);
   // The control plane's app tools, derived from the run's OWN gateway config.
   // This is what lets a CLOUD pod publish an app at all, and what makes a
@@ -297,7 +301,10 @@ export function buildQueryArgs(
       // prompt layer always defers to it.
       canUseTool: async (tool: string, input: unknown) => {
         const action = classifyTool(tool, input);
-        const { allowed, reason } = await gateAction(session, cfg.permission, action, deps.approvalTimeoutMs);
+        // The LIVE mode, re-read per call — a mid-run change governs the next
+        // decision. Falls back to the start snapshot before the engine seeds it.
+        const mode = session.permission ?? cfg.permission;
+        const { allowed, reason } = await gateAction(session, mode, action, deps.approvalTimeoutMs);
         return allowed
           ? { behavior: "allow" as const, updatedInput: input as Record<string, unknown> }
           : { behavior: "deny" as const, message: reason ?? "denied" };

@@ -22,6 +22,8 @@
  *   GET  /runs/:id/frames      replay the frame tape (?from=<seq>, exclusive)
  *   POST /runs/:id/answer      resolve a paused ask/approval frame
  *   POST /runs/:id/stop        abort the run (emits done{stopped:true})
+ *   POST /runs/:id/permission  change the LIVE permission mode mid-run (the
+ *                              gate re-reads it on the next action)
  *   GET  /threads              thread list, newest first (metadata only)
  *   GET  /threads/:id          full transcript (latest 500 messages)
  *   PUT  /threads/:id          client LWW push (applies only when newer)
@@ -77,7 +79,7 @@ import type { Introspector, Principal, AuthDecision } from "../auth/introspect.j
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
 import { HARNESS_WIRE_VERSION } from "./frames.js";
 import type { WireFrame } from "./frames.js";
-import { resolveRunConfig, BadRunRequest } from "./config.js";
+import { resolveRunConfig, BadRunRequest, isPermissionMode } from "./config.js";
 import type { RunRequestBody } from "./config.js";
 import { HarnessSession, mintRunId } from "./session.js";
 import { runHarness } from "./engine.js";
@@ -330,7 +332,7 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
     return;
   }
 
-  const runMatch = /^\/runs\/([^/]+)(\/(frames|answer|stop))?$/.exec(path);
+  const runMatch = /^\/runs\/([^/]+)(\/(frames|answer|stop|permission))?$/.exec(path);
   if (runMatch) {
     const runId = decodeURIComponent(runMatch[1]);
     const sub = runMatch[3] ?? "";
@@ -404,6 +406,30 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
     if (method === "POST" && sub === "stop") {
       session.stop();
       sendJson(res, 200, { ok: true, status: session.status });
+      return;
+    }
+    // Mid-run permission-mode change: the user flipped the mode chip on some
+    // surface while this run is in flight. Update the LIVE mode so the gate
+    // re-evaluates the next action under it (session.setPermission). Idempotent;
+    // a settled run accepts it as a no-op (the field is unused after terminal).
+    if (method === "POST" && sub === "permission") {
+      readBody(req)
+        .then((raw) => {
+          let body: { permission?: unknown };
+          try {
+            body = raw.length ? JSON.parse(raw) : {};
+          } catch {
+            sendJson(res, 400, { error: "invalid-json", detail: "permission body must be JSON" });
+            return;
+          }
+          if (!isPermissionMode(body.permission)) {
+            sendJson(res, 400, { error: "bad-permission", detail: "`permission` must be one of ask/plan/acceptEdits/auto/bypass" });
+            return;
+          }
+          session.setPermission(body.permission);
+          sendJson(res, 200, { ok: true, permission: body.permission });
+        })
+        .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
       return;
     }
   }

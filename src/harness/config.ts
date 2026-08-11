@@ -43,6 +43,12 @@ import type { ActionKind, AskQuestion } from "./frames.js";
 export type PermissionMode = "ask" | "plan" | "acceptEdits" | "auto" | "bypass";
 const MODES: PermissionMode[] = ["ask", "plan", "acceptEdits", "auto", "bypass"];
 
+/** True when `v` is a valid permission mode — the shared validator (config +
+ *  the mid-run POST /runs/:id/permission route both gate on it). */
+export function isPermissionMode(v: unknown): v is PermissionMode {
+  return typeof v === "string" && (MODES as string[]).includes(v);
+}
+
 /** Session modes, as the desktop's session records carry them. `chat` runs
  *  tool-less; `cowork`/`code` get the sandbox toolset. */
 export type SessionMode = "chat" | "cowork" | "code";

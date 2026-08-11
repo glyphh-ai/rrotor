@@ -19,6 +19,7 @@
 
 import { FrameRing, isTerminal } from "./frames.js";
 import type { AgentFrame, WireFrame } from "./frames.js";
+import type { PermissionMode } from "./config.js";
 import { log } from "../obs/logger.js";
 
 /** What an answer to a paused frame carries: `allow` for approvals, `answers`
@@ -41,6 +42,12 @@ export class HarnessSession {
   readonly ctrl = new AbortController();
   readonly startedAt = Date.now();
   status: RunStatus = "running";
+  /** The LIVE permission mode. Seeded from the run config's snapshot, then
+   *  MUTABLE mid-run: a `POST /runs/:id/permission` (the user flipping the mode
+   *  chip on any surface) updates it, and the gate re-reads it per decision
+   *  (engine.ts canUseTool → gateAction), so a change lands on the very next
+   *  action instead of only the next run. `undefined` until the engine seeds it. */
+  permission: PermissionMode | undefined;
 
   private seq = 0;
   private readonly ring: FrameRing;
@@ -127,6 +134,19 @@ export class HarnessSession {
   /** Ids currently awaiting an answer (surfaced by the run-status endpoint). */
   pendingIds(): string[] {
     return [...this.pending.keys()];
+  }
+
+  /** Update the LIVE permission mode mid-run (POST /runs/:id/permission). The
+   *  gate re-reads `permission` per decision, so the new mode governs the next
+   *  action — a plan→auto flip unblocks an in-flight run, an auto→ask flip starts
+   *  gating it. No effect on decisions already resolved. */
+  setPermission(mode: PermissionMode): void {
+    if (this.permission === mode) return;
+    this.logger.info("permission changed mid-run", { from: this.permission, to: mode });
+    this.permission = mode;
+    // Fan the change out on the run's frame stream so EVERY surface observing this
+    // run re-renders its mode chip together (the gate uses `permission` directly).
+    if (this.status === "running") this.emit({ type: "permission", permission: mode });
   }
 
   /** Abort the run — the engine observes the controller and emits done{stopped}. */

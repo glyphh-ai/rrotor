@@ -191,6 +191,53 @@ describe("harness pod — ask/approval round trip", () => {
   });
 });
 
+describe("harness pod — mid-run permission change", () => {
+  // A run started in `plan` (read-only): the first tool decision is DENIED. We
+  // then POST /runs/:id/permission {auto} and the SECOND decision is ALLOWED —
+  // proving the gate re-reads the LIVE mode per call, not the start snapshot.
+  it("POST /runs/:id/permission changes the live gate mode; the next decision uses it", async () => {
+    let flipped: (() => void) | null = null;
+    const gate: QueryFn = (args) =>
+      (async function* () {
+        const canUse = (args.options as { canUseTool: (t: string, i: unknown) => Promise<{ behavior: string }> }).canUseTool;
+        const first = await canUse("Edit", { file_path: "a.ts" });      // plan → deny
+        // Signal the test that the first decision landed, then wait for the flip.
+        await new Promise<void>((r) => { flipped = r; });
+        const second = await canUse("Edit", { file_path: "b.ts" });     // auto → allow
+        yield { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: `first:${first.behavior} second:${second.behavior}` } } };
+        yield { type: "result", subtype: "success", result: "" };
+      })();
+    const base = await boot(gate);
+    const { runId } = (await (
+      await fetch(`${base}/run`, { method: "POST", body: JSON.stringify({ prompt: "edit", permission: "plan" }) })
+    ).json()) as { runId: string };
+
+    // Wait until the first (denied) decision resolved and the run is parked on `flipped`.
+    for (let i = 0; i < 200 && !flipped; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(flipped).toBeTruthy();
+
+    // Flip the live mode → auto, then release the run to make its second decision.
+    const res = await fetch(`${base}/runs/${runId}/permission`, { method: "POST", body: JSON.stringify({ permission: "auto" }) });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, permission: "auto" });
+    (flipped as unknown as () => void)();
+
+    const frames = await untilDone(base, runId);
+    const text = frames.map((f) => (f.type === "delta" ? String(f.delta ?? "") : "")).join("");
+    expect(text).toContain("first:deny");
+    expect(text).toContain("second:allow");
+    // The change fanned out on the stream so observers repaint their chip.
+    expect(frames.find((f) => f.type === "permission")).toMatchObject({ type: "permission", permission: "auto" });
+  });
+
+  it("rejects an invalid permission with 400", async () => {
+    const base = await boot(happyQuery);
+    const { runId } = (await (await fetch(`${base}/run`, { method: "POST", body: JSON.stringify({ prompt: "x" }) })).json()) as { runId: string };
+    const bad = await fetch(`${base}/runs/${runId}/permission`, { method: "POST", body: JSON.stringify({ permission: "yolo" }) });
+    expect(bad.status).toBe(400);
+  });
+});
+
 describe("harness pod — WS frame stream", () => {
   it("greets with ready, replays on attach, then streams live to done", async () => {
     let release: () => void = () => {};

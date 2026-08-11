@@ -72,6 +72,11 @@ export type AgentFrame =
   | { type: "approval"; id: string; kind: ActionKind; title: string; detail: string }
   | { type: "ask"; id: string; questions: AskQuestion[] }
   | { type: "setup"; phase: string; [k: string]: unknown }
+  // The run's LIVE permission mode changed mid-flight (POST /runs/:id/permission).
+  // Advisory + non-terminal: it rides the frame stream so EVERY surface observing
+  // the run re-renders its mode chip in lockstep (the gate change itself is
+  // server-side). Older consumers ignore the unknown type harmlessly.
+  | { type: "permission"; permission: "ask" | "plan" | "acceptEdits" | "auto" | "bypass" }
   | { type: "done"; stopped: boolean }
   | { type: "error"; error: string };
 
