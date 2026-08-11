@@ -41,12 +41,13 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 
 import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
-import { appsServerRef, withPublishPolicy } from "./glyphh-apps.js";
+import { appsServerRef, withPublishPolicy, expandBuildAppInput, BUILD_APP_TOOL } from "./glyphh-apps.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
 import type { MaterializedAttachment } from "./sandbox.js";
 import { HarnessSession } from "./session.js";
 import { ASK_TIMEOUT_MS } from "./gate.js";
+import { toolTitle } from "./frames.js";
 import type { AskQuestion } from "./frames.js";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
@@ -309,6 +310,19 @@ export function buildQueryArgs(
       // The gate: mode model + approval frames (gate.ts). The SDK's own
       // prompt layer always defers to it.
       canUseTool: async (tool: string, input: unknown) => {
+        // build_app { distDir }: the POD walks the built folder and inlines the
+        // { files } map itself (glyphh-apps.ts) — the model passes a path, never
+        // file bytes, and the SERVER contract ({ slug, files }) is unchanged. A
+        // failed expansion denies with the reason so the model can re-plan.
+        if (tool === BUILD_APP_TOOL) {
+          const expanded = await expandBuildAppInput(input, cfg.workdir).catch(
+            (err): { ok: false; error: string } => ({ ok: false, error: (err as Error).message }),
+          );
+          if (expanded) {
+            if (!expanded.ok) return { behavior: "deny" as const, message: expanded.error };
+            input = expanded.input;
+          }
+        }
         const action = classifyTool(tool, input);
         // The LIVE mode, re-read per call — a mid-run change governs the next
         // decision. Falls back to the start snapshot before the engine seeds it.
@@ -370,8 +384,12 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   // The turn's price lookup, fired at `result` and awaited before the terminal
   // frame. Null until the turn produces a result (an aborted run never asks).
   let creditsProbe: Promise<number | null> | null = null;
-  // Correlate tool_use ids → names so tool_result frames name their tool.
+  // Correlate tool_use ids → names/titles so tool_result frames name their
+  // tool AND keep the call's human title ("Run: <cmd>", "Write /path") — the
+  // result block carries no input, so the done frame's title must be remembered
+  // from the start.
   const toolNames = new Map<string, string>();
+  const toolTitles = new Map<string, string>();
 
   runLog.info("run start", {
     mode: cfg.mode,
@@ -538,9 +556,22 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
         const blocks = msg.message.content as Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
         for (const b of blocks) {
           if (b.type === "tool_use" && b.name) {
-            if (b.id) toolNames.set(b.id, b.name);
             const action = classifyTool(b.name, b.input);
-            session.emit({ type: "tool", phase: "start", name: b.name.replace(/^mcp__glyphh__/, ""), thought: action.title });
+            // The breadcrumb title carries the call's KEY INPUT (command, file
+            // path, pattern…), redacted — without it every successful row in a
+            // client renders as a bare tool name.
+            const title = redactSecrets(toolTitle(b.name, b.input), secrets);
+            if (b.id) {
+              toolNames.set(b.id, b.name);
+              if (title) toolTitles.set(b.id, title);
+            }
+            session.emit({
+              type: "tool",
+              phase: "start",
+              name: b.name.replace(/^mcp__glyphh__/, ""),
+              thought: action.title,
+              ...(title ? { title } : {}),
+            });
           }
         }
         const text = blocks.filter((b) => b.type === "text").map((b) => b.text || "").join("");
@@ -564,12 +595,15 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
           for (const b of blocks as Array<{ type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
             if (b.type !== "tool_result") continue;
             const name = (b.tool_use_id && toolNames.get(b.tool_use_id)) || "tool";
+            const title = (b.tool_use_id && toolTitles.get(b.tool_use_id)) || "";
+            if (b.tool_use_id) toolTitles.delete(b.tool_use_id);
             const result = redactSecrets(flattenResult(b.content), secrets);
             const failed = Boolean(b.is_error);
             session.emit({
               type: "tool",
               phase: "done",
               name: name.replace(/^mcp__glyphh__/, ""),
+              ...(title ? { title } : {}),
               failed,
               denied: failed && /denied this action|read-only/.test(result),
               // Errors keep enough of the message to diagnose (desktop: 600/160).

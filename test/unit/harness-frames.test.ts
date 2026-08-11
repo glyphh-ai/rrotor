@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { FrameRing, isTerminal, HARNESS_WIRE_VERSION } from "../../src/harness/frames.js";
+import { FrameRing, isTerminal, HARNESS_WIRE_VERSION, toolTitle, redactTitle } from "../../src/harness/frames.js";
 import type { WireFrame } from "../../src/harness/frames.js";
 import { HarnessSession, mintRunId } from "../../src/harness/session.js";
 
@@ -117,5 +117,35 @@ describe("mintRunId", () => {
   it("mints desktop-format run ids", () => {
     expect(mintRunId()).toMatch(/^run-[a-z0-9]+-[a-z0-9]+$/);
     expect(HARNESS_WIRE_VERSION).toBe("glyphh.harness/v1");
+  });
+});
+
+describe("toolTitle — the breadcrumb's key input", () => {
+  it("derives per-tool: command, file path, pattern", () => {
+    expect(toolTitle("Bash", { command: "npm run  build" })).toBe("Run: npm run build");
+    expect(toolTitle("Read", { file_path: "/w/src/a.ts" })).toBe("Read /w/src/a.ts");
+    expect(toolTitle("Write", { file_path: "/w/out.txt", content: "x" })).toBe("Write /w/out.txt");
+    expect(toolTitle("Edit", { file_path: "/w/b.ts" })).toBe("Edit /w/b.ts");
+    expect(toolTitle("Grep", { pattern: "toolTitle", path: "src/" })).toBe('Grep "toolTitle" in src/');
+    expect(toolTitle("Glob", { pattern: "**/*.ts" })).toBe('Glob "**/*.ts"');
+  });
+
+  it("strips MCP prefixes and picks the salient arg of unknown tools", () => {
+    expect(toolTitle("mcp__glyphh_apps__build_app", { slug: "my-app", deploy: true })).toBe("build_app — my-app");
+    expect(toolTitle("mcp__desktop__open_browser", { url: "https://x.dev" })).toBe("open_browser — https://x.dev");
+  });
+
+  it("returns empty when nothing salient exists, and truncates long commands", () => {
+    expect(toolTitle("Bash", {})).toBe("");
+    expect(toolTitle("KillShell", {})).toBe("");
+    const long = toolTitle("Bash", { command: "x".repeat(500) });
+    expect(long.length).toBeLessThanOrEqual(170);
+    expect(long.startsWith("Run: ")).toBe(true);
+  });
+
+  it("NEVER carries secret-looking values", () => {
+    expect(toolTitle("Bash", { command: "curl -H api_key=sk-live-123 https://api" })).toBe("Run: curl -H api_key=[redacted] https://api");
+    expect(redactTitle("TOKEN: abc123 password=hunter2")).toBe("TOKEN: [redacted] password=[redacted]");
+    expect(redactTitle("Write /w/notes.txt")).toBe("Write /w/notes.txt");
   });
 });

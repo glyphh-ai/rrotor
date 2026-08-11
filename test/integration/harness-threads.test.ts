@@ -149,11 +149,13 @@ describe("thread persistence — a run writes its transcript", () => {
     });
     expect(res.status).toBe(200);
 
-    // user turn → tool row (⚙ rewritten to ✓ in place) → assistant text.
+    // user turn → tool row (⚙ rewritten to ✓ in place) → assistant text. The
+    // breadcrumb carries the call's KEY INPUT (engine toolTitle) — a bare
+    // "✓ Read" is exactly the poverty the title exists to remove.
     const t = await untilMessages(base, "c1a2b3", 3);
     expect(t.messages.map((m) => [m.role, m.kind ?? "", m.text])).toEqual([
       ["user", "", "read a.ts"],
-      ["assistant", "tool", "✓ Read"],
+      ["assistant", "tool", "✓ Read /w/a.ts"],
       ["assistant", "", "the answer"],
     ]);
 

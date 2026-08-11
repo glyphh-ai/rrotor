@@ -527,7 +527,9 @@ export class ThreadRecorder {
         this.enqueue((s, p) => this.flushLive(s, p, f.at));
       }
     } else if (f.type === "tool" && f.phase === "start") {
-      const row = `⚙ ${f.name}${f.thought ? ` — ${f.thought}` : ""}`;
+      // The title carries the call's key input ("Run: <cmd>", "Write /path") —
+      // the same label the desktop's start row shows; thought is the fallback.
+      const row = `⚙ ${f.title || (f.thought ? `${f.name} — ${f.thought}` : f.name)}`;
       const name = f.name;
       this.enqueue(async (s, p) => {
         await this.commitText(s, p, f.at);

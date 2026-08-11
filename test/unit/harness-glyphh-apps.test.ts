@@ -14,11 +14,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runtimeMcpUrl, appsServerRef, withPublishPolicy, APPS_SERVER_NAME, PUBLISH_POLICY } from "../../src/harness/glyphh-apps.js";
+import { runtimeMcpUrl, appsServerRef, withPublishPolicy, expandBuildAppInput, APPS_SERVER_NAME, BUILD_APP_TOOL, PUBLISH_POLICY } from "../../src/harness/glyphh-apps.js";
 import { buildQueryArgs } from "../../src/harness/engine.js";
 import { HarnessSession } from "../../src/harness/session.js";
 import type { HarnessRunConfig } from "../../src/harness/config.js";
@@ -165,5 +165,87 @@ describe("the publish policy travels with the tools", () => {
   it("is absent from a chat turn, which has no tools to act on it", () => {
     const { options } = buildQueryArgs(cfg({ mode: "chat", system: "You are Glyphh." }), new HarnessSession({ runId: "run-t" }), []);
     expect(String(options.systemPrompt)).not.toContain("## Building and publishing a Glyphh app");
+  });
+
+  it("steers the model to distDir, not read-and-inline", () => {
+    expect(PUBLISH_POLICY).toContain("distDir: 'dist'");
+    expect(PUBLISH_POLICY).toContain("Do NOT read built files");
+  });
+});
+
+describe("expandBuildAppInput — build_app { distDir } inlines pod-side", () => {
+  /** A workdir with a small built bundle under `dist/`. */
+  function workspaceWithDist(extra: Record<string, string | Buffer> = {}): string {
+    const home = mkdtempSync(join(tmpdir(), "dist-"));
+    mkdirSync(join(home, "dist", "assets"), { recursive: true });
+    writeFileSync(join(home, "dist", "index.html"), "<!doctype html><h1>hi</h1>");
+    writeFileSync(join(home, "dist", "assets", "app.js"), "console.log(1)");
+    for (const [rel, content] of Object.entries(extra)) {
+      writeFileSync(join(home, "dist", rel), content);
+    }
+    return home;
+  }
+
+  it("walks distDir and builds the server's { files } map — keys without the dist/ prefix", async () => {
+    const home = workspaceWithDist();
+    const out = await expandBuildAppInput({ slug: "my-app", distDir: "dist" }, home);
+    expect(out).toMatchObject({ ok: true, fileCount: 2 });
+    if (!out || !out.ok) throw new Error("expected ok");
+    const files = out.input.files as Record<string, unknown>;
+    expect(files["index.html"]).toContain("<!doctype html>");
+    expect(files["assets/app.js"]).toBe("console.log(1)");
+    // distDir never reaches the server — the contract stays { slug, files }.
+    expect(out.input.distDir).toBeUndefined();
+    expect(out.input.slug).toBe("my-app");
+  });
+
+  it("defaults distDir to 'dist' when the model passes neither files nor distDir", async () => {
+    const out = await expandBuildAppInput({ slug: "my-app" }, workspaceWithDist());
+    expect(out).toMatchObject({ ok: true });
+  });
+
+  it("leaves a small inline { files } call untouched", async () => {
+    const out = await expandBuildAppInput({ slug: "s", files: { "index.html": "<h1>x</h1>" } }, workspaceWithDist());
+    expect(out).toBeNull();
+  });
+
+  it("binary assets ride as { base64 }; sourcemaps are skipped", async () => {
+    const home = workspaceWithDist({ "logo.png": Buffer.from([0x89, 0x50, 0x4e, 0x47]), "app.js.map": "{}" });
+    const out = await expandBuildAppInput({ slug: "s", distDir: "dist" }, home);
+    if (!out || !out.ok) throw new Error("expected ok");
+    expect(out.input.files).toMatchObject({ "logo.png": { base64: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64") } });
+    expect((out.input.files as Record<string, unknown>)["app.js.map"]).toBeUndefined();
+    expect(out.skipped).toContain("app.js.map");
+  });
+
+  it("refuses a distDir outside the working folder — a published app must not inhale the machine", async () => {
+    const out = await expandBuildAppInput({ slug: "s", distDir: "../../etc" }, workspaceWithDist());
+    expect(out).toMatchObject({ ok: false });
+    if (!out || out.ok) throw new Error("expected refusal");
+    expect(out.error).toContain("inside the working folder");
+  });
+
+  it("errors clearly when there is no build output or no root index.html", async () => {
+    const missing = await expandBuildAppInput({ slug: "s", distDir: "nope" }, mkdtempSync(join(tmpdir(), "dist-")));
+    if (!missing || missing.ok) throw new Error("expected error");
+    expect(missing.error).toContain("run the build first");
+
+    const home = mkdtempSync(join(tmpdir(), "dist-"));
+    mkdirSync(join(home, "dist"));
+    writeFileSync(join(home, "dist", "main.js"), "x");
+    const noIndex = await expandBuildAppInput({ slug: "s", distDir: "dist" }, home);
+    if (!noIndex || noIndex.ok) throw new Error("expected error");
+    expect(noIndex.error).toContain("index.html");
+  });
+
+  it("names the control plane's request limit when the bundle is too big to inline", async () => {
+    const home = workspaceWithDist({ "big.js": "y".repeat(1_000_000) });
+    const out = await expandBuildAppInput({ slug: "s", distDir: "dist" }, home);
+    if (!out || out.ok) throw new Error("expected error");
+    expect(out.error).toContain("1 MB request limit");
+  });
+
+  it("the engine intercepts exactly the lent build_app tool name", () => {
+    expect(BUILD_APP_TOOL).toBe(`mcp__${APPS_SERVER_NAME}__build_app`);
   });
 });

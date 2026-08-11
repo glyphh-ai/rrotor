@@ -12,7 +12,9 @@
  * Frame schema (payload shapes mirror the desktop emit sites exactly):
  *
  *   delta     { delta }                          — streamed answer text; append
- *   tool      { phase:"start", name, thought? }  — a tool began
+ *   tool      { phase:"start", name, thought?, title? } — a tool began; `title`
+ *                                                  carries the call's key input
+ *                                                  ("Run: <cmd>", "Write /path")
  *             { phase:"done", name, title?, denied?, failed?, preview? }
  *   progress  { inTokens, outTokens }            — live token accounting
  *   credits   { creditsMicro }                   — running metered price (see note)
@@ -43,6 +45,106 @@
  * the rotor stream's WireEvent tape, in-memory for v1 — stator-backed history
  * is the later convergence).
  */
+
+// ── Tool breadcrumb titles ─────────────────────────────────────────────────
+//
+// The renderer renders RICH tool rows when the label carries the key input
+// (`✓ Run: <cmd>` → terminal card, `✓ Write /path` → file card in the
+// desktop's code.ts toolLineEl). The frames must therefore carry a human
+// `title` derived from the tool's INPUT — the same grammar the desktop's own
+// gate titles use — or every successful row degrades to a bare tool name.
+
+/** Values that look like credentials never ride a breadcrumb. Matches
+ *  `<something>key|token|secret|password<something>[=:] value` and keeps the
+ *  key name while dropping the value. */
+const SECRETISH_RE = /([A-Za-z0-9_-]*(?:key|token|secret|password)[A-Za-z0-9_-]*["']?\s*[=:]\s*)(["']?)[^\s"']+/gi;
+
+/** Redact secret-looking `key=value` / `key: value` pairs from a title. */
+export function redactTitle(s: string): string {
+  return s.replace(SECRETISH_RE, "$1$2[redacted]");
+}
+
+/** One line, sanely bounded. */
+function clip(s: string, max: number): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+const str = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** The most salient string argument of an unknown (MCP/connector) tool —
+ *  preferred keys first, then the first reasonably short string value. */
+function salientArg(args: Record<string, unknown>): string {
+  const preferred = ["query", "url", "path", "file_path", "file", "slug", "name", "title", "prompt", "pattern", "command", "description", "message"];
+  for (const k of preferred) {
+    const v = str(args[k]);
+    if (v) return v;
+  }
+  for (const v of Object.values(args)) {
+    if (typeof v === "string" && v.trim() && v.length <= 400) return v;
+  }
+  return "";
+}
+
+/**
+ * A human breadcrumb title for one tool call, derived from its input:
+ * Bash → the command; Read/Write/Edit → the file path; Glob/Grep → the
+ * pattern (+ path); everything else → the most salient string argument.
+ * Returns "" when nothing salient exists (callers fall back to the name).
+ * Secret-looking values are always redacted; never include raw credentials.
+ */
+export function toolTitle(name: string, input: unknown): string {
+  const bare = name.replace(/^mcp__[a-z0-9_-]+__/i, "");
+  const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  let title = "";
+  switch (bare) {
+    case "Bash": {
+      const cmd = clip(str(args.command), 120);
+      title = cmd ? `Run: ${cmd}` : "";
+      break;
+    }
+    case "Read":
+    case "NotebookRead": {
+      const p = str(args.file_path) || str(args.notebook_path);
+      title = p ? `Read ${p}` : "";
+      break;
+    }
+    case "Write": {
+      const p = str(args.file_path);
+      title = p ? `Write ${p}` : "";
+      break;
+    }
+    case "Edit":
+    case "MultiEdit":
+    case "NotebookEdit": {
+      const p = str(args.file_path) || str(args.notebook_path);
+      title = p ? `Edit ${p}` : "";
+      break;
+    }
+    case "Glob":
+    case "Grep": {
+      const pat = clip(str(args.pattern), 80);
+      const where = str(args.path);
+      title = pat ? `${bare} "${pat}"${where ? ` in ${where}` : ""}` : "";
+      break;
+    }
+    case "WebFetch": {
+      const u = clip(str(args.url), 120);
+      title = u ? `Fetch ${u}` : "";
+      break;
+    }
+    case "WebSearch": {
+      const q = clip(str(args.query), 100);
+      title = q ? `Search "${q}"` : "";
+      break;
+    }
+    default: {
+      const arg = clip(salientArg(args), 80);
+      title = arg ? `${bare} — ${arg}` : "";
+    }
+  }
+  return title ? redactTitle(clip(title, 160)) : "";
+}
 
 /** One question the agent puts to the user (the desktop's `ask_user` shape). */
 export interface AskQuestion {

@@ -24,10 +24,17 @@
  * URL is still validated as http(s) before it is used.
  */
 
+import { readdir, stat, readFile } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
+
 /** The lent server's name on the wire. Must match rrotor's own
  *  `^[a-z0-9_-]{1,32}$` rule and must not be `glyphh` (the in-process ask_user
  *  server). Tools reach the model as `mcp__glyphh_apps__<tool>`. */
 export const APPS_SERVER_NAME = "glyphh_apps";
+
+/** The publish tool's wire name — the seam engine.ts intercepts to expand
+ *  `{ distDir }` into the `{ files }` map the server contract requires. */
+export const BUILD_APP_TOOL = `mcp__${APPS_SERVER_NAME}__build_app`;
 
 /** The control plane's pod-facing MCP route. Mirrors the server's
  *  `RUNTIME_MCP_PATH` — the two must agree. */
@@ -101,6 +108,119 @@ export function appsServerRef(cfg: {
   };
 }
 
+// ── build_app { distDir } — the pod inlines the bundle itself ──────────────
+//
+// The server's `build_app` contract is `{ slug, files }` — a path→content map.
+// Forcing the MODEL to produce that map means reading every built file and
+// pasting its contents into a tool call, which fails outright on a real Vite
+// bundle (the JS is "too large" to read) and sends the agent hunting for an
+// upload path that does not exist. The pod fixes this on ITS side of the wire:
+// `build_app { slug, distDir }` is expanded here — the pod walks the directory
+// on its own filesystem, builds the map, and the server receives the exact
+// contract it always had. The server was NOT changed.
+
+/** The control plane parses `/api/runtime/mcp` with its default 1 MB JSON body
+ *  limit (server `express.json({ limit: "1mb" })`; the deeper 50 MB source cap
+ *  never binds first on this route). Stay under it with headroom for the
+ *  JSON-RPC envelope. */
+const MAX_INLINE_JSON_BYTES = 900 * 1024;
+
+/** Never walk into these — build output should not contain them, and a stray
+ *  `node_modules` would blow the payload instantly. */
+const SKIP_DIRS = new Set(["node_modules", ".git"]);
+
+/** Text rides as a plain string; anything else as `{ base64 }`, which the
+ *  server's build_app value contract explicitly supports. */
+const TEXT_EXT = new Set(["html", "htm", "js", "mjs", "cjs", "css", "json", "svg", "txt", "md", "xml", "webmanifest", "csv", "tsv"]);
+
+const MAX_FILES = 2000;
+
+type FileValue = string | { base64: string };
+
+export type DistExpansion =
+  | { ok: true; input: Record<string, unknown>; fileCount: number; jsonBytes: number; skipped: string[] }
+  | { ok: false; error: string };
+
+async function walkDist(dir: string, rel: string, out: Array<{ rel: string; abs: string }>, skipped: string[]): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const e of entries) {
+    const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      // Dot-directories and dependency/VCS trees are never build output.
+      if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) { skipped.push(`${childRel}/`); continue; }
+      await walkDist(join(dir, e.name), childRel, out, skipped);
+      continue;
+    }
+    if (!e.isFile()) continue;
+    // Sourcemaps are dropped by default: the server contract does not require
+    // them, and they routinely double a bundle's inline size.
+    if (e.name.endsWith(".map") || e.name === ".DS_Store") { skipped.push(childRel); continue; }
+    out.push({ rel: childRel, abs: join(dir, e.name) });
+    if (out.length > MAX_FILES) throw new Error(`more than ${MAX_FILES} files under the dist folder — that is not a built bundle`);
+  }
+}
+
+/**
+ * Expand a `build_app { slug, distDir }` call into the server's
+ * `{ slug, files }` contract by walking `distDir` on the POD's filesystem.
+ *
+ * Returns null when no expansion applies (an inline `files` map was passed and
+ * no `distDir` named) — the call goes through untouched. `distDir` must stay
+ * INSIDE the run's working folder: a local pod's workdir is the user's real
+ * project, and an absolute path outside it would let a published app inhale
+ * arbitrary files from the machine.
+ */
+export async function expandBuildAppInput(input: unknown, workdir: string): Promise<DistExpansion | null> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const args = input as Record<string, unknown>;
+  const inlineFiles = args.files && typeof args.files === "object" && !Array.isArray(args.files) && Object.keys(args.files as object).length > 0;
+  const named = typeof args.distDir === "string" ? args.distDir.trim() : "";
+  // Inline files with no distDir: the small hand-written case — untouched.
+  if (inlineFiles && !named) return null;
+  const distDir = named || "dist";
+
+  const root = resolve(workdir || ".");
+  const dir = resolve(root, distDir);
+  if (dir !== root && !dir.startsWith(root + sep)) {
+    return { ok: false, error: `distDir must be a folder inside the working folder (got "${distDir}")` };
+  }
+
+  try {
+    const st = await stat(dir).catch(() => null);
+    if (!st?.isDirectory()) {
+      return { ok: false, error: `no build output at "${distDir}" — run the build first (e.g. \`npm run build\`), or pass the folder that contains the built index.html as distDir` };
+    }
+
+    const found: Array<{ rel: string; abs: string }> = [];
+    const skipped: string[] = [];
+    await walkDist(dir, "", found, skipped);
+    if (!found.length) return { ok: false, error: `"${distDir}" is empty — run the build first` };
+    if (!found.some((f) => f.rel.toLowerCase() === "index.html")) {
+      return { ok: false, error: `"${distDir}" has no index.html at its root — pass the folder that CONTAINS the built index.html as distDir` };
+    }
+
+    const files: Record<string, FileValue> = {};
+    for (const f of found) {
+      const buf = await readFile(f.abs);
+      const ext = f.rel.split(".").pop()?.toLowerCase() ?? "";
+      files[f.rel] = TEXT_EXT.has(ext) ? buf.toString("utf8") : { base64: buf.toString("base64") };
+    }
+
+    const jsonBytes = Buffer.byteLength(JSON.stringify(files), "utf8");
+    if (jsonBytes > MAX_INLINE_JSON_BYTES) {
+      return {
+        ok: false,
+        error: `the built bundle inlines to ~${Math.round(jsonBytes / 1024)} KB of JSON — over the control plane's 1 MB request limit on build_app (/api/runtime/mcp). Shrink the bundle: drop large assets, split vendor chunks, compress images.`,
+      };
+    }
+
+    const { distDir: _dropped, ...rest } = args;
+    return { ok: true, input: { ...rest, files }, fileCount: found.length, jsonBytes, skipped };
+  } catch (err) {
+    return { ok: false, error: `could not read "${distDir}": ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
 /**
  * The non-negotiable publish policy, appended to whatever system prompt a run
  * carries.
@@ -120,7 +240,7 @@ export const PUBLISH_POLICY = [
   "1. scaffold_app { slug } — the shared starting Vite project as a { path: content } map. Write those files into the working folder. Do not hand-roll a project instead; this scaffold is the same on every surface.",
   "2. npm install && npm run build — Vite emits dist/.",
   "3. create_app_entry { kind: 'glyphh', slug, name } — registers the app and returns the MINTED slug, which may differ from the one you asked for. Use the returned slug from then on.",
-  "4. build_app { slug, files } — files is everything under dist/, keyed WITHOUT the 'dist/' prefix so index.html is at the root. It cuts a release, builds it, and deploys it live. If it returns status 'failed', read the error, fix the source, rebuild and call it again.",
+  "4. build_app { slug, distDir: 'dist' } — pass the built output FOLDER (relative to the working folder). The runtime walks it itself, inlines every file, and uploads. Do NOT read built files, do NOT paste their contents into the call, and do not hunt for an upload endpoint — passing distDir is the whole upload. It cuts a release, builds it, and deploys it live. If it returns status 'failed', read the error, fix the source, rebuild and call it again. (For a tiny hand-written app you may instead pass files: { path: content } directly — the total call must stay well under 1 MB.)",
   "5. Give the user the returned https://<slug>.glyphh.app URL.",
   "",
   "NEVER start a local web server to show an app — not `python3 -m http.server`, not `npx serve`, not `vite preview`, not any other. This session may be running in a cloud container, where such a URL is unreachable by the user and by everyone else. Publishing is the ONLY way an app becomes visible.",
