@@ -53,6 +53,7 @@ import type { Logger } from "../obs/logger.js";
 import type { Principal } from "../auth/introspect.js";
 import { recallForTurn, persistTurn, recallForTurnViaApi, persistTurnViaApi, controlBaseFromGateway } from "./stator-api.js";
 import { constructSystemPrompt, attentionCheck, renderFocus } from "./memory-rotor.js";
+import { sessionTranscripts, gatewaySummarizer, CONTEXT_DEFAULTS, TranscriptStore } from "./transcript.js";
 
 /** The injectable SDK seam: the real `query` in production, a fake in tests. */
 export type QueryFn = (args: { prompt: string | AsyncIterable<unknown>; options: Record<string, unknown> }) => AsyncIterable<unknown>;
@@ -64,6 +65,9 @@ export interface EngineDeps {
   approvalTimeoutMs?: number;
   /** Credits-lookup timeout override (tests shorten it). */
   creditsTimeoutMs?: number;
+  /** The full-context fallback's transcript store (tests isolate it);
+   *  defaults to the pod-wide {@link sessionTranscripts}. */
+  transcripts?: TranscriptStore;
 }
 
 /** How long the turn's price lookup may take before we give up on it. The
@@ -142,10 +146,15 @@ const DEFAULT_SYSTEM =
   "Use ask_user when a decision is genuinely the user's. Answer directly and concisely.";
 
 /** Assemble the per-run prompt the way the desktop does (persistSession is
- *  off — each run carries its own recent history in the user turn). */
-export function assemblePrompt(history: ChatTurn[], prompt: string, attachments: MaterializedAttachment[]): string {
+ *  off — each run carries its own recent history in the user turn). When the
+ *  FULL-CONTEXT FALLBACK produced a `contextBlock` (rotor not active), that
+ *  block IS the complete conversation — already compaction-sized, never
+ *  sliced — and replaces the legacy last-40 history rendering. */
+export function assemblePrompt(history: ChatTurn[], prompt: string, attachments: MaterializedAttachment[], contextBlock?: string): string {
   const parts: string[] = [];
-  if (history.length) {
+  if (contextBlock) {
+    parts.push(`<conversation_so_far>\n${contextBlock}\n</conversation_so_far>`);
+  } else if (history.length) {
     const recent = history.slice(-40);
     const block = recent.map((m) => `${m.role === "user" ? "User" : "Glyphh"}: ${m.content}`).join("\n");
     parts.push(`<conversation_so_far>\n${block}\n</conversation_so_far>`);
@@ -269,7 +278,7 @@ export function buildQueryArgs(
   // The publish policy rides WITH the tools: no app tools, no policy.
   const system = cfg.system ?? DEFAULT_SYSTEM;
   return {
-    prompt: buildPrompt(assemblePrompt(cfg.history, cfg.prompt, attachments), cfg.images ?? []),
+    prompt: buildPrompt(assemblePrompt(cfg.history, cfg.prompt, attachments, cfg.contextBlock), cfg.images ?? []),
     options: {
       cwd: cfg.workdir,
       ...(cfg.model ? { model: cfg.model } : {}),
@@ -448,6 +457,46 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
     }
   }
 
+  // ── THE FULL-CONTEXT FALLBACK (harness/transcript.ts) ──────────────────────
+  // When the memory rotor is NOT active (it is opt-in and usually off), the
+  // worker's prompt must carry the COMPLETE conversation — every turn of the
+  // session, verbatim — with first-class COMPACTION when it outgrows the
+  // budget. Memory-off must NEVER mean thread-loss (the "my workspace is
+  // empty" incident). The pod retains the transcript per thread; the client's
+  // resent history reconciles a pod restart (adopt); compaction folds the
+  // oldest turns into a record-once summary + deterministic anchors and keeps
+  // the newest turns verbatim. Rotor ON ⇒ untouched: the rotor owns the
+  // system prompt and already carries the working plane — no double-inject.
+  const transcripts = deps.transcripts ?? sessionTranscripts;
+  const threadKey = cfg.threadId || cfg.sessionId || cfg.runId;
+  if (!rotorOn) {
+    transcripts.adopt(threadKey, cfg.history);
+    const budgetTokens = Math.max(1, cfg.context?.budgetTokens ?? CONTEXT_DEFAULTS.budgetTokens);
+    const keepTurns = Math.max(1, cfg.context?.keepTurns ?? CONTEXT_DEFAULTS.keepTurns);
+    // The summarizer is the back path's cheap LLM (the enricher pattern) over
+    // the metered gateway; the store degrades to a deterministic gist fold on
+    // any failure — compaction never blocks or loses the thread.
+    const summarize = gatewaySummarizer({
+      gatewayUrl: cfg.gatewayUrl,
+      token: cfg.runtimeToken,
+      runId: cfg.runId,
+      ...(deps.fetchFn ? { fetchFn: deps.fetchFn } : {}),
+    });
+    const compaction = await transcripts.compact(threadKey, { budgetTokens, keepTurns, summarize });
+    if (compaction) {
+      session.emit({ type: "compaction", folded: compaction.folded, kept: compaction.kept, summaryChars: compaction.summaryChars, via: compaction.via });
+      runLog.info("transcript compacted", {
+        thread: threadKey, folded: compaction.folded, kept: compaction.kept,
+        summary_chars: compaction.summaryChars, via: compaction.via,
+      });
+    }
+    const contextBlock = transcripts.render(threadKey);
+    if (contextBlock) {
+      runCfg = { ...runCfg, contextBlock };
+      runLog.info("full-context fallback engaged", { thread: threadKey, chars: contextBlock.length, compacted: !!compaction });
+    }
+  }
+
   try {
     const q = queryFn(buildQueryArgs(runCfg, session, attachments, deps));
     for await (const raw of q) {
@@ -554,6 +603,9 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
       }
     }
     if (session.ctrl.signal.aborted) {
+      // A stopped run still happened — retain the partial exchange so the
+      // thread survives the stop (record-once per runId).
+      transcripts.append(threadKey, cfg.runId, cfg.prompt, finalText);
       session.emit({ type: "done", stopped: true });
       runLog.info("run stopped", { turns: turnsUsed });
       return;
@@ -577,11 +629,17 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
         else await persistTurnViaApi(statorBase!, cfg.runtimeToken, thread, cfg.prompt, finalText, cfg.memory?.entity);
         runLog.info("turn persisted to stator", { via: principal ? "store" : "api" });
       }
+      // ALWAYS retain the exchange in the pod transcript (rotor on or off,
+      // memory on or off — record-once per runId): the next turn's
+      // full-context fallback must carry this turn even if memory never was
+      // or later stops being active. The thread is never lost.
+      transcripts.append(threadKey, cfg.runId, cfg.prompt, finalText);
       session.emit({ type: "done", stopped: false });
       runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok(), credits_micro: creditsMicro ?? undefined });
     }
   } catch (err) {
     if (session.ctrl.signal.aborted) {
+      transcripts.append(threadKey, cfg.runId, cfg.prompt, finalText);
       session.emit({ type: "done", stopped: true });
       runLog.info("run stopped", { turns: turnsUsed });
       return;

@@ -133,6 +133,17 @@ export interface HarnessRunConfig {
    *  enricher). This is the seam that hands the memory decision back to the loop
    *  instead of it being hardcoded in the engine. */
   memory?: MemoryPolicy;
+  /** FULL-CONTEXT FALLBACK sizing (engaged when the memory rotor is NOT active;
+   *  see harness/transcript.ts): the transcript token budget before compaction
+   *  and how many recent turns always stay verbatim. Absent fields take the
+   *  engine defaults (transcript.CONTEXT_DEFAULTS). Body `context` overrides
+   *  env (HARNESS_CONTEXT_BUDGET_TOKENS / HARNESS_CONTEXT_KEEP_TURNS). */
+  context?: { budgetTokens?: number; keepTurns?: number };
+  /** ENGINE-INTERNAL (never body-parsed): the pre-rendered full-conversation
+   *  block. When present, {@link import("./engine.js").assemblePrompt} carries
+   *  it as the COMPLETE `<conversation_so_far>` instead of rendering (and
+   *  slicing) `history` — the full-context fallback's delivery seam. */
+  contextBlock?: string;
 }
 
 /** How a loop wants a turn to use memory. All optional; absent fields take the
@@ -193,6 +204,7 @@ export interface RunRequestBody {
   runtimeToken?: unknown;
   maxTurns?: unknown;
   memory?: unknown;
+  context?: unknown;
 }
 
 /** A validation failure the HTTP layer maps to 400. */
@@ -371,7 +383,27 @@ export function resolveRunConfig(
     attachmentMaxBytes: intEnv(env.HARNESS_ATTACH_MAX_MB, 50) * 1024 * 1024,
     maxTurns: num(body.maxTurns) ?? intEnv(env.HARNESS_MAX_TURNS, 0),
     ...(parseMemory(body.memory) ? { memory: parseMemory(body.memory) } : {}),
+    ...(parseContext(body.context, env) ? { context: parseContext(body.context, env) } : {}),
   };
+}
+
+/** Parse the full-context fallback sizing: body `context` wins over env; absent
+ *  everywhere ⇒ undefined (the engine applies transcript.CONTEXT_DEFAULTS). */
+function parseContext(v: unknown, env: NodeJS.ProcessEnv): { budgetTokens?: number; keepTurns?: number } | undefined {
+  const o = v != null && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  const budgetTokens = num(o.budgetTokens) ?? optIntEnv(env.HARNESS_CONTEXT_BUDGET_TOKENS);
+  const keepTurns = num(o.keepTurns) ?? optIntEnv(env.HARNESS_CONTEXT_KEEP_TURNS);
+  const p = {
+    ...(budgetTokens !== undefined ? { budgetTokens } : {}),
+    ...(keepTurns !== undefined ? { keepTurns } : {}),
+  };
+  return Object.keys(p).length ? p : undefined;
+}
+
+function optIntEnv(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
 }
 
 /** Parse the loop's memory policy from the body. Returns undefined when nothing

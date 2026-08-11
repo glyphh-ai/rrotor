@@ -77,6 +77,11 @@ export type AgentFrame =
   // the run re-renders its mode chip in lockstep (the gate change itself is
   // server-side). Older consumers ignore the unknown type harmlessly.
   | { type: "permission"; permission: "ask" | "plan" | "acceptEdits" | "auto" | "bypass" }
+  // The FULL-CONTEXT FALLBACK compacted the session transcript before this run
+  // (harness/transcript.ts): `folded` oldest turns became the summary, `kept`
+  // recent turns stayed verbatim. Advisory + additive — surfaces may render a
+  // "conversation compacted" notice; older consumers ignore it harmlessly.
+  | { type: "compaction"; folded: number; kept: number; summaryChars: number; via: "model" | "deterministic" }
   | { type: "done"; stopped: boolean }
   | { type: "error"; error: string };
 
