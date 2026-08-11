@@ -178,6 +178,11 @@ export type AgentFrame =
   | { type: "credits"; creditsMicro: number }
   | { type: "approval"; id: string; kind: ActionKind; title: string; detail: string }
   | { type: "ask"; id: string; questions: AskQuestion[] }
+  // The agent asked to SHOW an app/page to the user. Deliberately surface-blind:
+  // whatever surface is WATCHING the run renders it natively (desktop → panel,
+  // web → workbench card, mobile → app tray) — the agent never picks a machine.
+  // `ref` = an installed app's slug/name; `url` = a page (open_browser).
+  | { type: "open-app"; ref?: string; url?: string }
   | { type: "setup"; phase: string; [k: string]: unknown }
   // The run's LIVE permission mode changed mid-flight (POST /runs/:id/permission).
   // Advisory + non-terminal: it rides the frame stream so EVERY surface observing

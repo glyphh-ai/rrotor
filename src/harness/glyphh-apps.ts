@@ -35,6 +35,50 @@ export const APPS_SERVER_NAME = "glyphh_apps";
 /** The publish tool's wire name — the seam engine.ts intercepts to expand
  *  `{ distDir }` into the `{ files }` map the server contract requires. */
 export const BUILD_APP_TOOL = `mcp__${APPS_SERVER_NAME}__build_app`;
+export const SAVE_FILE_TOOL = `mcp__${APPS_SERVER_NAME}__save_file`;
+
+/** save_file { path }: the POD reads the workspace file and inlines it as
+ *  contentBase64 — the model passes a path, never bytes, and the SERVER
+ *  contract ({ name, contentBase64, mime }) is unchanged. Same 1MB-bound
+ *  reality as build_app: /api/runtime/mcp parses JSON at the default 1MB,
+ *  so the base64 payload is capped ~700KB and the error names the limit. */
+const SAVE_FILE_MAX_BYTES = 700 * 1024;
+const MIME_BY_EXT: Record<string, string> = {
+  md: "text/markdown", txt: "text/plain", html: "text/html", css: "text/css",
+  js: "text/javascript", json: "application/json", csv: "text/csv",
+  pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  gif: "image/gif", svg: "image/svg+xml", webp: "image/webp", zip: "application/zip",
+};
+export async function expandSaveFileInput(
+  input: unknown,
+  workdir: string,
+): Promise<{ ok: true; input: Record<string, unknown> } | { ok: false; error: string } | null> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const args = { ...(input as Record<string, unknown>) };
+  const path = typeof args.path === "string" ? args.path.trim() : "";
+  if (!path) return null;   // inline content/contentBase64 — untouched
+  const root = resolve(workdir || ".");
+  const abs = resolve(root, path);
+  if (abs !== root && !abs.startsWith(root + sep)) {
+    return { ok: false, error: `path must be a file inside the working folder (got "${path}")` };
+  }
+  let bytes: Buffer;
+  try { bytes = await readFile(abs); }
+  catch { return { ok: false, error: `no such file: ${path}` }; }
+  if (!bytes.byteLength) return { ok: false, error: `${path} is empty — nothing to save` };
+  if (bytes.byteLength > SAVE_FILE_MAX_BYTES) {
+    return { ok: false, error: `${path} is ${Math.round(bytes.byteLength / 1024)}KB — save_file is capped at ${Math.round(SAVE_FILE_MAX_BYTES / 1024)}KB (the runtime MCP request limit); export something smaller or split it` };
+  }
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  delete args.path;
+  if (typeof args.name !== "string" || !args.name.trim()) args.name = path.split("/").pop() || "artifact";
+  args.contentBase64 = bytes.toString("base64");
+  if (typeof args.mime !== "string" || !args.mime) {
+    const m = MIME_BY_EXT[ext];
+    if (m) args.mime = m;
+  }
+  return { ok: true, input: args };
+}
 
 /** The control plane's pod-facing MCP route. Mirrors the server's
  *  `RUNTIME_MCP_PATH` — the two must agree. */

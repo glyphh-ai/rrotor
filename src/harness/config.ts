@@ -185,6 +185,29 @@ export function harnessHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.HARNESS_HOME ?? join(tmpdir(), "glyphh-harness");
 }
 
+/**
+ * The ONE workspace-keying rule, shared by run config (below) and the fs API
+ * (fs-routes.ts) so the Files/Diff panels browse EXACTLY where runs execute:
+ *
+ *   · a BOUND session (dedicated pod / provisioned `sess_*`) → the session id,
+ *     unchanged — one session, one workspace.
+ *   · a SHARED pod turn (front-door: user token, no session binding) → the
+ *     OWNER'S user id + the client thread id, so a chat's turns share one
+ *     stable workspace AND no org member can reach another's by guessing a
+ *     thread id (thread ids are client-minted `c<ts36>` — guessable).
+ *   · neither → the run id (an unattributed one-off stays isolated per run).
+ */
+export function workspaceSegment(key: { sessionId?: string; owner?: string; threadId?: string; runId: string }): string {
+  if (key.sessionId) return sanitizeSegment(key.sessionId);
+  if (key.owner && key.threadId) return `${sanitizeSegment(key.owner)}~${sanitizeSegment(key.threadId)}`;
+  return sanitizeSegment(key.runId);
+}
+
+/** A session workspace root under the harness home, by its keyed segment. */
+export function sessionWorkspace(env: NodeJS.ProcessEnv, segment: string): string {
+  return join(harnessHome(env), "sessions", segment, "workspace");
+}
+
 /** The POST /run body shape (all optional except `prompt`). */
 export interface RunRequestBody {
   prompt?: unknown;
@@ -322,7 +345,7 @@ export function resolveRunConfig(
   runId: string,
   body: RunRequestBody,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { allowWorkdir?: boolean } = {},
+  opts: { allowWorkdir?: boolean; owner?: string } = {},
 ): HarnessRunConfig {
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   if (!prompt) throw new BadRunRequest("`prompt` is required");
@@ -345,11 +368,19 @@ export function resolveRunConfig(
   const permissionRaw = str(body.permission) ?? env.HARNESS_PERMISSION_MODE ?? "auto";
   const home = harnessHome(env);
   // One sandbox + one config home PER SESSION (a session's runs share their
-  // files; sessions never see each other's). A blank session id still gets an
-  // isolated area keyed by the run.
-  const scope = sessionId || runId;
-  const sandbox = join(home, "sessions", sanitizeSegment(scope), "workspace");
-  const configDir = join(home, "sessions", sanitizeSegment(scope), "agent-config");
+  // files; sessions never see each other's). On a SHARED pod (no bound session)
+  // the workspace keys by OWNER + THREAD so a chat's turns share one stable
+  // workspace (workspaceSegment) — previously each front-door run got a fresh
+  // per-run sandbox, so nothing persisted across turns and nothing was
+  // browsable. A blank session id AND no owner/thread still isolates per run.
+  const segment = workspaceSegment({
+    ...(sessionId ? { sessionId } : {}),
+    ...(opts.owner ? { owner: opts.owner } : {}),
+    ...(threadId ? { threadId } : {}),
+    runId,
+  });
+  const sandbox = sessionWorkspace(env, segment);
+  const configDir = join(home, "sessions", segment, "agent-config");
   // LOCAL MODE: the caller's own folder becomes the run's cwd, so the SDK's
   // preset tools (Bash/Read/Edit/Glob/Grep) act on the user's real files
   // instead of an empty pod sandbox. Attachments still land in the POD's

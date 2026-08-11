@@ -86,6 +86,7 @@ import { runHarness } from "./engine.js";
 import type { EngineDeps } from "./engine.js";
 import { ThreadRecorder, FrameTape, threadStoreFromEnv, warnIfUnrecordable, parseThreadMsgs, parseMode } from "./threads.js";
 import type { ThreadStore, ThreadPut } from "./threads.js";
+import { handleFsRequest } from "./fs-routes.js";
 
 const DEFAULT_PORT = 8080;
 const FINISHED_KEEP = 8;
@@ -292,7 +293,13 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         try {
           // A caller-named `workdir` is honored ONLY in local mode (auth off,
           // loopback-bound, the user's own machine); a cloud pod rejects it.
-          cfg = resolveRunConfig(runId, body, opts.env ?? process.env, { allowWorkdir: !authn.enabled });
+          // The introspected OWNER keys the shared-pod workspace (config.ts
+          // workspaceSegment) — the same key the fs API (/fs/*) resolves, so
+          // the Files/Diff panels browse exactly where this run executes.
+          cfg = resolveRunConfig(runId, body, opts.env ?? process.env, {
+            allowWorkdir: !authn.enabled,
+            ...(authn.principal ? { owner: authn.principal.userId } : {}),
+          });
         } catch (err) {
           if (err instanceof BadRunRequest) {
             sendJson(res, 400, { error: "bad-run", detail: err.message });
@@ -460,6 +467,12 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
       return;
     }
+  }
+
+  // ── the WORKSPACE FS API (Files/Diff/Editor panels; owner-scoped) ────────────
+  if (path.startsWith("/fs/")) {
+    handleFsRequest(authn, req, res, method, path, opts.env ?? process.env);
+    return;
   }
 
   // ── the STATOR API (recall/write the regional memory plane; owner-scoped) ────

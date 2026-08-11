@@ -41,7 +41,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 
 import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
-import { appsServerRef, withPublishPolicy, expandBuildAppInput, BUILD_APP_TOOL } from "./glyphh-apps.js";
+import { appsServerRef, withPublishPolicy, expandBuildAppInput, expandSaveFileInput, BUILD_APP_TOOL, SAVE_FILE_TOOL } from "./glyphh-apps.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
 import type { MaterializedAttachment } from "./sandbox.js";
@@ -244,10 +244,38 @@ function buildAskServer(session: HarnessSession): McpServer {
             "Use when a decision is genuinely the user's. Returns the answers in order; an empty answer means the user skipped it.",
           inputSchema: { type: "object" as const, additionalProperties: true },
         },
+        {
+          name: "open_app",
+          description:
+            "open_app(app) — show one of the user's installed apps ON THE USER'S SCREEN, whatever surface they are watching " +
+            "(desktop panel, web workbench, mobile tray). You never pick a machine — the surface the user is on renders it. " +
+            "'app' is the app's slug or name. To show a WEB PAGE or something you built/deployed, use open_browser(url) instead.",
+          inputSchema: { type: "object" as const, additionalProperties: true },
+        },
+        {
+          name: "open_browser",
+          description:
+            "open_browser(url) — show a web page ON THE USER'S SCREEN, whatever surface they are watching. " +
+            "THE way to show a built or deployed app: after build_app publishes, open the returned URL here.",
+          inputSchema: { type: "object" as const, additionalProperties: true },
+        },
       ],
     }),
   );
   mcp.server.setRequestHandler(CallToolRequestSchema, async (rq) => {
+    if (rq.params.name === "open_app" || rq.params.name === "open_browser") {
+      const args = (rq.params.arguments ?? {}) as { app?: unknown; name?: unknown; url?: unknown };
+      const ref = String(args.app ?? args.name ?? "").trim();
+      const url = String(args.url ?? "").trim();
+      if (rq.params.name === "open_app" && !ref) {
+        return { content: [{ type: "text" as const, text: "ERROR: open_app needs { app } — the app's slug or name" }], isError: true };
+      }
+      if (rq.params.name === "open_browser" && !/^https?:\/\//i.test(url)) {
+        return { content: [{ type: "text" as const, text: "ERROR: open_browser needs { url } (http/https)" }], isError: true };
+      }
+      session.emit({ type: "open-app", ...(rq.params.name === "open_app" ? { ref } : { url }) });
+      return { content: [{ type: "text" as const, text: `opening ${ref || url} on the user's screen` }] };
+    }
     const raw = ((rq.params.arguments ?? {}) as { questions?: unknown }).questions;
     const questions: AskQuestion[] = (Array.isArray(raw) ? raw : [])
       .slice(0, 4)
@@ -353,6 +381,17 @@ export function buildQueryArgs(
         // failed expansion denies with the reason so the model can re-plan.
         if (tool === BUILD_APP_TOOL) {
           const expanded = await expandBuildAppInput(input, cfg.workdir).catch(
+            (err): { ok: false; error: string } => ({ ok: false, error: (err as Error).message }),
+          );
+          if (expanded) {
+            if (!expanded.ok) return { behavior: "deny" as const, message: expanded.error };
+            input = expanded.input;
+          }
+        }
+        // save_file { path }: same seam — the pod inlines the workspace file
+        // as contentBase64; a failed expansion denies with the reason.
+        if (tool === SAVE_FILE_TOOL) {
+          const expanded = await expandSaveFileInput(input, cfg.workdir).catch(
             (err): { ok: false; error: string } => ({ ok: false, error: (err as Error).message }),
           );
           if (expanded) {

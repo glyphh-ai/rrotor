@@ -108,7 +108,7 @@ async function promptText(p: string | AsyncIterable<unknown>): Promise<string> {
   if (typeof p === "string") return p;
   const first = await (p as AsyncIterable<{ message?: { content?: Array<{ type?: string; text?: string }> } }>)[Symbol.asyncIterator]().next();
   const content = first.value?.message?.content ?? [];
-  return content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+  return content.filter((b: { type?: string }) => b.type === "text").map((b: { text?: string }) => b.text ?? "").join("");
 }
 
 /** Fake the SDK: capture what the worker was given, answer with `answer`. */
