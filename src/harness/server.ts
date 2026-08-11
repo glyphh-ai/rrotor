@@ -332,7 +332,7 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
     return;
   }
 
-  const runMatch = /^\/runs\/([^/]+)(\/(frames|answer|stop|permission))?$/.exec(path);
+  const runMatch = /^\/runs\/([^/]+)(\/(frames|answer|stop|permission|inject))?$/.exec(path);
   if (runMatch) {
     const runId = decodeURIComponent(runMatch[1]);
     const sub = runMatch[3] ?? "";
@@ -396,6 +396,34 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
           });
           if (!ok) {
             sendJson(res, 404, { error: "no-such-question", detail: `nothing awaits an answer under ${id}` });
+            return;
+          }
+          sendJson(res, 200, { ok: true });
+        })
+        .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
+      return;
+    }
+    // Mid-run prompt injection: the user keeps talking while the agent works.
+    // The message queues on the session and the engine drains it at the next
+    // BETWEEN-TURN boundary — steering the run without stopping it. 409 once
+    // the run can no longer take input (settled / final turn closing).
+    if (method === "POST" && sub === "inject") {
+      readBody(req)
+        .then((raw) => {
+          let body: { text?: unknown };
+          try {
+            body = raw.length ? JSON.parse(raw) : {};
+          } catch {
+            sendJson(res, 400, { error: "invalid-json", detail: "inject body must be JSON" });
+            return;
+          }
+          const text = typeof body.text === "string" ? body.text.trim() : "";
+          if (!text) {
+            sendJson(res, 400, { error: "bad-inject", detail: "`text` (the message to add) is required" });
+            return;
+          }
+          if (!session.inject(text)) {
+            sendJson(res, 409, { error: "not-accepting-input", detail: "the run is no longer taking messages — it has settled or is finishing" });
             return;
           }
           sendJson(res, 200, { ok: true });

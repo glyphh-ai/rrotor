@@ -159,6 +159,11 @@ export type ActionKind = "read" | "edit" | "command" | "network" | "dangerous";
 /** A harness event frame, pre-envelope. Shapes mirror the desktop emit sites. */
 export type AgentFrame =
   | { type: "delta"; delta: string }
+  // A USER message on the run's tape. The server mints one for the opening
+  // prompt (harness-proxy); the ENGINE emits one per MID-RUN injection
+  // (POST /runs/:id/inject) so every observing surface renders the injected
+  // bubble in place. Additive — older consumers ignore the type harmlessly.
+  | { type: "prompt"; text: string }
   | {
       type: "tool";
       phase: "start" | "done";

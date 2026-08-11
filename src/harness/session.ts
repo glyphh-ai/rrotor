@@ -80,8 +80,10 @@ export class HarnessSession {
     if (isTerminal(frame)) {
       this.status = frame.type === "error" ? "error" : (frame as { stopped?: boolean }).stopped ? "stopped" : "done";
       // A run that ends with questions in flight resolves them empty — nothing
-      // may wait on a dead run.
+      // may wait on a dead run. The injection inbox wakes too, so the input
+      // stream closes instead of parking forever.
       for (const [id] of this.pending) this.answer(id, {});
+      this.injectSignal?.();
     }
     return wire;
   }
@@ -152,5 +154,52 @@ export class HarnessSession {
   /** Abort the run — the engine observes the controller and emits done{stopped}. */
   stop(): void {
     this.ctrl.abort();
+    this.injectSignal?.();
+  }
+
+  // ── Mid-run prompt injection (POST /runs/:id/inject) ───────────────────────
+  // The user keeps talking while the agent works: injected messages queue here
+  // and the engine drains them BETWEEN turns (the SDK's streaming-input seam),
+  // so a follow-up steers the run without stopping it.
+  private readonly injected: string[] = [];
+  private injectSignal: (() => void) | null = null;
+  private inputClosed = false;
+
+  /** Queue a user message for the run's next between-turn boundary. Emits the
+   *  same "prompt" frame the opening prompt rides, so every observing surface
+   *  renders the injected bubble in place. False once the run can no longer
+   *  take input (settled, stopped, or its final turn already closing). */
+  inject(text: string): boolean {
+    const t = text.trim();
+    if (!t || this.status !== "running" || this.inputClosed) return false;
+    this.injected.push(t);
+    this.logger.info("prompt injected mid-run", { chars: t.length });
+    this.emit({ type: "prompt", text: t });
+    this.injectSignal?.();
+    return true;
+  }
+
+  /** Anything queued and not yet drained? (Engine checks this at turn end.) */
+  hasInjected(): boolean {
+    return this.injected.length > 0;
+  }
+
+  /** ENGINE-ONLY: the next injected message, or null once the input closed /
+   *  the run settled. Parks until one of those happens. */
+  async nextInjected(): Promise<string | null> {
+    for (;;) {
+      const next = this.injected.shift();
+      if (next !== undefined) return next;
+      if (this.inputClosed || this.status !== "running" || this.ctrl.signal.aborted) return null;
+      await new Promise<void>((resolve) => { this.injectSignal = resolve; });
+      this.injectSignal = null;
+    }
+  }
+
+  /** ENGINE-ONLY: close the input stream — the SDK ends the query after the
+   *  current turn instead of waiting for more user messages. */
+  closeInput(): void {
+    this.inputClosed = true;
+    this.injectSignal?.();
   }
 }

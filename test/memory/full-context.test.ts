@@ -101,11 +101,22 @@ interface Captured {
   system: string;
 }
 
+/** The streamed form's opening user message, flattened back to its text —
+ *  tool-mode prompts stream now (mid-run injection), so the capture reads the
+ *  first message's text blocks; a chat-mode string passes through untouched. */
+async function promptText(p: string | AsyncIterable<unknown>): Promise<string> {
+  if (typeof p === "string") return p;
+  const first = await (p as AsyncIterable<{ message?: { content?: Array<{ type?: string; text?: string }> } }>)[Symbol.asyncIterator]().next();
+  const content = first.value?.message?.content ?? [];
+  return content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+}
+
 /** Fake the SDK: capture what the worker was given, answer with `answer`. */
 function worker(answer: string, captured: Captured[]): QueryFn {
   return (args) => {
-    captured.push({ prompt: String(args.prompt), system: String(args.options.systemPrompt ?? "") });
+    const system = String(args.options.systemPrompt ?? "");
     return (async function* () {
+      captured.push({ prompt: await promptText(args.prompt), system });
       yield { type: "result", subtype: "success", result: answer };
     })();
   };

@@ -197,6 +197,38 @@ export function buildPrompt(text: string, images: ImageRef[]): string | AsyncIte
   })();
 }
 
+/**
+ * Streaming input: the opening user message, then any MID-RUN injections
+ * (session.inject → POST /runs/:id/inject) — each drained one starts a fresh
+ * turn. The engine closes the stream at the first turn end with an empty
+ * inbox, which is what ends the query; a run with no injections behaves
+ * exactly like the single-shot form.
+ */
+export function buildInputStream(text: string, images: ImageRef[], session: HarnessSession): AsyncIterable<unknown> {
+  const userMsg = (t: string, imgs: ImageRef[]): unknown => ({
+    type: "user" as const,
+    parent_tool_use_id: null,
+    message: {
+      role: "user" as const,
+      content: [
+        ...imgs.map((img) => ({
+          type: "image" as const,
+          source: { type: "base64" as const, media_type: img.mediaType, data: img.data },
+        })),
+        { type: "text" as const, text: t },
+      ],
+    },
+  });
+  return (async function* () {
+    yield userMsg(text, images);
+    for (;;) {
+      const next = await session.nextInjected();
+      if (next === null) return;
+      yield userMsg(next, []);
+    }
+  })();
+}
+
 /** The in-process MCP server carrying the pod's ONE custom tool: `ask_user`.
  *  Same wire pattern as the desktop's glyphh MCP surface. */
 function buildAskServer(session: HarnessSession): McpServer {
@@ -279,7 +311,12 @@ export function buildQueryArgs(
   // The publish policy rides WITH the tools: no app tools, no policy.
   const system = cfg.system ?? DEFAULT_SYSTEM;
   return {
-    prompt: buildPrompt(assemblePrompt(cfg.history, cfg.prompt, attachments, cfg.contextBlock), cfg.images ?? []),
+    // CHAT stays single-shot (one turn, no tools, nothing to steer). The
+    // tool-bearing modes take the streaming form so the user can inject
+    // follow-ups between turns without stopping the run.
+    prompt: chat
+      ? buildPrompt(assemblePrompt(cfg.history, cfg.prompt, attachments, cfg.contextBlock), cfg.images ?? [])
+      : buildInputStream(assemblePrompt(cfg.history, cfg.prompt, attachments, cfg.contextBlock), cfg.images ?? [], session),
     options: {
       cwd: cfg.workdir,
       ...(cfg.model ? { model: cfg.model } : {}),
@@ -622,6 +659,10 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
           runError = `run ended: ${r.subtype.replaceAll("_", " ")}`;
         }
         if (typeof r.num_turns === "number") turnsUsed = r.num_turns;
+        // BETWEEN-TURN boundary: queued injected messages start the next turn
+        // (the input stream yields them); an empty inbox closes the stream,
+        // which is what ends the query. Errors always close.
+        if (r.subtype !== "success" || !session.hasInjected()) session.closeInput();
         // The turn's usage is final here, so start the price lookup NOW — it
         // overlaps the loop's drain and has normally resolved by the time the
         // terminal frame goes out, costing the run nothing.
@@ -681,5 +722,9 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
     const detail = redactSecrets((err as Error).message ?? String(err), secrets);
     runLog.error("run error", { detail });
     fail(detail);
+  } finally {
+    // A query that ends any way but the result boundary (throw, abort, SDK
+    // drain) must still release the input stream's parked waiter.
+    session.closeInput();
   }
 }

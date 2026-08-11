@@ -498,9 +498,33 @@ describe("runHarness — the credits frame", () => {
 describe("buildPrompt — images ride as vision blocks", () => {
   const png = { mediaType: "image/png", data: "iVBORw0KGgo=" };
 
-  it("a text-only turn stays a plain string prompt", () => {
+  it("a text-only turn stays a plain string prompt (chat); tool modes take the injectable stream", async () => {
     expect(buildPrompt("just words", [])).toBe("just words");
-    expect(buildQueryArgs(cfg(), new HarnessSession({}), []).prompt).toBe("do the thing");
+    // CHAT keeps the single-shot string — one turn, nothing to steer.
+    expect(buildQueryArgs(cfg({ mode: "chat" }), new HarnessSession({}), []).prompt).toBe("do the thing");
+    // Tool-bearing modes stream, so mid-run injections can start new turns.
+    const session = new HarnessSession({});
+    const prompt = buildQueryArgs(cfg(), session, []).prompt as AsyncIterable<{ message: { content: Array<{ type: string; text?: string }> } }>;
+    const it = prompt[Symbol.asyncIterator]();
+    const first = await it.next();
+    expect((first.value as { message: { content: Array<{ type: string; text?: string }> } }).message.content).toEqual([{ type: "text", text: "do the thing" }]);
+    session.closeInput();   // empty inbox → the stream ends, same as single-shot
+    expect((await it.next()).done).toBe(true);
+  });
+
+  it("an injected message rides the stream as the next user turn (and its frame hits the tape)", async () => {
+    const session = new HarnessSession({});
+    const prompt = buildQueryArgs(cfg(), session, []).prompt as AsyncIterable<{ message: { content: Array<{ type: string; text?: string }> } }>;
+    const it = prompt[Symbol.asyncIterator]();
+    await it.next();   // the opening prompt
+    expect(session.inject("also check the tests")).toBe(true);
+    const second = await it.next();
+    expect((second.value as { message: { content: Array<{ type: string; text?: string }> } }).message.content).toEqual([{ type: "text", text: "also check the tests" }]);
+    expect(frames(session).some((f) => f.type === "prompt" && (f as { text?: string }).text === "also check the tests")).toBe(true);
+    session.closeInput();
+    expect((await it.next()).done).toBe(true);
+    // Closed input takes no more messages.
+    expect(session.inject("too late")).toBe(false);
   });
 
   it("an image turn becomes the SDK's streaming-input form, images before the text", async () => {
@@ -521,8 +545,10 @@ describe("buildPrompt — images ride as vision blocks", () => {
   });
 
   it("buildQueryArgs uses the block form when the run carries images", async () => {
-    const { prompt } = buildQueryArgs(cfg({ images: [png] }), new HarnessSession({}), []);
+    const session = new HarnessSession({});
+    const { prompt } = buildQueryArgs(cfg({ images: [png] }), session, []);
     expect(typeof prompt).not.toBe("string");
+    session.closeInput();   // no injections in this test — let the stream end
     for await (const m of prompt as AsyncIterable<{ message: { content: Array<{ type: string; text?: string }> } }>) {
       // The assembled text (history + ask + manifest) is the trailing block.
       expect(m.message.content[0].type).toBe("image");
