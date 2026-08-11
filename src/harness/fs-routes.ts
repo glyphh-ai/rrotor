@@ -495,7 +495,9 @@ export function handleFsRequest(
       }
       case "GET /fs/list":
       case "POST /fs/list": {
-        const dirRaw = params.dir ?? root;
+        // "" / absent / "." all mean THE ROOT — the panels' first list is the
+        // workspace itself (containPath refuses empty strings by design).
+        const dirRaw = typeof params.dir === "string" && params.dir.trim() && params.dir.trim() !== "." ? params.dir : root;
         const dir = await containPath(root, dirRaw);
         if (!dir) { sendJson(res, 200, { entries: [], error: deny.escape }); return; }
         sendJson(res, 200, await listDir(dir));
