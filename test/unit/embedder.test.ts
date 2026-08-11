@@ -118,15 +118,18 @@ describe("HttpEmbedder", () => {
     expect((init.headers as Record<string, string>).authorization).toBeUndefined();
   });
 
-  it("throws a clear error on a non-2xx response (no retry storm)", async () => {
+  it("throws a clear error on a non-retryable non-2xx response (no retry storm)", async () => {
+    // 400 is NOT in EMBED_RETRYABLE — exactly one attempt, a clear error.
+    // (503 is retryable BY DESIGN now: backoff + retry-after; this test's old
+    // 503 shape predated that and gated every deploy red.)
     const fetchMock = vi.fn(async () => ({
       ok: false,
-      status: 503,
-      text: async () => "upstream down",
+      status: 400,
+      text: async () => "bad request",
     }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(new HttpEmbedder({ url: "https://embed.example/e", dim: 2 }).embed("x")).rejects.toThrow(/503/);
+    await expect(new HttpEmbedder({ url: "https://embed.example/e", dim: 2 }).embed("x")).rejects.toThrow(/400/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

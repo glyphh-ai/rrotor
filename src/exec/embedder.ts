@@ -128,7 +128,7 @@ export class HttpEmbedder implements Embedder {
       }
       if (!res.ok) {
         if (EMBED_RETRYABLE.has(res.status) && attempt < maxAttempts - 1) {
-          const ra = Number(res.headers.get("retry-after"));
+          const ra = Number(res.headers?.get?.("retry-after"));
           await sleep(Number.isFinite(ra) && ra > 0 ? ra * 1000 : embedBackoff(attempt));
           continue;
         }
