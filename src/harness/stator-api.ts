@@ -69,6 +69,17 @@ async function withScopedMemory<T>(
 export interface RecallRequest { threadId?: string; query?: string; entity?: string; topK?: number; threshold?: number }
 export interface WriteRequest { threadId?: string; entity?: string; mode?: "turn" | "absorb"; text?: string; speaker?: string; tier?: MemoryTier; date?: string }
 
+/** POST /stator/provision — EAGER per-org provisioning, called by the CONTROL
+ *  PLANE at org creation (service-token gated in server.ts; no user bearer
+ *  exists in that flow). Materializes the org's schema + the store's DDL so
+ *  stator health is a signup-time signal and the first turn carries no DDL.
+ *  The per-call `CREATE SCHEMA IF NOT EXISTS` in {@link withScopedMemory}
+ *  stays as the safety net for orgs that predate this hook. */
+export async function statorProvision(orgId: string): Promise<{ schema: string }> {
+  await withScopedMemory({ orgId, userId: "control-plane-provision" }, async () => undefined);
+  return { schema: schemaForOrg(orgId) };
+}
+
 /** POST /stator/recall — the recall block + the entity's fact node for a turn.
  *  Fact selection is relevance-ranked and latest-first (see recallContext), so an
  *  early-stated fact isn't lost to a recency cap and the current value leads. */

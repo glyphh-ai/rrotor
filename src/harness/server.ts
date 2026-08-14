@@ -74,7 +74,7 @@ import { VERSION } from "../version.js";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
 import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "../auth/introspect.js";
-import { statorRecall, statorWrite, type RecallRequest, type WriteRequest } from "./stator-api.js";
+import { statorRecall, statorWrite, statorProvision, type RecallRequest, type WriteRequest } from "./stator-api.js";
 import type { Introspector, Principal, AuthDecision } from "../auth/introspect.js";
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
 import { HARNESS_WIRE_VERSION } from "./frames.js";
@@ -472,6 +472,36 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
   // ── the WORKSPACE FS API (Files/Diff/Editor panels; owner-scoped) ────────────
   if (path.startsWith("/fs/")) {
     handleFsRequest(authn, req, res, method, path, opts.env ?? process.env);
+    return;
+  }
+
+  // ── EAGER stator provisioning (control-plane only) ──────────────────────────
+  // Called at ORG CREATION by the control plane, which has no user bearer in
+  // that flow — the credential is the SAME service token this pod presents to
+  // /api/auth/introspect (a secret only the two of them hold). Explicit orgId.
+  if (method === "POST" && path === "/stator/provision") {
+    const svc = String((opts.env ?? process.env).ROTOR_AUTH_SERVICE_TOKEN ?? "");
+    const bearer = bearerFromHeader(req.headers.authorization);
+    if (!svc || !bearer || bearer !== svc) {
+      sendJson(res, 401, { error: "unauthorized", detail: "control-plane service token required" });
+      return;
+    }
+    readBody(req, 64 * 1024)
+      .then(async (raw) => {
+        let body: { orgId?: unknown };
+        try { body = raw.length ? (JSON.parse(raw) as { orgId?: unknown }) : {}; }
+        catch { sendJson(res, 400, { error: "invalid-json", detail: "body must be JSON" }); return; }
+        const orgId = typeof body.orgId === "string" ? body.orgId.trim() : "";
+        if (!/^[0-9a-f-]{32,36}$/i.test(orgId)) { sendJson(res, 400, { error: "bad-org", detail: "orgId (uuid) is required" }); return; }
+        try {
+          sendJson(res, 200, await statorProvision(orgId));
+          log.info("stator schema provisioned", { org_id: orgId });
+        } catch (err) {
+          log.error("stator provision failed", { org_id: orgId, detail: (err as Error).message });
+          sendJson(res, 500, { error: "stator-error", detail: (err as Error).message });
+        }
+      })
+      .catch(() => sendJson(res, 500, { error: "stator-error" }));
     return;
   }
 
