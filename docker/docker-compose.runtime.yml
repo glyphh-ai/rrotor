@@ -13,6 +13,9 @@ name: runtime
 services:
   stator:
     image: pgvector/pgvector:pg16
+    # 64MB /dev/shm default starves Postgres parallel workers at real schema
+    # counts ("could not resize shared memory segment"); give it real room.
+    shm_size: 1gb
     ports:
       - "5434:5432"
     environment:
