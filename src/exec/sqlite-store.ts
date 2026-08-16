@@ -16,7 +16,21 @@
  * cross-pod) swaps in behind this same interface.
  */
 
-import Database from "better-sqlite3";
+// LAZY native load. A top-level `import Database from "better-sqlite3"` pulls
+// the native addon at MODULE load — and this module is statically reachable
+// from cli.js, so every pod paid the native dependency even when the backend
+// was `memory` (the harness default). That made the runtime unvendorable into
+// the desktop bundle: extraResources cannot rebuild a native module per arch.
+// better-sqlite3 is CJS, so createRequire loads it synchronously at FIRST
+// CONSTRUCTION instead; a pod that never selects sqlite never touches it.
+import { createRequire } from "node:module";
+import type DatabaseT from "better-sqlite3";
+
+let DatabaseCtor: typeof DatabaseT | null = null;
+function openDatabase(...args: ConstructorParameters<typeof DatabaseT>): InstanceType<typeof DatabaseT> {
+  if (!DatabaseCtor) DatabaseCtor = createRequire(import.meta.url)("better-sqlite3") as typeof DatabaseT;
+  return new DatabaseCtor(...args);
+}
 
 import type { StepRecord } from "../types.js";
 import {
@@ -29,7 +43,7 @@ import {
 } from "./facts.js";
 import type { CacheEntry, EventHistory, ResultCache, Stator } from "./store.js";
 
-type DB = InstanceType<typeof Database>;
+type DB = InstanceType<typeof DatabaseT>;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS step_records (
@@ -112,7 +126,7 @@ export class SqliteStore implements Stator {
   private readonly db: DB;
 
   constructor(path = ":memory:") {
-    this.db = new Database(path);
+    this.db = openDatabase(path);
     // WAL + a busy timeout let MULTIPLE PROCESSES share one file safely: many
     // readers concurrently, writes serialized, and a writer waits (up to 5s) for
     // a competing write instead of throwing SQLITE_BUSY. This is what makes one

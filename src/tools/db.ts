@@ -13,9 +13,20 @@
  * `finally`; no handle outlives a step.
  */
 
-import Database from "better-sqlite3";
+// LAZY native load — same reason as exec/sqlite-store.ts: this pack is
+// statically reachable from the tools index, and a top-level import would drag
+// the native addon into every pod at boot. createRequire loads the CJS module
+// synchronously at first OPEN instead.
+import { createRequire } from "node:module";
+import type DatabaseT from "better-sqlite3";
 import { resolve, sep, relative, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
+
+let DatabaseCtor: typeof DatabaseT | null = null;
+function openDatabase(...args: ConstructorParameters<typeof DatabaseT>): InstanceType<typeof DatabaseT> {
+  if (!DatabaseCtor) DatabaseCtor = createRequire(import.meta.url)("better-sqlite3") as typeof DatabaseT;
+  return new DatabaseCtor(...args);
+}
 
 import { RotorError } from "../errors.js";
 import type { Row } from "../plugins/interfaces.js";
@@ -92,12 +103,12 @@ interface ColumnInfo {
   notnull: boolean;
 }
 
-function tableColumns(db: InstanceType<typeof Database>, table: string): ColumnInfo[] {
+function tableColumns(db: InstanceType<typeof DatabaseT>, table: string): ColumnInfo[] {
   const rows = db.prepare(`PRAGMA table_info(${quoteIdent(table)})`).all() as Array<{ name: string; type: string; pk: number; notnull: number }>;
   return rows.map((c) => ({ name: c.name, type: c.type, pk: c.pk > 0, notnull: c.notnull !== 0 }));
 }
 
-function userTables(db: InstanceType<typeof Database>): Array<{ name: string; sql: string }> {
+function userTables(db: InstanceType<typeof DatabaseT>): Array<{ name: string; sql: string }> {
   return db
     .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     .all() as Array<{ name: string; sql: string }>;
@@ -108,9 +119,9 @@ export function dbPack(opts: { root: string; maxRows?: number }): ToolPack {
   const maxRows = opts.maxRows ?? 500;
 
   /** Open an existing db read-only; never creates a file on a read path. */
-  const openRead = (p: string, dbArg: unknown): InstanceType<typeof Database> => {
+  const openRead = (p: string, dbArg: unknown): InstanceType<typeof DatabaseT> => {
     try {
-      return new Database(p, { readonly: true, fileMustExist: true });
+      return openDatabase(p, { readonly: true, fileMustExist: true });
     } catch (e) {
       throw new RotorError("E_TOOL", `sqlite open failed: ${(e as Error).message}`, { context: { db: dbArg }, cause: e });
     }
@@ -190,10 +201,10 @@ export function dbPack(opts: { root: string; maxRows?: number }): ToolPack {
         if (!sql) throw new RotorError("E_MISSING_INPUT", "sqlite.exec requires `sql`");
         assertNoAttach(sql, args.db);
         const bound = bindParams(args.params);
-        let db: InstanceType<typeof Database>;
+        let db: InstanceType<typeof DatabaseT>;
         try {
           mkdirSync(dirname(p), { recursive: true });
-          db = new Database(p);
+          db = openDatabase(p);
         } catch (e) {
           throw new RotorError("E_TOOL", `sqlite open failed: ${(e as Error).message}`, { context: { db: args.db }, cause: e });
         }
