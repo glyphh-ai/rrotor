@@ -68,7 +68,9 @@ services:
       ROTOR_MODE: harness
       ROTOR_STATOR_BACKEND: pgvector
       ROTOR_STATOR_URL: postgres://glyphh:glyphh@stator:5432/rotor_stator
-      ROTOR_AUTH_SERVICE_TOKEN: dev-only-service-token
+      # Must MATCH the local server's SERVICE_TOKEN (server/.env) or every
+      # introspection call is rejected and all user-bearer routes 401.
+      ROTOR_AUTH_SERVICE_TOKEN: ${ROTOR_AUTH_SERVICE_TOKEN:-dev-only-service-token}
       ROTOR_AUTH_INTROSPECT_URL: http://host.docker.internal:3001/api/auth/introspect
       GLYPHH_GATEWAY_URL: http://host.docker.internal:3001/api/gateway
       HARNESS_MODEL: anthropic::claude-sonnet-5
