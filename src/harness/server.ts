@@ -81,6 +81,7 @@ import { HARNESS_WIRE_VERSION } from "./frames.js";
 import type { WireFrame } from "./frames.js";
 import { resolveRunConfig, BadRunRequest, isPermissionMode } from "./config.js";
 import type { RunRequestBody } from "./config.js";
+import { handleAppsDeploy } from "./apps-deploy.js";
 import { HarnessSession, mintRunId } from "./session.js";
 import { runHarness } from "./engine.js";
 import type { EngineDeps } from "./engine.js";
@@ -528,6 +529,12 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         }
       })
       .catch(() => sendJson(res, 500, { error: "stator-error" }));
+    return;
+  }
+
+  // ── cloud build+deploy of a Glyphh app (UI-driven, not an agent turn) ────────
+  if (method === "POST" && path === "/apps/deploy") {
+    void handleAppsDeploy(authn, req, res, opts.env ?? process.env);
     return;
   }
 
