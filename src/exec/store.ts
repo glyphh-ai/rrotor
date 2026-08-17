@@ -86,6 +86,11 @@ export interface Stator {
   sessionOrdinal(id?: string): Promise<number>;
   /** All facts — the input to the tier visibility filter. */
   snapshotFacts(): Promise<Fact[]>;
+  /** CURATION (the Memory panel): remove facts matching every given field.
+   *  A bare filter is refused by the API layer, never here. Returns count. */
+  deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number>;
+  /** CURATION: remove every corpus turn whose text matches exactly. Count. */
+  deleteTurns(text: string): Promise<number>;
   /** Release backing resources (file handles). No-op for in-process. */
   close?(): Promise<void>;
 }
@@ -168,6 +173,24 @@ export class InProcessStore implements Stator {
   }
   async addTurn(text: string): Promise<void> {
     this.turnLog.push(text);
+  }
+
+  async deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number> {
+    const keep = this.facts.filter((f) =>
+      (match.entity !== undefined && f.entity !== match.entity) ||
+      (match.role !== undefined && f.role !== match.role) ||
+      (match.filler !== undefined && f.filler !== match.filler) ||
+      (match.key !== undefined && f.key !== match.key));
+    const removed = this.facts.length - keep.length;
+    this.facts.length = 0;
+    this.facts.push(...keep);
+    return removed;
+  }
+
+  async deleteTurns(text: string): Promise<number> {
+    const before = this.turnLog.length;
+    for (let i = this.turnLog.length - 1; i >= 0; i--) if (this.turnLog[i] === text) this.turnLog.splice(i, 1);
+    return before - this.turnLog.length;
   }
   async turns(): Promise<string[]> {
     return this.turnLog.slice();

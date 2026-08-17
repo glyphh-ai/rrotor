@@ -74,7 +74,7 @@ import { VERSION } from "../version.js";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
 import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "../auth/introspect.js";
-import { statorRecall, statorWrite, statorProvision, type RecallRequest, type WriteRequest } from "./stator-api.js";
+import { statorRecall, statorWrite, statorProvision, statorBrowse, statorGraph, statorForget, statorAmend, type RecallRequest, type WriteRequest, type BrowseRequest, type GraphRequest, type ForgetRequest, type AmendRequest } from "./stator-api.js";
 import type { Introspector, Principal, AuthDecision } from "../auth/introspect.js";
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
 import { HARNESS_WIRE_VERSION } from "./frames.js";
@@ -507,7 +507,7 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
   }
 
   // ── the STATOR API (recall/write the regional memory plane; owner-scoped) ────
-  if (method === "POST" && (path === "/stator/recall" || path === "/stator/write")) {
+  if (method === "POST" && (path === "/stator/recall" || path === "/stator/write" || path === "/stator/browse" || path === "/stator/graph" || path === "/stator/forget" || path === "/stator/amend")) {
     const principal = authn.principal;
     if (!principal) {
       sendJson(res, 503, { error: "no-principal", detail: "the stator API needs introspection auth — the token's org/user scopes every read and write" });
@@ -519,8 +519,12 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         try { body = raw.length ? (JSON.parse(raw) as Record<string, unknown>) : {}; }
         catch { sendJson(res, 400, { error: "invalid-json", detail: "body must be JSON" }); return; }
         try {
-          const result = path === "/stator/recall"
-            ? await statorRecall(principal, body as RecallRequest)
+          const result =
+            path === "/stator/recall" ? await statorRecall(principal, body as RecallRequest)
+            : path === "/stator/browse" ? await statorBrowse(principal, body as BrowseRequest)
+            : path === "/stator/graph" ? await statorGraph(principal, body as GraphRequest)
+            : path === "/stator/forget" ? await statorForget(principal, body as ForgetRequest)
+            : path === "/stator/amend" ? await statorAmend(principal, body as unknown as AmendRequest)
             : await statorWrite(principal, body as WriteRequest);
           sendJson(res, 200, result);
         } catch (err) {

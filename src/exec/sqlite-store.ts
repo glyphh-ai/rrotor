@@ -263,6 +263,21 @@ export class SqliteStore implements Stator {
   async addTurn(text: string): Promise<void> {
     this.db.prepare("INSERT INTO turns (text) VALUES (?)").run(text);
   }
+
+  async deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number> {
+    const cond: string[] = [];
+    const args: string[] = [];
+    if (match.entity !== undefined) { cond.push("entity = ?"); args.push(match.entity); }
+    if (match.role !== undefined) { cond.push("role = ?"); args.push(match.role); }
+    if (match.filler !== undefined) { cond.push("filler = ?"); args.push(match.filler); }
+    if (match.key !== undefined) { cond.push("fact_key = ?"); args.push(match.key); }
+    if (!cond.length) return 0;
+    return this.db.prepare(`DELETE FROM facts WHERE ${cond.join(" AND ")}`).run(...args).changes;
+  }
+
+  async deleteTurns(text: string): Promise<number> {
+    return this.db.prepare("DELETE FROM turns WHERE text = ?").run(text).changes;
+  }
   async turns(): Promise<string[]> {
     const rows = this.db.prepare("SELECT text FROM turns ORDER BY seq ASC").all() as Array<{ text: string }>;
     return rows.map((r) => r.text);

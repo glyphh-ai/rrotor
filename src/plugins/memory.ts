@@ -72,6 +72,20 @@ export class BasicMemory implements MemoryPlugin {
     if (text && text.trim() !== "") await this.store.addTurn(text);
   }
 
+  /** CURATION surface for the Memory panel — raw reads + targeted deletes. */
+  async turnsList(): Promise<string[]> {
+    return this.store.turns();
+  }
+  async snapshot(): Promise<Fact[]> {
+    return this.store.snapshotFacts();
+  }
+  async deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number> {
+    return this.store.deleteFacts(match);
+  }
+  async deleteTurns(text: string): Promise<number> {
+    return this.store.deleteTurns(text);
+  }
+
   /** The conversation window lives in the stator's KV, keyed by session —
    *  session-scoped by construction, ordered by append, bounded to the newest
    *  CONV_CAP exchanges. Deterministic: an ordinal read, no embeddings. */

@@ -275,6 +275,24 @@ export class PgVectorStore implements Stator {
     const v = vec(await this.embedder.embed(text));
     await this.db.query("INSERT INTO turns (text, embedding) VALUES ($1, $2::vector)", [text, v]);
   }
+
+  async deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number> {
+    const cond: string[] = [];
+    const args: string[] = [];
+    const bind = (col: string, v: string): void => { args.push(v); cond.push(`${col} = $${args.length}`); };
+    if (match.entity !== undefined) bind("entity", match.entity);
+    if (match.role !== undefined) bind("role", match.role);
+    if (match.filler !== undefined) bind("filler", match.filler);
+    if (match.key !== undefined) bind("fact_key", match.key);
+    if (!cond.length) return 0;
+    const r = await this.db.query(`DELETE FROM facts WHERE ${cond.join(" AND ")}`, args);
+    return (r as { rowCount?: number }).rowCount ?? 0;
+  }
+
+  async deleteTurns(text: string): Promise<number> {
+    const r = await this.db.query("DELETE FROM turns WHERE text = $1", [text]);
+    return (r as { rowCount?: number }).rowCount ?? 0;
+  }
   async turns(): Promise<string[]> {
     const rows = (await this.db.query("SELECT text FROM turns ORDER BY seq ASC")).rows;
     return rows.map((r) => String(r.text));

@@ -214,3 +214,156 @@ export async function persistTurnViaApi(
     /* memory is best-effort */
   }
 }
+
+// ─── CURATION + VISUALIZATION (the desktop Memory panel) ─────────────────────
+
+export interface BrowseRequest { threadId?: string }
+
+/** POST /stator/browse — the org member's memory, raw: every fact (superseded
+ *  included — the panel shows the version chain), the similarity corpus, and
+ *  the session's recency window. Read-only; the panel's list tabs. */
+export async function statorBrowse(principal: Principal, body: BrowseRequest): Promise<unknown> {
+  const session = (body.threadId ?? "").trim() || "default";
+  return withScopedMemory(principal, async (memory) => {
+    const [facts, turns, window] = await Promise.all([
+      memory.snapshot(),
+      memory.turnsList(),
+      memory.conversation(session, 20),
+    ]);
+    return { facts, turns, window };
+  });
+}
+
+export interface GraphRequest {
+  /** Node cap — newest turns win; facts always ride. */
+  max?: number;
+  /** Edge bands: semantic ≥ semMin; "neural" in [neuralMin, neuralMax). */
+  semMin?: number;
+  neuralMin?: number;
+  neuralMax?: number;
+}
+
+interface GraphNode { id: number; kind: "turn" | "fact"; text: string; tier?: string; entity?: string; role?: string }
+
+/** Project vectors to 3D — top-3 principal components via power iteration
+ *  with deflation. Deterministic (fixed pseudo-random start), dependency-free,
+ *  and plenty for a point cloud the eye will orbit anyway. */
+function pca3(vecs: number[][]): Array<[number, number, number]> {
+  const n = vecs.length;
+  if (!n) return [];
+  const dim = vecs[0]!.length;
+  const mean = new Array<number>(dim).fill(0);
+  for (const v of vecs) for (let d = 0; d < dim; d++) mean[d]! += v[d]! / n;
+  const centered = vecs.map((v) => v.map((x, d) => x - mean[d]!));
+  const comps: number[][] = [];
+  for (let c = 0; c < 3; c++) {
+    let w = new Array<number>(dim).fill(0).map((_, i) => Math.sin(i * 12.9898 + c * 78.233) % 1);
+    for (let iter = 0; iter < 24; iter++) {
+      const next = new Array<number>(dim).fill(0);
+      for (const v of centered) {
+        let dp = 0;
+        for (let d = 0; d < dim; d++) dp += v[d]! * w[d]!;
+        for (let d = 0; d < dim; d++) next[d]! += dp * v[d]!;
+      }
+      for (const prev of comps) {
+        let dp = 0;
+        for (let d = 0; d < dim; d++) dp += next[d]! * prev[d]!;
+        for (let d = 0; d < dim; d++) next[d]! -= dp * prev[d]!;
+      }
+      const norm = Math.sqrt(next.reduce((acc, x) => acc + x * x, 0)) || 1;
+      w = next.map((x) => x / norm);
+    }
+    comps.push(w);
+  }
+  return centered.map((v) => comps.map((w) => {
+    let dp = 0;
+    for (let d = 0; d < v.length; d++) dp += v[d]! * w[d]!;
+    return dp;
+  }) as [number, number, number]);
+}
+
+/** POST /stator/graph — the semantic space as data: nodes (turns + current
+ *  facts), 3D coordinates (PCA over the shared embedding space), and edges in
+ *  two bands — SEMANTIC (near-duplicates / same-thought, high cosine) and
+ *  NEURAL (the associative middle distance; below it is noise). Node cap keeps
+ *  the payload and the O(n²) pair scan honest. */
+export async function statorGraph(principal: Principal, body: GraphRequest): Promise<unknown> {
+  const max = Math.max(16, Math.min(800, Number(body.max) || 500));
+  const semMin = Number.isFinite(body.semMin) ? Number(body.semMin) : 0.85;
+  const neuralMin = Number.isFinite(body.neuralMin) ? Number(body.neuralMin) : 0.25;
+  const neuralMax = Number.isFinite(body.neuralMax) ? Number(body.neuralMax) : 0.45;
+  return withScopedMemory(principal, async (memory) => {
+    const [facts, turns] = await Promise.all([memory.snapshot(), memory.turnsList()]);
+    const nodes: GraphNode[] = [];
+    for (const t of turns.slice(-max)) nodes.push({ id: nodes.length, kind: "turn", text: t });
+    for (const f of facts.filter((x) => x.is_current).slice(-max)) {
+      nodes.push({
+        id: nodes.length, kind: "fact",
+        text: `${f.entity} · ${f.role} · ${f.filler}`,
+        ...(f.tier ? { tier: f.tier } : {}),
+        entity: f.entity, role: f.role,
+      });
+    }
+    if (!nodes.length) return { nodes: [], coords: [], edges: [] };
+    const vecs = await memory.embedBatch(nodes.map((nd) => nd.text));
+    const coords = pca3(vecs);
+    // Normalize magnitudes once; every pair is then a plain dot product.
+    const norms = vecs.map((v) => Math.sqrt(v.reduce((acc, x) => acc + x * x, 0)) || 1);
+    const edges: Array<{ a: number; b: number; sim: number; kind: "semantic" | "neural" }> = [];
+    const EDGE_CAP = 4000;
+    for (let i = 0; i < nodes.length && edges.length < EDGE_CAP; i++) {
+      for (let j = i + 1; j < nodes.length && edges.length < EDGE_CAP; j++) {
+        let dp = 0;
+        const a = vecs[i]!, b = vecs[j]!;
+        for (let d = 0; d < a.length; d++) dp += a[d]! * b[d]!;
+        const sim = dp / (norms[i]! * norms[j]!);
+        if (sim >= semMin) edges.push({ a: i, b: j, sim: Math.round(sim * 1000) / 1000, kind: "semantic" });
+        else if (sim >= neuralMin && sim < neuralMax) edges.push({ a: i, b: j, sim: Math.round(sim * 1000) / 1000, kind: "neural" });
+      }
+    }
+    return { nodes, coords, edges };
+  });
+}
+
+export interface ForgetRequest {
+  fact?: { entity?: string; role?: string; filler?: string; key?: string };
+  turnText?: string;
+}
+
+/** POST /stator/forget — targeted curation deletes. A fact filter must carry at
+ *  least one field; a turn is matched by exact text (duplicates all go — for
+ *  curation that is the point). */
+export async function statorForget(principal: Principal, body: ForgetRequest): Promise<unknown> {
+  return withScopedMemory(principal, async (memory) => {
+    let deleted = 0;
+    if (body.fact && Object.values(body.fact).some((v) => typeof v === "string" && v.length)) {
+      deleted += await memory.deleteFacts(body.fact);
+    }
+    if (typeof body.turnText === "string" && body.turnText.length) {
+      deleted += await memory.deleteTurns(body.turnText);
+    }
+    return { deleted };
+  });
+}
+
+export interface AmendRequest { entity: string; role: string; filler: string; key?: string; tier?: MemoryTier }
+
+/** POST /stator/amend — correct a fact. With a key the write SUPERSEDES the
+ *  chain (the old version stays, is_current=false — an audit trail, not an
+ *  erasure); without one the old (entity, role) rows are removed and the
+ *  corrected fact written fresh. */
+export async function statorAmend(principal: Principal, body: AmendRequest): Promise<unknown> {
+  const entity = String(body.entity ?? "").trim();
+  const role = String(body.role ?? "").trim();
+  const filler = String(body.filler ?? "").trim();
+  if (!entity || !role || !filler) throw new Error("amend needs entity, role and filler");
+  return withScopedMemory(principal, async (memory, spaceId) => {
+    const key = (body.key ?? "").trim();
+    if (!key) await memory.deleteFacts({ entity, role });
+    const written = await memory.write(
+      [{ entity, role, filler, ...(body.tier ? { tier: body.tier } : {}) }],
+      { spaceId, speaker: "user", ...(key ? { key } : {}) },
+    );
+    return { written };
+  });
+}
