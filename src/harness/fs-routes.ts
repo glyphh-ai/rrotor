@@ -53,7 +53,7 @@ import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "no
 
 import { log } from "../obs/logger.js";
 import type { Principal } from "../auth/introspect.js";
-import { sessionWorkspace, workspaceSegment } from "./config.js";
+import { harnessHome, sessionWorkspace, workspaceSegment } from "./config.js";
 
 const execFileP = promisify(execFile);
 
@@ -471,6 +471,36 @@ export function handleFsRequest(
       params = await paramsOf(req, method);
     } catch (err) {
       sendJson(res, 400, { error: "bad-request", detail: /JSON/i.test(msg(err)) ? "body must be JSON" : msg(err) });
+      return;
+    }
+
+    // ── /fs/spaces — the caller's EXISTING workspaces (his ask, 2026-08-19:
+    // "how can the user ever re-connect to that space?"). No scope: it
+    // ENUMERATES them — one row per sessions/<owner>~<threadId> dir, newest
+    // first, with a few top-level names so an orphaned space (its chat
+    // deleted) still reads as something recognizable.
+    if (path === "/fs/spaces" && (method === "GET" || method === "POST")) {
+      const owner = authn.principal!.userId;
+      const base = join(harnessHome(env), "sessions");
+      const spaces: Array<{ id: string; updatedAt: number; top: string[] }> = [];
+      try {
+        const dirs = await readdir(base, { withFileTypes: true });
+        for (const d of dirs) {
+          if (!d.isDirectory() || !d.name.startsWith(`${owner}~`)) continue;
+          const id = d.name.slice(owner.length + 1);
+          if (!id) continue;
+          const ws = join(base, d.name, "workspace");
+          let updatedAt = 0;
+          let top: string[] = [];
+          try {
+            updatedAt = (await stat(ws)).mtimeMs;
+            top = (await readdir(ws)).filter((n) => n !== ".git" && n !== "node_modules").slice(0, 4);
+          } catch { continue; }   // no workspace dir = never materialized — not a space
+          spaces.push({ id, updatedAt, top });
+        }
+      } catch { /* no sessions dir yet — the empty list is the truth */ }
+      spaces.sort((a, b) => b.updatedAt - a.updatedAt);
+      sendJson(res, 200, { spaces });
       return;
     }
 
