@@ -25,9 +25,10 @@
  * at 60s by default. A worker that crashes, times out, or belongs to a stale
  * bundle hash is disposed — the NEXT invoke restarts it fresh.
  *
- * `glyphh.call` forwards to a dependency-injected capability bridge. The real
- * HTTP bridge to the control plane arrives in a later slice; the default stub
- * answers `ping` (a liveness probe for tests) and refuses everything else.
+ * `glyphh.call` forwards to a dependency-injected capability bridge. The REAL
+ * bridge lives in capability-bridge.ts (per-app worker-token clients, adapted
+ * via `executorBridge`); the default stub answers `ping` (a liveness probe for
+ * tests) and refuses everything else.
  */
 
 import { join, resolve } from "node:path";
@@ -39,16 +40,16 @@ import type { ResolvedApp } from "./bundle.js";
 export const INVOKE_TIMEOUT_MS = 60_000;
 export const READY_TIMEOUT_MS = 10_000;
 
-/** The host side of `glyphh.call(method, args)` — slice 4 wires the real
- *  HTTP capability bridge behind this seam. */
+/** The host side of `glyphh.call(method, args)` — the real per-app bridge is
+ *  capability-bridge.ts (`createCapabilityBridge` + `executorBridge`). */
 export type CapabilityBridge = (slug: string, method: string, args: unknown) => Promise<unknown>;
 
-/** The slice-2 stand-in bridge: `ping` echoes (so a roundtrip is testable),
- *  every real capability refuses loudly until the HTTP bridge lands. */
+/** The stand-in bridge tests keep: `ping` echoes (so a roundtrip is testable),
+ *  every real capability refuses loudly. */
 export function stubCapabilityBridge(): CapabilityBridge {
   return async (_slug, method, args) => {
     if (method === "ping") return { pong: true, args: args ?? null };
-    throw new Error("capability bridge not wired (slice 4)");
+    throw new Error("capability bridge not wired (pass capabilityBridge — see capability-bridge.ts)");
   };
 }
 

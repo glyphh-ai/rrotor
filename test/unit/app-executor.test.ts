@@ -146,12 +146,12 @@ describe("AppWorkerExecutor", () => {
     expect(await exec.invokeHandler("demo", "probe", { x: 1 })).toEqual({ pong: true, args: { x: 1 } });
   });
 
-  it("every other capability refuses until slice 4 wires the bridge", async () => {
+  it("every other capability refuses on the stub bridge (the real one is capability-bridge.ts)", async () => {
     const { resolveApp } = materializedApp(`
       glyphh.handle("query", async () => glyphh.call("db.exec", { sql: "select 1" }));
     `);
     const exec = makeExecutor({ resolveApp });
-    await expect(exec.invokeHandler("demo", "query")).rejects.toThrow(/capability bridge not wired \(slice 4\)/);
+    await expect(exec.invokeHandler("demo", "query")).rejects.toThrow(/capability bridge not wired/);
   });
 
   it("an injected bridge receives (slug, method, args)", async () => {
