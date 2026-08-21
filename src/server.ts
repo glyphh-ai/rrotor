@@ -37,7 +37,9 @@ import { toolModeFromLabels } from "./tools/index.js";
 import { streamRunLive, replayRun } from "./transport/sse.js";
 import { attachWebSocket } from "./transport/ws.js";
 import { introspectorFromEnv, disabledIntrospector, bearerFromHeader } from "./auth/introspect.js";
-import type { Introspector } from "./auth/introspect.js";
+import type { Introspector, Principal } from "./auth/introspect.js";
+import { appWorkerServiceFromEnv, classifyWorkerError } from "./app-worker/service.js";
+import type { AppWorkerService } from "./app-worker/service.js";
 
 /** The per-session workspace sandbox for fs/exec/git tools (docs/hosting.md §3). */
 function workspaceRoot(): string {
@@ -104,6 +106,7 @@ function handle(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   auth: Introspector = disabledIntrospector(),
+  appWorkers: AppWorkerService | null = null,
 ): void {
   const method = req.method ?? "GET";
   // Strip any query string; probes hit bare paths.
@@ -146,7 +149,7 @@ function handle(
           sendJson(res, decision.status, { error: "unauthorized", detail: decision.reason });
           return;
         }
-        dispatchDataPlane(rt, store, drain, req, res, method, path);
+        dispatchDataPlane(rt, store, drain, req, res, method, path, decision.principal, appWorkers);
       })
       .catch((err: unknown) => {
         log.error("auth check error", { detail: (err as Error).message });
@@ -154,11 +157,12 @@ function handle(
       });
     return;
   }
-  dispatchDataPlane(rt, store, drain, req, res, method, path);
+  dispatchDataPlane(rt, store, drain, req, res, method, path, undefined, appWorkers);
 }
 
-/** Route the authenticated data-plane requests (run/resume/events). Reached only
- *  after the auth gate in {@link handle} has allowed the caller. */
+/** Route the authenticated data-plane requests (run/resume/events/app-worker).
+ *  Reached only after the auth gate in {@link handle} has allowed the caller;
+ *  `principal` is the introspected token owner (absent when auth is disabled). */
 function dispatchDataPlane(
   rt: Runtime,
   store: Stator,
@@ -167,7 +171,52 @@ function dispatchDataPlane(
   res: http.ServerResponse,
   method: string,
   path: string,
+  principal?: Principal,
+  appWorkers: AppWorkerService | null = null,
 ): void {
+  // ── POST /app-worker/invoke — run one workpanel-app worker handler (slice 5a).
+  // The whole surface exists only when app-worker mode is enabled (ROTOR_APP_WORKERS)
+  // — a pod without the service 404s exactly like today. The caller passed the same
+  // introspection gate as /run; the ORG comes from the introspected principal, never
+  // the body, when auth is on (an auth-off pod — dev/self-host — may pass `orgId`).
+  if (method === "POST" && path === "/app-worker/invoke") {
+    if (!appWorkers) {
+      sendJson(res, 404, { error: "not-found", detail: "app workers are not enabled on this pod" });
+      return;
+    }
+    readBody(req)
+      .then(async (raw) => {
+        let body: { slug?: unknown; handler?: unknown; args?: unknown; orgId?: unknown };
+        try {
+          body = raw.length ? (JSON.parse(raw) as typeof body) : {};
+        } catch {
+          sendJson(res, 400, { error: "invalid-json", detail: "POST /app-worker/invoke body must be JSON" });
+          return;
+        }
+        const slug = typeof body.slug === "string" ? body.slug.trim() : "";
+        const handler = typeof body.handler === "string" ? body.handler.trim() : "";
+        if (!slug) {
+          sendJson(res, 400, { error: "missing-slug", detail: "POST /app-worker/invoke requires a `slug`" });
+          return;
+        }
+        if (!handler) {
+          sendJson(res, 400, { error: "missing-handler", detail: "POST /app-worker/invoke requires a `handler`" });
+          return;
+        }
+        const orgId = principal?.orgId ?? (typeof body.orgId === "string" ? body.orgId : "");
+        try {
+          const result = await appWorkers.invoke(orgId, slug, handler, body.args ?? {});
+          sendJson(res, 200, { ok: true, slug, handler, result });
+        } catch (err) {
+          const e = classifyWorkerError(err);
+          log.warn("app worker invoke failed", { app: slug, handler, kind: e.kind, detail: e.message });
+          sendJson(res, e.httpStatus, { error: e.kind, detail: e.message });
+        }
+      })
+      .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
+    return;
+  }
+
   if (method === "POST" && path === "/run") {
     readBody(req)
       .then((raw) => {
@@ -380,8 +429,12 @@ export function startServer(
   store: Stator = statorFromEnv(),
   drain: DrainPlugin = drainFromEnv(),
   auth: Introspector = introspectorFromEnv(),
+  appWorkers: AppWorkerService | null = null,
 ): http.Server {
-  const server = http.createServer((req, res) => handle(rt, store, drain, req, res, auth));
+  // App-worker mode advertises itself the way every other seam does: a
+  // capability in the runtime's manifest, so /readyz reports it per-pod.
+  if (appWorkers) rt.registry.register({ name: "app-worker", status: () => appWorkers.status() });
+  const server = http.createServer((req, res) => handle(rt, store, drain, req, res, auth, appWorkers));
   // Bidirectional streaming transport (GET /ws upgrade) over the same event model as
   // the SSE lane — the client SDK can use either. Shares the pod's stator + drain.
   // The upgrade is gated by the same introspector as the HTTP data plane.
@@ -397,7 +450,21 @@ export function startServer(
  * release the stator, then close the server. Ordered so buffered telemetry is
  * delivered before the process exits.
  */
-export async function shutdown(server: http.Server, store: Stator, drain: DrainPlugin): Promise<void> {
+export async function shutdown(
+  server: http.Server,
+  store: Stator,
+  drain: DrainPlugin,
+  appWorkers: AppWorkerService | null = null,
+): Promise<void> {
+  // App workers first: stop cron timers and terminate worker threads before the
+  // process's transports go away (persisted schedules re-arm on the next boot).
+  if (appWorkers) {
+    try {
+      await appWorkers.close();
+    } catch (err) {
+      log.error("app worker shutdown failed", { detail: (err as Error).message });
+    }
+  }
   try {
     await drain.close();
   } catch (err) {
@@ -432,11 +499,18 @@ export async function serve(port: number = DEFAULT_PORT): Promise<never> {
   // OPTIONAL introspection auth (off unless ROTOR_AUTH_INTROSPECT_URL is set).
   const auth = introspectorFromEnv();
   if (auth.enabled) log.info("data-plane auth enabled (introspection)", {});
-  const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain, auth);
+  // OPTIONAL app-worker mode (off unless ROTOR_APP_WORKERS is set): the pod
+  // serves POST /app-worker/invoke and re-arms persisted app cron schedules.
+  const appWorkers = await appWorkerServiceFromEnv();
+  if (appWorkers) {
+    await appWorkers.start();
+    log.info("app worker mode enabled", {});
+  }
+  const server = startServer(Number.isFinite(port) ? port : DEFAULT_PORT, new Runtime(), store, drain, auth, appWorkers);
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, () => {
       log.info("shutting down", { signal: sig });
-      void shutdown(server, store, drain).then(() => process.exit(0));
+      void shutdown(server, store, drain, appWorkers).then(() => process.exit(0));
     });
   }
   return new Promise<never>(() => {});
