@@ -13,6 +13,12 @@
 #              compile TS → dist, then prune dev deps.
 #   runtime  — a slim, non-root image running `rrotor serve` on 8080.
 
+# @glyphh/sdk is a `file:../sdk` dependency — outside this build context. Build
+# with an extra named context pointing at the sibling checkout:
+#   docker build --build-context sdk=../sdk -t rrotor:dev .
+# The SDK is staged at /sdk (a sibling of /app) in BOTH stages, so npm's
+# node_modules/@glyphh/sdk → ../../sdk symlink resolves at install AND runtime.
+
 # ── builder ──────────────────────────────────────────────────────────────────
 FROM node:20-bookworm-slim AS builder
 WORKDIR /app
@@ -21,6 +27,10 @@ WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
+
+# The linked SDK (package.json + built dist — it has no runtime deps of its own).
+COPY --from=sdk package.json /sdk/package.json
+COPY --from=sdk dist /sdk/dist
 
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -42,6 +52,10 @@ WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git python3 make g++ ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+
+# The linked SDK again — node_modules/@glyphh/sdk is a symlink to /sdk.
+COPY --from=sdk package.json /sdk/package.json
+COPY --from=sdk dist /sdk/dist
 
 # Compiled deps + build output from the builder (rrotor's own compile still
 # happens only in the builder layer).

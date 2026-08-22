@@ -51,6 +51,21 @@ services:
       PORT: "8080"
       ROTOR_STATOR_BACKEND: pgvector
       ROTOR_STATOR_URL: postgres://glyphh:glyphh@stator:5432/rotor_stator
+      # ── workpanel app workers (slice 5a) ────────────────────────────────
+      # POST /app-worker/invoke + durable app cron. The pod needs a control-
+      # plane credential of its own (GLYPHH_RUNTIME_TOKEN — a gy_rk_ runtime
+      # token / API key for the org this pod serves) to mint gy_wk_ worker
+      # tokens and download bundles. Inject it at `docker compose up` time;
+      # unset, app workers stay OFF (service.ts logs loudly and disarms).
+      ROTOR_APP_WORKERS: "1"
+      GLYPHH_CONTROL_URL: http://host.docker.internal:3001
+      GLYPHH_RUNTIME_TOKEN: ${GLYPHH_RUNTIME_TOKEN:-}
+      ROTOR_APP_CACHE_DIR: /tmp/rrotor-app-bundles
+      # Caller auth on the data plane (incl. /app-worker/invoke): introspect
+      # bearers against the local control plane. The service token must MATCH
+      # the server's SERVICE_TOKEN (server/.env) or every call 401s.
+      ROTOR_AUTH_SERVICE_TOKEN: ${ROTOR_AUTH_SERVICE_TOKEN:-dev-only-service-token}
+      ROTOR_AUTH_INTROSPECT_URL: http://host.docker.internal:3001/api/auth/introspect
     depends_on:
       stator:
         condition: service_healthy
