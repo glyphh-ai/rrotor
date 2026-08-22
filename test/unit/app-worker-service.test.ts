@@ -71,6 +71,10 @@ let server: Server;
 let base = "";
 let seen: Seen[] = [];
 let mintCount = 0;
+/** Simulates another pod rotating the worker token out from under this one:
+ *  while true, the data plane 401s the minted token (mint itself still works —
+ *  minting again is exactly how the pod takes the handle back). */
+let rotatedOut = false;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -115,7 +119,7 @@ beforeAll(async () => {
       }
       // ── the app's data plane: requires the MINTED worker token ──────────
       if (path === `/api/apps/${SLUG}/data/query`) {
-        if (bearer !== WORKER_TOKEN) { json(401, { error: { code: "E_UNAUTHENTICATED", message: "invalid or revoked worker token" } }); return; }
+        if (rotatedOut || bearer !== WORKER_TOKEN) { json(401, { error: { code: "E_UNAUTHENTICATED", message: "invalid or revoked worker token" } }); return; }
         json(200, { data: { rows: [{ inserted: true }], rowCount: 1 } });
         return;
       }
@@ -134,6 +138,7 @@ afterAll(async () => {
 beforeEach(() => {
   seen = [];
   mintCount = 0;
+  rotatedOut = false;
 });
 
 function makeService(over: Partial<ConstructorParameters<typeof AppWorkerService>[0]> = {}): AppWorkerService {
@@ -287,6 +292,34 @@ describe("AppWorkerService — org binding + typed error shapes", () => {
       expect(err).toBeInstanceOf(AppWorkerError);
       expect((err as AppWorkerError).kind).toBe("no-handler");
       expect((err as AppWorkerError).httpStatus).toBe(404);
+    } finally {
+      await svc.close();
+    }
+  });
+
+  it("re-arms after a control-plane 401: a rotated-out worker token drops the cached arm (slice 5b)", async () => {
+    // The e2e report's gap: mint is rotate, so another pod arming the same
+    // (org, slug) kills THIS pod's minted handle. Without the 401 hook the
+    // cached arm pins the dead token and every later invoke fails forever.
+    const svc = makeService();
+    try {
+      // Armed and working.
+      expect(await svc.invoke(ORG, SLUG, "note", { body: "pre" })).toEqual({ rows: [{ inserted: true }], rowCount: 1 });
+      expect(mintCount).toBe(1);
+
+      // Another pod takes the handle: the control plane now 401s our token.
+      rotatedOut = true;
+      const err = await svc.invoke(ORG, SLUG, "note", { body: "stale" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AppWorkerError);
+      expect((err as AppWorkerError).message).toMatch(/HTTP 401/);
+
+      // The failed call dropped the arm — the NEXT invoke re-mints (taking the
+      // handle back) and the data plane accepts the fresh token again.
+      rotatedOut = false;
+      expect(await svc.invoke(ORG, SLUG, "note", { body: "post" })).toEqual({ rows: [{ inserted: true }], rowCount: 1 });
+      expect(mintCount).toBe(2);
+      const mints = seen.filter((s) => s.path.endsWith("/worker-token"));
+      expect(mints).toHaveLength(2);
     } finally {
       await svc.close();
     }

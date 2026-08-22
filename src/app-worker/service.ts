@@ -117,6 +117,19 @@ export function classifyWorkerError(err: unknown): AppWorkerError {
   return new AppWorkerError("invoke-error", message, 500);
 }
 
+/**
+ * Did the control plane refuse the app's MINTED worker token on a data call?
+ * Two shapes reach the arm's guard: a raw SDK {@link ApiError} (401), or the
+ * capability bridge's `surfaced` wrapper — a plain Error carrying
+ * `refused by the control plane (HTTP 401 …)` (capability-bridge.ts), the
+ * exact string its unit tests pin down.
+ */
+export function isWorkerTokenRejection(err: unknown): boolean {
+  if (err instanceof ApiError) return err.httpStatus === 401;
+  const message = err instanceof Error ? err.message : String(err);
+  return /refused by the control plane \(HTTP 401 /.test(message);
+}
+
 // ── the service ─────────────────────────────────────────────────────────────
 
 export interface AppWorkerServiceOptions {
@@ -271,7 +284,28 @@ export class AppWorkerService {
       ...(this.cron ? { cron: this.cron } : {}),
       ...(this.opts.fetchImpl ? { fetchImpl: this.opts.fetchImpl } : {}),
     });
-    this.bridges.set(slug, bridge);
+    // RE-ARM ON 401 (the e2e report's gap): mint is rotate, so ANOTHER pod
+    // arming this (org, slug) kills OUR minted handle out from under us — every
+    // data call would 401 forever while the cached arm pins the dead token.
+    // When the control plane rejects the worker token, drop the cached arm so
+    // the NEXT invoke re-mints (taking the handle back) instead of wedging.
+    // The failing call itself still fails — its worker script already observed
+    // the refusal — recovery is one invoke later, not a silent retry.
+    this.bridges.set(slug, async (method, args) => {
+      try {
+        return await bridge(method, args);
+      } catch (err) {
+        if (isWorkerTokenRejection(err)) {
+          this.bridges.delete(slug);
+          this.entries.delete(slug);
+          log.warn("worker token rejected by the control plane — dropping the arm to re-mint on next invoke", {
+            app: slug,
+            org_id: minted.orgId,
+          });
+        }
+        throw err;
+      }
+    });
     log.info("app worker armed", {
       app: slug,
       org_id: minted.orgId,
