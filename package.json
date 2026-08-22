@@ -1,12 +1,10 @@
 {
   "name": "@glyphh/rrotor",
   "version": "1.0.1-beta.1",
-  "publishConfig": {
-    "access": "public"
-  },
+  "private": true,
   "description": "rrotor — Recursive Reasoning on top of reasoning. The open runtime for RotorSpec, the standard for deterministic agent loops.",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "LicenseRef-Proprietary",
   "author": "Glyphh AI LLC",
   "homepage": "https://github.com/glyphh-ai/rrotor#readme",
   "repository": {

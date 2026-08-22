@@ -1,28 +1,7 @@
-rrotor — the open reference runtime for RotorSpec
-Copyright 2026 Glyphh AI LLC
+rrotor
+Copyright 2026 Glyphh AI LLC. All rights reserved.
 
-This product is licensed under the Apache License, Version 2.0 (the
-"License"); you may not use it except in compliance with the License. A copy
-of the License is distributed with this work in the LICENSE file, and is also
-available at http://www.apache.org/licenses/LICENSE-2.0.
-
---------------------------------------------------------------------------------
-
-Patent notice
-
-The hyperdimensional-computing (HDC) grounding method used by Glyphh's
-production runtime is the subject of a pending U.S. patent application
-(No. 63/969,729). That method is NOT disclosed or implemented in this
-repository: the `hdc.map` step is abstracted or stubbed here, and the
-production grounding implementation is a separate work that is not included.
-
-The patent license granted under Section 3 of the Apache License applies only
-to the contributions actually contained in this Work. It does not extend to
-the separate, unpublished production grounding implementation, and no license
-to the pending patent claims is granted beyond what Section 3 requires for the
-code in this repository.
-
-"Glyphh", "rrotor", and "RotorSpec" are trademarks of Glyphh AI LLC. As stated
-in Section 6 of the License, this license does not grant permission to use
-those marks except as required for reasonable and customary use in describing
-the origin of the Work.
+This software is proprietary and confidential. It is NOT open source and NOT
+"source available." Its use is governed solely by the Glyphh AI Proprietary
+License in LICENSE; no other rights are granted. Patent Pending — U.S.
+Application No. 63/969,729.

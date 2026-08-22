@@ -4,8 +4,7 @@
 of the model and turns it into a declarative, deterministic, replayable artifact —
 a *rotor*.
 
-Version 0.1 · Draft · Apache-2.0 (Glyphh AI LLC) · The open reference runtime for
-[RotorSpec](SPEC.md) · Production runtime: [glyphh-rotor]
+Version 0.1 · Draft · Proprietary (Glyphh AI LLC) · The RotorSpec runtime
 
 ## What "rrotor" means
 
@@ -184,7 +183,7 @@ pods, scaled horizontally.
 
 ## Status & license
 
-- **Open source — Apache-2.0** (see [LICENSE](LICENSE), [NOTICE](NOTICE)).
+- **Proprietary** — © Glyphh AI LLC, all rights reserved (see [LICENSE](LICENSE)). Not open source; not source-available.
   Copyright © 2026 Glyphh AI LLC. Contributions are accepted under the same
   license — see [CONTRIBUTING.md](CONTRIBUTING.md).
 - Draft **v0.1**: the spec text ([SPEC.md](SPEC.md) + [docs/](docs/)) is written;
