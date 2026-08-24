@@ -76,9 +76,6 @@ export interface Stator {
   /** KV scratch. */
   kvGet(key: string): Promise<unknown>;
   kvSet(key: string, value: unknown): Promise<void>;
-  /** Turn-level text for `retrieve.vector` lexical fallback (§7.7). */
-  addTurn(text: string): Promise<void>;
-  turns(): Promise<string[]>;
   /** Register a session id (assigning a monotonic ordinal) and mark it current.
    *  Ordinals order sessions for mid-tier windowing (docs/memory.md). */
   touchSession(id: string): Promise<number>;
@@ -89,8 +86,6 @@ export interface Stator {
   /** CURATION (the Memory panel): remove facts matching every given field.
    *  A bare filter is refused by the API layer, never here. Returns count. */
   deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number>;
-  /** CURATION: remove every corpus turn whose text matches exactly. Count. */
-  deleteTurns(text: string): Promise<number>;
   /** Release backing resources (file handles). No-op for in-process. */
   close?(): Promise<void>;
 }
@@ -171,9 +166,6 @@ export class InProcessStore implements Stator {
   async kvSet(key: string, value: unknown): Promise<void> {
     this.kv.set(key, value);
   }
-  async addTurn(text: string): Promise<void> {
-    this.turnLog.push(text);
-  }
 
   async deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number> {
     const keep = this.facts.filter((f) =>
@@ -187,14 +179,6 @@ export class InProcessStore implements Stator {
     return removed;
   }
 
-  async deleteTurns(text: string): Promise<number> {
-    const before = this.turnLog.length;
-    for (let i = this.turnLog.length - 1; i >= 0; i--) if (this.turnLog[i] === text) this.turnLog.splice(i, 1);
-    return before - this.turnLog.length;
-  }
-  async turns(): Promise<string[]> {
-    return this.turnLog.slice();
-  }
 
   // ── sessions + fact snapshot ────────────────────────────────────────────────
   async touchSession(id: string): Promise<number> {

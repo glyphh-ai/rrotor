@@ -17,7 +17,6 @@
         "write",
         "retrieve.sql",
         "retrieve.kb",
-        "retrieve.vector",
         "gate",
         "assert",
         "plan",
@@ -28,7 +27,6 @@
         "escalate",
         "tool",
         "transform",
-        "cascade",
         "sub-rotor",
         "fail"
       ]
@@ -427,23 +425,6 @@
       }
     },
     {
-      "if": { "properties": { "type": { "const": "retrieve.vector" } } },
-      "then": {
-        "properties": {
-          "config": {
-            "type": "object",
-            "properties": {
-              "top_k": { "type": "integer", "minimum": 0 },
-              "kind": { "enum": ["query", "document", "recent"] },
-              "window": { "type": "integer", "minimum": 1 },
-              "threshold": { "type": "number" },
-              "embed_model": { "type": "string" }
-            }
-          }
-        }
-      }
-    },
-    {
       "if": { "properties": { "type": { "const": "gate" } } },
       "then": {
         "properties": { "config": { "$ref": "#/$defs/gateConfig" } },
@@ -631,22 +612,6 @@
                 "additionalProperties": { "type": "string" }
               },
               "strip": { "enum": ["fences"] }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": { "properties": { "type": { "const": "cascade" } } },
-      "then": {
-        "properties": {
-          "config": {
-            "type": "object",
-            "properties": {
-              "span": { "type": "integer", "minimum": 0 },
-              "trigger": { "type": "integer", "minimum": 0 },
-              "recall_k": { "type": "integer", "minimum": 0 },
-              "cadence": { "type": "string" }
             }
           }
         }

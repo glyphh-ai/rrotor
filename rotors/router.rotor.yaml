@@ -5,7 +5,7 @@
 # by a ROUTER model into a closed enum (§7.10 in the conversation-native idiom:
 # model proposes in text, transform lifts the field deterministically, branch
 # routes), then dispatched to the right domain rotor as a sub-rotor call
-# (§7.19): conversation → glyphh/base-memory, a build/change request →
+# (§7.19): conversation → glyphh/base-single, a build/change request →
 # glyphh/code. An unparseable route defaults to conversation — the safe lane.
 #
 # The router itself is mode: chat — least privilege; it has no tool steps. Each
@@ -18,7 +18,7 @@ metadata:
   name: router
   version: 1.0.0
   namespace: glyphh
-  description: The front-door router — classify each turn (router model) and dispatch to base-memory (chat) or code (build) as a sub-rotor.
+  description: The front-door router — classify each turn (router model) and dispatch to base-single (chat) or code (build) as a sub-rotor.
   labels:
     tier: base
     domain: general
@@ -109,10 +109,10 @@ spec:
     # reduces into state.answer.
     - id: subchat
       type: sub-rotor
-      display: { label: "chatting", detail: "glyphh/base-memory", output: min }
+      display: { label: "chatting", detail: "glyphh/base-single", output: min }
       out: { answer: string }
       config:
-        ref: glyphh/base-memory
+        ref: glyphh/base-single
         mode: call
         inputs: { prompt: $.inputs.prompt, entity: $.inputs.entity }
       next: end

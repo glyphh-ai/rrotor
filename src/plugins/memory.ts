@@ -1,7 +1,7 @@
 /**
  * BasicMemory — the in-process stator (docs/runtime.md §3.2). It wraps an
  * {@link InProcessStore}: the closed ops (§7.5), exact-match probe/verify,
- * lexical semantic recall (§7.7), fact writes (§7.4), the append-only event
+ * fact writes (§7.4), the append-only event
  * history (§5.4), and the result cache (§5.7). Zero-dependency Maps — no SQLite,
  * no Postgres. Degrades to this single-node backend rather than crashing when no
  * shared stator is configured; the premium swap-in is Postgres + pgvector behind
@@ -12,14 +12,11 @@ import type { CapabilityStatus } from "../runtime/registry.js";
 import type { StepRecord } from "../types.js";
 import { InProcessStore, type Fact, type Row, type Stator } from "../exec/store.js";
 import { visibleFacts, type MemoryTier } from "../exec/facts.js";
-import { cosine } from "../exec/embedding.js";
-import { HashEmbedder, type Embedder } from "../exec/embedder.js";
 import type {
   GroundVerdict,
   MemoryPlugin,
   ProbeResult,
   QueryResult,
-  SemanticHit,
 } from "./interfaces.js";
 
 const norm = (s: unknown): string => String(s ?? "").trim().toLowerCase();
@@ -27,12 +24,7 @@ const norm = (s: unknown): string => String(s ?? "").trim().toLowerCase();
 export class BasicMemory implements MemoryPlugin {
   readonly name = "memory";
 
-  constructor(
-    readonly store: Stator = new InProcessStore(),
-    /** The turn embedder for semantic recall. Defaults to the deterministic hash
-     *  embedder (replay-safe); the fleet injects an HTTP one. */
-    private readonly embedder: Embedder = new HashEmbedder(),
-  ) {}
+  constructor(readonly store: Stator = new InProcessStore()) {}
 
   status(): CapabilityStatus {
     return { ready: true, detail: "in-process maps; no pgvector", tier: "basic" };
@@ -42,48 +34,12 @@ export class BasicMemory implements MemoryPlugin {
     return this.store.query(op, params, spaceId);
   }
 
-  /** Deterministic-local semantic recall (§7.7): cosine over the hashed-ngram
-   *  embedding of the query and each recorded turn. Replay-safe (pure). */
-  async semanticRecall(query: string, topK: number, threshold: number): Promise<SemanticHit[]> {
-    if (query.trim() === "") return [];
-    const turns = await this.store.turns();
-    if (turns.length === 0) return [];
-    // ONE batched embed for the query + all turns. The hash backend maps in-process;
-    // an HTTP (neural) backend batches into a few requests instead of N sequential
-    // round-trips — the difference between usable and unusable at scale.
-    const [qv, ...tvs] = await this.embedder.embedBatch([query, ...turns]);
-    const scored: SemanticHit[] = [];
-    for (let i = 0; i < turns.length; i++) {
-      const score = cosine(qv, tvs[i]!);
-      if (score >= threshold) scored.push({ text: turns[i]!, score });
-    }
-    return scored
-      .sort((a, b) => b.score - a.score || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0))
-      .slice(0, topK);
-  }
-
-  /** Embed a batch with the bound embedder — the seam recall uses to rank facts
-   *  in the same semantic space as turns. */
-  async embedBatch(texts: string[]): Promise<number[][]> {
-    return this.embedder.embedBatch(texts);
-  }
-
-  async recordTurn(text: string): Promise<void> {
-    if (text && text.trim() !== "") await this.store.addTurn(text);
-  }
-
   /** CURATION surface for the Memory panel — raw reads + targeted deletes. */
-  async turnsList(): Promise<string[]> {
-    return this.store.turns();
-  }
   async snapshot(): Promise<Fact[]> {
     return this.store.snapshotFacts();
   }
   async deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number> {
     return this.store.deleteFacts(match);
-  }
-  async deleteTurns(text: string): Promise<number> {
-    return this.store.deleteTurns(text);
   }
 
   /** The conversation window lives in the stator's KV, keyed by session —
@@ -185,19 +141,4 @@ export class BasicMemory implements MemoryPlugin {
     await this.store.cache.put(key, output, opts);
   }
 
-  /**
-   * Short → mid → long consolidation (§7.18), deterministic over recorded turns.
-   * The `span` most-recent turns are the hot **short** tier; older turns
-   * consolidate into the **mid** tier by de-duplication (distinct summaries); the
-   * duplicates that collapse away are the **long**-tier absorb count. A model
-   * summarizer is the premium swap-in; this keeps it pure and replay-safe.
-   */
-  async cascade(span = 8): Promise<{ short: number; mid: number; long: number }> {
-    const turns = await this.store.turns();
-    const window = Math.max(0, span);
-    const short = Math.min(turns.length, window);
-    const older = turns.slice(0, Math.max(0, turns.length - window));
-    const distinctOlder = new Set(older).size;
-    return { short, mid: distinctOlder, long: older.length - distinctOlder };
-  }
 }

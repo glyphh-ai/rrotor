@@ -33,8 +33,6 @@ async function exerciseStore(s: Stator): Promise<unknown> {
 
   await s.cache.put("ck", { v: 42 }, { ttlTicks: 5, scope: "rotor" });
   await s.kvSet("greeting", { hi: true });
-  await s.addTurn("first turn");
-  await s.addTurn("second turn");
 
   return {
     lookup_spouse: (await s.lookupFact("ada", "rel.spouse"))?.filler,
@@ -48,7 +46,6 @@ async function exerciseStore(s: Stator): Promise<unknown> {
     cache_live: await s.cache.get("ck", 4),
     cache_expired: await s.cache.get("ck", 5),
     kv: await s.kvGet("greeting"),
-    turns: await s.turns(),
   };
 }
 

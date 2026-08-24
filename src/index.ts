@@ -57,8 +57,8 @@ export { runInProcess, openSqliteStator, type EmbedOptions } from "./embed.js";
 export { executeToEvents, resumeToEvents, type StreamContext, type Emit } from "./transport/run.js";
 export { WIRE_VERSION, type WireEvent } from "./transport/events.js";
 
-// Stator (durable memory) — factory + backends, so an embedder controls where memory
-// lives (the shared local SQLite file, an in-process store, or Postgres/pgvector).
+// Stator (the determinism store) — factory + backends: in-process, the shared
+// local SQLite file, or Postgres (the org schema in the regional userstore).
 export {
   createStator,
   initStator,
@@ -66,35 +66,10 @@ export {
   type StatorOptions,
   type StatorBackend,
 } from "./exec/stator.js";
-export {
-  HashEmbedder,
-  HttpEmbedder,
-  embedderFromEnv,
-  DEFAULT_EMBED_DIM,
-  type Embedder,
-  type EmbedBackend,
-  type HttpEmbedderOptions,
-} from "./exec/embedder.js";
 export { SqliteStore } from "./exec/sqlite-store.js";
 export { InProcessStore } from "./exec/store.js";
 export type { Stator } from "./exec/store.js";
 
-// The memory rotor — builds the worker's per-turn system prompt from short/mid/
-// long-term memory (docs/recursive-memory.md). Opt-in, stochastic-data.
-export {
-  MemoryRotor,
-  MEMORY_ROTOR_SYSTEM,
-  ATTENTION_SYSTEM,
-  constructSystemPrompt,
-  attentionCheck,
-  renderFocus,
-  type MemoryRotorOptions,
-  type ConstructedPrompt,
-  type ConstructInput,
-  type AttentionState,
-  type MemoryUsage,
-  type Turn,
-} from "./harness/memory-rotor.js";
 
 // The tool SDK surface — a host product (desktop, CLI) defines its own tools behind
 // the same contract as the stdlib and passes them to `runInProcess({tools})` /

@@ -59,23 +59,6 @@ describe("pgvector stator — tier/session parity", () => {
 });
 
 describe("pgvector stator — durable hydrate across a restart", () => {
-  it("a fresh store over the same database rebuilds facts, turns and sessions", async () => {
-    const db = await pglite();
-    const s1 = await PgVectorStore.create({ client: db });
-    await s1.touchSession("sess-A");
-    await s1.writeFacts([{ entity: "user", role: "pref", filler: "tabs", key: "user:pref", is_current: true, tick: 0, tier: "long" }]);
-    await s1.addTurn("we decided to use pgvector for the durable stator");
-    await s1.flush(); // persist before the "restart"
-
-    // A new pod: construct a second store over the SAME database and hydrate.
-    const s2 = await PgVectorStore.create({ client: db });
-    expect((await s2.lookupFact("user", "pref"))?.filler).toBe("tabs");
-    expect(await s2.turns()).toContain("we decided to use pgvector for the durable stator");
-    expect(await s2.sessionOrdinal("sess-A")).toBe(0);
-    // A new session continues the ordinal sequence, not restart from 0.
-    expect(await s2.touchSession("sess-B")).toBe(1);
-    await s2.flush();
-  });
 });
 
 describe("pgvector stator — atomic supersede+insert (CTE)", () => {
@@ -121,23 +104,6 @@ describe("pgvector stator — live-read edge cases", () => {
 });
 
 describe("pgvector stator — live cross-pod visibility (mirror dropped)", () => {
-  it("a second store already running sees the first's committed writes — no restart", async () => {
-    const db = await pglite();
-    // Two live stores over the SAME database (two pods sharing one Postgres).
-    const podA = await PgVectorStore.create({ client: db });
-    const podB = await PgVectorStore.create({ client: db });
-
-    // B sees nothing before A writes.
-    expect(await podB.lookupFact("shared", "x")).toBeUndefined();
-
-    // A writes; B — already constructed, never restarted — reads it live.
-    await podA.writeFacts([{ entity: "shared", role: "x", filler: "y", key: "shared:x", is_current: true, tick: 0 }]);
-    expect((await podB.lookupFact("shared", "x"))?.filler).toBe("y");
-
-    // And the reverse: B's write is visible to A live.
-    await podB.addTurn("a turn written by pod B");
-    expect(await podA.turns()).toContain("a turn written by pod B");
-  });
 });
 
 describe("pgvector stator — event history, cache and kv are durable", () => {
@@ -166,14 +132,6 @@ describe("pgvector stator — event history, cache and kv are durable", () => {
 });
 
 describe("pgvector stator — lifecycle", () => {
-  it("shutdown flushes then releases the client", async () => {
-    const db = await PGlite.create({ extensions: { vector } }); // untracked: shutdown closes it
-    const store = await PgVectorStore.create({ client: db as unknown as PgLike });
-    await store.addTurn("persisted before shutdown");
-    await store.shutdown();
-    await expect(db.query("SELECT 1")).rejects.toBeDefined(); // client is closed
-  });
-
   it("surfaces a persistence error instead of swallowing it (live writes)", async () => {
     const db = await pglite();
     // A client that fails only the facts insert — DDL still succeeds.
@@ -189,30 +147,7 @@ describe("pgvector stator — lifecycle", () => {
 });
 
 describe("pgvector stator — ANN recall in the database", () => {
-  it("ranks turns by cosine similarity via the vector index", async () => {
-    const store = await PgVectorStore.create({ client: await pglite() });
-    expect(store.vectorIndexed).toBe(true); // 256-dim ⇒ hnsw-indexed
-    await store.addTurn("the config parser reads parseConfig from the yaml file");
-    await store.addTurn("the pool warms hot instances up to the budget");
-    await store.addTurn("the drain forwards step records to an external sink");
-    await store.flush();
-
-    const hits = await store.semanticRecallDb("config parser parseConfig yaml", 3);
-    expect(hits[0].text).toMatch(/parseConfig/);
-    expect(hits[0].score).toBeGreaterThan(hits[hits.length - 1].score - 1e-9);
-    await store.flush();
-  });
 });
 
 describe("pgvector stator — dim-cap degrades to an exact scan", () => {
-  it("an embedding dim above the index cap is unindexed but still recalls", async () => {
-    const store = await PgVectorStore.create({ client: await pglite(), embedDim: 3000 });
-    expect(store.vectorIndexed).toBe(false); // > 2000 ⇒ no hnsw index
-    await store.addTurn("alpha beta gamma delta");
-    await store.addTurn("completely unrelated words here");
-    await store.flush();
-    const hits = await store.semanticRecallDb("alpha beta gamma", 2);
-    expect(hits[0].text).toBe("alpha beta gamma delta");
-    await store.flush();
-  });
 });

@@ -13,9 +13,7 @@ import {
   writeHandler,
   retrieveSqlHandler,
   retrieveKbHandler,
-  retrieveVectorHandler,
   hdcMapHandler,
-  cascadeHandler,
 } from "./memory.js";
 import { branchHandler, failHandler, waitHandler, planHandler } from "./control.js";
 import { loopHandler, parallelHandler, subRotorHandler } from "./flow.js";
@@ -33,7 +31,6 @@ export const ALL_HANDLERS: StepHandler[] = [
   writeHandler,
   retrieveSqlHandler,
   retrieveKbHandler,
-  retrieveVectorHandler,
   gateHandler,
   assertHandler,
   planHandler,
@@ -44,7 +41,6 @@ export const ALL_HANDLERS: StepHandler[] = [
   escalateHandler,
   toolHandler,
   transformHandler,
-  cascadeHandler,
   subRotorHandler,
   failHandler,
 ];

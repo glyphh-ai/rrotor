@@ -63,18 +63,6 @@ spec:
       config:
         mode: turn
         speaker: user
-      next: recall
-
-    # ── recall ───────────────────────────────────────────────────────────────
-    - id: recall
-      type: retrieve.vector
-      display: { label: "recalling context" }
-      in: { query: $.inputs.task }
-      out: { hits: array }
-      config:
-        top_k: 6
-        kind: query
-        threshold: 0.25
       next: frame
 
     # ── frame ────────────────────────────────────────────────────────────────
@@ -86,7 +74,6 @@ spec:
       display: { label: "framing the task" }
       in:
         task: $.inputs.task
-        context: $.steps.recall.hits
         prior_plan: $.steps.plan.text
         review_notes: $.steps.review-parse.notes
       out: { text: string }

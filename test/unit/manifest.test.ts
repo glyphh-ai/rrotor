@@ -24,12 +24,6 @@ describe("rotorManifest", () => {
     expect(m.inputs[0].required).toBe(true);
   });
 
-  it("base-memory: declares the HDC space", () => {
-    const m = rotorManifest(rotor("base-memory"));
-    expect(m.space).toBe(true);
-    expect(m.roles.map((r) => r.role)).toEqual(["assistant"]);
-  });
-
   it("code (conductor): frontier planner only; build delegated to the worker", () => {
     const m = rotorManifest(rotor("code"));
     expect(m.mode).toBe("code");

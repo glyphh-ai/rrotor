@@ -29,7 +29,6 @@ export const STEP_TYPES = [
   "write", // §7.4  persist a fact (WRITE macro step)
   "retrieve.sql", // §7.5  deterministic closed-op query (RECALL)
   "retrieve.kb", // §7.6  entity-keyed associative / graph recall
-  "retrieve.vector", // §7.7  semantic vector recall
   "gate", // §7.8  accept / reject / escalate
   "assert", // §7.9  grounded terminal / refuse
   "plan", // §7.10 typed constrained decode + deterministic execute
@@ -40,7 +39,6 @@ export const STEP_TYPES = [
   "escalate", // §7.15 local → frontier → human (the ladder)
   "tool", // §7.16 deterministic MCP tool / side-effecting app method
   "transform", // §7.17 pure Pass
-  "cascade", // §7.18 memory maintenance / compact
   "sub-rotor", // §7.19 callable rotor / handoff (composition)
   "fail", // §7.20 typed terminal failure
 ] as const;
@@ -543,19 +541,6 @@ export interface RetrieveKbConfig {
   margin?: number;
 }
 
-/** §7.7 retrieve.vector */
-export interface RetrieveVectorConfig {
-  top_k?: number;
-  /** `recent` reads the session's conversation window by ORDER (no embedding,
-   *  deterministic) — the recency channel anaphora needs; similarity can't
-   *  retrieve "how do you know?"'s referent because its meaning is positional. */
-  kind?: "query" | "document" | "recent";
-  threshold?: number;
-  embed_model?: string;
-  /** `recent` only: how many exchanges to return (default 6). */
-  window?: number;
-}
-
 export type GateMode =
   | "hdc-ground"
   | "schema"
@@ -682,14 +667,6 @@ export interface TransformConfig {
   strip?: "fences";
 }
 
-/** §7.18 cascade */
-export interface CascadeConfig {
-  span?: number;
-  trigger?: number;
-  recall_k?: number;
-  cadence?: string;
-}
-
 /** §7.19 sub-rotor */
 export interface SubRotorConfig {
   /** `namespace/name@version`. */
@@ -714,7 +691,6 @@ export interface StepConfigMap {
   write: WriteConfig;
   "retrieve.sql": RetrieveSqlConfig;
   "retrieve.kb": RetrieveKbConfig;
-  "retrieve.vector": RetrieveVectorConfig;
   gate: GateConfig;
   assert: AssertConfig;
   plan: PlanConfig;
@@ -725,7 +701,6 @@ export interface StepConfigMap {
   escalate: EscalateConfig;
   tool: ToolConfig;
   transform: TransformConfig;
-  cascade: CascadeConfig;
   "sub-rotor": SubRotorConfig;
   fail: FailConfig;
 }

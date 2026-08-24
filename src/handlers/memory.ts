@@ -1,17 +1,16 @@
 /**
  * The memory/grounding-backed handlers (docs/runtime.md §2.3): `write` (§7.4),
- * the three `retrieve.*` recall primitives (§7.5–§7.7), `hdc.map` (§7.3), and
+ * the `retrieve.sql` / `retrieve.kb` recall primitives (§7.5–§7.6), `hdc.map` (§7.3), and
  * `cascade` (§7.18). Each is deterministic-given-store (or, for the embedding
- * boundary of `retrieve.vector`, checkpointed) and carries/validates `space_id`.
+ * carries/validates `space_id`. The semantic lane (retrieve.vector) was cut
+ * with the memory plane (2026-08-24) — deterministic recall only.
  */
 
 import type {
-  CascadeConfig,
   Frame,
   HdcMapConfig,
   RetrieveKbConfig,
   RetrieveSqlConfig,
-  RetrieveVectorConfig,
   StepResult,
   WriteConfig,
 } from "../types.js";
@@ -29,7 +28,6 @@ export const writeHandler: StepHandler = {
       const text = String(input.text ?? "");
       const speaker = cfg.speaker ?? "user";
       await plugins.memory.appendConversation(env.session ?? "default", speaker, text);
-      await plugins.memory.recordTurn(`${speaker}: ${text}`);
       return {
         output: { logged: text.trim() !== "", speaker },
         frames: [{ type: "done", data: { speaker } }],
@@ -183,33 +181,6 @@ export const retrieveKbHandler: StepHandler = {
     };
   },
 };
-
-export const retrieveVectorHandler: StepHandler = {
-  type: "retrieve.vector",
-  async execute({ step, input, env, plugins }: HandlerArgs): Promise<StepResult> {
-    const cfg = (step.config ?? {}) as RetrieveVectorConfig;
-    if (cfg.kind === "recent") {
-      // The RECENCY channel (§7.7): the last `window` exchanges of THIS session
-      // in order — an ordinal read, no embedding, fully deterministic. Also
-      // emits a ready-to-compose transcript block.
-      const turns = await plugins.memory.conversation(env.session ?? "default", cfg.window ?? 6);
-      const transcript = turns.map((t) => `${t.speaker}: ${t.text}`).join("\n");
-      return {
-        output: { turns, transcript, count: turns.length },
-        frames: [{ type: "done", data: { kind: "recent", count: turns.length } }],
-        status: "ok",
-      };
-    }
-    const query = String(input.query ?? input.text ?? "");
-    const hits = await plugins.memory.semanticRecall(query, cfg.top_k ?? 8, cfg.threshold ?? 0.35);
-    return {
-      output: { hits, scores: hits.map((h) => h.score) },
-      frames: [{ type: "done", data: { hits: hits.length } }],
-      status: "ok",
-    };
-  },
-};
-
 export const hdcMapHandler: StepHandler = {
   type: "hdc.map",
   async execute({ step, input, env, plugins }: HandlerArgs): Promise<StepResult> {
@@ -233,15 +204,5 @@ export const hdcMapHandler: StepHandler = {
       frames: [{ type: "parse", data: { slots: enc.slots.length } }, { type: "done" }],
       status: "ok",
     };
-  },
-};
-
-export const cascadeHandler: StepHandler = {
-  type: "cascade",
-  async execute({ step, plugins }: HandlerArgs): Promise<StepResult> {
-    const cfg = (step.config ?? {}) as CascadeConfig;
-    const counts = await plugins.memory.cascade(cfg.span);
-    const frames: Frame[] = [{ type: "delta", data: counts }, { type: "done", data: counts }];
-    return { output: { consolidated: counts }, frames, status: "ok" };
   },
 };

@@ -55,8 +55,6 @@ import { readdir } from "node:fs/promises";
 import { log } from "../obs/logger.js";
 import type { Logger } from "../obs/logger.js";
 import type { Principal } from "../auth/introspect.js";
-import { recallForTurn, persistTurn, recallForTurnViaApi, persistTurnViaApi, controlBaseFromGateway } from "./stator-api.js";
-import { constructSystemPrompt, attentionCheck, renderFocus } from "./memory-rotor.js";
 import { sessionTranscripts, gatewaySummarizer, CONTEXT_DEFAULTS, TranscriptStore } from "./transcript.js";
 
 /** The injectable SDK seam: the real `query` in production, a fake in tests. */
@@ -533,93 +531,18 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
     workdir: cfg.workdir,
   });
 
-  // ROTATE THE TURN AROUND THE STATOR: recall prior facts/directives + similar
-  // turns and fold them into the system prompt; write the exchange back after.
-  // TWO paths to ONE regional memory plane (docs/runtime-stator-split.md):
-  //   cloud pod  — principal present → the org-scoped store, direct.
-  //   local pod  — auth off (no principal) → the control plane's /api/stator/*,
-  //                bearer = the run's runtimeToken (the user's access token),
-  //                control base derived from the gatewayUrl the run carries.
-  // Best-effort either way; a memory miss never blocks the turn.
-  const statorBase = principal ? null : controlBaseFromGateway(cfg.gatewayUrl);
-  const memoryOn = !!(principal || (statorBase && cfg.runtimeToken));
-  // Memory silently unarmed is the failure mode that burns hours — say WHY once.
-  if (!memoryOn) runLog.info("memory unarmed", { principal: !!principal, stator_base: !!statorBase, token: !!cfg.runtimeToken });
-  const recallOpts = {
-    ...(cfg.memory?.topK !== undefined ? { topK: cfg.memory.topK } : {}),
-    ...(cfg.memory?.threshold !== undefined ? { threshold: cfg.memory.threshold } : {}),
-    ...(cfg.memory?.entity ? { entity: cfg.memory.entity } : {}),
-  };
   let runCfg = cfg;
-  const rotorOn = memoryOn && cfg.memory?.rotor?.enabled === true;
-  if (memoryOn && (rotorOn || cfg.memory?.recall !== false)) {
-    const thread = cfg.threadId ?? cfg.sessionId;
-    const block = principal
-      ? await recallForTurn(principal, thread, cfg.prompt, recallOpts)
-      : await recallForTurnViaApi(statorBase!, cfg.runtimeToken, thread, cfg.prompt, recallOpts);
-    // MEMORY ROTOR: when the rotor is enabled, an assembler LLM builds the worker's
-    // system prompt from the recalled memory (docs/recursive-memory.md). Off-clock
-    // metering rides the gateway. Best-effort — any failure falls back to the raw
-    // recall injection below, so a bad assemble never breaks the turn.
-    if (rotorOn) {
-      try {
-        const model = cfg.memory!.rotor!.model ?? "claude-haiku-4-5";
-        // The WORKING PLANE: the last few turns — BOTH prompts and responses — so the
-        // rotor carries the live thread and can hold the goal, not just recall facts.
-        const recent = (cfg.history ?? []).slice(-6).map((t) => `${t.role}: ${t.content}`).join("\n");
-        // THE ATTENTION LOOP — its own call, sees ONLY the conversation, keeps true north
-        // and flags rabbit-holes. Config-driven model (defaults to the reasoner). NOTE:
-        // true-north is derived from the recent window here; durable per-thread persistence
-        // (so it holds across a long horizon) is the next increment — a stator keyed-store.
-        const attentionModel = cfg.memory!.rotor!.attentionModel ?? model;
-        const attn = recent
-          ? await attentionCheck(recent, "", attentionModel, {
-              ...(cfg.gatewayUrl ? { gatewayUrl: cfg.gatewayUrl } : {}),
-              ...(cfg.runtimeToken ? { gatewayToken: cfg.runtimeToken } : {}),
-              ...(cfg.runId ? { runId: cfg.runId } : {}),
-            })
-          : null;
-        if (attn) runLog.info("attention", { onTrack: attn.onTrack, progress: attn.progress, rabbitHole: attn.rabbitHole || undefined });
-        const { systemPrompt, usage } = await constructSystemPrompt({
-          userPrompt: cfg.prompt,
-          model,
-          ...(attn ? { goal: renderFocus(attn) } : {}),
-          ...(recent ? { recent } : {}),
-          longTerm: block ?? "",
-          ...(cfg.memory!.rotor!.standards ? { standards: cfg.memory!.rotor!.standards } : {}),
-          baseSystem: cfg.system ?? DEFAULT_SYSTEM,
-          ...(cfg.sessionId ? { sessionId: cfg.sessionId } : {}),
-          ...(cfg.gatewayUrl ? { gatewayUrl: cfg.gatewayUrl } : {}),
-          ...(cfg.runtimeToken ? { gatewayToken: cfg.runtimeToken } : {}),
-          ...(cfg.runId ? { runId: cfg.runId } : {}),
-        });
-        runCfg = { ...cfg, system: systemPrompt };
-        runLog.info("memory rotor: system prompt constructed", {
-          chars: systemPrompt.length, model, in: usage.inputTokens, out: usage.outputTokens,
-        });
-      } catch (err) {
-        runLog.warn("memory rotor failed; raw recall fallback", { detail: (err as Error).message });
-      }
-    }
-    if (runCfg === cfg && block) {
-      runCfg = { ...cfg, system: `${cfg.system ?? DEFAULT_SYSTEM}\n\n<memory>\n${block}\n</memory>` };
-      runLog.info("recall injected", { chars: block.length, via: principal ? "store" : "api" });
-    }
-  }
 
   // ── THE FULL-CONTEXT FALLBACK (harness/transcript.ts) ──────────────────────
-  // When the memory rotor is NOT active (it is opt-in and usually off), the
-  // worker's prompt must carry the COMPLETE conversation — every turn of the
+  // The worker's prompt carries the COMPLETE conversation — every turn of the
   // session, verbatim — with first-class COMPACTION when it outgrows the
-  // budget. Memory-off must NEVER mean thread-loss (the "my workspace is
-  // empty" incident). The pod retains the transcript per thread; the client's
-  // resent history reconciles a pod restart (adopt); compaction folds the
-  // oldest turns into a record-once summary + deterministic anchors and keeps
-  // the newest turns verbatim. Rotor ON ⇒ untouched: the rotor owns the
-  // system prompt and already carries the working plane — no double-inject.
+  // budget (the memory plane is gone; the transcript IS the thread). The pod
+  // retains the transcript per thread; the client's resent history reconciles
+  // a pod restart (adopt); compaction folds the oldest turns into a
+  // record-once summary + deterministic anchors, keeping the newest verbatim.
   const transcripts = deps.transcripts ?? sessionTranscripts;
   const threadKey = cfg.threadId || cfg.sessionId || cfg.runId;
-  if (!rotorOn) {
+  {
     transcripts.adopt(threadKey, cfg.history);
     const budgetTokens = Math.max(1, cfg.context?.budgetTokens ?? CONTEXT_DEFAULTS.budgetTokens);
     const keepTurns = Math.max(1, cfg.context?.keepTurns ?? CONTEXT_DEFAULTS.keepTurns);
@@ -792,18 +715,9 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
       fail(runError);
       runLog.warn("run failed", { detail: runError, turns: turnsUsed });
     } else {
-      // Persist the exchange to the stator so the NEXT turn recalls it: log both
-      // turns + absorb the user turn into facts. Best-effort; never fails the run.
-      if (memoryOn && cfg.memory?.write !== false) {
-        const thread = cfg.threadId ?? cfg.sessionId;
-        if (principal) await persistTurn(principal, thread, cfg.prompt, finalText, cfg.memory?.entity);
-        else await persistTurnViaApi(statorBase!, cfg.runtimeToken, thread, cfg.prompt, finalText, cfg.memory?.entity);
-        runLog.info("turn persisted to stator", { via: principal ? "store" : "api" });
-      }
-      // ALWAYS retain the exchange in the pod transcript (rotor on or off,
-      // memory on or off — record-once per runId): the next turn's
-      // full-context fallback must carry this turn even if memory never was
-      // or later stops being active. The thread is never lost.
+      // ALWAYS retain the exchange in the pod transcript (record-once per
+      // runId): the next turn's full-context path must carry this turn. The
+      // thread is never lost.
       transcripts.append(threadKey, cfg.runId, cfg.prompt, finalText);
       session.emit({ type: "done", stopped: false });
       runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok(), credits_micro: creditsMicro ?? undefined });

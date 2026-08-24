@@ -6,7 +6,7 @@ name: Deploy glyphh-ai-runtime
 # `publish.yml` keeps pushing the GHCR image for control-plane-minted machines,
 # this workflow deploys the ALWAYS-ON shared runtime.
 #
-# One-time infra (app create, private IP, stator PG, fly secrets) is provisioned
+# One-time infra (app create, private IP, fly secrets) is provisioned
 # out-of-band; this only deploys code. Secrets live in `fly secrets`, not here.
 
 on:

@@ -149,29 +149,14 @@ describe("cowork pack", () => {
   });
 });
 
-describe("chat pack — recall over recorded turns", () => {
-  it("recalls a keyword-overlapping turn", async () => {
-    const store = new InProcessStore();
-    const plugins = buildBasicPlugins({ store });
-    await plugins.memory.recordTurn("the config parser parseConfig reads the yaml file");
-    await plugins.memory.recordTurn("the payment gateway charges a card");
-    const registry = buildStdlib({ root, memory: plugins.memory, kv: kvFromStore(store) });
-    installStdlib(plugins.connections, { root, memory: plugins.memory, kv: kvFromStore(store), mode: "code" });
-    void registry;
-    const r = await plugins.connections.invoke("recall", { query: "config parser parseConfig", top_k: 3 });
-    expect(JSON.stringify((r as { hits: unknown }).hits)).toMatch(/parseConfig/);
-  });
-});
-
 describe("capability gating (permission modes)", () => {
-  it("chat mode installs read/recall tools but skips every mutating one", () => {
+  it("chat mode installs read tools but skips every mutating one", () => {
     const store = new InProcessStore();
     const plugins = buildBasicPlugins({ store });
     const c = new BasicConnections();
     const res = installStdlib(c, { root, memory: plugins.memory, kv: kvFromStore(store), granted: MODES.chat });
     expect(res.installed).toContain("file.read");
     expect(res.installed).toContain("git.status");
-    expect(res.installed).toContain("recall");
     // Mutating / exec tools are absent — not merely denied at call time, they never exist.
     for (const t of ["file.write", "file.edit", "shell.bash", "git.commit", "doc.write", "todo.write"]) {
       expect(res.installed).not.toContain(t);
@@ -185,7 +170,7 @@ describe("capability gating (permission modes)", () => {
     const plugins = buildBasicPlugins({ store });
     const c = new BasicConnections();
     const res = installStdlib(c, { root, memory: plugins.memory, kv: kvFromStore(store), mode: "code" });
-    for (const t of ["file.write", "shell.bash", "git.commit", "doc.write", "todo.write", "recall", "web.fetch"]) {
+    for (const t of ["file.write", "shell.bash", "git.commit", "doc.write", "todo.write", "web.fetch"]) {
       expect(res.installed).toContain(t);
     }
     expect(res.skipped).toHaveLength(0);

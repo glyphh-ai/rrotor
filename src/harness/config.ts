@@ -135,13 +135,8 @@ export interface HarnessRunConfig {
   attachmentMaxBytes: number;
   /** Hard cap on agent turns (0 = SDK default). */
   maxTurns: number;
-  /** The LOOP's memory policy for this turn — whether the turn rotates around the
-   *  stator and how. Absent ⇒ the default (recall + write on, deterministic
-   *  enricher). This is the seam that hands the memory decision back to the loop
-   *  instead of it being hardcoded in the engine. */
-  memory?: MemoryPolicy;
-  /** FULL-CONTEXT FALLBACK sizing (engaged when the memory rotor is NOT active;
-   *  see harness/transcript.ts): the transcript token budget before compaction
+  /** FULL-CONTEXT sizing (see harness/transcript.ts): the transcript token
+   *  budget before compaction
    *  and how many recent turns always stay verbatim. Absent fields take the
    *  engine defaults (transcript.CONTEXT_DEFAULTS). Body `context` overrides
    *  env (HARNESS_CONTEXT_BUDGET_TOKENS / HARNESS_CONTEXT_KEEP_TURNS). */
@@ -155,39 +150,6 @@ export interface HarnessRunConfig {
    *  it as the COMPLETE `<conversation_so_far>` instead of rendering (and
    *  slicing) `history` — the full-context fallback's delivery seam. */
   contextBlock?: string;
-}
-
-/** How a loop wants a turn to use memory. All optional; absent fields take the
- *  engine default (recall + write on, assembleRecall's own topK/threshold). */
-export interface MemoryPolicy {
-  /** Recall + inject before the loop. Default true. */
-  recall?: boolean;
-  /** Persist the exchange after the loop. Default true. */
-  write?: boolean;
-  /** Semantic-recall breadth (overrides the default). */
-  topK?: number;
-  /** Minimum cosine for a semantic hit (overrides the default). */
-  threshold?: number;
-  /** The fact-owning entity (default `user`). */
-  entity?: string;
-  /**
-   * The MEMORY ROTOR (opt-in, org-governed): when enabled, a cheap assembler LLM
-   * builds the worker's system prompt from the recalled memory instead of raw-
-   * injecting it (docs/recursive-memory.md). Off by default — a rotor with no
-   * `rotor.enabled` behaves exactly as before. The model is the org's chosen,
-   * catalog-governed assembler; the call rides the metered gateway.
-   */
-  rotor?: {
-    enabled?: boolean;
-    /** The reasoner / assembler model id (an org-supported catalog model). */
-    model?: string;
-    /** The ATTENTION loop's model (defaults to `model` when unset). */
-    attentionModel?: string;
-    /** The GOVERNOR / dream-loop model. */
-    governorModel?: string;
-    /** Cached mid-tier standards/rules text (the shipped baseline / org rules). */
-    standards?: string;
-  };
 }
 
 /** The pod's harness home: sandboxes + config dirs live under it. Writable by
@@ -239,7 +201,6 @@ export interface RunRequestBody {
   controlUrl?: unknown;
   runtimeToken?: unknown;
   maxTurns?: unknown;
-  memory?: unknown;
   context?: unknown;
 }
 
@@ -437,7 +398,6 @@ export function resolveRunConfig(
     attachments: parseAttachments(body.attachments),
     attachmentMaxBytes: intEnv(env.HARNESS_ATTACH_MAX_MB, 50) * 1024 * 1024,
     maxTurns: num(body.maxTurns) ?? intEnv(env.HARNESS_MAX_TURNS, 0),
-    ...(parseMemory(body.memory) ? { memory: parseMemory(body.memory) } : {}),
     ...(parseContext(body.context, env) ? { context: parseContext(body.context, env) } : {}),
   };
 }
@@ -459,22 +419,6 @@ function optIntEnv(raw: string | undefined): number | undefined {
   if (raw === undefined || raw === "") return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
-}
-
-/** Parse the loop's memory policy from the body. Returns undefined when nothing
- *  is specified, so the engine falls back to its defaults. */
-function parseMemory(v: unknown): MemoryPolicy | undefined {
-  if (v == null || typeof v !== "object") return undefined;
-  const o = v as Record<string, unknown>;
-  const p: MemoryPolicy = {};
-  if (typeof o.recall === "boolean") p.recall = o.recall;
-  if (typeof o.write === "boolean") p.write = o.write;
-  const tk = num(o.topK);
-  if (tk !== undefined) p.topK = tk;
-  if (typeof o.threshold === "number" && Number.isFinite(o.threshold)) p.threshold = o.threshold;
-  const e = str(o.entity);
-  if (e) p.entity = e;
-  return Object.keys(p).length ? p : undefined;
 }
 
 function str(v: unknown): string | undefined {

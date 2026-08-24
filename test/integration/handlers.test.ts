@@ -39,13 +39,6 @@ describe("write absorb enricher (§7.4)", () => {
 });
 
 describe("cascade tiered consolidation (§7.18)", () => {
-  it("splits recent/short from de-duplicated older turns", async () => {
-    const store = new InProcessStore();
-    for (const t of ["one", "two", "three", "two", "one", "four", "five"]) await store.addTurn(t);
-    const mem = buildBasicPlugins({ store }).memory;
-    // span 3 → short = last 3; older = [one,two,three,two] → distinct {one,two,three}=3, absorbed 1.
-    expect(await mem.cascade(3)).toEqual({ short: 3, mid: 3, long: 1 });
-  });
 });
 
 describe("plan typed-enum decode (§7.10)", () => {

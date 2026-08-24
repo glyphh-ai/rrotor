@@ -21,21 +21,6 @@ export function chatPack(opts: ChatOptions): ToolPack {
 
   const tools: ToolSpec[] = [
     {
-      name: "recall",
-      version: 1,
-      description: "Semantic recall over the session's recorded turns — the top-k most relevant snippets.",
-      effect: "reading",
-      grants: ["memory.read"],
-      input: { type: "object", properties: { query: { type: "string" }, top_k: { type: "number" } }, required: ["query"] },
-      output: { type: "object", properties: { hits: { type: "array" }, count: { type: "number" } } },
-      handler: async (args: Row) => {
-        const query = String(args.query ?? "");
-        const k = Math.max(1, Math.min(Number(args.top_k ?? 5), 20));
-        const hits = await memory.semanticRecall(query, k, 0.05);
-        return { hits, count: hits.length };
-      },
-    },
-    {
       name: "web.fetch",
       version: 1,
       description: "Fetch a URL and return its text body (bounded).",

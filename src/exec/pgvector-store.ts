@@ -16,18 +16,13 @@
  * golden replay returns recorded outputs from the tape (§5.4) and never re-reads the
  * stator, so live reads on fresh execution don't perturb it.
  *
- * ## The two vectors (docs/vector-stores.md)
- *
- * Turn embeddings (the ANN-searched vector, default dim 256) live in an
- * `hnsw`-indexed `vector` column — this is the pluggable vector store. The HDC
- * hypervector (dim ~10k) is per-entity and never cross-row searched, so it is not
+ * The MEMORY-PLANE half (turn embeddings, ANN recall) was cut with the memory
+ * plane (2026-08-24): this is now a plain-Postgres determinism store — events,
+ * facts, kv, result cache — org-schema friendly. Historical note: it was not
  * stored here (it is derivable by re-encoding facts); that persistence is a scoped
- * follow-up. The pgvector `hnsw`/`ivfflat` index caps at 2000 dims, so an embedding
- * dim above that **degrades to an unindexed exact scan** rather than failing (the
  * "degrade, never raise" rule).
  */
 
-import { HashEmbedder, type Embedder } from "./embedder.js";
 import {
   currentFillers,
   lookupCurrentFact,
@@ -60,18 +55,10 @@ export interface PgVectorOptions {
   client?: PgLike;
   /** Postgres connection string; lazy-loads `pg` when no client is injected. */
   url?: string;
-  /** The turn embedder (its `dim` sizes the `vector` column). Defaults to the
-   *  deterministic hash embedder; the fleet injects an HTTP one. */
-  embedder?: Embedder;
-  /** DEPRECATED shim: the turn-embedding dimension. Retained for back-compat —
-   *  when no `embedder` is given, builds a {@link HashEmbedder} of this width.
-   *  Defaults to 256. */
-  embedDim?: number;
 }
 
-function ddl(embedDim: number, indexable: boolean): string {
+function ddl(): string {
   return `
-CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS step_records (
   seq     BIGSERIAL PRIMARY KEY,
   run_id  TEXT NOT NULL,
@@ -108,18 +95,7 @@ CREATE TABLE IF NOT EXISTS kv (
   k TEXT PRIMARY KEY,
   v JSONB NOT NULL
 );
-CREATE TABLE IF NOT EXISTS turns (
-  seq       BIGSERIAL PRIMARY KEY,
-  text      TEXT NOT NULL,
-  embedding vector(${embedDim})
-);
-${indexable ? "CREATE INDEX IF NOT EXISTS ix_turns_embedding ON turns USING hnsw (embedding vector_cosine_ops);" : ""}
 `;
-}
-
-/** Render a vector literal for a `$n::vector` bind. */
-function vec(v: number[]): string {
-  return "[" + v.join(",") + "]";
 }
 
 /** A DB fact row → the shared {@link Fact} shape (matches SqliteStore's mapping). */
@@ -141,25 +117,16 @@ function rowToFact(r: Record<string, unknown>): Fact {
 
 export class PgVectorStore implements Stator {
   private readonly db: PgLike;
-  private readonly embedder: Embedder;
-  private readonly embedDim: number;
-  private readonly indexable: boolean;
 
-  private constructor(db: PgLike, embedder: Embedder) {
+  private constructor(db: PgLike) {
     this.db = db;
-    this.embedder = embedder;
-    this.embedDim = embedder.dim;
-    this.indexable = embedder.dim <= INDEX_DIM_CAP;
   }
 
-  /** Connect (or adopt an injected client) and create the schema. The column
-   *  width follows the embedder's `dim`; the legacy `embedDim` option still works
-   *  and maps to a {@link HashEmbedder} of that width for full back-compat. */
+  /** Connect (or adopt an injected client) and create the schema. */
   static async create(opts: PgVectorOptions = {}): Promise<PgVectorStore> {
-    const embedder = opts.embedder ?? new HashEmbedder(opts.embedDim ?? 256);
     const db = opts.client ?? (await connectPg(opts.url));
-    const store = new PgVectorStore(db, embedder);
-    await store.execScript(ddl(store.embedDim, store.indexable));
+    const store = new PgVectorStore(db);
+    await store.execScript(ddl());
     return store;
   }
 
@@ -270,12 +237,6 @@ export class PgVectorStore implements Stator {
     );
   }
 
-  // ── turns — the embedding corpus, stored with its ANN vector ────────────────
-  async addTurn(text: string): Promise<void> {
-    const v = vec(await this.embedder.embed(text));
-    await this.db.query("INSERT INTO turns (text, embedding) VALUES ($1, $2::vector)", [text, v]);
-  }
-
   async deleteFacts(match: { entity?: string; role?: string; filler?: string; key?: string }): Promise<number> {
     const cond: string[] = [];
     const args: string[] = [];
@@ -287,15 +248,6 @@ export class PgVectorStore implements Stator {
     if (!cond.length) return 0;
     const r = await this.db.query(`DELETE FROM facts WHERE ${cond.join(" AND ")}`, args);
     return (r as { rowCount?: number }).rowCount ?? 0;
-  }
-
-  async deleteTurns(text: string): Promise<number> {
-    const r = await this.db.query("DELETE FROM turns WHERE text = $1", [text]);
-    return (r as { rowCount?: number }).rowCount ?? 0;
-  }
-  async turns(): Promise<string[]> {
-    const rows = (await this.db.query("SELECT text FROM turns ORDER BY seq ASC")).rows;
-    return rows.map((r) => String(r.text));
   }
 
   // ── sessions — atomic ordinal assignment ────────────────────────────────────
@@ -316,28 +268,6 @@ export class PgVectorStore implements Stator {
     }
     const rows = (await this.db.query("SELECT ordinal FROM sessions WHERE id = $1", [id])).rows;
     return rows.length ? Number(rows[0].ordinal) : 0;
-  }
-
-  /** Whether turn embeddings are `hnsw`-indexed (false ⇒ exact-scan fallback). */
-  get vectorIndexed(): boolean {
-    return this.indexable;
-  }
-
-  /**
-   * ANN recall **in the database** (§7.7): turns by descending cosine similarity.
-   * Uses the `hnsw` index when present, else an exact scan (same SQL, planner
-   * picks). This is the large-corpus retrieval path.
-   */
-  async semanticRecallDb(query: string, topK = 8, threshold = 0.0): Promise<Array<{ text: string; score: number }>> {
-    const q = vec(await this.embedder.embed(query));
-    const rows = (await this.db.query(
-      "SELECT text, 1 - (embedding <=> $1::vector) AS score FROM turns " +
-        "WHERE embedding IS NOT NULL ORDER BY embedding <=> $1::vector LIMIT $2",
-      [q, topK],
-    )).rows;
-    return rows
-      .map((r) => ({ text: String(r.text), score: Number(r.score) }))
-      .filter((h) => h.score >= threshold);
   }
 
   /** Live writes are awaited directly, so there is nothing to flush; retained for

@@ -2,7 +2,7 @@
  * rotors.ts — the bundled rotor registry: `ref → document` for `sub-rotor`
  * dispatch (§7.19) and name-based CLI/embed resolution.
  *
- * A ref is a bundled name (`code`, `base-memory`) or its namespaced form
+ * A ref is a bundled name (`code`, `base`) or its namespaced form
  * (`glyphh/code`); it resolves to `rotors/<name>.rotor.yaml` in the package.
  * Documents are validated on first load and cached; an unknown or invalid ref
  * resolves to `undefined`, which the executor turns into a typed failure —

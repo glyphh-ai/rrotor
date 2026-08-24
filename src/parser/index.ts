@@ -174,7 +174,6 @@ const SPACE_REQUIRING_TYPES = new Set([
   "write",
   "retrieve.sql",
   "retrieve.kb",
-  "retrieve.vector",
   "gate",
 ]);
 

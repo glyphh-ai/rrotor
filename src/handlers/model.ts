@@ -91,7 +91,6 @@ export const modelHandler: StepHandler = {
 
     plugins.gateway.recordUsage(usage, lane);
     plugins.governance.recordUsage(usage);
-    plugins.memory.recordTurn(text); // short-term memory: the outbound completion
 
     // Hard grounding gate on the decoded output (§6.3).
     if (ground?.hard) {

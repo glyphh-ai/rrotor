@@ -28,12 +28,10 @@ const STEP_CAPABILITIES: Partial<Record<StepType, CapabilityName[]>> = {
   plan: ["models"],
   "retrieve.sql": ["memory"],
   "retrieve.kb": ["memory", "grounding"],
-  "retrieve.vector": ["memory"],
   "hdc.map": ["grounding"],
   write: ["memory"],
   gate: ["grounding"],
   assert: ["grounding"],
-  cascade: ["memory"],
   tool: ["connections"],
   escalate: ["models"],
 };

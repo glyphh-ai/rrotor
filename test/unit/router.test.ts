@@ -15,7 +15,7 @@ import type { WireEvent } from "../../src/transport/events.js";
 describe("bundledRotorResolver", () => {
   it("resolves bare and namespaced bundled names, validated", () => {
     expect(bundledRotorResolver("code")?.metadata.name).toBe("code");
-    expect(bundledRotorResolver("glyphh/base-memory")?.metadata.name).toBe("base-memory");
+    expect(bundledRotorResolver("glyphh/base")?.metadata.name).toBe("base");
   });
 
   it("unknown or path-shaped refs resolve to undefined", () => {

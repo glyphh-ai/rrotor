@@ -63,24 +63,9 @@ export interface GroundingPlugin extends Capability {
 
 // ── §3.2 memory / stator ────────────────────────────────────────────────────
 
-export interface SemanticHit {
-  text: string;
-  score: number;
-}
-
 export interface MemoryPlugin extends Capability {
   /** The closed op set (§7.5); NO model-generated SQL. */
   executeOp(op: string, params: Row, spaceId?: string): Promise<QueryResult>;
-  /** Embed + rank over recorded turns (§7.7); basic tier is deterministic-local
-   *  cosine over the hashed-ngram embedding. */
-  semanticRecall(query: string, topK: number, threshold: number): Promise<SemanticHit[]>;
-  /** Embed a batch of texts with the bound embedder (hash or neural). Lets recall
-   *  rank the extracted FACTS by the same semantic space as the turns, not just by
-   *  lexical overlap — so schema-on-write + embeddings compose. */
-  embedBatch(texts: string[]): Promise<number[][]>;
-  /** Record a turn into short-term memory (inbound prompt / outbound completion),
-   *  the corpus `semanticRecall` ranks over. */
-  recordTurn(text: string): Promise<void>;
   /** Append one exchange to a session's conversation window (bounded). */
   appendConversation(session: string, speaker: string, text: string): Promise<void>;
   /** The last `k` exchanges of a session, oldest→newest. */
@@ -107,8 +92,6 @@ export interface MemoryPlugin extends Capability {
   cacheGet(key: string, tick: number): Promise<Row | undefined>;
   cachePut(key: string, output: Row, opts: { ttlTicks?: number; scope?: string }): Promise<void>;
 
-  /** short → mid → long consolidation (§7.18) over the `span`-recent window. */
-  cascade(span?: number): Promise<{ short: number; mid: number; long: number }>;
 }
 
 // ── §3.3 models / inference lanes ───────────────────────────────────────────

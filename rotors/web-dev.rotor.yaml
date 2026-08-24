@@ -5,7 +5,6 @@
 #
 # It composes the base rotor's grounding cycle rather than reinventing it:
 #   recall    semantic recall of framework docs / prior snippets via a cached
-#             `retrieve.vector` step (§7.7) — the cache means repeat builds over
 #             the same corpus skip re-embedding + re-search.
 #   plan      typed constrained decode of the build steps (§7.10).
 #   scaffold  a deterministic `tool` step lays down the project skeleton (§7.16).
@@ -36,7 +35,7 @@ spec:
       type: string
       description: Optional target repo or workspace path.
 
-  # Required because `recall` (retrieve.vector) and `test` (gate) bind a space.
+  # Required because `test` (gate) binds a space.
   space:
     vector_dim: 10000
     encoder_seed: 42
@@ -54,34 +53,15 @@ spec:
     reducers:
       artifact: last-write-wins
 
-  entry: recall
+  entry: plan
 
   steps:
-    # ── recall ───────────────────────────────────────────────────────────────
-    # Semantic doc / snippet recall (RECALL, §7.7). The step-level `cache`
-    # memoizes the retrieval by query for a day at rotor scope — repeated builds
-    # over the same docs corpus reuse the result instead of re-embedding.
-    - id: recall
-      type: retrieve.vector
-      in: { query: $.inputs.task }
-      out: { hits: array }
-      cache:
-        key: $.inputs.task
-        ttl: 24h
-        scope: rotor
-      config:
-        top_k: 8
-        kind: query
-        threshold: 0.2
-        embed_model: bge-small-en
-      next: plan
-
     # ── plan ───────────────────────────────────────────────────────────────
     # Constrained decode of the build approach (§7.10): the model chooses an op
     # from a closed enum; an out-of-schema slot refuses.
     - id: plan
       type: plan
-      in: { question: $.inputs.task, context: $.steps.recall.hits }
+      in: { question: $.inputs.task }
       out: { plan: object }
       config:
         ops: [scaffold, edit, add_dependency, write_test, refactor]
@@ -110,7 +90,7 @@ spec:
     # stable system prefix is prompt-cached (§8).
     - id: code
       type: model
-      in: { plan: $.steps.plan.plan, docs: $.steps.recall.hits, files: $.steps.scaffold.files }
+      in: { plan: $.steps.plan.plan, files: $.steps.scaffold.files }
       out: { text: string, frames: array }
       config:
         lane: local

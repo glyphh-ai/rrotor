@@ -1,9 +1,9 @@
-# RECONSTRUCTED 2026-08-11 — the original runtime/ directory vanished from disk
-# (deleted to free disk space). This file was
-# rebuilt from `docker inspect` of the live containers so the stack stays
-# operable: service names, aliases, ports, env and the named volumes match the
-# running originals exactly. If the original repo turns up (git remote?), prefer
-# it over this reconstruction.
+# The LOCAL runtime — the deterministic loop + harness, memory plane CUT
+# (2026-08-24): no stator container, no redis, no embedder/enricher sidecars.
+# The loop's determinism store rides SQLite inside each pod; the HARNESS's
+# thread/transcript persistence rides the ORG'S OWN regional database — the
+# server compose's userstore (org schemas), the same store the control plane
+# reads. One database, all the org's data together.
 #
 # Build the app image first:
 #   (cd .. && docker build -t rrotor:dev .)
@@ -11,37 +11,6 @@
 name: runtime
 
 services:
-  stator:
-    image: pgvector/pgvector:pg16
-    # 64MB /dev/shm default starves Postgres parallel workers at real schema
-    # counts ("could not resize shared memory segment"); give it real room.
-    shm_size: 1gb
-    ports:
-      - "5434:5432"
-    environment:
-      POSTGRES_USER: glyphh
-      POSTGRES_PASSWORD: glyphh
-      POSTGRES_DB: rotor_stator
-    volumes:
-      - rotor_stator:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U glyphh -d rotor_stator"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6380:6379"
-    volumes:
-      - rotor_redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   rrotor:
     image: rrotor:dev
     ports:
@@ -49,13 +18,11 @@ services:
     environment:
       NODE_ENV: production
       PORT: "8080"
-      ROTOR_STATOR_BACKEND: pgvector
-      ROTOR_STATOR_URL: postgres://glyphh:glyphh@stator:5432/rotor_stator
-    depends_on:
-      stator:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      # Local-dev determinism store: SQLite in the pod's own tmp (the image
+      # runs as uid 1000; a named volume mounts root-owned and SQLITE_CANTOPENs).
+      # Cloud pods point this at the org schema in the regional userstore.
+      ROTOR_STATOR_BACKEND: sqlite
+      ROTOR_STATOR_URL: /tmp/rotor-stator.sqlite
     restart: unless-stopped
 
   rrotor-harness:
@@ -66,23 +33,15 @@ services:
       NODE_ENV: production
       PORT: "8080"
       ROTOR_MODE: harness
+      # Threads/transcripts persist into the org schemas of the SERVER's
+      # userstore (server/docker-compose.yml publishes it on 5435) — the same
+      # per-org store the control plane's tenantDb reads.
       ROTOR_STATOR_BACKEND: pgvector
-      ROTOR_STATOR_URL: postgres://glyphh:glyphh@stator:5432/rotor_stator
+      ROTOR_STATOR_URL: postgres://glyphh:glyphh@host.docker.internal:5435/user_store
       # Must MATCH the local server's SERVICE_TOKEN (server/.env) or every
       # introspection call is rejected and all user-bearer routes 401.
       ROTOR_AUTH_SERVICE_TOKEN: ${ROTOR_AUTH_SERVICE_TOKEN:-dev-only-service-token}
       ROTOR_AUTH_INTROSPECT_URL: http://host.docker.internal:3001/api/auth/introspect
       GLYPHH_GATEWAY_URL: http://host.docker.internal:3001/api/gateway
       HARNESS_MODEL: anthropic::claude-sonnet-5
-      ROTOR_ENRICH_MODEL_ID: qwen3-1.7b
-      ROTOR_ENRICH_MODEL_URL: http://host.docker.internal:8090/v1
-    depends_on:
-      stator:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  rotor_stator:
-  rotor_redis:

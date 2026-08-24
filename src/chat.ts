@@ -35,7 +35,7 @@ export function defaultChatRotorPath(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "rotors", "router.rotor.yaml");
 }
 
-/** Resolve a chat rotor argument: a path is used as-is; a bare name (`base-memory`)
+/** Resolve a chat rotor argument: a path is used as-is; a bare name (`base`)
  *  resolves to the bundled `rotors/<name>.rotor.yaml` when one exists. */
 export function resolveChatRotor(arg: string): string {
   if (arg.includes("/") || arg.includes("\\") || arg.endsWith(".yaml") || arg.endsWith(".yml")) return arg;

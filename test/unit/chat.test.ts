@@ -13,7 +13,7 @@ import { dirname, resolve } from "node:path";
 import { openChat, defaultChatRotorPath, resolveChatRotor } from "../../src/chat.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const MEMORY_ROTOR = resolve(ROOT, "rotors/base-memory.rotor.yaml");
+const BASE_ROTOR = resolve(ROOT, "rotors/base.rotor.yaml");
 
 const ESC = String.fromCharCode(27);
 const strip = (s: string) => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
@@ -63,22 +63,6 @@ describe("chat session", () => {
     }
   });
 
-  it("base-memory absorbs a fact in one turn and recalls it in the next", async () => {
-    const chat = await openChat(MEMORY_ROTOR);
-    try {
-      expect(chat.rotor).toBe("glyphh/base-memory@1.1.0");
-      let first = "";
-      let second = "";
-      await chat.turn("my name is Tim", (t) => (first += t));
-      await chat.turn("what is my name?", (t) => (second += t));
-      // The stub lane echoes the composed prompt, so the absorbed fact from
-      // turn 1 must surface in turn 2's memory block.
-      expect(strip(second)).toContain('"filler":"Tim"');
-    } finally {
-      await chat.close();
-    }
-  });
-
   it("rejects a missing rotor file at open time with a load error", async () => {
     await expect(openChat("/no/such/rotor.yaml")).rejects.toThrow(/cannot load/);
   });
@@ -88,7 +72,7 @@ describe("chat session", () => {
   });
 
   it("a bare name resolves to the bundled rotor; paths pass through", () => {
-    expect(resolveChatRotor("base-memory")).toMatch(/rotors[/\\]base-memory\.rotor\.yaml$/);
+    expect(resolveChatRotor("base")).toMatch(/rotors[/\\]base\.rotor\.yaml$/);
     expect(resolveChatRotor("./my.rotor.yaml")).toBe("./my.rotor.yaml");
     expect(resolveChatRotor("no-such-rotor")).toBe("no-such-rotor");
   });

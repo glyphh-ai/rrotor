@@ -129,7 +129,6 @@ const COMPOSITE: ReadonlySet<StepType> = new Set<StepType>(["loop", "parallel", 
 const CACHEABLE_DEFAULT: ReadonlySet<StepType> = new Set<StepType>([
   "retrieve.sql",
   "retrieve.kb",
-  "retrieve.vector",
   "hdc.map",
   "transform",
   "tool",
