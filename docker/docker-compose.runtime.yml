@@ -51,21 +51,6 @@ services:
       PORT: "8080"
       ROTOR_STATOR_BACKEND: pgvector
       ROTOR_STATOR_URL: postgres://glyphh:glyphh@stator:5432/rotor_stator
-      # ── workpanel app workers (slice 5a) ────────────────────────────────
-      # POST /app-worker/invoke + durable app cron. The pod needs a control-
-      # plane credential of its own (GLYPHH_RUNTIME_TOKEN — a gy_rk_ runtime
-      # token / API key for the org this pod serves) to mint gy_wk_ worker
-      # tokens and download bundles. Inject it at `docker compose up` time;
-      # unset, app workers stay OFF (service.ts logs loudly and disarms).
-      ROTOR_APP_WORKERS: "1"
-      GLYPHH_CONTROL_URL: http://host.docker.internal:3001
-      GLYPHH_RUNTIME_TOKEN: ${GLYPHH_RUNTIME_TOKEN:-}
-      ROTOR_APP_CACHE_DIR: /tmp/rrotor-app-bundles
-      # Caller auth on the data plane (incl. /app-worker/invoke): introspect
-      # bearers against the local control plane. The service token must MATCH
-      # the server's SERVICE_TOKEN (server/.env) or every call 401s.
-      ROTOR_AUTH_SERVICE_TOKEN: ${ROTOR_AUTH_SERVICE_TOKEN:-dev-only-service-token}
-      ROTOR_AUTH_INTROSPECT_URL: http://host.docker.internal:3001/api/auth/introspect
     depends_on:
       stator:
         condition: service_healthy
@@ -79,9 +64,6 @@ services:
       - "8081:8080"
     environment:
       NODE_ENV: production
-      # Recall over a large turn corpus materializes embedding vectors in JS;
-      # the default heap OOM'd mid-benchmark (fatal JSON-parse allocation).
-      NODE_OPTIONS: "--max-old-space-size=8192"
       PORT: "8080"
       ROTOR_MODE: harness
       ROTOR_STATOR_BACKEND: pgvector
@@ -94,14 +76,6 @@ services:
       HARNESS_MODEL: anthropic::claude-sonnet-5
       ROTOR_ENRICH_MODEL_ID: qwen3-1.7b
       ROTOR_ENRICH_MODEL_URL: http://host.docker.internal:8090/v1
-      # Neural embeddings (semantic recall lane) — LOCAL llama-server in
-      # --embedding mode. Mistral was rate-limited to death by per-turn embed
-      # calls (429s + connection resets at benchmark ingest volume); a local
-      # embedder has no ceiling and keeps the runtime self-contained.
-      ROTOR_EMBED_BACKEND: http
-      ROTOR_EMBED_URL: http://host.docker.internal:8092/v1/embeddings
-      ROTOR_EMBED_MODEL: qwen3-1.7b
-      ROTOR_EMBED_DIM: "2048"
     depends_on:
       stator:
         condition: service_healthy
