@@ -91,6 +91,13 @@ services:
       HARNESS_MODEL: anthropic::claude-sonnet-5
       ROTOR_ENRICH_MODEL_ID: qwen3-1.7b
       ROTOR_ENRICH_MODEL_URL: http://host.docker.internal:8090/v1
+      # Neural embeddings (semantic recall lane) — without these the stator
+      # falls back to the deterministic hash floor. Key injected at up-time.
+      ROTOR_EMBED_BACKEND: http
+      ROTOR_EMBED_URL: https://api.mistral.ai/v1/embeddings
+      ROTOR_EMBED_MODEL: mistral-embed
+      ROTOR_EMBED_DIM: "1024"
+      ROTOR_EMBED_API_KEY: ${ROTOR_EMBED_API_KEY:-}
     depends_on:
       stator:
         condition: service_healthy

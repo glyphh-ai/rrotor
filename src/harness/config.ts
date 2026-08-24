@@ -238,6 +238,7 @@ export interface RunRequestBody {
   gatewayUrl?: unknown;
   controlUrl?: unknown;
   runtimeToken?: unknown;
+  subdir?: unknown;
   maxTurns?: unknown;
   memory?: unknown;
   context?: unknown;
@@ -408,6 +409,22 @@ export function resolveRunConfig(
   // instead of an empty pod sandbox. Attachments still land in the POD's
   // sandbox — a run never litters the user's folder.
   const named = resolveWorkdir(body.workdir, opts.allowWorkdir === true);
+  // `subdir` — a RELATIVE folder INSIDE the session workspace (his ask,
+  // 2026-08-20: the source chip's cloud folder pick). Safe on any pod: it can
+  // only narrow the sandbox, never point outside it. Validated segments only;
+  // created on demand so a fresh space can be pointed at a folder-to-be.
+  let subdirred: string | undefined;
+  {
+    const rawSub = typeof body.subdir === "string" ? body.subdir.trim().replace(/^\/+|\/+$/g, "") : "";
+    if (rawSub) {
+      const parts = rawSub.split("/");
+      if (parts.some((p) => !p || p === "." || p === ".." || p.includes("\\"))) {
+        throw new BadRunRequest("`subdir` must be a relative path inside the workspace (no '..')");
+      }
+      subdirred = join(sandbox, ...parts);
+      try { mkdirSync(subdirred, { recursive: true }); } catch { /* fs error surfaces at run */ }
+    }
+  }
 
   const mcpServers = parseMcpServers(body.mcpServers);
   const images = parseImages(body.images);
@@ -431,7 +448,7 @@ export function resolveRunConfig(
       ? { controlUrl: (str(body.controlUrl) ?? env.GLYPHH_CONTROL_URL ?? "").replace(/\/+$/, "") }
       : {}),
     runtimeToken,
-    workdir: named ?? sandbox,
+    workdir: named ?? subdirred ?? sandbox,
     attachDir: sandbox,
     configDir,
     attachments: parseAttachments(body.attachments),
