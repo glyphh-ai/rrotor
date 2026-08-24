@@ -79,6 +79,9 @@ services:
       - "8081:8080"
     environment:
       NODE_ENV: production
+      # Recall over a large turn corpus materializes embedding vectors in JS;
+      # the default heap OOM'd mid-benchmark (fatal JSON-parse allocation).
+      NODE_OPTIONS: "--max-old-space-size=8192"
       PORT: "8080"
       ROTOR_MODE: harness
       ROTOR_STATOR_BACKEND: pgvector
@@ -91,13 +94,14 @@ services:
       HARNESS_MODEL: anthropic::claude-sonnet-5
       ROTOR_ENRICH_MODEL_ID: qwen3-1.7b
       ROTOR_ENRICH_MODEL_URL: http://host.docker.internal:8090/v1
-      # Neural embeddings (semantic recall lane) — without these the stator
-      # falls back to the deterministic hash floor. Key injected at up-time.
+      # Neural embeddings (semantic recall lane) — LOCAL llama-server in
+      # --embedding mode. Mistral was rate-limited to death by per-turn embed
+      # calls (429s + connection resets at benchmark ingest volume); a local
+      # embedder has no ceiling and keeps the runtime self-contained.
       ROTOR_EMBED_BACKEND: http
-      ROTOR_EMBED_URL: https://api.mistral.ai/v1/embeddings
-      ROTOR_EMBED_MODEL: mistral-embed
-      ROTOR_EMBED_DIM: "1024"
-      ROTOR_EMBED_API_KEY: ${ROTOR_EMBED_API_KEY:-}
+      ROTOR_EMBED_URL: http://host.docker.internal:8092/v1/embeddings
+      ROTOR_EMBED_MODEL: qwen3-1.7b
+      ROTOR_EMBED_DIM: "2048"
     depends_on:
       stator:
         condition: service_healthy
