@@ -24,6 +24,12 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # The glyph oracle suite runs the vendored Python canon as the referee
+      # for the TS port — numpy is a test dep (same as ci.yml).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
       - run: npm run build
       - run: npm run lint
       - run: npm test
