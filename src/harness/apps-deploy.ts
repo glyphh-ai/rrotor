@@ -58,9 +58,12 @@ function readJson(req: http.IncomingMessage, limit = 256 * 1024): Promise<Record
  *  failure is diagnosable; a hung build is killed rather than pinning the pod. */
 function runBuild(cwd: string, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
-    const child = spawn("sh", ["-c", "npm install --no-audit --no-fund && npm run build"], {
+    // The runtime image runs NODE_ENV=production, under which npm SKIPS
+    // devDependencies — where every Vite project keeps tsc/vite (his failure,
+    // 2026-08-25: "sh: tsc: not found"). Builds are development acts.
+    const child = spawn("sh", ["-c", "npm install --no-audit --no-fund --include=dev && npm run build"], {
       cwd,
-      env: { ...env, CI: "1", npm_config_yes: "true" },
+      env: { ...env, CI: "1", NODE_ENV: "development", npm_config_yes: "true" },
     });
     let tail = "";
     const grab = (c: Buffer): void => { tail = (tail + c.toString()).slice(-6000); };
