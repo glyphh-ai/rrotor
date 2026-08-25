@@ -131,6 +131,15 @@ export async function handleAppsDeploy(
     workdir = sessionWorkspace(env, segment);
   }
 
+  // A missing workspace must say so — spawn() reports a nonexistent cwd as a
+  // baffling "spawn sh ENOENT" otherwise (his bug, 2026-08-25: a stale pod
+  // without fromSource fell through here with no session workspace).
+  try { await fsp.access(workdir); }
+  catch {
+    reply(res, 200, { ok: false, stage: "workspace", error: `no workspace at the pod for this build — build from a session, or use fromSource (source-of-record) with a current runtime image` });
+    return;
+  }
+
   // 1. build
   const built = await runBuild(workdir, env);
   if (!built.ok) { reply(res, 200, { ok: false, stage: "build", error: built.error }); return; }
