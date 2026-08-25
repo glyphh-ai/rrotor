@@ -86,6 +86,7 @@ import { runHarness } from "./engine.js";
 import type { EngineDeps } from "./engine.js";
 import { ThreadRecorder, FrameTape, threadStoreFromEnv, warnIfUnrecordable, parseThreadMsgs, parseMode } from "./threads.js";
 import type { ThreadStore, ThreadPut } from "./threads.js";
+import { recallFacts, browseFacts, forgetFact } from "../facts/server.js";
 import { handleFsRequest } from "./fs-routes.js";
 
 const DEFAULT_PORT = 8080;
@@ -473,6 +474,30 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
   // ── the WORKSPACE FS API (Files/Diff/Editor panels; owner-scoped) ────────────
   if (path.startsWith("/fs/")) {
     handleFsRequest(authn, req, res, method, path, opts.env ?? process.env);
+    return;
+  }
+
+  // ── MEMORY over HTTP — the fact substrate (his order, 2026-08-25) ───────────
+  // The desktop's ada_recall/browse/forget used to POST /stator/*, which no
+  // runtime served (404 every time). ONE memory plane: they land here, on the
+  // same glyph ledger the per-turn fact block is drawn from.
+  const factsMatch = /^\/facts\/(recall|browse|forget)$/.exec(path);
+  if (method === "POST" && factsMatch) {
+    const op = factsMatch[1]!;
+    const principal = authn.principal;
+    if (!principal) { sendJson(res, 401, { error: "unauthorized", detail: "memory needs an introspected session" }); return; }
+    readBody(req)
+      .then(async (raw) => {
+        const body = (raw.length ? JSON.parse(raw) : {}) as Record<string, unknown>;
+        if (op === "recall") {
+          sendJson(res, 200, await recallFacts(principal, String(body.query ?? ""), Number(body.topK) || 5));
+        } else if (op === "browse") {
+          sendJson(res, 200, await browseFacts(principal, Number(body.limit) || 200));
+        } else {
+          sendJson(res, 200, await forgetFact(principal, String(body.id ?? "")));
+        }
+      })
+      .catch((e: unknown) => sendJson(res, 500, { error: "memory-failed", detail: (e as Error).message }));
     return;
   }
 

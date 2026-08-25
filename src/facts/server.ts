@@ -351,6 +351,53 @@ function factLine(row: GlyphRow): string {
  * exchange text (the tail of the client's resent history). Null when the
  * ledger is unavailable or empty — the turn simply runs without memory.
  */
+/**
+ * The HTTP-facing memory surface (his order, 2026-08-25). The desktop's
+ * ada_recall/ada_browse rode `/stator/*`, which no runtime ever served — a
+ * 404 every time. ONE memory plane: those calls now land on the FACT
+ * SUBSTRATE, the same ledger the per-turn fact block is drawn from. No second
+ * vector store, no competing recall.
+ */
+export async function recallFacts(
+  principal: Principal,
+  query: string,
+  topK = 5,
+): Promise<{ block: string; facts: unknown[] }> {
+  const s = await store();
+  if (!s) return { block: "", facts: [] };
+  const p = { orgId: principal.orgId, userId: principal.userId };
+  const { glyph } = encodeFact({ name: query.slice(0, 120) || "probe", facts: { query: { text: query } } });
+  const near = await neighbors(s, p, glyph.globalCortex.data, DEFAULT_THRESHOLD, Math.max(1, Math.min(20, topK)));
+  const facts = near.map((n) => asFactJson(n.row, n.cos));
+  const block = near.length
+    ? near.map((n) => `- ${n.row.name}: ${JSON.stringify(n.row.concept)} (${n.cos.toFixed(3)})`).join("\n")
+    : "";
+  return { block, facts };
+}
+
+/** Every live fact for the caller — the REVIEW surface (ada_browse). */
+export async function browseFacts(principal: Principal, limit = 200): Promise<{ block: string; facts: unknown[] }> {
+  const s = await store();
+  if (!s) return { block: "", facts: [] };
+  const rows = await s.live({ orgId: principal.orgId, userId: principal.userId }, limit);
+  return {
+    block: rows.map((r) => `- ${r.id} · ${r.name}: ${JSON.stringify(r.concept)}`).join("\n"),
+    facts: rows.map((r) => asFactJson(r, 1)),
+  };
+}
+
+/** Tombstone a fact by id (ada_forget). */
+export async function forgetFact(principal: Principal, id: string): Promise<{ forgotten: boolean }> {
+  const s = await store();
+  if (!s) return { forgotten: false };
+  const p = { orgId: principal.orgId, userId: principal.userId };
+  const existing = (await s.byIds(p, [id]))[0];
+  if (!existing) return { forgotten: false };
+  await s.tombstone(p, id);
+  indexes.delete(principal.orgId);
+  return { forgotten: true };
+}
+
 export async function renderFactBlock(principal: Principal, exchangeText: string): Promise<string | null> {
   const s = await store();
   if (!s) return null;
