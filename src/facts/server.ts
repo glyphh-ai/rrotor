@@ -28,7 +28,7 @@ import { EncoderConfig, type LayerConfig } from "../glyph/config.js";
 import { concept, type Glyph } from "../glyph/types.js";
 import { cosineSimilarity, type Bipolar } from "../glyph/ops.js";
 import { UNIVERSAL_SCHEMA, sanitizeUniversal } from "../glyph/universal-schema.js";
-import { ALL_PRIMES } from "../exec/glyph/primes.js";
+import { ALL_PRIMES, decompose } from "../exec/glyph/primes.js";
 import { FactTree } from "../glyph/fact-tree.js";
 import { GlyphStore, glyphStoreFromEnv, type GlyphRow } from "./store.js";
 import { log } from "../obs/logger.js";
@@ -83,7 +83,7 @@ export function setFactsStoreForTests(p: Promise<GlyphStore | null>): void {
 
 interface FactInput { name: string; facts: unknown }
 
-function encodeFact(input: FactInput): { glyph: Glyph; clean: Record<string, Record<string, string>> } {
+function encodeFact(input: FactInput): { glyph: Glyph; clean: Record<string, Record<string, string>>; primes: string[] } {
   const clean = sanitizeUniversal(input.facts);
   const attributes: Record<string, string> = {};
   for (const roles of Object.values(clean)) for (const [role, value] of Object.entries(roles)) attributes[role] = value;
@@ -91,7 +91,10 @@ function encodeFact(input: FactInput): { glyph: Glyph; clean: Record<string, Rec
     throw new Error("facts must fill at least one universal slot — layers entity/perceptual/spatial/temporal/relational/quantitative/epistemic, schema-valid roles only");
   }
   const glyph = encoder.encode(concept({ name: input.name, attributes, metadata: {} }));
-  return { glyph, clean };
+  // Primes STAMPED AT WRITE TIME (the doctrine): recall selects by the
+  // exchange's own primes against these.
+  const primes = decompose(`${input.name} ${Object.values(attributes).join(" ")}`);
+  return { glyph, clean, primes };
 }
 
 async function orgIndex(s: GlyphStore, p: Principal): Promise<Map<string, Bipolar>> {
@@ -220,13 +223,13 @@ export function buildFactsServer(principal: Principal): McpServer {
         }
         case "create_fact": {
           const name = String(args.name ?? "");
-          const { glyph, clean } = encodeFact({ name, facts: args.facts });
+          const { glyph, clean, primes } = encodeFact({ name, facts: args.facts });
           const scope = args.scope === "user" ? "user" as const : "org" as const;
           const confidence = clampConfidence(args.confidence);
           await s.insert({ orgId: p.orgId, userId: p.userId }, {
             id: glyph.identifier, name, scope,
             concept: { name, facts: clean },
-            confidence, citations: [], derived: false,
+            confidence, primes, citations: [], derived: false,
             cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
           });
           indexes.get(p.orgId)?.set(glyph.identifier, glyph.globalCortex.data);
@@ -243,14 +246,14 @@ export function buildFactsServer(principal: Principal): McpServer {
           const supersedes = String(args.supersedes ?? "");
           if (!supersedes) return errText("update_fact needs { supersedes } — the old fact's id");
           const name = String(args.name ?? "");
-          const { glyph, clean } = encodeFact({ name, facts: args.facts });
+          const { glyph, clean, primes } = encodeFact({ name, facts: args.facts });
           const confidence = clampConfidence(args.confidence);
           const old = (await s.byIds({ orgId: p.orgId, userId: p.userId }, [supersedes]))[0];
           if (!old) return errText(`no such fact: ${supersedes}`);
           await s.insert({ orgId: p.orgId, userId: p.userId }, {
             id: glyph.identifier, name: name || old.name, scope: old.scope,
             concept: { name: name || old.name, facts: clean },
-            confidence, citations: [supersedes], derived: old.derived,
+            confidence, primes, citations: [supersedes], derived: old.derived,
             cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
           });
           await s.supersede({ orgId: p.orgId, userId: p.userId }, supersedes, glyph.identifier);
@@ -271,7 +274,7 @@ export function buildFactsServer(principal: Principal): McpServer {
           const name = String(args.name ?? "");
           const citations = (Array.isArray(args.citations) ? args.citations : []).map(String).filter(Boolean);
           if (!citations.length) return errText("build_fact_tree needs { citations } — the source glyph ids the derivation reasons from");
-          const { glyph, clean } = encodeFact({ name, facts: args.facts });
+          const { glyph, clean, primes } = encodeFact({ name, facts: args.facts });
           const confidence = clampConfidence(args.confidence);
           const sources = await s.byIds({ orgId: p.orgId, userId: p.userId }, citations);
           if (sources.length !== citations.length) {
@@ -281,7 +284,7 @@ export function buildFactsServer(principal: Principal): McpServer {
           await s.insert({ orgId: p.orgId, userId: p.userId }, {
             id: glyph.identifier, name, scope: "org",
             concept: { name, facts: clean },
-            confidence, citations, derived: true,
+            confidence, primes, citations, derived: true,
             cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
           });
           indexes.get(p.orgId)?.set(glyph.identifier, glyph.globalCortex.data);
@@ -318,4 +321,67 @@ function clampConfidence(v: unknown): number {
 /** True when NSM discipline is worth nudging — exported for the prompt layer. */
 export function nsmPrimeCount(): number {
   return ALL_PRIMES.size;
+}
+
+// ── THE INJECTION HALF: the fixed-shape fact block every forward pass opens
+// with. Selection is DETERMINISTIC and sub-millisecond (no model call): the
+// exchange's own primes — decomposed from the newest turns of the resent
+// history — select and rank the org's facts ("the prompt's own primes select
+// what comes back; that grouping is the fact tree"), with confidence and
+// recency breaking ties, and the highest-confidence standing facts always in
+// contention (the "things I repeat constantly" cure). The block's SHAPE is
+// constant: stable header, ≤ FACT_BLOCK_MAX facts, one line each, hard char
+// cap — a fixed-size window whose CONTENT redistributes, never grows. ──
+
+const FACT_BLOCK_MAX = 12;
+const FACT_BLOCK_CHAR_CAP = 2400;
+const FACT_BLOCK_HEADER = "## Org facts (glyphh ledger — cite ids when you rely on one)";
+
+function factLine(row: GlyphRow): string {
+  const c = row.concept as { facts?: Record<string, Record<string, string>> };
+  const slots: string[] = [];
+  for (const [layer, roles] of Object.entries(c.facts ?? {})) {
+    for (const [role, value] of Object.entries(roles)) slots.push(`${layer}.${role}=${value}`);
+  }
+  return `- [${row.id}] (conf ${row.confidence.toFixed(2)}${row.derived ? ", derived" : ""}) ${slots.join("; ")}`;
+}
+
+/**
+ * Render the per-turn fact block for one principal, selected against the
+ * exchange text (the tail of the client's resent history). Null when the
+ * ledger is unavailable or empty — the turn simply runs without memory.
+ */
+export async function renderFactBlock(principal: Principal, exchangeText: string): Promise<string | null> {
+  const s = await store();
+  if (!s) return null;
+  try {
+    const rows = await s.live({ orgId: principal.orgId, userId: principal.userId });
+    if (!rows.length) return null;
+    const wanted = new Set(decompose(exchangeText));
+    const now = Date.now();
+    const scored = rows.map((row) => {
+      const overlap = row.primes.reduce((n, pr) => n + (wanted.has(pr) ? 1 : 0), 0);
+      const ageDays = Math.max(0, (now - Date.parse(row.createdAt)) / 86_400_000);
+      // Prime overlap dominates; confidence separates peers; a gentle recency
+      // decay keeps stale invariants from crowding out fresher ones forever.
+      const score = overlap * 10 + row.confidence * 5 - Math.min(ageDays / 30, 3);
+      return { row, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    const lines: string[] = [FACT_BLOCK_HEADER];
+    let chars = FACT_BLOCK_HEADER.length;
+    let taken = 0;
+    for (const { row } of scored) {
+      if (taken >= FACT_BLOCK_MAX) break;
+      const line = factLine(row);
+      if (chars + line.length + 1 > FACT_BLOCK_CHAR_CAP) continue;
+      lines.push(line);
+      chars += line.length + 1;
+      taken++;
+    }
+    return taken > 0 ? lines.join("\n") : null;
+  } catch (err) {
+    log.warn("fact block render failed (turn runs without memory)", { detail: (err as Error).message });
+    return null;
+  }
 }

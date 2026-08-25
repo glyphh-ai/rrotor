@@ -28,6 +28,9 @@ export interface GlyphRow {
   userId: string | null;
   concept: unknown;
   confidence: number;
+  /** NSM primes decomposed from the concept's values AT WRITE TIME — the
+   *  recall selector ("the prompt's own primes select what comes back"). */
+  primes: string[];
   citations: string[];
   derived: boolean;
   cortexB64: string;
@@ -53,6 +56,7 @@ CREATE TABLE IF NOT EXISTS glyphs (
   deleted_at    TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE glyphs ADD COLUMN IF NOT EXISTS primes JSONB NOT NULL DEFAULT '[]';
 CREATE INDEX IF NOT EXISTS glyphs_live_ix ON glyphs (org_id, created_at DESC);
 `;
 
@@ -64,7 +68,7 @@ const affected = (r: unknown): number => {
 
 interface Row {
   id: string; name: string; scope: string; user_id: string | null; concept: unknown;
-  confidence: number; citations: unknown; derived: boolean; cortex: Buffer;
+  confidence: number; primes: unknown; citations: unknown; derived: boolean; cortex: Buffer;
   superseded_by: string | null; created_at: string;
 }
 
@@ -75,6 +79,7 @@ const toRow = (r: Row): GlyphRow => ({
   userId: r.user_id,
   concept: r.concept,
   confidence: Number(r.confidence),
+  primes: Array.isArray(r.primes) ? (r.primes as string[]).map(String) : [],
   citations: Array.isArray(r.citations) ? (r.citations as string[]).map(String) : [],
   derived: !!r.derived,
   cortexB64: Buffer.from(r.cortex).toString("base64"),
@@ -116,15 +121,15 @@ export class GlyphStore {
    *  bridge stamps it; the ledger never invents identity. */
   insert(p: GlyphPrincipal, g: {
     id: string; name: string; scope: "org" | "user"; concept: unknown;
-    confidence: number; citations: string[]; derived: boolean; cortexB64: string;
+    confidence: number; primes: string[]; citations: string[]; derived: boolean; cortexB64: string;
   }): Promise<void> {
     return this.scoped(p.orgId, async () => {
       await this.db.query(
-        `INSERT INTO glyphs (id, org_id, user_id, name, scope, concept, confidence, citations, derived, cortex)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9,$10)`,
+        `INSERT INTO glyphs (id, org_id, user_id, name, scope, concept, confidence, primes, citations, derived, cortex)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11)`,
         [g.id, p.orgId, g.scope === "user" ? p.userId : null, g.name, g.scope,
-         JSON.stringify(g.concept ?? {}), g.confidence, JSON.stringify(g.citations ?? []),
-         g.derived, Buffer.from(g.cortexB64, "base64")],
+         JSON.stringify(g.concept ?? {}), g.confidence, JSON.stringify(g.primes ?? []),
+         JSON.stringify(g.citations ?? []), g.derived, Buffer.from(g.cortexB64, "base64")],
       );
     });
   }
@@ -156,7 +161,7 @@ export class GlyphStore {
   live(p: GlyphPrincipal, limit = 2000): Promise<GlyphRow[]> {
     return this.scoped(p.orgId, async () => {
       const r = await this.db.query(
-        `SELECT id, name, scope, user_id, concept, confidence, citations, derived, cortex, superseded_by, created_at
+        `SELECT id, name, scope, user_id, concept, confidence, primes, citations, derived, cortex, superseded_by, created_at
            FROM glyphs WHERE org_id = $1 AND superseded_by IS NULL AND deleted_at IS NULL
           ORDER BY created_at DESC LIMIT $2`,
         [p.orgId, limit],
@@ -170,7 +175,7 @@ export class GlyphStore {
     if (!ids.length) return Promise.resolve([]);
     return this.scoped(p.orgId, async () => {
       const r = await this.db.query(
-        `SELECT id, name, scope, user_id, concept, confidence, citations, derived, cortex, superseded_by, created_at
+        `SELECT id, name, scope, user_id, concept, confidence, primes, citations, derived, cortex, superseded_by, created_at
            FROM glyphs WHERE org_id = $1 AND id = ANY($2)`,
         [p.orgId, ids],
       );

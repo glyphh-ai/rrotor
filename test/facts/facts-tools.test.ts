@@ -21,7 +21,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { PgLike } from "../../src/exec/pgvector-store.js";
 import type { Principal } from "../../src/auth/introspect.js";
 import { GlyphStore } from "../../src/facts/store.js";
-import { buildFactsServer, setFactsStoreForTests } from "../../src/facts/server.js";
+import { buildFactsServer, setFactsStoreForTests, renderFactBlock } from "../../src/facts/server.js";
 
 const ORG_A: Principal = { orgId: "org-aaaa", userId: "user-1" } as Principal;
 const ORG_B: Principal = { orgId: "org-bbbb", userId: "user-2" } as Principal;
@@ -182,6 +182,34 @@ describe("glyphh_facts — the six tools over the org ledger", () => {
   it("another org sees nothing", async () => {
     const s = await call(clientB, "search_facts", { facts: DEPLOY_FACT, threshold: 0.3 });
     expect((s.json as { facts: unknown[] }).facts).toHaveLength(0);
+  });
+
+  it("renderFactBlock — the exchange's primes select; the shape is constant", async () => {
+    // Two fresh facts on distinct topics for the selector to choose between.
+    await call(clientA, "create_fact", {
+      name: "chris-wants-ci", confidence: 0.9,
+      facts: { entity: { name: "chris-wants-ci", kind: "rule" }, relational: { subject: "chris", predicate: "WANT", object: "deploy DO happen through ci" } },
+    });
+    await call(clientA, "create_fact", {
+      name: "office-location", confidence: 0.6,
+      facts: { entity: { name: "office-location", kind: "place" }, spatial: { location: "austin" }, relational: { possessor: "glyphh" } },
+    });
+
+    const block = await renderFactBlock(ORG_A, "the user wants to know how deploys happen and because of what");
+    expect(block).toBeTruthy();
+    const lines = block!.split("\n");
+    expect(lines[0]).toContain("## Org facts (glyphh ledger");
+    expect(lines.length).toBeLessThanOrEqual(13); // header + FACT_BLOCK_MAX
+    // The WANT/DO/HAPPEN/BECAUSE exchange selects the ci rule above the place.
+    const ciIdx = lines.findIndex((l) => l.includes("chris-wants-ci"));
+    const officeIdx = lines.findIndex((l) => l.includes("office-location"));
+    expect(ciIdx).toBeGreaterThan(0);
+    expect(officeIdx === -1 || officeIdx > ciIdx).toBe(true);
+    // Every fact line carries its citable id and confidence.
+    expect(lines[ciIdx]).toMatch(/\[chris-wants-ci@.+#v1\] \(conf 0\.90\)/);
+
+    // An empty org gets NO block, not an empty shell.
+    expect(await renderFactBlock({ orgId: "org-empty", userId: "u" } as Principal, "anything")).toBeNull();
   });
 
   it("schema-invalid facts are refused with the shape named", async () => {

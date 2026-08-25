@@ -42,7 +42,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
 import { appsServerRef, withPublishPolicy, expandBuildAppInput, expandSaveFileInput, BUILD_APP_TOOL, SAVE_FILE_TOOL } from "./glyphh-apps.js";
-import { buildFactsServer } from "../facts/server.js";
+import { buildFactsServer, renderFactBlock } from "../facts/server.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
 import type { MaterializedAttachment } from "./sandbox.js";
@@ -75,6 +75,10 @@ export interface EngineDeps {
    *  glyphh_facts server mounts and the fact ledger is org/user scoped to
    *  this principal. Absent (auth off) → no fact tools, deliberately. */
   principal?: Principal;
+  /** THE INJECTION HALF: the fixed-shape org-fact block for this turn,
+   *  rendered by runHarness (selection is deterministic prime-overlap against
+   *  the last exchange — sub-ms, no model call). Rides the system prompt. */
+  factBlock?: string | null;
 }
 
 /** How long the turn's price lookup may take before we give up on it. The
@@ -364,6 +368,14 @@ function withFactsPolicy(system: string, enabled: boolean): string {
   return system ? `${system}\n\n${FACTS_POLICY}` : FACTS_POLICY;
 }
 
+/** Append the turn's rendered fact block — a constant-shape window (stable
+ *  header, hard caps) so its cost never grows and the model learns where the
+ *  org's facts live. */
+function withFactBlock(system: string, block: string | null): string {
+  if (!block || system.includes("## Org facts (glyphh ledger")) return system;
+  return system ? `${system}\n\n${block}` : block;
+}
+
 /** Flatten a tool_result content payload to displayable text (CLI port). */
 function flattenResult(content: unknown): string {
   if (typeof content === "string") return content;
@@ -423,7 +435,7 @@ export function buildQueryArgs(
     options: {
       cwd: cfg.workdir,
       ...(cfg.model ? { model: cfg.model } : {}),
-      systemPrompt: withFactsPolicy(apps ? withPublishPolicy(system) : system, !!facts),
+      systemPrompt: withFactBlock(withFactsPolicy(apps ? withPublishPolicy(system) : system, !!facts), deps.factBlock ?? null),
       settingSources: [],
       // chat = a tool-less streamed turn; cowork/code = the sandbox toolset
       // plus any caller-lent HTTP MCP servers (streamable-http — the desktop's
@@ -501,6 +513,14 @@ export function buildQueryArgs(
  */
 export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig, deps: EngineDeps = {}, principal?: Principal): Promise<void> {
   if (principal && !deps.principal) deps = { ...deps, principal };
+  // THE INJECTION HALF: select this turn's fact block against the newest
+  // exchange (last assistant reply + the new prompt — the client resends
+  // history, so t-1 is right here). Deterministic prime-overlap: microseconds,
+  // no model call; failures degrade to a memory-less turn, never a dead one.
+  if (deps.principal && cfg.mode !== "chat" && deps.factBlock === undefined) {
+    const tail = cfg.history.slice(-2).map((t) => t.content).join("\n");
+    deps = { ...deps, factBlock: await renderFactBlock(deps.principal, `${tail}\n${cfg.prompt}`) };
+  }
   const runLog = log.child({ run_id: cfg.runId, session: cfg.sessionId || undefined });
   const secrets = [cfg.runtimeToken];
   const fail = (message: string): void => {

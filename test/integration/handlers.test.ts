@@ -38,9 +38,6 @@ describe("write absorb enricher (§7.4)", () => {
   });
 });
 
-describe("cascade tiered consolidation (§7.18)", () => {
-});
-
 describe("plan typed-enum decode (§7.10)", () => {
   const classify = (q: string, ops: string[]) => new BasicModels().classify(q, ops);
 

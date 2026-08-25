@@ -58,9 +58,6 @@ describe("pgvector stator — tier/session parity", () => {
   });
 });
 
-describe("pgvector stator — durable hydrate across a restart", () => {
-});
-
 describe("pgvector stator — atomic supersede+insert (CTE)", () => {
   it("keeps exactly one current row per key across repeated supersessions", async () => {
     const store = await PgVectorStore.create({ client: await pglite() });
@@ -103,9 +100,6 @@ describe("pgvector stator — live-read edge cases", () => {
   });
 });
 
-describe("pgvector stator — live cross-pod visibility (mirror dropped)", () => {
-});
-
 describe("pgvector stator — event history, cache and kv are durable", () => {
   it("hydrates the run tape, result cache and kv across a restart", async () => {
     const db = await pglite();
@@ -146,8 +140,3 @@ describe("pgvector stator — lifecycle", () => {
   });
 });
 
-describe("pgvector stator — ANN recall in the database", () => {
-});
-
-describe("pgvector stator — dim-cap degrades to an exact scan", () => {
-});
