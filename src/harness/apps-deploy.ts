@@ -21,8 +21,12 @@
 
 import { spawn } from "node:child_process";
 import type * as http from "node:http";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { sessionWorkspace, workspaceSegment } from "./config.js";
 import { expandBuildAppInput, runtimeMcpUrl } from "./glyphh-apps.js";
+import { pullSource } from "./source-sync.js";
 
 const BUILD_TIMEOUT_MS = 8 * 60 * 1000;
 
@@ -93,15 +97,39 @@ export async function handleAppsDeploy(
   if (!slug) { reply(res, 400, { error: "bad-slug", detail: "slug is required" }); return; }
   const distDir = typeof body.distDir === "string" && body.distDir.trim() ? body.distDir.trim() : "dist";
 
-  // The SAME workspace key /fs/* and every turn resolve: a shared-pod owner+thread,
-  // else an explicit session binding. No caller-named absolute path (guards traversal).
-  const segment = workspaceSegment({
-    sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
-    owner: principal.userId,
-    threadId: typeof body.threadId === "string" ? body.threadId : undefined,
-    runId: "",
-  });
-  const workdir = sessionWorkspace(env, segment);
+  let workdir: string;
+  if (body.fromSource === true) {
+    // SOURCE-OF-RECORD build: no session workspace at all — hydrate a scratch
+    // folder from the app's R2 snapshot head (the same chain push_source
+    // publishes) and build THAT. This is how a surface with no pod binding
+    // (the web's Releases tab) ships: the source is the record, not a machine.
+    const gatewayUrl = String(env.GLYPHH_GATEWAY_URL ?? "").trim();
+    const controlUrl = String(env.GLYPHH_CONTROL_URL ?? "").trim();
+    let origin: string | null = null;
+    try { origin = new URL(controlUrl || gatewayUrl).origin; } catch { origin = null; }
+    if (!origin) { reply(res, 500, { error: "no-control", detail: "no control-plane url configured" }); return; }
+    workdir = await mkdtemp(join(tmpdir(), `src-build-`));
+    try {
+      const pulled = await pullSource({ workdir, controlUrl: origin, token: bearer }, slug);
+      if (pulled.includes("no source snapshot")) {
+        reply(res, 200, { ok: false, stage: "source", error: `'${slug}' has no source snapshot yet — build once from the machine (or session) that holds the project, which publishes the source of record.` });
+        return;
+      }
+    } catch (e) {
+      reply(res, 200, { ok: false, stage: "source", error: (e as Error).message });
+      return;
+    }
+  } else {
+    // The SAME workspace key /fs/* and every turn resolve: a shared-pod owner+thread,
+    // else an explicit session binding. No caller-named absolute path (guards traversal).
+    const segment = workspaceSegment({
+      sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
+      owner: principal.userId,
+      threadId: typeof body.threadId === "string" ? body.threadId : undefined,
+      runId: "",
+    });
+    workdir = sessionWorkspace(env, segment);
+  }
 
   // 1. build
   const built = await runBuild(workdir, env);
