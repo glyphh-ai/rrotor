@@ -78,7 +78,7 @@ import type { Introspector, Principal, AuthDecision } from "../auth/introspect.j
 import { acceptKey, encodeFrame, FrameDecoder } from "../transport/ws.js";
 import { HARNESS_WIRE_VERSION } from "./frames.js";
 import type { WireFrame } from "./frames.js";
-import { resolveRunConfig, BadRunRequest, isPermissionMode } from "./config.js";
+import { resolveRunConfig, BadRunRequest, isPermissionMode, normalizePermissionMode } from "./config.js";
 import type { RunRequestBody } from "./config.js";
 import { handleAppsDeploy } from "./apps-deploy.js";
 import { HarnessSession, mintRunId } from "./session.js";
@@ -458,11 +458,12 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
             return;
           }
           if (!isPermissionMode(body.permission)) {
-            sendJson(res, 400, { error: "bad-permission", detail: "`permission` must be one of ask/plan/acceptEdits/auto/bypass" });
+            sendJson(res, 400, { error: "bad-permission", detail: "`permission` must be one of ask/plan/acceptEdits/auto" });
             return;
           }
-          session.setPermission(body.permission);
-          sendJson(res, 200, { ok: true, permission: body.permission });
+          const permission = normalizePermissionMode(String(body.permission));
+          session.setPermission(permission);
+          sendJson(res, 200, { ok: true, permission });
         })
         .catch(() => sendJson(res, 400, { error: "read-error", detail: "could not read request body" }));
       return;

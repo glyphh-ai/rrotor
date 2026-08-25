@@ -39,10 +39,9 @@ export const SAVE_FILE_TOOL = `mcp__${APPS_SERVER_NAME}__save_file`;
 
 /** save_file { path }: the POD reads the workspace file and inlines it as
  *  contentBase64 — the model passes a path, never bytes, and the SERVER
- *  contract ({ name, contentBase64, mime }) is unchanged. Same 1MB-bound
- *  reality as build_app: /api/runtime/mcp parses JSON at the default 1MB,
- *  so the base64 payload is capped ~700KB and the error names the limit. */
-const SAVE_FILE_MAX_BYTES = 700 * 1024;
+ *  contract ({ name, contentBase64, mime }) is unchanged. Bounded by the
+ *  control plane's 16 MB limit on /api/runtime/mcp (base64 ≈ 4/3 raw). */
+const SAVE_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const MIME_BY_EXT: Record<string, string> = {
   md: "text/markdown", txt: "text/plain", html: "text/html", css: "text/css",
   js: "text/javascript", json: "application/json", csv: "text/csv",
@@ -167,7 +166,7 @@ export function appsServerRef(cfg: {
  *  limit (server `express.json({ limit: "1mb" })`; the deeper 50 MB source cap
  *  never binds first on this route). Stay under it with headroom for the
  *  JSON-RPC envelope. */
-const MAX_INLINE_JSON_BYTES = 900 * 1024;
+const MAX_INLINE_JSON_BYTES = 15 * 1024 * 1024;
 
 /** Never walk into these — build output should not contain them, and a stray
  *  `node_modules` would blow the payload instantly. */
@@ -254,7 +253,7 @@ export async function expandBuildAppInput(input: unknown, workdir: string): Prom
     if (jsonBytes > MAX_INLINE_JSON_BYTES) {
       return {
         ok: false,
-        error: `the built bundle inlines to ~${Math.round(jsonBytes / 1024)} KB of JSON — over the control plane's 1 MB request limit on build_app (/api/runtime/mcp). Shrink the bundle: drop large assets, split vendor chunks, compress images.`,
+        error: `the built bundle inlines to ~${Math.round(jsonBytes / 1024)} KB of JSON — over the control plane's 16 MB request limit on build_app (/api/runtime/mcp). Shrink the bundle: drop large assets, split vendor chunks, compress images.`,
       };
     }
 

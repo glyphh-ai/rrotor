@@ -188,7 +188,7 @@ export type AgentFrame =
   // Advisory + non-terminal: it rides the frame stream so EVERY surface observing
   // the run re-renders its mode chip in lockstep (the gate change itself is
   // server-side). Older consumers ignore the unknown type harmlessly.
-  | { type: "permission"; permission: "ask" | "plan" | "acceptEdits" | "auto" | "bypass" }
+  | { type: "permission"; permission: "ask" | "plan" | "acceptEdits" | "auto" }
   // The FULL-CONTEXT FALLBACK compacted the session transcript before this run
   // (harness/transcript.ts): `folded` oldest turns became the summary, `kept`
   // recent turns stayed verbatim. Advisory + additive — surfaces may render a

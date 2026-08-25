@@ -37,16 +37,25 @@ import type { ActionKind, AskQuestion } from "./frames.js";
  *    ask         — every mutating action needs approval; reads are free
  *    plan        — read-only: the agent plans, nothing changes
  *    acceptEdits — file edits auto-approved; commands still ask
- *    auto        — workspace actions auto-approved; dangerous ones still ask
- *    bypass      — everything auto-approved (trusted sessions only)
+ *    auto        — full auto: everything runs without asking, dangerous included
+ *
+ *  "bypass" is retired (2026-08-24) — auto IS full auto now. Old clients still
+ *  sending it are normalized to auto at both parse seams.
  */
-export type PermissionMode = "ask" | "plan" | "acceptEdits" | "auto" | "bypass";
-const MODES: PermissionMode[] = ["ask", "plan", "acceptEdits", "auto", "bypass"];
+export type PermissionMode = "ask" | "plan" | "acceptEdits" | "auto";
+const MODES: PermissionMode[] = ["ask", "plan", "acceptEdits", "auto"];
 
 /** True when `v` is a valid permission mode — the shared validator (config +
- *  the mid-run POST /runs/:id/permission route both gate on it). */
+ *  the mid-run POST /runs/:id/permission route both gate on it). Accepts the
+ *  retired "bypass" for old clients; pair with normalizePermissionMode. */
 export function isPermissionMode(v: unknown): v is PermissionMode {
-  return typeof v === "string" && (MODES as string[]).includes(v);
+  return typeof v === "string" && ((MODES as string[]).includes(v) || v === "bypass");
+}
+
+/** The one seam that maps the retired "bypass" onto auto. */
+export function normalizePermissionMode(v: string): PermissionMode {
+  const m = v === "bypass" ? "auto" : v;
+  return (MODES as string[]).includes(m) ? (m as PermissionMode) : "auto";
 }
 
 /** Session modes, as the desktop's session records carry them. `chat` runs
@@ -386,7 +395,7 @@ export function resolveRunConfig(
     ...(str(body.system) ? { system: str(body.system) } : {}),
     ...(str(body.model) ?? env.HARNESS_MODEL ? { model: str(body.model) ?? env.HARNESS_MODEL } : {}),
     mode: SESSION_MODES.includes(modeRaw as SessionMode) ? (modeRaw as SessionMode) : "code",
-    permission: MODES.includes(permissionRaw as PermissionMode) ? (permissionRaw as PermissionMode) : "auto",
+    permission: normalizePermissionMode(String(permissionRaw ?? "")),
     gatewayUrl: gatewayUrl.replace(/\/+$/, ""),
     ...(str(body.controlUrl) ?? env.GLYPHH_CONTROL_URL
       ? { controlUrl: (str(body.controlUrl) ?? env.GLYPHH_CONTROL_URL ?? "").replace(/\/+$/, "") }

@@ -89,11 +89,11 @@ export async function gateAction(
   timeoutMs = APPROVAL_TIMEOUT_MS,
 ): Promise<{ allowed: boolean; reason?: string }> {
   if (action.kind === "read") return { allowed: true };
-  if (mode === "bypass") return { allowed: true };
+  // Auto is FULL auto (2026-08-24): nothing asks, dangerous included.
+  if (mode === "auto") return { allowed: true };
   if (mode === "plan") {
     return { allowed: false, reason: "plan mode is read-only — the user must switch modes before changes can be made" };
   }
-  if (mode === "auto" && action.kind !== "dangerous") return { allowed: true };
   if (mode === "acceptEdits" && action.kind === "edit") return { allowed: true };
 
   const id = `apr-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
