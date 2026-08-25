@@ -43,6 +43,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The glyph ORACLE suite runs the vendored Python canon (glyphh/) as the
+      # referee for the TS port — byte-parity is a CI gate, so numpy is a CI dep.
+      - name: Set up Python (glyph oracle)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install oracle deps
+        run: pip install numpy
+
       - name: Verify (typecheck + lint + test)
         run: npm run verify
 

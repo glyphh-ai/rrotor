@@ -46,10 +46,6 @@ export interface PgLike {
   end?(): Promise<void>;
 }
 
-/** The pgvector index dimension ceiling (`hnsw`/`ivfflat`). Above it we skip the
- *  index and exact-scan. `halfvec` (4000) is a future refinement. */
-const INDEX_DIM_CAP = 2000;
-
 export interface PgVectorOptions {
   /** Inject a ready client (tests pass a PGlite instance). */
   client?: PgLike;

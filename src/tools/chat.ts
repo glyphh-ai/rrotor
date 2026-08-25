@@ -16,7 +16,6 @@ export interface ChatOptions {
 }
 
 export function chatPack(opts: ChatOptions): ToolPack {
-  const { memory } = opts;
   const maxFetch = opts.maxFetch ?? 100_000;
 
   const tools: ToolSpec[] = [

@@ -239,10 +239,10 @@ describe("expandBuildAppInput — build_app { distDir } inlines pod-side", () =>
   });
 
   it("names the control plane's request limit when the bundle is too big to inline", async () => {
-    const home = workspaceWithDist({ "big.js": "y".repeat(1_000_000) });
+    const home = workspaceWithDist({ "big.js": "y".repeat(16_000_000) });
     const out = await expandBuildAppInput({ slug: "s", distDir: "dist" }, home);
     if (!out || out.ok) throw new Error("expected error");
-    expect(out.error).toContain("1 MB request limit");
+    expect(out.error).toContain("16 MB request limit");
   });
 
   it("the engine intercepts exactly the lent build_app tool name", () => {

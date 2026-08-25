@@ -253,7 +253,7 @@ describe("buildQueryArgs — the gate is the decision point (never pre-approved)
   const mutating = ["Write", "Edit", "NotebookEdit", "Bash", "KillShell"];
 
   it("NO tool is pre-approved — allowedTools is unset in every mode", () => {
-    for (const permission of ["ask", "plan", "acceptEdits", "auto", "bypass"] as const) {
+    for (const permission of ["ask", "plan", "acceptEdits", "auto"] as const) {
       const { options } = buildQueryArgs(cfg({ permission }), new HarnessSession({}), []);
       expect(options.allowedTools).toBeUndefined();
       // Availability is `tools`; it must never double as an allowance.
@@ -309,20 +309,15 @@ describe("buildQueryArgs — the gate is the decision point (never pre-approved)
     }
   });
 
-  it("auto mode runs clean (no approval frames) but still routes through the gate", async () => {
+  it("auto mode is FULL auto — every action allowed, no approval frames ever", async () => {
     const s = new HarnessSession({});
     const { options } = buildQueryArgs(cfg({ permission: "auto" }), s, []);
     const canUse = options.canUseTool as (t: string, i: unknown) => Promise<{ behavior: string }>;
     expect((await canUse("Write", { file_path: "/tmp/x" })).behavior).toBe("allow");
     expect((await canUse("Bash", { command: "npm test" })).behavior).toBe("allow");
+    // Dangerous included (2026-08-24: bypass retired; auto IS full auto).
+    expect((await canUse("Bash", { command: "sudo rm -rf /" })).behavior).toBe("allow");
     expect(s.framesSince(-1).filter((f) => f.type === "approval")).toHaveLength(0);
-    // …and a DANGEROUS command still stops to ask, even on auto.
-    const pending = canUse("Bash", { command: "sudo rm -rf /" });
-    await new Promise((r) => setTimeout(r, 0));
-    const frame = s.framesSince(-1).find((f) => f.type === "approval") as Extract<WireFrame, { type: "approval" }>;
-    expect(frame).toMatchObject({ kind: "dangerous" });
-    s.answer(frame.id, { allow: false });
-    expect((await pending).behavior).toBe("deny");
   });
 
   it("a lent MCP tool is gated too — plan refuses it, ask asks", async () => {

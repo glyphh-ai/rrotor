@@ -40,10 +40,10 @@ describe("gateAction — the mode matrix", () => {
   const danger = { kind: "dangerous" as const, title: "Run bad", detail: "bad" };
   const read = { kind: "read" as const, title: "Read a.ts", detail: "" };
 
-  it("reads are always free; bypass allows everything", async () => {
+  it("reads are always free; auto is FULL auto — dangerous included", async () => {
     expect((await gateAction(s(), "ask", read)).allowed).toBe(true);
     expect((await gateAction(s(), "plan", read)).allowed).toBe(true);
-    expect((await gateAction(s(), "bypass", danger)).allowed).toBe(true);
+    expect((await gateAction(s(), "auto", danger)).allowed).toBe(true);
   });
 
   it("plan mode is read-only, with a reason the model can re-plan on", async () => {
@@ -52,15 +52,13 @@ describe("gateAction — the mode matrix", () => {
     expect(d.reason).toMatch(/read-only/);
   });
 
-  it("auto allows workspace actions but still asks on dangerous", async () => {
+  it("auto is full auto — edits, commands and dangerous all run without asking", async () => {
     expect((await gateAction(s(), "auto", edit)).allowed).toBe(true);
     expect((await gateAction(s(), "auto", cmd)).allowed).toBe(true);
     const session = s();
-    const decision = gateAction(session, "auto", danger, 5000);
-    const frame = session.framesSince(-1)[0] as Extract<WireFrame, { type: "approval" }>;
-    expect(frame.type).toBe("approval");
-    session.answer(frame.id, { allow: false });
-    expect((await decision).allowed).toBe(false);
+    expect((await gateAction(session, "auto", danger, 5000)).allowed).toBe(true);
+    // Nothing parked, nothing asked — no approval frame exists.
+    expect(session.framesSince(-1).filter((f) => f.type === "approval")).toHaveLength(0);
   });
 
   it("acceptEdits auto-approves edits, still asks on commands", async () => {

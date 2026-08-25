@@ -20,7 +20,6 @@ import { buildBasicPlugins } from "../../src/plugins/index.js";
 import { InProcessStore } from "../../src/exec/store.js";
 import { execute } from "../../src/exec/executor.js";
 import {
-  buildStdlib,
   installStdlib,
   kvFromStore,
   fsPack,

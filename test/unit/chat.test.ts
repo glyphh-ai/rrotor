@@ -7,13 +7,9 @@
 
 import { describe, it, expect } from "vitest";
 
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 
 import { openChat, defaultChatRotorPath, resolveChatRotor } from "../../src/chat.js";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const BASE_ROTOR = resolve(ROOT, "rotors/base.rotor.yaml");
 
 const ESC = String.fromCharCode(27);
 const strip = (s: string) => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");

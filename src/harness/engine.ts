@@ -42,6 +42,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
 import { appsServerRef, withPublishPolicy, expandBuildAppInput, expandSaveFileInput, BUILD_APP_TOOL, SAVE_FILE_TOOL } from "./glyphh-apps.js";
+import { buildFactsServer } from "../facts/server.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
 import type { MaterializedAttachment } from "./sandbox.js";
@@ -70,6 +71,10 @@ export interface EngineDeps {
   /** The full-context fallback's transcript store (tests isolate it);
    *  defaults to the pod-wide {@link sessionTranscripts}. */
   transcripts?: TranscriptStore;
+  /** The introspected caller — when present (and the run has tools), the
+   *  glyphh_facts server mounts and the fact ledger is org/user scoped to
+   *  this principal. Absent (auth off) → no fact tools, deliberately. */
+  principal?: Principal;
 }
 
 /** How long the turn's price lookup may take before we give up on it. The
@@ -340,6 +345,25 @@ function buildAskServer(session: HarnessSession): McpServer {
   return mcp;
 }
 
+/** The RETURN-HOME memory discipline — appended once when glyphh_facts is
+ *  mounted. Lives here beside the tools it describes (the publish-policy
+ *  convention): a client-side rule only steers updated clients; this steers
+ *  every run that can act on it. */
+const FACTS_POLICY = [
+  "## Org memory (glyphh_facts)",
+  "",
+  "You have the org's fact ledger — durable, auditable memory across sessions and models.",
+  "AT THE START of substantive work: search_facts for what the org already knows about the task's entities.",
+  "AT THE END of a turn that taught you something durable (a preference, a decision, a lasting fact — not chit-chat): distill it into ONE universal-schema glyphh and call build_fact; then reason over the candidates it returns — genuinely new → create_fact; a restatement or change → update_fact with the old id. Wrong or retracted facts → delete_fact.",
+  "Retrieval is never pure similarity: the candidates are material for YOUR reasoning; when you compose an answer from several facts, record the composition with build_fact_tree citing its sources.",
+  "Express fact values toward NSM primes (KNOW/WANT/GOOD/BAD/DO/HAPPEN/BECAUSE/NOT/...); keep names, numbers and domain terms literal. Never invent layers or roles outside the universal schema.",
+].join("\n");
+
+function withFactsPolicy(system: string, enabled: boolean): string {
+  if (!enabled || system.includes("## Org memory (glyphh_facts)")) return system;
+  return system ? `${system}\n\n${FACTS_POLICY}` : FACTS_POLICY;
+}
+
 /** Flatten a tool_result content payload to displayable text (CLI port). */
 function flattenResult(content: unknown): string {
   if (typeof content === "string") return content;
@@ -368,6 +392,10 @@ export function buildQueryArgs(
   // mid-run POST /runs/:id/permission takes effect on the next decision.
   if (session.permission === undefined) session.permission = cfg.permission;
   const mcp = chat ? null : buildAskServer(session);
+  // The FACT SUBSTRATE: six glyphh_facts tools over the org's glyph ledger —
+  // only for an introspected caller (the ledger is owner-scoped; a principal-
+  // less run gets no memory rather than someone else's).
+  const facts = chat || !deps.principal ? null : buildFactsServer(deps.principal);
   // The control plane's app tools, derived from the run's OWN gateway config.
   // This is what lets a CLOUD pod publish an app at all, and what makes a
   // desktop-local pod publish it in exactly the same way. A caller that already
@@ -395,7 +423,7 @@ export function buildQueryArgs(
     options: {
       cwd: cfg.workdir,
       ...(cfg.model ? { model: cfg.model } : {}),
-      systemPrompt: apps ? withPublishPolicy(system) : system,
+      systemPrompt: withFactsPolicy(apps ? withPublishPolicy(system) : system, !!facts),
       settingSources: [],
       // chat = a tool-less streamed turn; cowork/code = the sandbox toolset
       // plus any caller-lent HTTP MCP servers (streamable-http — the desktop's
@@ -414,6 +442,7 @@ export function buildQueryArgs(
             tools: SANDBOX_TOOLS,
             mcpServers: {
               glyphh: { type: "sdk", name: "glyphh", instance: mcp as never },
+              ...(facts ? { glyphh_facts: { type: "sdk", name: "glyphh_facts", instance: facts as never } } : {}),
               ...Object.fromEntries(
                 lent.map((s) => [s.name, { type: "http", url: s.url, ...(s.headers ? { headers: s.headers } : {}) }]),
               ),
@@ -471,6 +500,7 @@ export function buildQueryArgs(
  * has emitted its terminal frame; never throws.
  */
 export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig, deps: EngineDeps = {}, principal?: Principal): Promise<void> {
+  if (principal && !deps.principal) deps = { ...deps, principal };
   const runLog = log.child({ run_id: cfg.runId, session: cfg.sessionId || undefined });
   const secrets = [cfg.runtimeToken];
   const fail = (message: string): void => {

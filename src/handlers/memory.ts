@@ -7,7 +7,6 @@
  */
 
 import type {
-  Frame,
   HdcMapConfig,
   RetrieveKbConfig,
   RetrieveSqlConfig,
