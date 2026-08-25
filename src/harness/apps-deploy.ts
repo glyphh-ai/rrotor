@@ -161,7 +161,7 @@ export async function handleAppsDeploy(
     const upstream = await fetch(mcpUrl, {
       method: "POST",
       headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "build_app", arguments: expanded.input } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "build_app", arguments: { ...expanded.input, ...(body.deploy === false ? { deploy: false } : {}) } } }),
     });
     const rpc = (await upstream.json().catch(() => null)) as
       | { error?: { message?: string }; result?: { isError?: boolean; content?: Array<{ text?: string }> } }
