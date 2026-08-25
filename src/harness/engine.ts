@@ -43,6 +43,7 @@ import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
 import { appsServerRef, withPublishPolicy, expandBuildAppInput, expandSaveFileInput, BUILD_APP_TOOL, SAVE_FILE_TOOL } from "./glyphh-apps.js";
 import { buildFactsServer, renderFactBlock } from "../facts/server.js";
+import { pullSource, pushSource, rebaseSource, type SourceSyncCfg } from "./source-sync.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
 import type { MaterializedAttachment } from "./sandbox.js";
@@ -279,7 +280,19 @@ export async function ensureRepoClone(cfg: { repo?: string; repoToken?: string; 
   }
 }
 
-function buildAskServer(session: HarnessSession): McpServer {
+/** Control-plane ORIGIN from the run's gateway config (glyphh-apps' rule:
+ *  the gateway is always <origin>/api/gateway). */
+function controlOrigin(cfg: HarnessRunConfig): string | null {
+  const explicit = (cfg.controlUrl ?? "").trim();
+  const base = explicit || (cfg.gatewayUrl ?? "").trim();
+  try {
+    const u = new URL(base);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.origin;
+  } catch { return null; }
+}
+
+function buildAskServer(session: HarnessSession, cfg?: HarnessRunConfig): McpServer {
   const mcp = new McpServer({ name: "glyphh", version: "1.0.0" }, { capabilities: { tools: {} } });
   mcp.server.setRequestHandler(ListToolsRequestSchema, () =>
     Promise.resolve({
@@ -300,6 +313,30 @@ function buildAskServer(session: HarnessSession): McpServer {
             "'app' is the app's slug or name. To show a WEB PAGE or something you built/deployed, use open_browser(url) instead.",
           inputSchema: { type: "object" as const, additionalProperties: true },
         },
+        ...(cfg && cfg.runtimeToken && controlOrigin(cfg) ? [
+          {
+            name: "pull_source",
+            description:
+              "pull_source(app) — hydrate the working folder from the app's SOURCE OF RECORD (its R2 snapshot head) and stamp the base. " +
+              "ALWAYS call this before working on an app you did not just create in this workspace — the folder here may be empty or stale; the snapshot is the truth. Run npm install after.",
+            inputSchema: { type: "object" as const, additionalProperties: true },
+          },
+          {
+            name: "push_source",
+            description:
+              "push_source(app, force?) — publish the working folder as the app's new source head (node_modules/dist/.git excluded). " +
+              "COMPARE-AND-SWAP: if a teammate moved the head since your base, this returns their name and a conflict — run rebase_source, review, then push again. force:true overwrites (only after naming the overwrite to the user). " +
+              "Call after every build_app so the app's source of record matches what you shipped.",
+            inputSchema: { type: "object" as const, additionalProperties: true },
+          },
+          {
+            name: "rebase_source",
+            description:
+              "rebase_source(app) — pull a moved source head UNDER your local changes: upstream-only files are taken; files you both changed keep YOURS with theirs staged at .glyphh/upstream/<path> for you to merge by hand. " +
+              "Returns what changed first — TELL THE USER before republishing.",
+            inputSchema: { type: "object" as const, additionalProperties: true },
+          },
+        ] : []),
         {
           name: "open_browser",
           description:
@@ -311,6 +348,24 @@ function buildAskServer(session: HarnessSession): McpServer {
     }),
   );
   mcp.server.setRequestHandler(CallToolRequestSchema, async (rq) => {
+    if ((rq.params.name === "pull_source" || rq.params.name === "push_source" || rq.params.name === "rebase_source")) {
+      const origin = cfg ? controlOrigin(cfg) : null;
+      if (!cfg || !cfg.runtimeToken || !origin) {
+        return { content: [{ type: "text" as const, text: "ERROR: source sync needs a control plane + runtime token on this run" }], isError: true };
+      }
+      const args = (rq.params.arguments ?? {}) as { app?: unknown; slug?: unknown; force?: unknown };
+      const slug = String(args.app ?? args.slug ?? "").trim();
+      if (!slug) return { content: [{ type: "text" as const, text: "ERROR: pass { app } — the app's slug or id" }], isError: true };
+      const sync: SourceSyncCfg = { workdir: cfg.workdir, controlUrl: origin, token: cfg.runtimeToken };
+      try {
+        const out = rq.params.name === "pull_source" ? await pullSource(sync, slug)
+          : rq.params.name === "push_source" ? await pushSource(sync, slug, args.force === true)
+          : await rebaseSource(sync, slug);
+        return { content: [{ type: "text" as const, text: out }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `ERROR: ${(err as Error).message}` }], isError: true };
+      }
+    }
     if (rq.params.name === "open_app" || rq.params.name === "open_browser") {
       const args = (rq.params.arguments ?? {}) as { app?: unknown; name?: unknown; url?: unknown };
       const ref = String(args.app ?? args.name ?? "").trim();
@@ -403,7 +458,7 @@ export function buildQueryArgs(
   // From here the gate reads `session.permission` (not `cfg.permission`), so a
   // mid-run POST /runs/:id/permission takes effect on the next decision.
   if (session.permission === undefined) session.permission = cfg.permission;
-  const mcp = chat ? null : buildAskServer(session);
+  const mcp = chat ? null : buildAskServer(session, cfg);
   // The FACT SUBSTRATE: six glyphh_facts tools over the org's glyph ledger —
   // only for an introspected caller (the ledger is owner-scoped; a principal-
   // less run gets no memory rather than someone else's).
