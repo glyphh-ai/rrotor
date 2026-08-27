@@ -212,9 +212,45 @@ describe("glyphh_facts — the six tools over the org ledger", () => {
     expect(await renderFactBlock({ orgId: "org-empty", userId: "u" } as Principal, "anything")).toBeNull();
   });
 
-  it("schema-invalid facts are refused with the shape named", async () => {
-    const r = await call(clientA, "create_fact", { name: "x", facts: { madeup: { nope: "y" } } });
+  it("off-schema slots are PRESERVED and reported, never dropped (loose capture)", async () => {
+    // The 2026-08-25 regression: relational.codename/owner (off-schema) were
+    // silently dropped and an empty shell persisted. Now: entity.name carries
+    // the encoding, the content survives in the concept, primes index it, and
+    // the caller is told what didn't vector-bind.
+    const r = await call(clientA, "create_fact", {
+      name: "smoke-codename",
+      facts: { entity: { name: "SMOKE project" }, relational: { codename: "nightjar-7", owner: "Priya Chen" } },
+    });
+    expect(r.isError).toBe(false);
+    const j = r.json as { id: string; preservedSlots?: string[] };
+    expect(j.preservedSlots?.sort()).toEqual(["relational.codename", "relational.owner"]);
+    const s = await call(clientA, "search_facts", {
+      name: "smoke lookup",
+      facts: { entity: { name: "SMOKE project" } },
+      threshold: 0.3, // this test asserts content survival, not gate calibration
+    });
+    const hit = (s.json as { facts: Array<{ id: string; concept: { facts: Record<string, Record<string, string>> } }> })
+      .facts.find((f) => f.id === j.id);
+    expect(hit).toBeDefined();
+    expect(hit!.concept.facts.relational).toEqual({ codename: "nightjar-7", owner: "Priya Chen" });
+    // The per-turn block can still find it — primes were stamped from ALL values.
+    const block = await renderFactBlock(ORG_A, "who is Priya Chen and what is the codename nightjar-7?");
+    expect(block).toContain("nightjar-7");
+    await call(clientA, "delete_fact", { id: j.id });
+  });
+
+  it("fully off-schema facts backfill entity.name and note it, instead of refusing", async () => {
+    const r = await call(clientA, "build_fact", { name: "loose-probe", facts: { madeup: { nope: "y" } } });
+    expect(r.isError).toBe(false);
+    const j = r.json as { preview: { layers: string[] }; preservedSlots?: string[]; note?: string };
+    expect(j.preview.layers).toEqual(["entity"]);
+    expect(j.preservedSlots).toEqual(["madeup.nope"]);
+    expect(j.note).toContain("entity.name carries the encoding");
+  });
+
+  it("truly empty facts are still refused", async () => {
+    const r = await call(clientA, "create_fact", { name: "", facts: {} });
     expect(r.isError).toBe(true);
-    expect(r.raw).toContain("universal");
+    expect(r.raw).toContain("name or at least one non-empty value");
   });
 });

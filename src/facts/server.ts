@@ -31,6 +31,10 @@ import { UNIVERSAL_SCHEMA, sanitizeUniversal } from "../glyph/universal-schema.j
 import { ALL_PRIMES, decompose } from "../exec/glyph/primes.js";
 import { FactTree } from "../glyph/fact-tree.js";
 import { GlyphStore, glyphStoreFromEnv, type GlyphRow } from "./store.js";
+import {
+  conceptWords, dictCosine, directiveOf, exchangeVector,
+  factDictVector, glossVectors, tokenize, wordsVector, type Lexicon,
+} from "./dict-lane.js";
 import { log } from "../obs/logger.js";
 
 /** Dimension/seed of the org fact space — the canonical defaults. */
@@ -70,9 +74,28 @@ function universalEncoderConfig(): EncoderConfig {
 
 const encoder = new GlyphEncoder(universalEncoderConfig());
 
-/** Per-org in-memory item index (id → cortex), hydrated from the ledger by
- *  RE-ENCODING concepts — vectors are derived, the concept JSON is authority. */
-const indexes = new Map<string, Map<string, Bipolar>>();
+/** One indexed fact: the canonical cortex (glyph space) + the dict-lane
+ *  vector (docs/dict-vector.md). Both DERIVED — concept JSON is authority. */
+interface IndexedFact {
+  cortex: Bipolar;
+  dict: Float32Array;
+}
+
+/**
+ * A per-org EPOCH: the hydrated item index plus the lexicon snapshot its IDF
+ * weights (and gloss vectors) were built from. The epoch IS the determinism
+ * boundary — same ledger + same snapshot → same selection, replayable; the
+ * live lexicon keeps counting underneath and takes effect at the next
+ * hydration.
+ */
+interface OrgEpoch {
+  items: Map<string, IndexedFact>;
+  lexicon: Lexicon;
+  glosses: Map<string, Float32Array>;
+  hydratedAt: string;
+}
+
+const indexes = new Map<string, OrgEpoch>();
 let storePromise: Promise<GlyphStore | null> | null = null;
 const store = (): Promise<GlyphStore | null> => (storePromise ??= glyphStoreFromEnv());
 /** Test seam: inject a store (PGlite) and reset the derived indexes. */
@@ -83,43 +106,129 @@ export function setFactsStoreForTests(p: Promise<GlyphStore | null>): void {
 
 interface FactInput { name: string; facts: unknown }
 
-function encodeFact(input: FactInput): { glyph: Glyph; clean: Record<string, Record<string, string>>; primes: string[] } {
-  const clean = sanitizeUniversal(input.facts);
-  const attributes: Record<string, string> = {};
-  for (const roles of Object.values(clean)) for (const [role, value] of Object.entries(roles)) attributes[role] = value;
-  if (!Object.keys(attributes).length) {
-    throw new Error("facts must fill at least one universal slot — layers entity/perceptual/spatial/temporal/relational/quantitative/epistemic, schema-valid roles only");
+/** Everything non-empty the caller said that sanitize did NOT keep — unknown
+ *  layers and unknown roles alike, verbatim under the names the caller used.
+ *  Loose capture: a fact's CONTENT is never silently dropped (2026-08-25: a
+ *  model wrote relational.codename/owner — off-schema — and the values
+ *  vanished; the persisted fact was an empty shell that recall then honestly,
+ *  uselessly reported as "nothing stored"). */
+function collectExtras(
+  facts: unknown,
+  clean: Record<string, Record<string, string>>,
+): Record<string, Record<string, string>> {
+  const extra: Record<string, Record<string, string>> = {};
+  if (!facts || typeof facts !== "object" || Array.isArray(facts)) return extra;
+  for (const [layer, roles] of Object.entries(facts as Record<string, unknown>)) {
+    if (!roles || typeof roles !== "object" || Array.isArray(roles)) continue;
+    const kept: Record<string, string> = {};
+    for (const [role, value] of Object.entries(roles as Record<string, unknown>)) {
+      if (clean[layer]?.[role] !== undefined) continue; // already encoded
+      if (value == null) continue;
+      const v = String(value).trim();
+      if (!v || ["none", "null", "n/a"].includes(v.toLowerCase())) continue;
+      kept[role] = v;
+    }
+    if (Object.keys(kept).length) extra[layer] = kept;
   }
-  const glyph = encoder.encode(concept({ name: input.name, attributes, metadata: {} }));
-  // Primes STAMPED AT WRITE TIME (the doctrine): recall selects by the
-  // exchange's own primes against these.
-  const primes = decompose(`${input.name} ${Object.values(attributes).join(" ")}`);
-  return { glyph, clean, primes };
+  return extra;
 }
 
-async function orgIndex(s: GlyphStore, p: Principal): Promise<Map<string, Bipolar>> {
-  let idx = indexes.get(p.orgId);
-  if (idx) return idx;
-  idx = new Map();
-  const rows = await s.live({ orgId: p.orgId, userId: p.userId });
+/**
+ * LOOSE CAPTURE, STRICT ENCODING, HONEST REPORTING.
+ *  - clean:  schema-valid slots → the ONLY thing the encoder binds (the vector
+ *    space stays canon-stable; the schema IS the space_id).
+ *  - extra:  every other non-empty slot, preserved verbatim in the concept
+ *    JSON (the authority) — rendered in the per-turn fact block, selectable
+ *    by primes, just not vector-addressable by that slot.
+ *  - primes: stamped from ALL values (clean + extra + name), so the injection
+ *    half can select a fact whose salient content lives off-schema.
+ *  - backfill: no encodable slot but a name → entity.name carries the cortex
+ *    rather than refusing (this also un-breaks the /facts/recall probe, whose
+ *    {query:{text}} shape sanitized to nothing and threw).
+ */
+function encodeFact(input: FactInput): {
+  glyph: Glyph;
+  clean: Record<string, Record<string, string>>;
+  extra: Record<string, Record<string, string>>;
+  stored: Record<string, Record<string, string>>;
+  primes: string[];
+  backfilled: boolean;
+} {
+  let clean = sanitizeUniversal(input.facts);
+  const extra = collectExtras(input.facts, clean);
+  let backfilled = false;
+  if (!Object.values(clean).some((roles) => Object.keys(roles).length)) {
+    const name = input.name.trim();
+    if (!name && !Object.keys(extra).length) {
+      throw new Error("facts must carry a name or at least one non-empty value — layers entity/perceptual/spatial/temporal/relational/quantitative/epistemic preferred; other slots are preserved verbatim");
+    }
+    clean = { entity: { name: name || "unnamed fact" } };
+    backfilled = true;
+  }
+  const attributes: Record<string, string> = {};
+  for (const roles of Object.values(clean)) for (const [role, value] of Object.entries(roles)) attributes[role] = value;
+  const glyph = encoder.encode(concept({ name: input.name, attributes, metadata: {} }));
+  // Primes STAMPED AT WRITE TIME (the doctrine): recall selects by the
+  // exchange's own primes against these — extras included, so preserved
+  // content stays reachable by the fact block's selection.
+  const allValues = [
+    ...Object.values(clean).flatMap((r) => Object.values(r)),
+    ...Object.values(extra).flatMap((r) => Object.values(r)),
+  ];
+  const primes = decompose(`${input.name} ${allValues.join(" ")}`);
+  // The stored concept is the union — clean and extra are disjoint by
+  // construction (extras skip anything clean kept).
+  const stored: Record<string, Record<string, string>> = {};
+  for (const [layer, roles] of Object.entries(clean)) stored[layer] = { ...roles };
+  for (const [layer, roles] of Object.entries(extra)) stored[layer] = { ...(stored[layer] ?? {}), ...roles };
+  return { glyph, clean, extra, stored, primes, backfilled };
+}
+
+/** `layer.role` names of preserved-but-unencoded slots — the honesty payload. */
+function extraSlotNames(extra: Record<string, Record<string, string>>): string[] {
+  return Object.entries(extra).flatMap(([layer, roles]) => Object.keys(roles).map((r) => `${layer}.${r}`));
+}
+
+const factsOf = (row: GlyphRow): Record<string, Record<string, string>> =>
+  ((row.concept as { facts?: Record<string, Record<string, string>> })?.facts ?? {});
+
+async function orgIndex(s: GlyphStore, p: Principal): Promise<OrgEpoch> {
+  let epoch = indexes.get(p.orgId);
+  if (epoch) return epoch;
+  const gp = { orgId: p.orgId, userId: p.userId };
+  const lexicon = await s.lexiconCounts(gp);
+  epoch = { items: new Map(), lexicon, glosses: glossVectors(lexicon), hydratedAt: new Date().toISOString() };
+  const rows = await s.live(gp);
   for (const row of rows) {
     try {
       const c = row.concept as { name?: string; facts?: unknown };
-      idx.set(row.id, encodeFact({ name: String(c.name ?? row.name), facts: c.facts }).glyph.globalCortex.data);
+      const name = String(c.name ?? row.name);
+      epoch.items.set(row.id, {
+        cortex: encodeFact({ name, facts: c.facts }).glyph.globalCortex.data,
+        dict: factDictVector(name, factsOf(row), row.primes, lexicon),
+      });
     } catch { /* a malformed historical row never blocks hydration */ }
   }
-  indexes.set(p.orgId, idx);
-  log.info("fact index hydrated", { org: p.orgId, facts: idx.size });
-  return idx;
+  indexes.set(p.orgId, epoch);
+  log.info("fact index hydrated", { org: p.orgId, facts: epoch.items.size, lexicon: lexicon.size, epoch: epoch.hydratedAt });
+  return epoch;
+}
+
+/** Add a fresh write to the hydrated epoch (if one exists) under ITS lexicon
+ *  snapshot — epoch determinism holds; the new words land at next hydration. */
+function indexNewFact(orgId: string, id: string, cortex: Bipolar, name: string, facts: Record<string, Record<string, string>>, primes: string[]): void {
+  const epoch = indexes.get(orgId);
+  if (!epoch) return;
+  epoch.items.set(id, { cortex, dict: factDictVector(name, facts, primes, epoch.lexicon) });
 }
 
 async function neighbors(
   s: GlyphStore, p: Principal, probe: Bipolar, threshold: number, limit: number,
 ): Promise<Array<{ row: GlyphRow; cos: number }>> {
-  const idx = await orgIndex(s, p);
+  const { items } = await orgIndex(s, p);
   const hits: Array<{ id: string; cos: number }> = [];
-  for (const [id, vec] of idx) {
-    const cos = cosineSimilarity(probe, vec);
+  for (const [id, item] of items) {
+    const cos = cosineSimilarity(probe, item.cortex);
     if (cos >= threshold) hits.push({ id, cos });
   }
   hits.sort((a, b) => b.cos - a.cos);
@@ -150,7 +259,10 @@ const errText = (t: string) => ({ content: [{ type: "text" as const, text: `ERRO
 const FACTS_SHAPE =
   "facts: {layer: {role: value}} over the UNIVERSAL schema — layers entity/perceptual/spatial/temporal/relational/quantitative/epistemic; " +
   "express values in NSM primes where possible (I/YOU/SOMEONE/THIS/GOOD/BAD/KNOW/WANT/DO/HAPPEN/BECAUSE/NOT/CAN/...; names, numbers and domain terms stay literal); " +
-  "epistemic.certainty carries your confidence in words. Unknown layers/roles are dropped; empty values refused.";
+  "epistemic.certainty carries your confidence in words. PREFER schema roles — they strengthen similarity — but NEVER omit a salient value: " +
+  "any other slot is preserved verbatim and prime-indexed (reported back as preservedSlots), just not vector-bound. A fact without its content is worse than no fact. Empty values refused. " +
+  "STANDING RULES ('always/never/prefer X') get the rule layer: rule: {action: 'must-use'|'never'|'prefer', object: <the thing, literal>, applies_to: <space-separated taxonomy labels, e.g. 'ui.forms code.style'>, condition?: <when>} — " +
+  "rules with applies_to are guaranteed into the model's context whenever the exchange matches those activities; rules without applies_to ride every turn.";
 
 export function buildFactsServer(principal: Principal): McpServer {
   const mcp = new McpServer({ name: "glyphh_facts", version: "1.0.0" }, { capabilities: { tools: {} } });
@@ -211,10 +323,13 @@ export function buildFactsServer(principal: Principal): McpServer {
     try {
       switch (rq.params.name) {
         case "build_fact": {
-          const { glyph, clean } = encodeFact({ name: String(args.name ?? ""), facts: args.facts });
+          const { glyph, clean, extra, backfilled } = encodeFact({ name: String(args.name ?? ""), facts: args.facts });
           const near = await neighbors(s, p, glyph.globalCortex.data, DEFAULT_THRESHOLD, 8);
+          const preserved = extraSlotNames(extra);
           return text(JSON.stringify({
             preview: { identifier: glyph.identifier, layers: Object.keys(clean), spaceId: glyph.spaceId },
+            ...(preserved.length ? { preservedSlots: preserved } : {}),
+            ...(backfilled ? { note: "no schema-valid slot filled — entity.name carries the encoding; consider re-slotting values into schema roles for stronger similarity" } : {}),
             candidates: near.map((n) => asFactJson(n.row, n.cos)),
             guidance: near.length
               ? "Reason over the candidates: same fact → update_fact with its id; related but distinct → create_fact; contradictory → update_fact the old one."
@@ -223,17 +338,19 @@ export function buildFactsServer(principal: Principal): McpServer {
         }
         case "create_fact": {
           const name = String(args.name ?? "");
-          const { glyph, clean, primes } = encodeFact({ name, facts: args.facts });
+          const { glyph, stored, extra, primes } = encodeFact({ name, facts: args.facts });
           const scope = args.scope === "user" ? "user" as const : "org" as const;
           const confidence = clampConfidence(args.confidence);
           await s.insert({ orgId: p.orgId, userId: p.userId }, {
             id: glyph.identifier, name, scope,
-            concept: { name, facts: clean },
+            concept: { name, facts: stored },
             confidence, primes, citations: [], derived: false,
             cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
           });
-          indexes.get(p.orgId)?.set(glyph.identifier, glyph.globalCortex.data);
-          return text(JSON.stringify({ id: glyph.identifier, confidence, scope }));
+          indexNewFact(p.orgId, glyph.identifier, glyph.globalCortex.data, name, stored, primes);
+          void s.bumpLexicon({ orgId: p.orgId, userId: p.userId }, conceptWords(name, stored));
+          const preserved = extraSlotNames(extra);
+          return text(JSON.stringify({ id: glyph.identifier, confidence, scope, ...(preserved.length ? { preservedSlots: preserved } : {}) }));
         }
         case "search_facts": {
           const threshold = typeof args.threshold === "number" ? args.threshold : DEFAULT_THRESHOLD;
@@ -246,20 +363,20 @@ export function buildFactsServer(principal: Principal): McpServer {
           const supersedes = String(args.supersedes ?? "");
           if (!supersedes) return errText("update_fact needs { supersedes } — the old fact's id");
           const name = String(args.name ?? "");
-          const { glyph, clean, primes } = encodeFact({ name, facts: args.facts });
+          const { glyph, stored, primes } = encodeFact({ name, facts: args.facts });
           const confidence = clampConfidence(args.confidence);
           const old = (await s.byIds({ orgId: p.orgId, userId: p.userId }, [supersedes]))[0];
           if (!old) return errText(`no such fact: ${supersedes}`);
           await s.insert({ orgId: p.orgId, userId: p.userId }, {
             id: glyph.identifier, name: name || old.name, scope: old.scope,
-            concept: { name: name || old.name, facts: clean },
+            concept: { name: name || old.name, facts: stored },
             confidence, primes, citations: [supersedes], derived: old.derived,
             cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
           });
           await s.supersede({ orgId: p.orgId, userId: p.userId }, supersedes, glyph.identifier);
-          const idx = indexes.get(p.orgId);
-          idx?.delete(supersedes);
-          idx?.set(glyph.identifier, glyph.globalCortex.data);
+          indexes.get(p.orgId)?.items.delete(supersedes);
+          indexNewFact(p.orgId, glyph.identifier, glyph.globalCortex.data, name || old.name, stored, primes);
+          void s.bumpLexicon({ orgId: p.orgId, userId: p.userId }, conceptWords(name || old.name, stored));
           return text(JSON.stringify({ id: glyph.identifier, supersedes, confidence }));
         }
         case "delete_fact": {
@@ -267,14 +384,14 @@ export function buildFactsServer(principal: Principal): McpServer {
           if (!id) return errText("delete_fact needs { id }");
           const removed = await s.tombstone({ orgId: p.orgId, userId: p.userId }, id);
           if (!removed) return errText(`no such live fact: ${id}`);
-          indexes.get(p.orgId)?.delete(id);
+          indexes.get(p.orgId)?.items.delete(id);
           return text(JSON.stringify({ deleted: id }));
         }
         case "build_fact_tree": {
           const name = String(args.name ?? "");
           const citations = (Array.isArray(args.citations) ? args.citations : []).map(String).filter(Boolean);
           if (!citations.length) return errText("build_fact_tree needs { citations } — the source glyph ids the derivation reasons from");
-          const { glyph, clean, primes } = encodeFact({ name, facts: args.facts });
+          const { glyph, stored, primes } = encodeFact({ name, facts: args.facts });
           const confidence = clampConfidence(args.confidence);
           const sources = await s.byIds({ orgId: p.orgId, userId: p.userId }, citations);
           if (sources.length !== citations.length) {
@@ -283,16 +400,17 @@ export function buildFactsServer(principal: Principal): McpServer {
           }
           await s.insert({ orgId: p.orgId, userId: p.userId }, {
             id: glyph.identifier, name, scope: "org",
-            concept: { name, facts: clean },
+            concept: { name, facts: stored },
             confidence, primes, citations, derived: true,
             cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
           });
-          indexes.get(p.orgId)?.set(glyph.identifier, glyph.globalCortex.data);
+          indexNewFact(p.orgId, glyph.identifier, glyph.globalCortex.data, name, stored, primes);
+          void s.bumpLexicon({ orgId: p.orgId, userId: p.userId }, conceptWords(name, stored));
 
           const tree = new FactTree(name || "Derived fact");
-          const idx = await orgIndex(s, p);
+          const { items } = await orgIndex(s, p);
           for (const src of sources) {
-            const vec = idx.get(src.id);
+            const vec = items.get(src.id)?.cortex;
             tree.addFact({
               path: ["derivation", src.id],
               description: src.name,
@@ -398,27 +516,68 @@ export async function forgetFact(principal: Principal, id: string): Promise<{ fo
   return { forgotten: true };
 }
 
+/** Reserved directive slots inside {@link FACT_BLOCK_MAX} — a rule that fires
+ *  needlessly costs one slot; one that fails to fire costs correctness, so
+ *  both gates are tuned permissive. A rule's label match is a DIRECT cosine
+ *  against its own gloss (no top-k competition — "is this exchange near MY
+ *  activity?"), words-only on both sides. */
+const DIRECTIVE_SLOTS = 4;
+const DIRECTIVE_TRIGGER_GATE = 0.08;
+const LABEL_GATE = 0.06;
+
 export async function renderFactBlock(principal: Principal, exchangeText: string): Promise<string | null> {
   const s = await store();
   if (!s) return null;
   try {
-    const rows = await s.live({ orgId: principal.orgId, userId: principal.userId });
+    const gp = { orgId: principal.orgId, userId: principal.userId };
+    const epoch = await orgIndex(s, principal);
+    const rows = await s.live(gp);
     if (!rows.length) return null;
-    const wanted = new Set(decompose(exchangeText));
+    // Exchange words are inbound words — the lexicon counts them (best-effort,
+    // off the selection path; they weigh in at the NEXT hydration epoch).
+    void s.bumpLexicon(gp, tokenize(exchangeText));
+
+    const vEx = exchangeVector(exchangeText, epoch.lexicon);
+    const vExWords = wordsVector(exchangeText, epoch.lexicon);
     const now = Date.now();
-    const scored = rows.map((row) => {
-      const overlap = row.primes.reduce((n, pr) => n + (wanted.has(pr) ? 1 : 0), 0);
+
+    const cands = rows.map((row) => {
+      const facts = factsOf(row);
+      const name = String((row.concept as { name?: string })?.name ?? row.name);
+      const dict = epoch.items.get(row.id)?.dict ?? factDictVector(name, facts, row.primes, epoch.lexicon);
+      const cos = dictCosine(vEx, dict);
+      const directive = directiveOf(facts);
+      // Force-include a directive when the exchange is ABOUT it: its own
+      // gloss cosine clears the gate (the synonymy bridge), the permissive
+      // trigger cosine clears (the atom lane), or it has no applies_to at
+      // all (a standing rule rides every turn).
+      const forced = !!directive && (
+        directive.appliesTo.length === 0 ||
+        directive.appliesTo.some((l) => {
+          const gloss = epoch.glosses.get(l);
+          return gloss !== undefined && dictCosine(vExWords, gloss) >= LABEL_GATE;
+        }) ||
+        cos >= DIRECTIVE_TRIGGER_GATE
+      );
       const ageDays = Math.max(0, (now - Date.parse(row.createdAt)) / 86_400_000);
-      // Prime overlap dominates; confidence separates peers; a gentle recency
-      // decay keeps stale invariants from crowding out fresher ones forever.
-      const score = overlap * 10 + row.confidence * 5 - Math.min(ageDays / 30, 3);
-      return { row, score };
+      const score = cos + row.confidence * 0.02 - Math.min(ageDays / 365, 0.05);
+      return { row, cos, score, directive, forced };
     });
-    scored.sort((a, b) => b.score - a.score);
+
+    // Directives own their reserved slots (confidence-ranked); untriggered
+    // directives stay OUT entirely — they never crowd the fact slots.
+    const directives = cands
+      .filter((c) => c.directive && c.forced)
+      .sort((a, b) => b.row.confidence - a.row.confidence || b.cos - a.cos)
+      .slice(0, DIRECTIVE_SLOTS);
+    const facts = cands
+      .filter((c) => !c.directive)
+      .sort((a, b) => b.score - a.score);
+
     const lines: string[] = [FACT_BLOCK_HEADER];
     let chars = FACT_BLOCK_HEADER.length;
     let taken = 0;
-    for (const { row } of scored) {
+    for (const { row } of [...directives, ...facts]) {
       if (taken >= FACT_BLOCK_MAX) break;
       const line = factLine(row);
       if (chars + line.length + 1 > FACT_BLOCK_CHAR_CAP) continue;

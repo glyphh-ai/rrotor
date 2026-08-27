@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS glyphs (
 );
 ALTER TABLE glyphs ADD COLUMN IF NOT EXISTS primes JSONB NOT NULL DEFAULT '[]';
 CREATE INDEX IF NOT EXISTS glyphs_live_ix ON glyphs (org_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS lexicon (
+  word       TEXT PRIMARY KEY,
+  count      BIGINT NOT NULL DEFAULT 0,
+  first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `;
 
 /** node-postgres reports rowCount; PGlite (tests) reports affectedRows. */
@@ -180,6 +186,38 @@ export class GlyphStore {
         [p.orgId, ids],
       );
       return (r.rows as unknown as Row[]).map(toRow);
+    });
+  }
+
+  /**
+   * The org LEXICON (docs/dict-vector.md) — additive word counts over every
+   * inbound word: turns, fact values, glosses. Statistics, never authority;
+   * powers IDF, novelty, epochs. Bump is best-effort — a failed count must
+   * never fail a turn or a write.
+   */
+  bumpLexicon(p: GlyphPrincipal, words: string[]): Promise<void> {
+    if (!words.length) return Promise.resolve();
+    const counts = new Map<string, number>();
+    for (const w of words) counts.set(w, (counts.get(w) ?? 0) + 1);
+    const entries = [...counts.entries()];
+    const values = entries.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
+    const params = entries.flatMap(([w, n]) => [w, n]);
+    return this.scoped(p.orgId, async () => {
+      await this.db.query(
+        `INSERT INTO lexicon (word, count) VALUES ${values}
+         ON CONFLICT (word) DO UPDATE SET count = lexicon.count + EXCLUDED.count, last_seen = now()`,
+        params,
+      );
+    }).catch((err: unknown) => {
+      log.warn("lexicon bump failed (counts drift, nothing breaks)", { detail: (err as Error).message });
+    });
+  }
+
+  /** The full lexicon snapshot — the IDF epoch the hydrated index pins. */
+  lexiconCounts(p: GlyphPrincipal): Promise<Map<string, number>> {
+    return this.scoped(p.orgId, async () => {
+      const r = await this.db.query(`SELECT word, count FROM lexicon`);
+      return new Map((r.rows as Array<{ word: string; count: unknown }>).map((row) => [row.word, Number(row.count)]));
     });
   }
 

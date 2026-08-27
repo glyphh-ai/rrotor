@@ -415,7 +415,7 @@ const FACTS_POLICY = [
   "AT THE START of substantive work: search_facts for what the org already knows about the task's entities.",
   "AT THE END of a turn that taught you something durable (a preference, a decision, a lasting fact — not chit-chat): distill it into ONE universal-schema glyphh and call build_fact; then reason over the candidates it returns — genuinely new → create_fact; a restatement or change → update_fact with the old id. Wrong or retracted facts → delete_fact.",
   "Retrieval is never pure similarity: the candidates are material for YOUR reasoning; when you compose an answer from several facts, record the composition with build_fact_tree citing its sources.",
-  "Express fact values toward NSM primes (KNOW/WANT/GOOD/BAD/DO/HAPPEN/BECAUSE/NOT/...); keep names, numbers and domain terms literal. Never invent layers or roles outside the universal schema.",
+  "Express fact values toward NSM primes (KNOW/WANT/GOOD/BAD/DO/HAPPEN/BECAUSE/NOT/...); keep names, numbers and domain terms literal. Prefer the universal schema's layers/roles — they strengthen similarity — but never omit a salient value for lack of a fitting slot: off-schema slots are preserved and prime-indexed, not dropped.",
 ].join("\n");
 
 function withFactsPolicy(system: string, enabled: boolean): string {
