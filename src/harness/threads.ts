@@ -13,10 +13,11 @@
  *     tables exist on first touch of an org. A SHARED pod serves many orgs
  *     through ONE static DSN, so every operation is scoped to the caller's
  *     org with the server's deterministic convention ({@link schemaForOrg},
- *     mirroring server/src/db/tenant.ts): `SET search_path TO <org schema>,
- *     public` pinned per operation on the store's single serialized
- *     connection (pool max 1 + an op mutex — no interleaving between the SET
- *     and the queries it scopes) — the server reads the same per-org schemas
+ *     mirroring server/src/db/tenant.ts): each operation runs in its own
+ *     transaction with `SET LOCAL search_path TO <org schema>, public`. The
+ *     transaction is what keeps the pin and the queries it scopes on ONE
+ *     backend — pool max 1 + an op mutex stop JS interleaving but cannot do
+ *     that through a transaction-mode pooler — the server reads the same schemas
  *     via its tenantDb routing. WHO owns a thread within the org is explicit:
  *     every row carries `org_id`/`user_id` from the introspected runtime-token
  *     {@link Principal}, and every read/write here is owner-scoped so a pod
@@ -176,17 +177,36 @@ export class ThreadStore {
   private scoped<T>(p: Principal, fn: () => Promise<T>): Promise<T> {
     const run = this.chain.then(async () => {
       const schema = schemaForOrg(p.orgId);
-      if (!this.ensured.has(schema)) {
-        await this.db.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
-        await this.db.query(`SET search_path TO "${schema}", public`);
-        if (this.db.exec) await this.db.exec(DDL);
-        else await this.db.query(DDL); // node-postgres runs multi-statement simple queries
-        this.ensured.add(schema);
-        log.info("thread schema ensured", { schema });
-      } else {
-        await this.db.query(`SET search_path TO "${schema}", public`);
+      // THE PIN IS TRANSACTIONAL. A single connection and the op mutex above stop
+      // JS-level interleaving, but they do NOT keep statements on one BACKEND: the
+      // stator is reached through pgbouncer in TRANSACTION mode, where a bare
+      // `SET search_path` is its own transaction and the queries after it are
+      // assigned independently — to a backend still carrying someone else's schema.
+      // That misfiled a thread (and its messages) into a stranger's tenant on
+      // 2026-08-29; see server/src/db/schema-session.ts, which this mirrors.
+      // BEGIN + SET LOCAL keeps the op on one backend and expires the pin at COMMIT.
+      const firstTouch = !this.ensured.has(schema);
+      await this.db.query("BEGIN");
+      try {
+        if (firstTouch) await this.db.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+        await this.db.query(`SET LOCAL search_path TO "${schema}", public`);
+        if (firstTouch) {
+          if (this.db.exec) await this.db.exec(DDL);
+          else await this.db.query(DDL); // node-postgres runs multi-statement simple queries
+        }
+        const out = await fn();
+        await this.db.query("COMMIT");
+        // Only AFTER the commit: a rolled-back DDL must not leave the org marked
+        // ensured, or the next op would skip creating tables that do not exist.
+        if (firstTouch) {
+          this.ensured.add(schema);
+          log.info("thread schema ensured", { schema });
+        }
+        return out;
+      } catch (e) {
+        try { await this.db.query("ROLLBACK"); } catch { /* surface the original */ }
+        throw e;
       }
-      return fn();
     });
     // The mutex survives a failed op; the failure still rejects `run`.
     this.chain = run.catch(() => undefined);
