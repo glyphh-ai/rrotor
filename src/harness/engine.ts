@@ -308,9 +308,9 @@ function buildAskServer(session: HarnessSession, cfg?: HarnessRunConfig): McpSer
         {
           name: "open_app",
           description:
-            "open_app(app) — show one of the user's installed apps ON THE USER'S SCREEN, whatever surface they are watching " +
-            "(desktop panel, web workbench, mobile tray). You never pick a machine — the surface the user is on renders it. " +
-            "'app' is the app's slug or name. To show a WEB PAGE or something you built/deployed, use open_browser(url) instead.",
+            "open_app(app) — show one of the user's LOCAL apps (one they're building or have installed) ON THE USER'S SCREEN, whatever surface they are watching " +
+            "(desktop panel, web workbench, mobile tray). It opens as a LOCAL panel — no URL, no login. This IS how you show an app you built with update_app; never publish or open a URL to preview a local app. " +
+            "'app' is the app's slug or name. Use open_browser(url) only for an EXTERNAL web page or a PUBLISHED app the user has NOT installed.",
           inputSchema: { type: "object" as const, additionalProperties: true },
         },
         ...(cfg && cfg.runtimeToken && controlOrigin(cfg) ? [
@@ -340,8 +340,8 @@ function buildAskServer(session: HarnessSession, cfg?: HarnessRunConfig): McpSer
         {
           name: "open_browser",
           description:
-            "open_browser(url) — show a web page ON THE USER'S SCREEN, whatever surface they are watching. " +
-            "THE way to show a built or deployed app: after build_app publishes, open the returned URL here.",
+            "open_browser(url) — show an EXTERNAL web page ON THE USER'S SCREEN, whatever surface they are watching. " +
+            "Do NOT use it to show an app the user is building or has installed — those run LOCALLY; show them with open_app(<slug>). Only for a third-party site, or a PUBLISHED app being viewed externally that the user has not installed.",
           inputSchema: { type: "object" as const, additionalProperties: true },
         },
       ],

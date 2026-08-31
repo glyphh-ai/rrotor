@@ -142,11 +142,17 @@ describe("the publish policy travels with the tools", () => {
     const { options } = buildQueryArgs(cfg({ system: "You are Glyphh." }), new HarnessSession({ runId: "run-t" }), []);
     const system = String(options.systemPrompt);
     expect(system).toContain("You are Glyphh.");
-    expect(system).toContain("## Building and publishing a Glyphh app");
+    expect(system).toContain("## Building and running a Glyphh app");
   });
 
   it("names the whole flow in order", () => {
     for (const step of ["scaffold_app", "npm run build", "create_app_entry", "build_app"]) {
+      expect(PUBLISH_POLICY).toContain(step);
+    }
+  });
+
+  it("makes the develop loop local-first — running is update_app + open_app, not a URL", () => {
+    for (const step of ["update_app", "open_app", "LOCAL panel", "SEPARATE, EXPLICIT step"]) {
       expect(PUBLISH_POLICY).toContain(step);
     }
   });
@@ -164,12 +170,12 @@ describe("the publish policy travels with the tools", () => {
 
   it("is absent from a chat turn, which has no tools to act on it", () => {
     const { options } = buildQueryArgs(cfg({ mode: "chat", system: "You are Glyphh." }), new HarnessSession({ runId: "run-t" }), []);
-    expect(String(options.systemPrompt)).not.toContain("## Building and publishing a Glyphh app");
+    expect(String(options.systemPrompt)).not.toContain("## Building and running a Glyphh app");
   });
 
   it("steers the model to distDir, not read-and-inline", () => {
     expect(PUBLISH_POLICY).toContain("distDir: 'dist'");
-    expect(PUBLISH_POLICY).toContain("Do NOT read built files");
+    expect(PUBLISH_POLICY).toContain("NEVER read built files");
   });
 });
 

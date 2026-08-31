@@ -77,6 +77,9 @@ describe("embedderFromEnv", () => {
 describe("HttpEmbedder", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
+    delete process.env.ROTOR_EMBED_RETRIES;
+    delete process.env.ROTOR_EMBED_BATCH;
   });
 
   it("POSTs { model, input } with bearer auth and parses data[0].embedding", async () => {
@@ -146,5 +149,107 @@ describe("HttpEmbedder", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(init.body as string).input).toEqual(["a", "b"]);
+  });
+
+  it("embedBatch short-circuits an empty input without hitting the network", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embedBatch([])).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("embedBatch chunks inputs past ROTOR_EMBED_BATCH into ordered requests", async () => {
+    process.env.ROTOR_EMBED_BATCH = "2";
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const n = (JSON.parse(init.body as string).input as string[]).length;
+      return { ok: true, status: 200, json: async () => ({ data: Array.from({ length: n }, () => ({ embedding: [1] })) }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embedBatch(["a", "b", "c", "d", "e"]);
+    expect(out).toHaveLength(5);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // 2 + 2 + 1
+  });
+
+  it("retries a 429 honouring Retry-After, then succeeds", async () => {
+    vi.useFakeTimers();
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call++;
+      if (call === 1)
+        return { ok: false, status: 429, headers: { get: (h: string) => (h === "retry-after" ? "2" : null) }, text: async () => "rate limited" };
+      return { ok: true, status: 200, json: async () => ({ data: [{ embedding: [9] }] }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embed("hi");
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toEqual([9]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a retryable status with backoff when no Retry-After is present", async () => {
+    vi.useFakeTimers();
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call++;
+      if (call === 1) return { ok: false, status: 503, headers: { get: () => null }, text: async () => "unavailable" };
+      return { ok: true, status: 200, json: async () => ({ data: [{ embedding: [5] }] }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embed("hi");
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toEqual([5]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a network-level failure, then succeeds", async () => {
+    vi.useFakeTimers();
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call++;
+      if (call === 1) throw new Error("ECONNRESET");
+      return { ok: true, status: 200, json: async () => ({ data: [{ embedding: [7] }] }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embed("hi");
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toEqual([7]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws after exhausting retries on a persistent network failure", async () => {
+    vi.useFakeTimers();
+    process.env.ROTOR_EMBED_RETRIES = "2";
+    const fetchMock = vi.fn(async () => {
+      throw new Error("ECONNRESET");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embed("hi").catch((e) => e);
+    await vi.runAllTimersAsync();
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
+    expect(String(err)).toMatch(/failed/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws with the status once a retryable error exhausts its budget", async () => {
+    process.env.ROTOR_EMBED_RETRIES = "1"; // one attempt → no retry, throw immediately
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 503, headers: { get: () => null }, text: async () => "unavailable" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embed("x")).rejects.toThrow(/503/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when the endpoint returns fewer vectors than inputs", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ data: [{ embedding: [1] }] }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embedBatch(["a", "b"])).rejects.toThrow(/vectors for/);
+  });
+
+  it("throws when a returned element carries no embedding array", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ data: [{ embedding: [1] }, {}] }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(new HttpEmbedder({ url: "https://embed.example/e", dim: 1 }).embedBatch(["a", "b"])).rejects.toThrow(
+      /no embedding at index/,
+    );
   });
 });

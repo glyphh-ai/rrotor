@@ -277,24 +277,24 @@ export async function expandBuildAppInput(input: unknown, workdir: string): Prom
  * open.
  */
 export const PUBLISH_POLICY = [
-  "## Building and publishing a Glyphh app",
+  "## Building and running a Glyphh app",
   "",
-  "When the user asks for an app, build a REAL project and PUBLISH it. The flow is fixed:",
+  "When the user asks for an app, build a REAL project and RUN IT LOCALLY on their machine. Developing and showing an app NEVER touch a public URL. The develop loop:",
   "1. scaffold_app { slug } — the shared starting Vite project as a { path: content } map. Write those files into the working folder. Do not hand-roll a project instead; this scaffold is the same on every surface.",
   "2. npm install && npm run build — Vite emits dist/.",
-  "3. create_app_entry { kind: 'glyphh', slug, name } — registers the app and returns the MINTED slug, which may differ from the one you asked for. Use the returned slug from then on.",
-  "4. build_app { slug, distDir: 'dist' } — pass the built output FOLDER (relative to the working folder). The runtime walks it itself, inlines every file, and uploads. Do NOT read built files, do NOT paste their contents into the call, and do not hunt for an upload endpoint — passing distDir is the whole upload. It cuts a release, builds it, and deploys it live. If it returns status 'failed', read the error, fix the source, rebuild and call it again. (For a tiny hand-written app you may instead pass files: { path: content } directly — the total call must stay well under 1 MB.)",
-  "5. push_source { app: <slug> } — publish the PROJECT SOURCE as the app's source of record (R2). Every surface builds from this; skipping it strands the app on this machine. A conflict here names the teammate who moved the source — rebase_source, tell the user what changed first, then push again.",
-  "6. Give the user the returned https://<slug>.glyphh.app URL.",
+  "3. update_app() — install the built app LOCALLY as a panel on the user's machine (it packages dist/, never your source). After ANY change: rebuild + update_app, or tools run the stale installed version.",
+  "4. open_app(<slug>) — show it. It opens as a LOCAL panel (no URL, no login). THIS is the preview; there is nothing to deploy to see it.",
   "",
   "Working on an EXISTING app in a fresh workspace? pull_source { app } FIRST — the working folder is not the source of record; the snapshot is.",
   "",
-  "NEVER start a local web server to show an app — not `python3 -m http.server`, not `npx serve`, not `vite preview`, not any other. This session may be running in a cloud container, where such a URL is unreachable by the user and by everyone else. Publishing is the ONLY way an app becomes visible.",
-  "Bundle every dependency at build time. The host CSP blocks remote scripts, stylesheets and fetches, so a CDN reference produces an app that will not publish.",
+  "PUBLISHING is a SEPARATE, EXPLICIT step — ONLY when the user asks to put the app on the PUBLIC web at https://<slug>.glyphh.app (external access). NEVER publish just to show or test an app during development. When they ask to publish: create_app_entry { kind: 'glyphh', slug, name } (returns the MINTED slug — use it from then on) → build_app { slug, distDir: 'dist' } (the runtime walks the folder, inlines every file, uploads, cuts a release, deploys live; NEVER read built files or paste their contents) → push_source { app: <slug> } (source of record to R2) → then give the user the returned https://<slug>.glyphh.app URL.",
+  "",
+  "NEVER start a local web server to show an app — not `python3 -m http.server`, not `npx serve`, not `vite preview` — and do NOT deploy to a URL just to preview: use update_app + open_app (the local panel). EXCEPTION: a HEADLESS session with NO connected desktop cannot open a local panel; only there, deploy a preview and show that URL.",
+  "Bundle every dependency at build time. The host CSP blocks remote scripts, stylesheets and fetches, so a CDN reference produces an app that will not run.",
 ].join("\n");
 
 /** Append the publish policy to a run's system prompt, once. */
 export function withPublishPolicy(system: string): string {
-  if (system.includes("## Building and publishing a Glyphh app")) return system;
+  if (system.includes("## Building and running a Glyphh app")) return system;
   return system ? `${system}\n\n${PUBLISH_POLICY}` : PUBLISH_POLICY;
 }
