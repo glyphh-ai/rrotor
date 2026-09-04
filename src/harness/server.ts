@@ -86,7 +86,7 @@ import { runHarness } from "./engine.js";
 import type { EngineDeps } from "./engine.js";
 import { ThreadRecorder, FrameTape, threadStoreFromEnv, warnIfUnrecordable, parseThreadMsgs, parseMode } from "./threads.js";
 import type { ThreadStore, ThreadPut } from "./threads.js";
-import { recallFacts, browseFacts, forgetFact } from "../facts/server.js";
+import { recallFacts, browseFacts, forgetFact, amendFact, graphFacts, createFact } from "../facts/server.js";
 import { handleFsRequest } from "./fs-routes.js";
 
 const DEFAULT_PORT = 8080;
@@ -481,7 +481,7 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
   // The desktop's ada_recall/browse/forget used to POST /stator/*, which no
   // runtime served (404 every time). ONE memory plane: they land here, on the
   // same glyph ledger the per-turn fact block is drawn from.
-  const factsMatch = /^\/facts\/(recall|browse|forget)$/.exec(path);
+  const factsMatch = /^\/facts\/(recall|browse|forget|amend|graph|create)$/.exec(path);
   if (method === "POST" && factsMatch) {
     const op = factsMatch[1]!;
     const principal = authn.principal;
@@ -493,6 +493,27 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
           sendJson(res, 200, await recallFacts(principal, String(body.query ?? ""), Number(body.topK) || 5));
         } else if (op === "browse") {
           sendJson(res, 200, await browseFacts(principal, Number(body.limit) || 200));
+        } else if (op === "amend") {
+          sendJson(res, 200, await amendFact(principal, {
+            id: String(body.id ?? ""),
+            ...(typeof body.name === "string" ? { name: body.name } : {}),
+            ...(body.facts !== undefined ? { facts: body.facts } : {}),
+            ...(typeof body.confidence === "number" ? { confidence: body.confidence } : {}),
+          }));
+        } else if (op === "create") {
+          sendJson(res, 200, await createFact(principal, {
+            ...(typeof body.name === "string" ? { name: body.name } : {}),
+            ...(body.facts !== undefined ? { facts: body.facts } : {}),
+            ...(typeof body.confidence === "number" ? { confidence: body.confidence } : {}),
+            ...(typeof body.scope === "string" ? { scope: body.scope } : {}),
+          }));
+        } else if (op === "graph") {
+          sendJson(res, 200, await graphFacts(principal, {
+            ...(typeof body.max === "number" ? { max: body.max } : {}),
+            ...(typeof body.semMin === "number" ? { semMin: body.semMin } : {}),
+            ...(typeof body.neuralMin === "number" ? { neuralMin: body.neuralMin } : {}),
+            ...(typeof body.neuralMax === "number" ? { neuralMax: body.neuralMax } : {}),
+          }));
         } else {
           sendJson(res, 200, await forgetFact(principal, String(body.id ?? "")));
         }

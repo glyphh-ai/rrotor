@@ -337,20 +337,13 @@ export function buildFactsServer(principal: Principal): McpServer {
           }, null, 1));
         }
         case "create_fact": {
-          const name = String(args.name ?? "");
-          const { glyph, stored, extra, primes } = encodeFact({ name, facts: args.facts });
-          const scope = args.scope === "user" ? "user" as const : "org" as const;
-          const confidence = clampConfidence(args.confidence);
-          await s.insert({ orgId: p.orgId, userId: p.userId }, {
-            id: glyph.identifier, name, scope,
-            concept: { name, facts: stored },
-            confidence, primes, citations: [], derived: false,
-            cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
+          const created = await persistFact(s, p, {
+            name: String(args.name ?? ""),
+            facts: args.facts,
+            ...(typeof args.confidence === "number" ? { confidence: args.confidence } : {}),
+            ...(args.scope === "user" ? { scope: "user" as const } : {}),
           });
-          indexNewFact(p.orgId, glyph.identifier, glyph.globalCortex.data, name, stored, primes);
-          void s.bumpLexicon({ orgId: p.orgId, userId: p.userId }, conceptWords(name, stored));
-          const preserved = extraSlotNames(extra);
-          return text(JSON.stringify({ id: glyph.identifier, confidence, scope, ...(preserved.length ? { preservedSlots: preserved } : {}) }));
+          return text(JSON.stringify(created));
         }
         case "search_facts": {
           const threshold = typeof args.threshold === "number" ? args.threshold : DEFAULT_THRESHOLD;
@@ -504,6 +497,43 @@ export async function browseFacts(principal: Principal, limit = 200): Promise<{ 
   };
 }
 
+/** Append a NEW fact glyphh to the ledger — the one write path, shared by the
+ *  create_fact tool and the HTTP create endpoint. */
+async function persistFact(
+  s: GlyphStore,
+  p: Principal,
+  input: { name: string; facts: unknown; confidence?: number; scope?: "org" | "user" },
+): Promise<{ id: string; confidence: number; scope: "org" | "user"; preservedSlots?: string[] }> {
+  const { glyph, stored, extra, primes } = encodeFact({ name: input.name, facts: input.facts });
+  const scope = input.scope === "user" ? "user" as const : "org" as const;
+  const confidence = clampConfidence(input.confidence);
+  await s.insert({ orgId: p.orgId, userId: p.userId }, {
+    id: glyph.identifier, name: input.name, scope,
+    concept: { name: input.name, facts: stored },
+    confidence, primes, citations: [], derived: false,
+    cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
+  });
+  indexNewFact(p.orgId, glyph.identifier, glyph.globalCortex.data, input.name, stored, primes);
+  void s.bumpLexicon({ orgId: p.orgId, userId: p.userId }, conceptWords(input.name, stored));
+  const preserved = extraSlotNames(extra);
+  return { id: glyph.identifier, confidence, scope, ...(preserved.length ? { preservedSlots: preserved } : {}) };
+}
+
+/** Add a fact over HTTP (the Memory panel's "+ fact" and the e2e circle). */
+export async function createFact(
+  principal: Principal,
+  input: { name?: string; facts?: unknown; confidence?: number; scope?: string },
+): Promise<{ id: string; confidence: number; scope: "org" | "user"; preservedSlots?: string[] }> {
+  const s = await store();
+  if (!s) throw new Error("the fact ledger is not configured on this runtime (ROTOR_STATOR_URL unset)");
+  return persistFact(s, principal, {
+    name: String(input.name ?? "").trim(),
+    facts: input.facts,
+    ...(typeof input.confidence === "number" ? { confidence: input.confidence } : {}),
+    ...(input.scope === "user" ? { scope: "user" as const } : {}),
+  });
+}
+
 /** Tombstone a fact by id (ada_forget). */
 export async function forgetFact(principal: Principal, id: string): Promise<{ forgotten: boolean }> {
   const s = await store();
@@ -514,6 +544,162 @@ export async function forgetFact(principal: Principal, id: string): Promise<{ fo
   await s.tombstone(p, id);
   indexes.delete(principal.orgId);
   return { forgotten: true };
+}
+
+/** Correct a fact over HTTP (the Memory panel's edit): appends a new version
+ *  and supersedes the old id — the ledger never mutates. The exact semantics
+ *  of the update_fact tool, without an MCP round-trip. */
+export async function amendFact(
+  principal: Principal,
+  input: { id: string; name?: string; facts?: unknown; confidence?: number },
+): Promise<{ id: string; supersedes: string }> {
+  const s = await store();
+  if (!s) throw new Error("the fact ledger is not configured on this runtime (ROTOR_STATOR_URL unset)");
+  const p = { orgId: principal.orgId, userId: principal.userId };
+  const old = (await s.byIds(p, [input.id]))[0];
+  if (!old) throw new Error(`no such fact: ${input.id}`);
+  const name = (input.name ?? "").trim() || old.name;
+  const facts = input.facts ?? (old.concept as { facts?: unknown }).facts;
+  const { glyph, stored, primes } = encodeFact({ name, facts });
+  const confidence = clampConfidence(input.confidence ?? old.confidence);
+  await s.insert(p, {
+    id: glyph.identifier, name, scope: old.scope,
+    concept: { name, facts: stored },
+    confidence, primes, citations: [input.id], derived: old.derived,
+    cortexB64: Buffer.from(glyph.globalCortex.data.buffer, glyph.globalCortex.data.byteOffset, glyph.globalCortex.data.byteLength).toString("base64"),
+  });
+  await s.supersede(p, input.id, glyph.identifier);
+  indexes.get(principal.orgId)?.items.delete(input.id);
+  indexNewFact(principal.orgId, glyph.identifier, glyph.globalCortex.data, name, stored, primes);
+  void s.bumpLexicon(p, conceptWords(name, stored));
+  return { id: glyph.identifier, supersedes: input.id };
+}
+
+// ── The semantic space as data (the Memory panel's 3D view) ──────────────────
+
+/** Cap the graph at a size whose pairwise cosine pass stays interactive —
+ *  n²/2 dot products over the 10k-dim cortex. */
+const GRAPH_MAX = 400;
+
+/** Deterministic pseudo-random start vector (mulberry32) — same ledger, same
+ *  projection, replayable renders. */
+function seededVector(dim: number, seed: number): Float64Array {
+  let a = seed >>> 0;
+  const rand = (): number => {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const v = new Float64Array(dim);
+  for (let i = 0; i < dim; i++) v[i] = rand() - 0.5;
+  return v;
+}
+
+/** Top-3 principal directions of the centered cortex cloud, by power
+ *  iteration with deflation — exact PCA is overkill for a starfield. */
+function pca3(vectors: Bipolar[], dim: number): Array<[number, number, number]> {
+  const n = vectors.length;
+  if (!n) return [];
+  const mean = new Float64Array(dim);
+  for (const v of vectors) for (let d = 0; d < dim; d++) mean[d]! += v[d]!;
+  for (let d = 0; d < dim; d++) mean[d]! /= n;
+
+  const comps: Float64Array[] = [];
+  for (let c = 0; c < 3; c++) {
+    let dir = seededVector(dim, SEED + c);
+    for (let iter = 0; iter < 8; iter++) {
+      const next = new Float64Array(dim);
+      for (const v of vectors) {
+        let dot = 0;
+        for (let d = 0; d < dim; d++) dot += (v[d]! - mean[d]!) * dir[d]!;
+        for (let d = 0; d < dim; d++) next[d]! += dot * (v[d]! - mean[d]!);
+      }
+      // Deflate against found components, then normalize.
+      for (const prev of comps) {
+        let proj = 0;
+        for (let d = 0; d < dim; d++) proj += next[d]! * prev[d]!;
+        for (let d = 0; d < dim; d++) next[d]! -= proj * prev[d]!;
+      }
+      let norm = 0;
+      for (let d = 0; d < dim; d++) norm += next[d]! * next[d]!;
+      norm = Math.sqrt(norm) || 1;
+      for (let d = 0; d < dim; d++) next[d]! /= norm;
+      dir = next;
+    }
+    comps.push(dir);
+  }
+  return vectors.map((v) => {
+    const out: [number, number, number] = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      let dot = 0;
+      for (let d = 0; d < dim; d++) dot += (v[d]! - mean[d]!) * comps[c]![d]!;
+      out[c] = dot;
+    }
+    return out;
+  });
+}
+
+export interface FactGraphNode {
+  id: number;
+  factId: string;
+  name: string;
+  /** "layer.role=value" lines — what the info card renders. */
+  slots: string[];
+  scope: string;
+  derived: boolean;
+  confidence: number;
+  createdAt: string;
+}
+
+/** The org's live fact space as render-ready data: nodes, 3D PCA coords,
+ *  cosine-banded similarity edges. Bands default to the glyph space's real
+ *  spread (unrelated facts share the universal skeleton and sit well above
+ *  zero, so the interesting bands start higher than the old stator's). */
+export async function graphFacts(
+  principal: Principal,
+  opts: { max?: number; semMin?: number; neuralMin?: number; neuralMax?: number } = {},
+): Promise<{ nodes: FactGraphNode[]; coords: Array<[number, number, number]>; edges: Array<{ a: number; b: number; sim: number; kind: "semantic" | "neural" }> }> {
+  const s = await store();
+  if (!s) return { nodes: [], coords: [], edges: [] };
+  const max = Math.max(1, Math.min(GRAPH_MAX, Number(opts.max) || GRAPH_MAX));
+  const semMin = typeof opts.semMin === "number" ? opts.semMin : 0.75;
+  const neuralMin = typeof opts.neuralMin === "number" ? opts.neuralMin : 0.55;
+  const neuralMax = typeof opts.neuralMax === "number" ? opts.neuralMax : semMin;
+
+  const gp = { orgId: principal.orgId, userId: principal.userId };
+  const { items } = await orgIndex(s, principal);
+  const rows = (await s.live(gp, max)).filter((r) => items.has(r.id)).slice(0, max);
+  const vectors = rows.map((r) => items.get(r.id)!.cortex);
+
+  const nodes: FactGraphNode[] = rows.map((row, i) => {
+    const facts = factsOf(row);
+    const slots: string[] = [];
+    for (const [layer, roles] of Object.entries(facts)) {
+      for (const [role, value] of Object.entries(roles)) slots.push(`${layer}.${role}=${value}`);
+    }
+    return {
+      id: i,
+      factId: row.id,
+      name: String((row.concept as { name?: string })?.name ?? row.name),
+      slots,
+      scope: row.scope,
+      derived: row.derived,
+      confidence: row.confidence,
+      createdAt: row.createdAt,
+    };
+  });
+
+  const coords = pca3(vectors, DIM);
+  const edges: Array<{ a: number; b: number; sim: number; kind: "semantic" | "neural" }> = [];
+  for (let a = 0; a < vectors.length; a++) {
+    for (let b = a + 1; b < vectors.length; b++) {
+      const sim = cosineSimilarity(vectors[a]!, vectors[b]!);
+      if (sim >= semMin) edges.push({ a, b, sim: Number(sim.toFixed(4)), kind: "semantic" });
+      else if (sim >= neuralMin && sim < neuralMax) edges.push({ a, b, sim: Number(sim.toFixed(4)), kind: "neural" });
+    }
+  }
+  return { nodes, coords, edges };
 }
 
 /** Reserved directive slots inside {@link FACT_BLOCK_MAX} — a rule that fires
