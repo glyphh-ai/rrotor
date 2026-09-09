@@ -17,7 +17,28 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The image is a PROD ARTIFACT (control-plane-minted machines pull it) — it
+  # passes the same gate CI and the deploy run, coverage threshold included.
+  # It previously published with NO verify at all.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - run: npm run build
+      - run: npm run lint
+      - run: npm run test:cov
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -128,3 +128,34 @@ describe("envelope leftovers", () => {
     expect(hooks?.pre).toBeTypeOf("function");
   });
 });
+
+describe("post (P2)", () => {
+  it("parsePostEffects clamps note + caps facts at 5, drops junk", async () => {
+    const { parsePostEffects } = await import("../../src/harness/envelope.js");
+    const eff = parsePostEffects({
+      note: " n".repeat(2000),
+      facts: [
+        { name: "a", facts: { x: 1 } }, { name: "b" }, { name: "" }, "junk",
+        { name: "c" }, { name: "d" }, { name: "e" }, { name: "f" },
+      ],
+      launchMissiles: true,
+    });
+    expect(eff?.note?.length).toBeLessThanOrEqual(1000);
+    expect(eff?.facts?.map((f) => f.name)).toEqual(["a", "b", "c", "d", "e"]);
+    expect((eff as Record<string, unknown>).launchMissiles).toBeUndefined();
+  });
+
+  it("runPost returns effects; a slow post is cut; capFinalText caps", async () => {
+    const { runPost, compileHooks: ch, capFinalText } = await import("../../src/harness/envelope.js");
+    const hooks = ch(`export async function post(ctx) { return { note: "saw " + ctx.finalText }; }`)!;
+    const ctx = { ...CTX, finalText: "hello", aborted: false, usage: { inTokens: 1, outTokens: 2 }, plan: null };
+    const r = await runPost(hooks, ctx, 100);
+    expect(r.effects?.note).toBe("saw hello");
+    const slow = ch(`exports.post = () => new Promise(() => {});`)!;
+    const r2 = await runPost(slow, ctx, 30);
+    expect(r2.error).toContain("exceeded");
+    expect(capFinalText("x".repeat(9000))).toContain("capped");
+    const none = await runPost({}, ctx, 30);
+    expect(none).toEqual({ effects: null, ms: 0 });
+  });
+});

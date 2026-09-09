@@ -47,8 +47,75 @@ export interface PreCtx {
   loop: string;
 }
 
+/** What `post` sees (P2): the turn's outcome. `finalText` is capped — post is
+ *  decision code over the RESULT, not a second transcript. */
+export interface PostCtx extends PreCtx {
+  finalText: string;
+  error?: string;
+  aborted: boolean;
+  usage: { inTokens: number; outTokens: number };
+  /** The plan `pre` returned this turn (null when none) — so post can check
+   *  its own program's intent against the outcome. */
+  plan: TurnPlan | null;
+}
+
+/** What `post` may DO — declarative effects, applied by the engine under the
+ *  principal's authority. Each is a capability, not ambient power. */
+export interface PostEffects {
+  /** Facts to record on the org ledger (capped; the engine writes them). */
+  facts?: Array<{ name: string; facts: unknown }>;
+  /** A short annotation framed into the transcript (setup loop-post frame). */
+  note?: string;
+}
+
 export interface LoopHooks {
   pre?: (ctx: PreCtx) => unknown;
+  post?: (ctx: PostCtx) => unknown;
+}
+
+const NOTE_MAX = 1_000;
+const FACTS_MAX = 5;
+const FINAL_TEXT_CAP = 8_000;
+
+/** Clamp an untrusted post return into effects. Unknown fields drop. */
+export function parsePostEffects(v: unknown): PostEffects | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const out: PostEffects = {};
+  if (typeof o.note === "string" && o.note.trim()) out.note = o.note.trim().slice(0, NOTE_MAX);
+  if (Array.isArray(o.facts)) {
+    const facts = o.facts
+      .filter((f): f is Record<string, unknown> => !!f && typeof f === "object")
+      .filter((f) => typeof f.name === "string" && !!(f.name as string).trim())
+      .slice(0, FACTS_MAX)
+      .map((f) => ({ name: String(f.name).trim().slice(0, 120), facts: f.facts }));
+    if (facts.length) out.facts = facts;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** Cap what post reads of the reply. */
+export function capFinalText(text: string): string {
+  return text.length > FINAL_TEXT_CAP ? `${text.slice(0, FINAL_TEXT_CAP)}\n[⋯ capped]` : text;
+}
+
+/** Run `post` under the same budget law as pre. Never throws. */
+export async function runPost(
+  hooks: LoopHooks,
+  ctx: PostCtx,
+  budgetMs: number,
+): Promise<{ effects: PostEffects | null; ms: number; error?: string }> {
+  const t0 = Date.now();
+  if (!hooks.post) return { effects: null, ms: 0 };
+  try {
+    const raced = await Promise.race([
+      Promise.resolve(hooks.post(ctx)),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`post exceeded ${budgetMs}ms`)), budgetMs)),
+    ]);
+    return { effects: parsePostEffects(raced), ms: Date.now() - t0 };
+  } catch (err) {
+    return { effects: null, ms: Date.now() - t0, error: (err as Error).message };
+  }
 }
 
 const STEER_MAX = 2_000;
@@ -108,7 +175,8 @@ export function compileHooks(code: string): LoopHooks | null {
   }
   const mod = (sandbox.module.exports ?? exportsObj) as Record<string, unknown>;
   const pre = typeof mod.pre === "function" ? (mod.pre as LoopHooks["pre"]) : undefined;
-  return pre ? { pre } : null;
+  const post = typeof mod.post === "function" ? (mod.post as LoopHooks["post"]) : undefined;
+  return pre || post ? { ...(pre ? { pre } : {}), ...(post ? { post } : {}) } : null;
 }
 
 /** Run `pre` under a wall-clock budget. Never throws: an error or timeout is

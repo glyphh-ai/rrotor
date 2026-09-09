@@ -32,7 +32,10 @@ jobs:
       - run: pip install numpy
       - run: npm run build
       - run: npm run lint
-      - run: npm test
+      # THE SAME GATE CI RUNS — coverage threshold included. Plain `npm test`
+      # here let five days of red-CI (coverage-failing) mains deploy silently
+      # (2026-09-04 → 09-09); the deploy's verify and CI must be one gate.
+      - run: npm run test:cov
 
   deploy-fly:
     needs: verify

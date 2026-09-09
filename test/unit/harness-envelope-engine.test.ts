@@ -137,3 +137,38 @@ describe("runHarness — the program envelope", () => {
     expect(frames(s).pop()).toMatchObject({ type: "done" });
   });
 });
+
+describe("runHarness — the post half (P2)", () => {
+  beforeEach(() => { clearEnvelopeCache(); process.env.ROTOR_TURN_PROGRAM = "1"; });
+  afterEach(() => { delete process.env.ROTOR_TURN_PROGRAM; });
+
+  it("post sees the final text and its note lands in a loop-post frame BEFORE done", async () => {
+    const queryFn: QueryFn = () => (async function* () {
+      yield { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Hello" } } };
+      yield { type: "result", subtype: "success", result: "Hello", num_turns: 1, usage: { input_tokens: 5, output_tokens: 1 } };
+    })();
+    const s = new HarnessSession({ runId: "run-p2" });
+    await runHarness(s, cfg({ loop: "post-loop" }), {
+      queryFn,
+      loopSource: async () => `export async function post(ctx) { return { note: "len=" + ctx.finalText.length + " out=" + ctx.usage.outTokens }; }`,
+    });
+    const all = frames(s);
+    const post = all.find((f) => f.type === "setup" && (f as { phase?: string }).phase === "loop-post") as Record<string, unknown> | undefined;
+    expect(post).toBeTruthy();
+    expect(String(post?.note)).toContain("len=5");
+    expect(all.findIndex((f) => f === post)).toBeLessThan(all.findIndex((f) => f.type === "done"));
+  });
+
+  it("post runs on a FAILED turn with the error in ctx", async () => {
+    const queryFn: QueryFn = () => (async function* () {
+      yield { type: "result", subtype: "error_during_execution", errorMessage: "model exploded" };
+    })();
+    const s = new HarnessSession({ runId: "run-p2e" });
+    await runHarness(s, cfg({ loop: "post-loop" }), {
+      queryFn,
+      loopSource: async () => `exports.post = (ctx) => ({ note: ctx.error ? "failed: yes" : "failed: no" });`,
+    });
+    const post = frames(s).find((f) => f.type === "setup" && (f as { phase?: string }).phase === "loop-post") as Record<string, unknown> | undefined;
+    expect(String(post?.note ?? "")).toContain("failed: yes");
+  });
+});

@@ -42,8 +42,8 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
 import { appsServerRef, withPublishPolicy, expandBuildAppInput, expandSaveFileInput, BUILD_APP_TOOL, SAVE_FILE_TOOL } from "./glyphh-apps.js";
-import { buildFactsServer, renderFactBlock } from "../facts/server.js";
-import { cachedHooks, runPre, type TurnPlan } from "./envelope.js";
+import { buildFactsServer, renderFactBlock, createFact } from "../facts/server.js";
+import { cachedHooks, runPre, runPost, capFinalText, type TurnPlan, type LoopHooks } from "./envelope.js";
 import { pullSource, pushSource, rebaseSource, type SourceSyncCfg } from "./source-sync.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
@@ -600,11 +600,14 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   // (server/docs/program-per-turn.md). Fail-open, loudly: any miss/error/
   // timeout skips with a visible setup frame and the turn runs on defaults.
   // The SAME seam as the fact block — the vessel owns the pre-turn moment.
+  let envHooks: LoopHooks | null = null;
+  let envPlan: TurnPlan | null = null;
   if (process.env.ROTOR_TURN_PROGRAM === "1" && cfg.loop && deps.loopSource && cfg.mode !== "chat") {
     const loop = cfg.loop;
     const src = deps.loopSource;
     const orgKey = deps.principal?.orgId ?? "anon";
     const hooks = await cachedHooks(`${orgKey}:${loop}`, () => src(loop));
+    envHooks = hooks;
     if (hooks) {
       const r = await runPre(hooks, {
         prompt: cfg.prompt, mode: cfg.mode, historyTurns: cfg.history.length,
@@ -622,6 +625,7 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
         return;
       }
       if (r.plan) {
+        envPlan = r.plan;
         // NARROW-ONLY application. Steer rides the injection lane the fact
         // block owns; the context budget can only shrink; tools narrow inside
         // buildQueryArgs via deps.turnPlan.
@@ -637,6 +641,40 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
       }
     }
   }
+
+  // ── PROGRAM-PER-TURN (P2): the loop's `post` hook — the deterministic
+  // close of the envelope. Sees the outcome, returns DECLARATIVE effects
+  // (facts to record, a note), applied under the principal's authority.
+  // Same budget + fail-open law as pre; skipped on user aborts (a stopped
+  // run is the user's call, not the program's moment). The loop-post frame
+  // lands on the durable frame tape — with loop-pre, THAT is the turn tape.
+  const runEnvelopePost = async (finalTextArg: string, errorArg: string | undefined, usage: { inTokens: number; outTokens: number }): Promise<void> => {
+    if (!envHooks?.post || !cfg.loop) return;
+    const r = await runPost(envHooks, {
+      prompt: cfg.prompt, mode: cfg.mode, historyTurns: cfg.history.length,
+      ...(cfg.workdir ? { workdir: cfg.workdir } : {}), loop: cfg.loop,
+      finalText: capFinalText(finalTextArg),
+      ...(errorArg ? { error: errorArg } : {}),
+      aborted: false,
+      usage,
+      plan: envPlan,
+    }, 50);
+    let factsRecorded = 0;
+    if (r.effects?.facts && deps.principal) {
+      for (const f of r.effects.facts) {
+        try { await createFact(deps.principal, { name: f.name, facts: f.facts }); factsRecorded++; }
+        catch (err) { runLog.warn("loop post fact write failed", { detail: (err as Error).message }); }
+      }
+    }
+    // Always framed when a post hook ran — a sub-ms hook is still the tape's
+    // record of the envelope closing (ms>0 as the gate silently dropped it).
+    session.emit({
+      type: "setup", phase: "loop-post", loop: cfg.loop, ms: r.ms,
+      ...(r.error ? { error: r.error } : {}),
+      ...(r.effects?.note ? { note: r.effects.note } : {}),
+      ...(factsRecorded ? { facts: factsRecorded } : {}),
+    });
+  };
 
   let attachments: MaterializedAttachment[] = [];
   let repoNote = "";
@@ -873,6 +911,8 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
     const creditsMicro = creditsProbe ? await creditsProbe : null;
     if (creditsMicro !== null) session.emit({ type: "credits", creditsMicro });
     if (runError) {
+      // P2: the program sees failures too — its post may record what broke.
+      await runEnvelopePost(finalText, runError, { inTokens: inTok, outTokens: outTok() });
       fail(runError);
       runLog.warn("run failed", { detail: runError, turns: turnsUsed });
     } else {
@@ -880,6 +920,10 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
       // runId): the next turn's full-context path must carry this turn. The
       // thread is never lost.
       transcripts.append(threadKey, cfg.runId, cfg.prompt, finalText);
+      // P2: the deterministic close — post runs (and its loop-post frame
+      // lands on the tape) BEFORE the terminal frame, so a consumer that
+      // stops at `done` still saw the whole envelope.
+      await runEnvelopePost(finalText, undefined, { inTokens: inTok, outTokens: outTok() });
       session.emit({ type: "done", stopped: false });
       runLog.info("run complete", { turns: turnsUsed, in_tokens: inTok, out_tokens: outTok(), credits_micro: creditsMicro ?? undefined });
     }
