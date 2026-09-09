@@ -120,6 +120,11 @@ export interface HarnessRunConfig {
   repoToken?: string;
   system?: string;
   model?: string;
+  /** The session's LOOP — the program that shapes this turn (program-per-turn,
+   *  see server/docs/program-per-turn.md). P0: carried + stamped for
+   *  attribution; the envelope hooks read it from P1 on. Absent = the org's
+   *  default loop semantics (today's behavior exactly). */
+  loop?: string;
   mode: SessionMode;
   permission: PermissionMode;
   /** The Glyphh gateway's Anthropic-compatible base URL. REQUIRED. */
@@ -203,6 +208,7 @@ export interface RunRequestBody {
   history?: unknown;
   system?: unknown;
   model?: unknown;
+  loop?: unknown;
   mode?: unknown;
   permission?: unknown;
   attachments?: unknown;
@@ -394,6 +400,9 @@ export function resolveRunConfig(
     history: parseHistory(body.history),
     ...(str(body.system) ? { system: str(body.system) } : {}),
     ...(str(body.model) ?? env.HARNESS_MODEL ? { model: str(body.model) ?? env.HARNESS_MODEL } : {}),
+    // Loop refs are slugs/ids — same shape law as thread ids; anything else is
+    // dropped rather than 400'd (the field is advisory until the envelope).
+    ...(str(body.loop) && THREAD_ID_RE.test(str(body.loop)!) ? { loop: str(body.loop)! } : {}),
     mode: SESSION_MODES.includes(modeRaw as SessionMode) ? (modeRaw as SessionMode) : "code",
     permission: normalizePermissionMode(String(permissionRaw ?? "")),
     gatewayUrl: gatewayUrl.replace(/\/+$/, ""),

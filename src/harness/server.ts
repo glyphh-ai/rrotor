@@ -330,6 +330,9 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
           session: cfg.sessionId || undefined,
           mode: cfg.mode,
           permission: cfg.permission,
+          // The LOOP shaping this turn (program-per-turn P0: attribution now,
+          // envelope from P1) — absent on legacy callers.
+          ...(cfg.loop ? { loop: cfg.loop } : {}),
           // The cwd the run's tools act on — a local run names the user's own
           // folder, so it is logged explicitly.
           workdir: cfg.workdir,
