@@ -324,7 +324,21 @@ function dispatch(reg: RunRegistry, opts: HarnessServerOptions, threads: Promise
         // Fire the run; frames stream via /ws + /runs/:id/frames. Never throws.
         // The principal (when introspected) lets the engine rotate the turn
         // around the stator — recall before, write after — owner-scoped.
-        void runHarness(session, cfg, opts.engine ?? {}, authn.principal);
+        // PROGRAM-PER-TURN: hand the engine a loop-source resolver over the
+        // same org-scoped store threads ride (the `loops` table is the
+        // server's tenant content in the same schema). Principal-less (local
+        // auth-off) pods get none — desktop parity is P3.
+        const p = authn.principal;
+        const engineDeps = {
+          ...(opts.engine ?? {}),
+          ...(p ? {
+            loopSource: async (ref: string): Promise<string | null> => {
+              const s = await threads;
+              return s ? s.loopProgram(p, ref) : null;
+            },
+          } : {}),
+        };
+        void runHarness(session, cfg, engineDeps, authn.principal);
         log.info("run accepted", {
           run_id: runId,
           session: cfg.sessionId || undefined,

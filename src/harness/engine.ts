@@ -43,6 +43,7 @@ import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
 import { appsServerRef, withPublishPolicy, expandBuildAppInput, expandSaveFileInput, BUILD_APP_TOOL, SAVE_FILE_TOOL } from "./glyphh-apps.js";
 import { buildFactsServer, renderFactBlock } from "../facts/server.js";
+import { cachedHooks, runPre, type TurnPlan } from "./envelope.js";
 import { pullSource, pushSource, rebaseSource, type SourceSyncCfg } from "./source-sync.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
@@ -80,6 +81,13 @@ export interface EngineDeps {
    *  rendered by runHarness (selection is deterministic prime-overlap against
    *  the last exchange — sub-ms, no model call). Rides the system prompt. */
   factBlock?: string | null;
+  /** PROGRAM-PER-TURN (P1): resolve a loop ref to its program source. Wired
+   *  by the pod server from the ThreadStore (cloud pods with a principal);
+   *  absent → no envelope, today's behavior exactly. */
+  loopSource?: (ref: string) => Promise<string | null>;
+  /** The envelope's TURN PLAN — narrows the tool pack in buildQueryArgs.
+   *  ENGINE-INTERNAL: set by runHarness after `pre` runs, never by callers. */
+  turnPlan?: TurnPlan | null;
 }
 
 /** How long the turn's price lookup may take before we give up on it. The
@@ -506,7 +514,12 @@ export function buildQueryArgs(
       ...(chat
         ? { tools: [] as string[] }
         : {
-            tools: SANDBOX_TOOLS,
+            // PROGRAM-PER-TURN: the envelope's plan NARROWS the preset pack —
+            // intersection only, so a program can hide tools, never add one
+            // (narrow-only law, envelope.ts). Absent plan → the full pack.
+            tools: deps.turnPlan?.tools
+              ? SANDBOX_TOOLS.filter((t) => deps.turnPlan!.tools!.includes(t))
+              : SANDBOX_TOOLS,
             mcpServers: {
               glyphh: { type: "sdk", name: "glyphh", instance: mcp as never },
               ...(facts ? { glyphh_facts: { type: "sdk", name: "glyphh_facts", instance: facts as never } } : {}),
@@ -581,6 +594,49 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   const fail = (message: string): void => {
     session.emit({ type: "error", error: redactSecrets(brandError(message), secrets) });
   };
+
+  // ── PROGRAM-PER-TURN (P1, flag-gated): the session loop's `pre` hook runs
+  // deterministically before the SDK inner loop and shapes this turn
+  // (server/docs/program-per-turn.md). Fail-open, loudly: any miss/error/
+  // timeout skips with a visible setup frame and the turn runs on defaults.
+  // The SAME seam as the fact block — the vessel owns the pre-turn moment.
+  if (process.env.ROTOR_TURN_PROGRAM === "1" && cfg.loop && deps.loopSource && cfg.mode !== "chat") {
+    const loop = cfg.loop;
+    const src = deps.loopSource;
+    const orgKey = deps.principal?.orgId ?? "anon";
+    const hooks = await cachedHooks(`${orgKey}:${loop}`, () => src(loop));
+    if (hooks) {
+      const r = await runPre(hooks, {
+        prompt: cfg.prompt, mode: cfg.mode, historyTurns: cfg.history.length,
+        ...(cfg.workdir ? { workdir: cfg.workdir } : {}), loop,
+      }, 50);
+      session.emit({
+        type: "setup", phase: "loop-pre", loop, ms: r.ms,
+        ...(r.error ? { error: r.error } : {}),
+        ...(r.plan ? { applied: Object.keys(r.plan) } : {}),
+      });
+      if (r.plan?.refuse) {
+        // Deterministic refusal — the program's call; the model never runs.
+        // Same early-exit shape as a setup failure (error frame, no done).
+        fail(r.plan.refuse);
+        return;
+      }
+      if (r.plan) {
+        // NARROW-ONLY application. Steer rides the injection lane the fact
+        // block owns; the context budget can only shrink; tools narrow inside
+        // buildQueryArgs via deps.turnPlan.
+        if (r.plan.steer) {
+          const steer = `## Loop steer (${loop})\n${r.plan.steer}`;
+          deps = { ...deps, factBlock: deps.factBlock ? `${deps.factBlock}\n\n${steer}` : steer };
+        }
+        if (r.plan.contextBudget) {
+          const current = cfg.context?.budgetTokens;
+          cfg = { ...cfg, context: { ...cfg.context, budgetTokens: Math.min(current ?? r.plan.contextBudget, r.plan.contextBudget) } };
+        }
+        deps = { ...deps, turnPlan: r.plan };
+      }
+    }
+  }
 
   let attachments: MaterializedAttachment[] = [];
   let repoNote = "";

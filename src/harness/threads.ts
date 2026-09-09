@@ -405,6 +405,30 @@ export class ThreadStore {
     return { applied: true, owned: true, updatedAt: patch.updatedAt };
   }
 
+  /** The org's LOOP PROGRAM source by slug or id (program-per-turn P1). The
+   *  `loops` table is the SERVER's tenant content in this same org schema —
+   *  two writers, one store, exactly like threads. Scoped the way the server
+   *  reads it: org loops for everyone, personal loops for their owner. A
+   *  missing table (older schema) or no row → null — the envelope fail-opens
+   *  to a hook-less turn, never a dead one. */
+  async loopProgram(p: Principal, ref: string): Promise<string | null> {
+    try {
+      return await this.scoped(p, async () => {
+        const r = await this.db.query(
+          `SELECT code FROM loops
+            WHERE org_id = $1 AND (slug = $2 OR id::text = $2)
+              AND (scope = 'org' OR (scope = 'personal' AND owner_user_id = $3))
+            LIMIT 1`,
+          [p.orgId, ref, p.userId],
+        );
+        const code = (r.rows[0] as { code?: string } | undefined)?.code;
+        return typeof code === "string" && code.trim() ? code : null;
+      });
+    } catch {
+      return null;
+    }
+  }
+
   /** Tombstone a thread of the principal's (hides it from list; reads 404;
    *  later PUTs lose). Returns false when `p` owns no such thread. */
   async tombstone(p: Principal, id: string, at: number): Promise<boolean> {
