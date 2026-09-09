@@ -271,3 +271,11 @@ describe("resolveRunConfig — loop + loopProgram (program-per-turn)", () => {
     expect(fat.loopProgram).toBeUndefined();
   });
 });
+
+describe("buildAgentEnv — long-context beta", () => {
+  it("sets ANTHROPIC_BETAS with context-1m (the gateway strips it for small-window models)", () => {
+    const env = buildAgentEnv({ runId: "r", gatewayUrl: "https://gw", runtimeToken: "t", configDir: "/tmp/cfg-envlp" });
+    expect(env.ANTHROPIC_BETAS).toContain("context-1m");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+});

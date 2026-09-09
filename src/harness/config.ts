@@ -533,6 +533,12 @@ export function buildAgentEnv(
     ANTHROPIC_CUSTOM_HEADERS: `x-glyphh-run: ${cfg.runId}`,
     ANTHROPIC_AUTH_TOKEN: cfg.runtimeToken,
     ANTHROPIC_API_KEY: undefined,
+    // LONG CONTEXT, both sides of the wire: without the 1m beta the SDK's OWN
+    // context accounting caps big-window models at 200K and refuses the call
+    // client-side ("Prompt is too long" with no request ever reaching the
+    // gateway — prod, 2026-09-09). The gateway STRIPS this beta for models
+    // whose catalog window is ≤200K, so always-on here is safe everywhere.
+    ANTHROPIC_BETAS: "context-1m-2025-08-07",
     CLAUDE_CONFIG_DIR: cfg.configDir,
     CLAUDE_CODE_USE_BEDROCK: undefined,
     CLAUDE_CODE_USE_VERTEX: undefined,

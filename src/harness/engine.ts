@@ -497,7 +497,11 @@ export function buildQueryArgs(
       : buildInputStream(assemblePrompt(cfg.history, cfg.prompt, attachments, cfg.contextBlock), cfg.images ?? [], session),
     options: {
       cwd: cfg.workdir,
-      ...(cfg.model ? { model: cfg.model } : {}),
+      // BARE model name to the SDK: a catalog id ("anthropic::claude-sonnet-5")
+      // isn't in the SDK's model table, so its context accounting fell back to
+      // a 200K default and refused big turns client-side (prod, 2026-09-09).
+      // The gateway resolves bare ids identically; frames/logs keep the full id.
+      ...(cfg.model ? { model: cfg.model.includes("::") ? cfg.model.split("::").pop()! : cfg.model } : {}),
       systemPrompt: withFactBlock(withFactsPolicy(apps ? withPublishPolicy(system) : system, !!facts), deps.factBlock ?? null),
       settingSources: [],
       // chat = a tool-less streamed turn; cowork/code = the sandbox toolset
