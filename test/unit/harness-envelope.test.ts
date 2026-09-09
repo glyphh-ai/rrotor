@@ -112,3 +112,19 @@ describe("cachedHooks", () => {
     expect(r).toBeNull(); // no prior entry → null, never a throw
   });
 });
+
+describe("envelope leftovers", () => {
+  it("runPre with no pre hook is a 0ms no-op", async () => {
+    const r = await runPre({}, CTX, 50);
+    expect(r).toEqual({ plan: null, ms: 0 });
+  });
+
+  it("toScript rewrites export default", () => {
+    expect(toScript(`export default { pre() {} }`)).toContain("exports.default =");
+  });
+
+  it("module.exports reassignment wins (CJS whole-object style)", () => {
+    const hooks = compileHooks(`module.exports = { pre: () => ({ steer: "m" }) };`);
+    expect(hooks?.pre).toBeTypeOf("function");
+  });
+});
