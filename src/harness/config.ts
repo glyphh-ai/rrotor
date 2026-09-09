@@ -125,6 +125,12 @@ export interface HarnessRunConfig {
    *  attribution; the envelope hooks read it from P1 on. Absent = the org's
    *  default loop semantics (today's behavior exactly). */
   loop?: string;
+  /** The loop's PROGRAM SOURCE, caller-supplied (P3, desktop parity). A LOCAL
+   *  auth-off pod has no principal and no org store to read `loops` from, so
+   *  the DESKTOP fetches the program via the SDK and hands it over — exactly
+   *  the workdir pattern. NEVER accepted on an authed (cloud) pod: there the
+   *  org store is the only source of program truth. */
+  loopProgram?: string;
   mode: SessionMode;
   permission: PermissionMode;
   /** The Glyphh gateway's Anthropic-compatible base URL. REQUIRED. */
@@ -209,6 +215,7 @@ export interface RunRequestBody {
   system?: unknown;
   model?: unknown;
   loop?: unknown;
+  loopProgram?: unknown;
   mode?: unknown;
   permission?: unknown;
   attachments?: unknown;
@@ -403,6 +410,12 @@ export function resolveRunConfig(
     // Loop refs are slugs/ids — same shape law as thread ids; anything else is
     // dropped rather than 400'd (the field is advisory until the envelope).
     ...(str(body.loop) && THREAD_ID_RE.test(str(body.loop)!) ? { loop: str(body.loop)! } : {}),
+    // The program source rides ONLY on a local auth-off pod (the workdir law):
+    // an authed cloud pod reads programs from the org store, never the wire —
+    // a caller-supplied program there would bypass org program truth. 256KB cap.
+    ...(opts.allowWorkdir === true && typeof body.loopProgram === "string" && body.loopProgram.trim() && body.loopProgram.length <= 256 * 1024
+      ? { loopProgram: body.loopProgram }
+      : {}),
     mode: SESSION_MODES.includes(modeRaw as SessionMode) ? (modeRaw as SessionMode) : "code",
     permission: normalizePermissionMode(String(permissionRaw ?? "")),
     gatewayUrl: gatewayUrl.replace(/\/+$/, ""),

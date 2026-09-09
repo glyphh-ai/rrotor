@@ -43,7 +43,7 @@ import { buildAgentEnv, brandError, redactSecrets } from "./config.js";
 import type { HarnessRunConfig, ChatTurn, ImageRef } from "./config.js";
 import { appsServerRef, withPublishPolicy, expandBuildAppInput, expandSaveFileInput, BUILD_APP_TOOL, SAVE_FILE_TOOL } from "./glyphh-apps.js";
 import { buildFactsServer, renderFactBlock, createFact } from "../facts/server.js";
-import { cachedHooks, runPre, runPost, capFinalText, type TurnPlan, type LoopHooks } from "./envelope.js";
+import { cachedHooks, compileHooks, runPre, runPost, capFinalText, type TurnPlan, type LoopHooks } from "./envelope.js";
 import { pullSource, pushSource, rebaseSource, type SourceSyncCfg } from "./source-sync.js";
 import { classifyTool, gateAction } from "./gate.js";
 import { ensureWorkspace, materializeAttachments } from "./sandbox.js";
@@ -602,11 +602,17 @@ export async function runHarness(session: HarnessSession, cfg: HarnessRunConfig,
   // The SAME seam as the fact block — the vessel owns the pre-turn moment.
   let envHooks: LoopHooks | null = null;
   let envPlan: TurnPlan | null = null;
-  if (process.env.ROTOR_TURN_PROGRAM === "1" && cfg.loop && deps.loopSource && cfg.mode !== "chat") {
+  // P3 (desktop parity): a LOCAL auth-off pod carries the program IN the run
+  // body (config.ts gates it to allowWorkdir pods) and compiles it FRESH each
+  // turn — the user may have just edited the loop; the TTL cache would serve
+  // it stale. A cloud pod resolves through the org store, cached.
+  if (process.env.ROTOR_TURN_PROGRAM === "1" && cfg.loop && (cfg.loopProgram || deps.loopSource) && cfg.mode !== "chat") {
     const loop = cfg.loop;
     const src = deps.loopSource;
     const orgKey = deps.principal?.orgId ?? "anon";
-    const hooks = await cachedHooks(`${orgKey}:${loop}`, () => src(loop));
+    const hooks = cfg.loopProgram
+      ? compileHooks(cfg.loopProgram)
+      : src ? await cachedHooks(`${orgKey}:${loop}`, () => src(loop)) : null;
     envHooks = hooks;
     if (hooks) {
       const r = await runPre(hooks, {

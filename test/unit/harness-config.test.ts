@@ -250,3 +250,24 @@ describe("harnessHome", () => {
     expect(harnessHome(ENV)).toBe(HOME);
   });
 });
+
+describe("resolveRunConfig — loop + loopProgram (program-per-turn)", () => {
+  it("carries a slug-shaped loop; drops a malformed one", () => {
+    const ok = resolveRunConfig("run-l1", { prompt: "hi", loop: "my-loop_2" }, ENV);
+    expect(ok.loop).toBe("my-loop_2");
+    const bad = resolveRunConfig("run-l2", { prompt: "hi", loop: "not a slug!!" }, ENV);
+    expect(bad.loop).toBeUndefined();
+  });
+
+  it("loopProgram rides ONLY on a local (allowWorkdir) pod — an authed pod drops it", () => {
+    const local = resolveRunConfig("run-l3", { prompt: "hi", loopProgram: "exports.pre = () => ({});" }, ENV, { allowWorkdir: true });
+    expect(local.loopProgram).toBe("exports.pre = () => ({});");
+    const cloud = resolveRunConfig("run-l4", { prompt: "hi", loopProgram: "exports.pre = () => ({});" }, ENV);
+    expect(cloud.loopProgram).toBeUndefined();
+  });
+
+  it("an oversized program is dropped, not 400'd", () => {
+    const fat = resolveRunConfig("run-l5", { prompt: "hi", loopProgram: "x".repeat(300 * 1024) }, ENV, { allowWorkdir: true });
+    expect(fat.loopProgram).toBeUndefined();
+  });
+});

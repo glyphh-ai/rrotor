@@ -172,3 +172,38 @@ describe("runHarness — the post half (P2)", () => {
     expect(String(post?.note ?? "")).toContain("failed: yes");
   });
 });
+
+describe("runHarness — inline program (P3, local pods)", () => {
+  beforeEach(() => { clearEnvelopeCache(); process.env.ROTOR_TURN_PROGRAM = "1"; });
+  afterEach(() => { delete process.env.ROTOR_TURN_PROGRAM; });
+
+  it("cfg.loopProgram runs the envelope with NO loopSource (the desktop path)", async () => {
+    let captured: { options: Record<string, unknown> } | null = null;
+    const queryFn: QueryFn = (args) => {
+      captured = args as { options: Record<string, unknown> };
+      return (async function* () { for (const m of okStream) yield m; })();
+    };
+    const s = new HarnessSession({ runId: "run-p3" });
+    await runHarness(s, cfg({
+      loop: "local-loop",
+      loopProgram: `export async function pre() { return { steer: "local program speaking" }; }`,
+    }), { queryFn });
+    expect(loopPre(s)).toMatchObject({ loop: "local-loop" });
+    expect(String(captured!.options.systemPrompt ?? "")).toContain("local program speaking");
+  });
+
+  it("an inline program compiles FRESH each turn — an edit applies immediately (no TTL cache)", async () => {
+    const run = async (steer: string): Promise<string> => {
+      let sys = "";
+      const queryFn: QueryFn = (args) => {
+        sys = String((args as { options: Record<string, unknown> }).options.systemPrompt ?? "");
+        return (async function* () { for (const m of okStream) yield m; })();
+      };
+      const s = new HarnessSession({ runId: `run-p3-${steer}` });
+      await runHarness(s, cfg({ loop: "edited-loop", loopProgram: `exports.pre = () => ({ steer: "${steer}" });` }), { queryFn });
+      return sys;
+    };
+    expect(await run("v1")).toContain("v1");
+    expect(await run("v2")).toContain("v2");   // the TTL cache would have served v1
+  });
+});
