@@ -60,10 +60,18 @@ async function walk(root: string, rel = "", out: string[] = []): Promise<string[
 export async function packWorkdir(workdir: string): Promise<Buffer> {
   const zip = new AdmZip();
   const files = await walk(workdir);
-  files.sort(); // deterministic archive → deterministic hash for identical trees
+  files.sort(); // deterministic order…
   for (const rel of files) {
     zip.addFile(rel, await fsp.readFile(join(workdir, rel)));
   }
+  // …AND deterministic timestamps: AdmZip stamps every entry with NOW at
+  // 2-second DOS-time resolution, so the SAME tree packed across a second
+  // boundary produced different bytes — a different CAS hash, and a spurious
+  // new head on an unchanged re-push (the noop contract broke in prod exactly
+  // as it flaked in CI, 2026-09-09). A fixed epoch makes identical trees
+  // byte-identical. 1990: safely past the zip format's 1980 floor.
+  const EPOCH = new Date("1990-01-01T00:00:00Z");
+  for (const entry of zip.getEntries()) entry.header.time = EPOCH;
   return zip.toBuffer();
 }
 
