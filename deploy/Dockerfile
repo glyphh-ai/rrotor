@@ -21,7 +21,7 @@
 # node (no curl in the image), CMD runs the mode-dispatching pod entry.
 
 # ---- build stage -----------------------------------------------------------
-FROM node:20-slim AS build
+FROM node:22-slim AS build
 WORKDIR /app
 
 # Install ALL deps (incl. devDeps: typescript) against the lockfile, deterministically.
@@ -37,7 +37,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ---- runtime stage ---------------------------------------------------------
-FROM node:20-slim AS runtime
+FROM node:22-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \
