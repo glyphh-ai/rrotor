@@ -24,6 +24,12 @@
 FROM node:22-slim AS build
 WORKDIR /app
 
+# Toolchain to compile better-sqlite3's native binding when no prebuilt matches
+# the image platform. Build stage only — never in the runtime image.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 # Install ALL deps (incl. devDeps: typescript) against the lockfile, deterministically.
 COPY package.json package-lock.json ./
 RUN npm ci
