@@ -335,17 +335,52 @@ sequenceDiagram
     Note over A,D: or the dashboard reads them live itself (an artifact may call the Glyphh connector)
     alt a step needs approval, with nobody watching
         H-->>G: Result needs_approval
-        G->>G: approvals row (waiting)
-        G-->>P: push / email: "daily_sales needs you"
+        G->>G: approvals row (waiting), published on Redis
         G-->>A: needs_approval: the routine reports it and ends
-        P->>G: approves later (the live panel or the mod)
+        G-->>P: the mod's band in Claude (2.6), or an email if no Claude is open
+        P->>G: Approve (the band, the live panel or the email's link)
         G->>H: continue → done
     end
 ```
 
 **State:** designed. To prove: a scheduled routine writing to an artifact's database unattended, and an artifact calling a custom connector.
 
-### 2.6 The Cloud starting a routine (calls back to Claude)
+### 2.6 Approvals, shown in Claude
+
+A step that needs approval is a row in `approvals` (the record, kept until answered) and a signal on Redis (pub/sub, to whichever server process holds the person's connection). Redis runs on the server's own Fly machine, beside the server (Chris, 2026-10-14); in development it is a service in the server's `compose.yaml`. The `glyphh` mod holds one live connection while Claude is open and shows the approval itself, with no Claude turn.
+
+![Approvals](img/seq-approvals.png)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P as Person
+    participant M as Mod (glyphh), in Claude
+    participant G as Cloud
+    participant Q as Redis
+    participant H as rrotor
+    M->>G: GET /v1/approvals/stream (server-sent events, the install's token), and GET /v1/approvals to catch up
+    H-->>G: Result needs_approval {run_id, step, detail}
+    G->>G: approvals row (waiting)
+    G->>Q: publish approval {user, id}
+    Q-->>G: the process holding this person's stream
+    G-->>M: event approval {id, program, step, detail}
+    M-->>P: a band above the prompt with Approve and Decline, a toast, a native notification if Claude is not in front
+    P->>M: Approve
+    M->>G: POST /v1/approvals/{id} {approve}
+    G->>G: answered (first answer wins)
+    G->>H: continue {run_id, approved}
+    G->>Q: publish answered {id}
+    Q-->>G: every process
+    G-->>M: event answered {id}: the band clears in every open Claude
+    alt no Claude open
+        G-->>P: email with the step and an Approve link (notified_at)
+    end
+```
+
+**State:** designed.
+
+### 2.7 The Cloud starting a routine (calls back to Claude)
 
 When something happens on Glyphh's side (a program finished, a page it watches changed, a waiting step was approved), the Cloud can start a routine through the routine's API trigger, with the data as its text.
 
@@ -399,6 +434,8 @@ Content-Type: application/json
 | Cloud → routine | HTTPS POST to `api.anthropic.com/v1/claude_code/routines/<id>/fire` | the routine's trigger token |
 | Mod → local rrotor | MCP on `127.0.0.1` | a local token (proposed) |
 | Stripe → Cloud | webhook | Stripe's signature |
+| Mod ← Cloud | server-sent events, `/v1/approvals/stream` | the install's token |
+| Cloud ↔ Redis | pub/sub, inside the cloud | the cloud's network |
 
 ## 4. rrotor, inside
 
