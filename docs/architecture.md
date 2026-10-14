@@ -360,11 +360,11 @@ sequenceDiagram
     participant Q as Redis
     participant H as rrotor
     M->>G: GET /v1/approvals/stream (server-sent events, the install's token), and GET /v1/approvals to catch up
-    H-->>G: Result needs_approval {run_id, step, detail}
+    H-->>G: Result needs_approval {run_id, step, prompt}
     G->>G: approvals row (waiting)
     G->>Q: publish approval {user, id}
     Q-->>G: the process holding this person's stream
-    G-->>M: event approval {id, program, step, detail}
+    G-->>M: event approval {id, program, step, prompt}
     M-->>P: a band above the prompt with Approve and Decline, a toast, a native notification if Claude is not in front
     P->>M: Approve
     M->>G: POST /v1/approvals/{id} {approve}
