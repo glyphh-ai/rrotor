@@ -82,7 +82,7 @@ sequenceDiagram
     participant D as Docker / OrbStack / container
     participant R as Local rrotor
     participant G as Cloud
-    M->>G: POST /v1/runtime/local {install_id} (proposed)
+    M->>G: POST /v1/runtime/local {install_id}
     G-->>M: runtime_id, runtime token (shown once)
     M->>D: run ghcr.io/glyphh-ai/rrotor:#lt;version#gt; with volume /data, port 127.0.0.1:#lt;port#gt;, the runtime token
     D->>R: boot: s6 starts the runner (databases start on demand)
@@ -92,7 +92,7 @@ sequenceDiagram
     M->>R: local MCP on 127.0.0.1:#lt;port#gt; with a local token (proposed): the workspaces, RPA and programs tools
 ```
 
-**State:** designed (the local rrotor, the outbound link); proposed: how the local runtime gets its token and how the mods reach it (see [Open](#open)).
+**State:** designed (the local rrotor, its token, the outbound link); proposed: how the mods reach it (see [Open](#open)).
 
 ### 1.3 The hosted rrotor, on upgrading to Pro or Team
 
@@ -141,7 +141,7 @@ sequenceDiagram
     P->>A: Add custom connector: https://#lt;glyphh#gt;/mcp
     A->>G: OAuth dynamic client registration
     A->>G: GET /mcp/authorize (PKCE) → browser
-    G-->>P: sign in (Google / GitHub) and "Allow Claude to use your Glyphh?" (proposed page)
+    G-->>P: sign in (Google / GitHub) and "Allow Claude to use your Glyphh?" (the Allow page)
     P->>I: signs in
     P->>G: Allow
     G-->>A: authorization code → POST /mcp/token → access token
@@ -149,7 +149,7 @@ sequenceDiagram
     A->>G: /mcp tools/list: programs_list, call, continue, run_status, live panel
 ```
 
-**State:** designed (connector, OAuth endpoints, `connector_grants` table built); proposed: the Allow page.
+**State:** designed (connector, OAuth endpoints, the Allow page; `connector_grants` table built).
 
 - A grant is revoked one at a time; a revoked grant answers 401.
 - The Cloud never holds a Claude login: Claude runs on the person's subscription and calls Glyphh's tools.
@@ -214,7 +214,9 @@ sequenceDiagram
 
 **State:** designed (programs mod and local rrotor not built).
 
-### 2.2 Deploy: to the hosted rrotor, and the routine
+### 2.2 Deploy: to the hosted rrotor, through git, and the routine
+
+Each program is a repo in the person's GitHub account; a version is a commit. Git is required for hosted programs (the Glyphh GitHub App installed on their account); local programs need none.
 
 ![Deploy](img/seq-deploy.png)
 
@@ -224,21 +226,27 @@ sequenceDiagram
     participant C as Claude
     participant M as Mod (glyphh-programs)
     participant R as Local rrotor
+    participant GH as GitHub
     participant G as Cloud
     participant H as Hosted rrotor
     C->>M: program_deploy daily_sales
-    M->>R: cut version 1: bundle + manifest, content hash
-    M->>G: POST /v1/programs {name}, POST /v1/programs/{id}/versions {manifest, hash, bundle_ref}
-    G->>H: wake if stopped, link: deploy {program, version 1, bundle}
-    H->>H: /data/programs/daily_sales/1, its Postgres database and role
-    H-->>G: deployed
+    M->>R: commit the draft (secrets never committed: ignore rules and a pre-commit check)
+    R->>GH: git push to the program's repo (the person's GitHub)
+    R-->>M: commit SHA
+    M->>G: POST /v1/programs/{id}/versions {commit_sha, manifest}
+    G->>G: program_versions row (version 1 = that commit)
+    G->>GH: mint an installation token for that repo (Glyphh GitHub App, one hour)
+    G->>H: wake if stopped, link: deploy {program, repo, commit_sha, token}
+    H->>GH: fetch exactly that commit
+    H->>H: check the SHA, /data/programs/daily_sales/#lt;commit#gt;, install requirements.lock, its database and role
+    H-->>G: deployed {commit_sha}
     G->>G: deployments row (hosted rrotor, version 1, active)
     G-->>M: deployed
-    Note over H: the hosted rrotor has its own browser profiles: its first run that needs the site answers needs_signin, signed in once through the live panel (secrets are set on it the same way)
-    C->>C: create the routine (Claude's routines): "Every day at 7:07, run daily_sales and update my sales dashboard", Glyphh connector included
+    Note over H: the hosted rrotor has its own browser profiles and secrets: its first run that needs the site answers needs_signin, signed in once through the live panel, and secrets are set on it the same way
+    C->>C: create the routine (Claude's routines), its repo the program's, with the Glyphh connector included
 ```
 
-**State:** designed. (Local runs need no deploy: a local program runs where it was built.)
+**State:** designed.
 
 ### 2.3 Update
 
@@ -250,16 +258,19 @@ sequenceDiagram
     participant C as Claude
     participant M as Mod (glyphh-programs)
     participant R as Local rrotor
+    participant GH as GitHub
     participant G as Cloud
     participant H as Hosted rrotor
     C->>M: file_write (the change), program_test
     M->>R: test in the sandbox until done
     C->>M: program_deploy daily_sales
-    M->>G: POST /v1/programs/{id}/versions {version 2}
-    G->>H: deploy {version 2}
+    R->>GH: commit and push
+    M->>G: POST /v1/programs/{id}/versions {commit_sha (version 2)}
+    G->>H: deploy {repo, commit_sha, token}
+    H->>GH: fetch that commit
     H-->>G: deployed
     G->>G: version 2 active, version 1 kept
-    Note over G: a routine calls by name, so it gets version 2 next run, a rollback makes version 1 active again (POST /v1/programs/{id}/deploy {version 1})
+    Note over G: a routine calls by name, so it gets version 2 next run, a rollback activates version 1's commit again (POST /v1/programs/{id}/deploy {version 1}), fetched from the repo if the rrotor no longer has it
 ```
 
 **State:** designed.
@@ -347,7 +358,7 @@ sequenceDiagram
     participant G as Cloud
     participant A as Claude routine (Anthropic)
     H-->>G: event {program, kind: changed, data}
-    G->>A: POST /v1/claude_code/routines/#lt;id#gt;/fire {text: event JSON} (the person gave Glyphh this routine's trigger token)
+    G->>A: POST /v1/claude_code/routines/#lt;id#gt;/fire {text: event JSON} (the person gave Glyphh this routine's trigger)
     A->>A: reads the payload (its prompt says to act on it)
     A->>G: connector call(…) for the next step
 ```
@@ -442,7 +453,7 @@ flowchart TB
 |---|---|
 | `keys/runtime.key` | The runtime key (secrets at rest), made on first boot |
 | `runtime.json` | The runtime's id and token (0600) |
-| `programs/<name>/<version>/` | A deployed version: bundle and manifest, immutable |
+| `programs/<name>/<commit>/` | A deployed version: the checkout of that commit, its manifest and installed dependencies, immutable |
 | `programs/<name>/draft/` | The version being built (local) |
 | `programs/<name>/files/` | The program's own folder, the only one it sees |
 | `secrets/<name>.enc` | Its secrets, encrypted |
@@ -458,7 +469,7 @@ flowchart TB
 
 ### 5.1 What a program is
 
-A folder, the unit of a version:
+A git repo in the person's GitHub account; a version is a commit:
 
 | File | What |
 |---|---|
@@ -495,7 +506,7 @@ A folder, the unit of a version:
 - **`hosts`, `secrets`, `databases`, `profiles`:** everything a run may reach; nothing undeclared exists inside the sandbox.
 - **`limits`:** per run, capped by the plan.
 - **`connectors`:** the Claude connectors its routine needs (written into the routine, never used by the program).
-- A version is **immutable**: the manifest, `program.py`, the lock and its content hash.
+- A version is **immutable**: a commit, identified by its SHA.
 
 ### 5.3 The SDK: `glyphh`
 
@@ -552,8 +563,8 @@ JSON messages over the WebSocket `/v1/runtime/link`, one per frame, each with `t
 | Cloud → rrotor | `continue` | `run_id`, answer |
 | Cloud → rrotor | `cancel` | `run_id` |
 | rrotor → Cloud | `result` | `run_id`, `Result` (status, data), seconds so far |
-| Cloud → rrotor | `deploy` / `activate` / `remove` | program, version, bundle (by URL the rrotor fetches over HTTPS, hash checked) |
-| rrotor → Cloud | `deployed` | program, version, hash |
+| Cloud → rrotor | `deploy` / `activate` / `remove` | program, version, repo, commit SHA, a short-lived repo-scoped token (the rrotor fetches that commit from GitHub and checks the SHA) |
+| rrotor → Cloud | `deployed` | program, version, commit SHA |
 | Cloud → rrotor | `secret_set` | program, name, value encrypted to the rrotor's public key |
 | Cloud → rrotor | `live_open` / `live_close` | `run_id` or profile: start or stop frames |
 | rrotor → Cloud | `frame` | `run_id`, image (JPEG), sequence number |
@@ -577,7 +588,7 @@ The programs, workspaces and RPA mods call the local rrotor's MCP endpoint (`mod
 | `workspace_*` | Workspaces |
 | `profile_*`, `page_read`, `page_act`, `record_start`, `record_stop`, `site_save`, `sequence_save`, `run`, `log_read` | RPA |
 
-Deploying goes local rrotor → Cloud → hosted rrotor: the local rrotor uploads the version's bundle to the Cloud (`POST /v1/programs/{id}/versions`), which hands the hosted rrotor its URL.
+Deploying goes through git: the local rrotor pushes a commit to the program's repo, the Cloud records it (`POST /v1/programs/{id}/versions`) and hands the hosted rrotor the commit and a short-lived token to fetch it.
 
 ## 8. The server, checked
 
@@ -591,22 +602,22 @@ Every call above against what the server has (branch `relaunch`):
 | Tables: `rrotors`, `programs`, `program_versions`, `deployments`, `runs`, `approvals`, `connector_grants` | Built (tables only) |
 | `/v1/programs`, `/v1/runs`, `/v1/runtime`, `/v1/runtime/link`, `/mcp` and its OAuth | Designed, not built |
 
-### Server gaps
+### Settled in the server's design (2026-10-14)
 
-What the flows above need that the server's design does not have yet; settling them now keeps the infrastructure fixed when rrotor is built:
+What the flows needed that the server's design did not have; now in it, so the infrastructure stays fixed while rrotor is built:
 
-1. **`POST /v1/runtime/local`** (1.2): a runtime token for a local rrotor. Today `rrotors` is one hosted runtime per user (`user_id` unique): it needs a `mode` (`local` or `hosted`) and one row per mode per user (a local rrotor per install, keyed by `install_id`).
-2. **`routine_triggers`** (2.6): the person's routine triggers, `id`, `user_id`, `program_id` (nullable), `name`, `fire_url`, `token_enc`, `status`, `last_fired_at`, `created_at`; and `POST`/`DELETE /v1/routine-triggers`.
-3. **`program_events`** (2.6): what a program raised and whether it fired a routine (`session_url`).
-4. **Bundles** (5, 7): where a version's bundle is kept between the local and the hosted rrotor: object storage (R2) with a short-lived URL, or passed straight down the link.
-5. **Notifying the person** (2.5): push or email when an approval waits.
-6. **The connector's Allow page** (1.4).
-7. **`program_versions`** needs `hash` (the content hash); `bundle_ref` holds the storage key.
+1. **Local runtimes:** `POST /v1/runtime/local` gives a local rrotor its runtime token; `rrotors` has a `mode` (`hosted` or `local`) and a local one is keyed by its install.
+2. **Routine triggers:** `routine_triggers` (name, fire URL, token encrypted, status) and `/v1/routine-triggers`.
+3. **Program events:** `program_events` (kind, the routine trigger it fired, the session URL).
+4. **Versions through git:** each program a repo in the person's GitHub; `program_versions.commit_sha` is the version's identity; the Glyphh GitHub App's installation (`github_installations`) mints a short-lived token per deploy. No code is kept in Glyphh's cloud.
+5. **Approval email:** `approvals.notified_at`.
+6. **The connector's Allow page.**
+7. **No bundle storage:** `bundle_ref` is gone.
 
 ## Open
 
-- **The local rrotor's token and reach** (1.2): `POST /v1/runtime/local` for its runtime token; the mods reach it as a local MCP server on `127.0.0.1` with a local token. Or the mods go through the Cloud over the same link as the hosted one.
-- **The Allow page** for the connector's OAuth (1.4): one more server page, the only one besides the device page.
+- **How the mods reach the local rrotor** (1.2): a local MCP server on `127.0.0.1` with a local token (proposed), or through the Cloud over the same link as the hosted one.
 - **The live panel's transport:** frames over the link and the relay first; WebRTC end to end later.
 - **Secrets on the hosted rrotor:** set again there (2.2), or carried from the local one encrypted to the hosted rrotor's key.
+- **The Glyphh GitHub App's permissions:** repository contents (read and write, for the person's program repos) and metadata; the person picks which repos it may reach.
 - **Per-program isolation in Neo4j:** the free edition holds one database.
