@@ -352,7 +352,29 @@ sequenceDiagram
     A->>G: connector call(…) for the next step
 ```
 
-**State:** designed. The routine's trigger token starts that routine only; it is not a Claude login.
+**State:** designed.
+
+**How the Cloud calls a routine.** Through the routine's **API trigger**, the documented way to start a routine from outside Claude (Anthropic's routines documentation, checked 2026-10-14):
+
+1. **The person adds an API trigger** to the routine at claude.ai/code/routines (Edit → Add another trigger → API) and generates its token. The token is shown once and starts **that routine only**: it is not a Claude login, so the Cloud never holds one.
+2. **The person gives the Cloud the trigger** (its URL and token) in the programs mod, as they would a secret. The Cloud keeps it encrypted (`routine_triggers`, see [Server gaps](#server-gaps)).
+3. **The Cloud fires it** when the program's event happens (a run finished, a watched page changed, a waiting step was approved):
+
+```
+POST https://api.anthropic.com/v1/claude_code/routines/<trigger id>/fire
+Authorization: Bearer <the routine's trigger token>
+anthropic-beta: experimental-cc-routine-2026-04-01
+anthropic-version: 2023-06-01
+Content-Type: application/json
+
+{"text": "{\"program\": \"daily_sales\", \"event\": \"changed\", \"data\": {...}}"}
+```
+
+4. **Anthropic answers** `{"type": "routine_fire", "claude_code_session_id", "claude_code_session_url"}`; the Cloud records the session URL on the event, so the person can open the run.
+5. **The routine runs** on the person's subscription. `text` reaches it wrapped as untrusted data (`<routine-fire-payload>`), so the routine's own prompt must say to act on it ("Act on the event in the payload: …"); the programs mod writes that line into the routines it creates.
+
+- **Limits:** 30 fires an hour per routine (shared with Run now), 100 an hour per account; the Cloud holds fires past them and says so. A `401` means the token was regenerated or deleted: the trigger is marked broken and the person is asked for the new one.
+- **Research preview:** request and response shapes may change behind a new dated beta header; the two previous header versions keep working, so the Cloud pins one header and moves deliberately.
 
 ## 3. What every call carries
 
@@ -363,9 +385,223 @@ sequenceDiagram
 | rrotor → Cloud | WebSocket `/v1/runtime/link`, outbound only | the runtime's token (Bearer header, never in a URL) |
 | Cloud → rrotor | messages down the link: call, continue, cancel, deploy | the link itself |
 | Claude / routines → Cloud | MCP over HTTPS, `/mcp` | the connector grant's token (OAuth) |
-| Cloud → routine | HTTPS POST to the routine's `/fire` | the routine's trigger token |
+| Cloud → routine | HTTPS POST to `api.anthropic.com/v1/claude_code/routines/<id>/fire` | the routine's trigger token |
 | Mod → local rrotor | MCP on `127.0.0.1` | a local token (proposed) |
 | Stripe → Cloud | webhook | Stripe's signature |
+
+## 4. rrotor, inside
+
+One image, `ghcr.io/glyphh-ai/rrotor`, for both modes; `mode` (`local` or `hosted`) is the only difference, set at start.
+
+![rrotor inside](img/rrotor-inside.png)
+
+```mermaid
+flowchart TB
+    subgraph R["rrotor (one container / one Fly machine)"]
+        S6["s6-overlay (PID 1): starts, watches, restarts"]
+        Runner["runner (Python 3.13, asyncio)<br/>link client · run engine · deploys · metering"]
+        Local["local endpoint (mode local only)<br/>MCP on 127.0.0.1"]
+        Proxy["egress proxy<br/>per-run host allowlist"]
+        Browser["browser manager<br/>Chromium per profile on Xvfb · CDP · frames · input"]
+        DBs["databases, on demand<br/>Postgres 17 + pgvector · MongoDB · Neo4j"]
+        Vault["secrets vault<br/>encrypted with the runtime key"]
+        subgraph Sandbox["one sandbox per run"]
+            Prog["the program<br/>load → function → end"]
+        end
+        Data[("/data volume")]
+        S6 --> Runner
+        S6 --> Local
+        S6 --> Proxy
+        Runner --> Sandbox
+        Runner --> Browser
+        Runner --> DBs
+        Runner --> Vault
+        Prog -- "ctx: http" --> Proxy
+        Prog -- "ctx.browser (via the runner)" --> Browser
+        Prog -- "ctx.db" --> DBs
+        Runner --> Data
+    end
+    Cloud["Glyphh Cloud"]
+    Runner -- "WebSocket /v1/runtime/link (outbound)" --> Cloud
+```
+
+| Process | Job |
+|---|---|
+| **runner** | Holds the link (connects out, reconnects with backoff 1 s → 30 s, replays unacknowledged results), takes calls, deploys versions, launches each run in its sandbox, keeps runs that wait for `continue`, reports each run's seconds |
+| **local endpoint** | `mode: local` only: the MCP server the mods call on `127.0.0.1:<port>` with the local token (programs, workspaces, RPA tools) |
+| **egress proxy** | The only network a run has: lets through the hosts its manifest declares (HTTPS, by SNI), refuses and records anything else |
+| **browser manager** | One headful Chromium per named profile on its own virtual screen (Xvfb), driven over CDP; started when a run or the live panel needs it, stopped after an hour idle; streams frames, takes the person's input while they hold control |
+| **databases** | Started when a run of a program that declares them begins, stopped after; each program its own Postgres database and role, its own MongoDB database and user |
+| **secrets vault** | Each program's secrets, encrypted at rest with the runtime key (`/data/keys/runtime.key`, 0600); decrypted into a run's environment only |
+
+**The sandbox.** Each run starts with `bwrap`: new mount, PID, IPC, user and network namespaces; read-only `/usr`, the program's version mounted read-only, `/data/programs/<name>/files` writable, nothing else of `/data`; Landlock inside holds the same folders; `no_new_privs` and a seccomp filter; the only socket is the egress proxy's; a uid per program; memory, CPU and wall-clock limits per run (cgroups, `prlimit`). Tested on Docker Desktop on 2026-10-12 (Landlock ABI 6; bwrap needs `--security-opt seccomp=unconfined --security-opt systempaths=unconfined` in a container; on Fly the image is the VM and needs neither).
+
+**`/data`:**
+
+| Path | What |
+|---|---|
+| `keys/runtime.key` | The runtime key (secrets at rest), made on first boot |
+| `runtime.json` | The runtime's id and token (0600) |
+| `programs/<name>/<version>/` | A deployed version: bundle and manifest, immutable |
+| `programs/<name>/draft/` | The version being built (local) |
+| `programs/<name>/files/` | The program's own folder, the only one it sees |
+| `secrets/<name>.enc` | Its secrets, encrypted |
+| `db/` | Postgres, MongoDB, Neo4j data |
+| `profiles/<name>/` | Named Chromium profiles: the sign-ins made in them |
+| `runs/<run_id>/` | Each run's log, checkpoints and outputs |
+| `workspaces/<slug>.json` | Workspaces (local) |
+| `rpa/<slug>.json`, `rpa/log/` | RPA sites and sequences, what ran (local) |
+
+**The image:** Debian 13 (trixie) slim; amd64 and arm64; s6-overlay; Python 3.13 (runner and programs), Node 22 LTS, Postgres 17 with pgvector, MongoDB 8, Neo4j 5 Community, Chromium, Xvfb, bubblewrap. Read-only root; everything kept on `/data`. A new version is a new image tag; the Cloud moves hosted rrotors to it (Fly Machines API), the mod moves the local one.
+
+## 5. A program
+
+### 5.1 What a program is
+
+A folder, the unit of a version:
+
+| File | What |
+|---|---|
+| `glyphh.json` | The manifest (below) |
+| `program.py` | The module: `load`, the functions, `end` |
+| `requirements.lock` | Its Python dependencies, pinned with hashes; installed into the version at deploy, never at run |
+| `files/` | Optional seed files, copied into its folder on first deploy |
+
+### 5.2 The manifest: `glyphh.json`
+
+```json
+{
+  "name": "daily_sales",
+  "version": 2,
+  "description": "Yesterday's sales from analytics.example.com, for the sales dashboard",
+  "python": "3.13",
+  "functions": {
+    "start": {
+      "description": "Read a day's sales and store the total",
+      "inputs": { "type": "object", "properties": { "day": { "type": "string", "format": "date" } } },
+      "approvals": ["write"]
+    }
+  },
+  "hosts": ["analytics.example.com", "api.analytics.example.com"],
+  "secrets": ["ANALYTICS_KEY"],
+  "databases": ["postgres"],
+  "profiles": { "work": { "sites": ["analytics.example.com"] } },
+  "limits": { "seconds": 300, "memory_mb": 512 },
+  "connectors": ["slack"]
+}
+```
+
+- **`functions`:** each callable function with a JSON Schema for its inputs and the named steps that need approval; `start` is the default.
+- **`hosts`, `secrets`, `databases`, `profiles`:** everything a run may reach; nothing undeclared exists inside the sandbox.
+- **`limits`:** per run, capped by the plan.
+- **`connectors`:** the Claude connectors its routine needs (written into the routine, never used by the program).
+- A version is **immutable**: the manifest, `program.py`, the lock and its content hash.
+
+### 5.3 The SDK: `glyphh`
+
+```python
+from glyphh import Ctx, Result
+
+Result.done(data)                                     # finished: data (JSON), files, links
+Result.needs_input(prompt, schema=None, options=None) # a value or a choice
+Result.needs_approval(step, detail)                   # about to act; continue answers it
+Result.needs_signin(profile, site)                    # a site signed the program out
+Result.failed(step, reason)                           # stopped, with why
+
+ctx.inputs              # the call's inputs, checked against the manifest
+ctx.answer              # the answer a continue brought (None on the first call)
+ctx.http                # requests to declared hosts only
+ctx.browser.open(profile, url)  # a page in a named profile (Playwright-style API)
+ctx.db.postgres / ctx.db.mongo / ctx.db.neo4j   # its own databases
+ctx.secrets["NAME"]     # declared secrets
+ctx.files               # its folder
+ctx.checkpoint(key, fn) # run fn once per run; a resumed run reads the stored value
+ctx.log(message, **detail)
+```
+
+### 5.4 A run
+
+```mermaid
+stateDiagram-v2
+    [*] --> loading: call
+    loading --> running: load ok
+    running --> waiting: needs_input / needs_approval / needs_signin
+    waiting --> running: continue (answer)
+    waiting --> expired: no continue in 15 min
+    running --> done: done
+    running --> failed: failed or limit hit
+    done --> [*]: end runs
+    failed --> [*]: end runs
+    expired --> [*]: end runs
+```
+
+- **One run, many calls:** `call` opens a run (`run_id`); each `continue` resumes the same run, in the same process while it waits (up to 15 minutes), its checkpoints kept in `/data/runs/<run_id>/`.
+- **`end` always runs**, on `done`, `failed`, a limit, a cancel or an expiry.
+- **Every call returns a `Result`**, never an exception: a crash is `failed` with the error and the step.
+- **Approvals:** a `needs_approval` the Cloud sees with nobody watching (a routine) waits in `approvals`; the person's answer is a `continue`.
+
+## 6. The link: protocol 1
+
+JSON messages over the WebSocket `/v1/runtime/link`, one per frame, each with `type` and an `id`. The rrotor connects out; the Cloud never connects in.
+
+| Direction | `type` | Carries |
+|---|---|---|
+| rrotor → Cloud | `hello` | protocol 1, rrotor version, mode, runtime id, deployed versions |
+| Cloud → rrotor | `welcome` | accepted, the plan's limits for runs |
+| Cloud → rrotor | `call` | `run_id`, program, version (or active), function, inputs, caller |
+| Cloud → rrotor | `continue` | `run_id`, answer |
+| Cloud → rrotor | `cancel` | `run_id` |
+| rrotor → Cloud | `result` | `run_id`, `Result` (status, data), seconds so far |
+| Cloud → rrotor | `deploy` / `activate` / `remove` | program, version, bundle (by URL the rrotor fetches over HTTPS, hash checked) |
+| rrotor → Cloud | `deployed` | program, version, hash |
+| Cloud → rrotor | `secret_set` | program, name, value encrypted to the rrotor's public key |
+| Cloud → rrotor | `live_open` / `live_close` | `run_id` or profile: start or stop frames |
+| rrotor → Cloud | `frame` | `run_id`, image (JPEG), sequence number |
+| Cloud → rrotor | `input` | `run_id`, take control and give back, clicks, keys, paste |
+| rrotor → Cloud | `event` | program, kind, data (for routine fires) |
+| both | `ping` / `pong` | every 20 s |
+| both | `ack` | the `id` it acknowledges |
+
+- **Order and replay:** results and events carry a sequence number; the rrotor keeps the unacknowledged ones on `/data` and replays them after a reconnect, so nothing is lost or doubled.
+- **Frames** are best effort: dropped under pressure, never queued.
+- **A different protocol** is closed with code 4426 and an update is asked for.
+
+## 7. The mod and the local rrotor
+
+The programs, workspaces and RPA mods call the local rrotor's MCP endpoint (`mode: local`):
+
+| Tools | For |
+|---|---|
+| `program_create`, `file_read`, `file_write`, `program_test`, `program_deploy`, `program_versions`, `program_activate` | Building, testing and deploying programs |
+| `secret_set`, `profile_list`, `profile_create`, `live_open` | Secrets, profiles, the live panel |
+| `workspace_*` | Workspaces |
+| `profile_*`, `page_read`, `page_act`, `record_start`, `record_stop`, `site_save`, `sequence_save`, `run`, `log_read` | RPA |
+
+Deploying goes local rrotor → Cloud → hosted rrotor: the local rrotor uploads the version's bundle to the Cloud (`POST /v1/programs/{id}/versions`), which hands the hosted rrotor its URL.
+
+## 8. The server, checked
+
+Every call above against what the server has (branch `relaunch`):
+
+| Need | Server today |
+|---|---|
+| Device sign-in, installs by machine, license | Built |
+| Identities, linking | Built |
+| Plans, mods, Stripe checkout and webhook | Built |
+| Tables: `rrotors`, `programs`, `program_versions`, `deployments`, `runs`, `approvals`, `connector_grants` | Built (tables only) |
+| `/v1/programs`, `/v1/runs`, `/v1/runtime`, `/v1/runtime/link`, `/mcp` and its OAuth | Designed, not built |
+
+### Server gaps
+
+What the flows above need that the server's design does not have yet; settling them now keeps the infrastructure fixed when rrotor is built:
+
+1. **`POST /v1/runtime/local`** (1.2): a runtime token for a local rrotor. Today `rrotors` is one hosted runtime per user (`user_id` unique): it needs a `mode` (`local` or `hosted`) and one row per mode per user (a local rrotor per install, keyed by `install_id`).
+2. **`routine_triggers`** (2.6): the person's routine triggers, `id`, `user_id`, `program_id` (nullable), `name`, `fire_url`, `token_enc`, `status`, `last_fired_at`, `created_at`; and `POST`/`DELETE /v1/routine-triggers`.
+3. **`program_events`** (2.6): what a program raised and whether it fired a routine (`session_url`).
+4. **Bundles** (5, 7): where a version's bundle is kept between the local and the hosted rrotor: object storage (R2) with a short-lived URL, or passed straight down the link.
+5. **Notifying the person** (2.5): push or email when an approval waits.
+6. **The connector's Allow page** (1.4).
+7. **`program_versions`** needs `hash` (the content hash); `bundle_ref` holds the storage key.
 
 ## Open
 
