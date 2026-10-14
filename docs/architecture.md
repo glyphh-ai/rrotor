@@ -82,7 +82,7 @@ sequenceDiagram
     participant D as Docker / OrbStack / container
     participant R as Local rrotor
     participant G as Cloud
-    M->>G: POST /v1/runtime/local {install_id}
+    M->>G: POST /v1/runtime/local (the install from its token)
     G-->>M: runtime_id, runtime token (shown once)
     M->>D: run ghcr.io/glyphh-ai/rrotor:#lt;version#gt; with volume /data, port 127.0.0.1:#lt;port#gt;, the runtime token
     D->>R: boot: s6 starts the runner (databases start on demand)
