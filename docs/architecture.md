@@ -88,11 +88,11 @@ sequenceDiagram
     D->>R: boot: s6 starts the runner (databases start on demand)
     R->>G: WebSocket /v1/runtime/link, Authorization: Bearer #lt;runtime token#gt;
     R->>G: hello {protocol, rrotor version, mode: local}
-    G-->>R: welcome {runtime_id}
+    G-->>R: welcome {accepted, limits}
     M->>R: local MCP on 127.0.0.1:#lt;port#gt; with a local token (proposed): the workspaces, RPA and programs tools
 ```
 
-**State:** designed (the local rrotor, its token, the outbound link); proposed: how the mods reach it (see [Open](#open)).
+**State:** the Cloud's side built (the runtime token, `/v1/runtime/link`); the local rrotor designed; proposed: how the mods reach it (see [Open](#open)).
 
 ### 1.3 The hosted rrotor, on upgrading to Pro or Team
 
@@ -599,20 +599,21 @@ JSON messages over the WebSocket `/v1/runtime/link`, one per frame, each with `t
 | Cloud → rrotor | `call` | `run_id`, program, version (or active), function, inputs, caller |
 | Cloud → rrotor | `continue` | `run_id`, answer |
 | Cloud → rrotor | `cancel` | `run_id` |
-| rrotor → Cloud | `result` | `run_id`, `Result` (status, data), seconds so far |
+| rrotor → Cloud | `result` | `seq`, `run_id`, `Result` (status, data; `needs_approval` also its step and prompt; `expired` or `cancelled` when a run ends without one), seconds so far |
 | Cloud → rrotor | `deploy` / `activate` / `remove` | program, version, repo, commit SHA, a short-lived repo-scoped token (the rrotor fetches that commit from GitHub and checks the SHA) |
 | rrotor → Cloud | `deployed` | program, version, commit SHA |
 | Cloud → rrotor | `secret_set` | program, name, value encrypted to the rrotor's public key |
 | Cloud → rrotor | `live_open` / `live_close` | `run_id` or profile: start or stop frames |
 | rrotor → Cloud | `frame` | `run_id`, image (JPEG), sequence number |
 | Cloud → rrotor | `input` | `run_id`, take control and give back, clicks, keys, paste |
-| rrotor → Cloud | `event` | program, kind, data (for routine fires) |
+| rrotor → Cloud | `event` | `seq`, program, kind, data, and the routine trigger to fire, if any (one of the program owner's) |
 | both | `ping` / `pong` | every 20 s |
-| both | `ack` | the `id` it acknowledges |
+| both | `ack` | `of`: the `id` it acknowledges (the Cloud acks every result, event and `deployed`) |
 
-- **Order and replay:** results and events carry a sequence number; the rrotor keeps the unacknowledged ones on `/data` and replays them after a reconnect, so nothing is lost or doubled.
+- **Order and replay:** results and events carry a sequence number, one rising counter per runtime for both; the rrotor keeps the unacknowledged ones on `/data` and replays them after a reconnect, and the Cloud applies each number once, so nothing is lost or doubled. A new runtime token (a fresh `/data`) starts the counter again.
 - **Frames** are best effort: dropped under pressure, never queued.
 - **A different protocol** is closed with code 4426 and an update is asked for.
+- **Closes:** 4401 the token is not valid or its install was signed out (do not retry with it); 4400 the first message was not a good `hello` for this runtime (sent within 10 s); 4408 nothing heard for three pings; 4409 a newer link of the same runtime took over (do not reconnect); 1011 the Cloud could not record a message (reconnect and replay); 1012 the server is restarting (reconnect).
 
 ## 7. The mod and the local rrotor
 
@@ -637,7 +638,8 @@ Every call above against what the server has (branch `relaunch`):
 | Identities, linking | Built |
 | Plans, mods, Stripe checkout and webhook | Built |
 | Tables: `rrotors`, `programs`, `program_versions`, `deployments`, `runs`, `approvals`, `connector_grants` | Built (tables only) |
-| `/v1/programs`, `/v1/runs`, `/v1/runtime`, `/v1/runtime/link`, `/mcp` and its OAuth | Designed, not built |
+| `/v1/runtime/link` (protocol 1; waking a stopped hosted runtime on Fly not built) | Built |
+| `/v1/programs`, `/v1/runs`, `/v1/runtime`, `/mcp` and its OAuth | Designed, not built |
 
 ### Settled in the server's design (2026-10-14)
 
