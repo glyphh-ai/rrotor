@@ -15,6 +15,9 @@ These come first where anything below says otherwise.
 5. **rrotor has no sign-in of its own.** The mod is signed in (device flow, `~/.glyphh/install.json`); it asks the server for the runtime token (`POST /v1/runtime/local`) and hands it to rrotor at start; rrotor sends it on its outbound link; signing out the install cuts rrotor off (built on the server). A hosted rrotor gets its token from the server when it is provisioned (designed).
 6. **How Claude reaches rrotor.** Locally, **through the mods**: a mod registers tools (`$.tool.register`) and draws panels, and calls rrotor's **local API on 127.0.0.1** with a local token only the mod holds. Remotely (routines, other AI clients, a hosted rrotor), **through the Glyphh connector**, then the server, then the runtime link. rrotor serves no MCP to Claude, and no plugin carries an MCP server.
 7. **Local runtimes:** Docker, OrbStack or Apple's `container`, preferring `container` where it is present (a VM per container, the closest to the hosted Firecracker isolation). Hosted on Fly: designed only.
+8. **The mod installs rrotor; no separate install.** It finds a container runtime, pulls `ghcr.io/glyphh-ai/rrotor` at the version matching the mod (pinned by digest, verified), starts it with `/data` on a named volume and hands in the runtime token; updating the mod updates rrotor, and the data stays. PyPI carries only the `rrotor` program SDK. macOS: Apple's `container`, then OrbStack, then Docker; Windows: WSL2, preferably a WSL distribution of the same image (designed); Linux: Docker or Podman (designed) ([11](#11-where-rrotor-runs-and-how-it-is-installed)).
+9. **Workspaces needs no VM.** The stream does not need the program sandbox, so Workspaces (in the base subscription) keeps running its browser helper natively on the host, and uses rrotor's browser, through the same frame protocol, when rrotor is running ([12](#12-the-browser-and-the-stream)). Programs, Gateway and Ada need rrotor.
+10. **rrotor's browser** is a small shared part (`browser`): Chromium, named profiles shared by workspaces and programs (one sign-in for both), and the Workspaces helper's frame protocol on the local API ([12](#12-the-browser-and-the-stream)).
 
 ## The parts
 
@@ -483,7 +486,8 @@ flowchart TB
             Prog["the program (rrotor SDK)<br/>load → function → end"]
         end
         subgraph PartsBox["parts on /data/parts, each from its mod's release"]
-            PChrome["programs: Chromium, profiles"]
+            PBrowser["browser: Chromium, profiles, the stream"]
+            PChrome["programs: ctx.browser on the browser part"]
             PGateway["gateway: its runtime"]
             PAda["ada: numpy, the kernel"]
             PDB["postgres / mongodb / neo4j"]
@@ -734,7 +738,7 @@ rrotor is not sold. Three mods install into it, each its own product in the plan
 
 | Mod | Its part in rrotor | Limits (the licence) | State |
 |---|---|---|---|
-| **Programs** (`programs`) | Chromium and named profiles (the live panel, `ctx.browser`) | `programs` (deployed programs), `runs_per_day` (placeholders, TBD) | Mod built minimal (start rrotor, deploy, call, continue, status); its part designed |
+| **Programs** (`programs`) | `ctx.browser`, on the shared `browser` part (Chromium, named profiles, the stream) | `programs` (deployed programs), `runs_per_day` (placeholders, TBD) | Mod built minimal (start rrotor, deploy, call, continue, status); its part designed |
 | **Gateway** (`gateway`) | The gateway's runtime | Designed with the mod | Designed |
 | **Ada** (`ada`) | numpy and the Ada kernel | Designed with the mod | Designed |
 
@@ -777,17 +781,74 @@ A **part** is what a mod installs into rrotor beyond the base: Programs' Chromiu
 - **Licensed by the plan:** the mod hands rrotor its signed licence (`PUT /v1/licence`); rrotor checks it with Glyphh's licence key, as the mods do, and installs or starts a part only while the licence includes its mod. A licence that expires or drops the mod stops the part's services and refuses runs that need it (`E_NOT_IN_PLAN`), keeping its data. Per-part limits (a database's size, Ada's precedents) come from the mod's limits in the same licence.
 - **A program asks for a part** in its manifest (`databases`, `profiles`, `gateway`, Ada's kernel); a run whose part is missing fails with `E_PART_MISSING` naming the part and the mod that brings it.
 
-## 11. Where rrotor runs
+## 11. Where rrotor runs, and how it is installed
+
+**The mod installs rrotor; there is no separate install** (Chris, 2026-10-15). The first mod that needs it finds a container runtime, pulls `ghcr.io/glyphh-ai/rrotor` at the version that matches the mod, **pinned by digest** (the mod carries the image's digest for each architecture, and the runtime checks the pulled image against it), starts it with `/data` on a named volume (`glyphh-rrotor-data`) and the local API on the host's loopback, and hands in the runtime token (1.2). Updating the mod pulls the new digest and replaces the container; `/data` stays. PyPI carries only the `rrotor` program SDK (and later perhaps a developer CLI), never the runtime.
 
 | | Local | Hosted (designed only) |
 |---|---|---|
-| How | The mod starts it: Apple's `container` when present (macOS 26 on Apple silicon: a lightweight VM per container), else OrbStack, else Docker | The server provisions one Fly machine and its volume, the image as the VM (Firecracker) |
+| How | The mod starts it (below, per system) | The server provisions one Fly machine and its volume, the image as the VM (Firecracker) |
 | Token | The mod's sign-in gets it (`POST /v1/runtime/local`) and hands it in | The server makes it at provisioning |
 | Reached by | Claude through the mods (local API); the Cloud through the link | The Cloud through the link: routines and other AI clients via the Glyphh connector |
-| Sandbox | As section 4; on Docker and OrbStack the container needs seccomp and systempaths unconfined for bwrap; on `container` it is its own VM | As section 4, plus a cgroup per run |
+| Sandbox | As section 4; on Docker and OrbStack the container needs seccomp and systempaths unconfined for bwrap; on Apple's `container` and WSL2 it is its own VM | As section 4, plus a cgroup per run |
 
-- **Apple's `container`** needs macOS 26 to run well (macOS 15 works with limits); the mod uses `container run` with the same image, volume and loopback port, and treats it as the preferred runtime because each container is its own VM, the closest to a hosted Firecracker machine.
-- **OrbStack** answers the `docker` command (its own context); the mod uses it as Docker.
+**macOS.** Apple's `container` first (macOS 26 on Apple silicon: a lightweight VM per container, the closest to the hosted Firecracker machine), then OrbStack (it answers the `docker` command through its own context), then Docker Desktop. With none of them, the mod offers to install Apple's `container`: Apple's signed installer package from its GitHub releases, which macOS installs after the person enters their password once (they approve; the mod never asks for the password itself). On a Mac older than macOS 26, or an Intel Mac, the mod points to OrbStack instead. **Built now:** detection of `container`, OrbStack and Docker, and starting rrotor on Docker or OrbStack; `container` is detected and started with the same arguments, but not tested on this build's Mac (macOS 14).
+
+**Windows** (designed, not built). **WSL2** is the VM: a real Linux kernel, so the sandbox works as on a hosted machine. Preferred: rrotor also ships as a **WSL distribution**, a root filesystem tarball built in CI from the same image (`rrotor-wsl-<version>-<arch>.tar.gz`), imported with `wsl --import Glyphh-rrotor <folder> <tarball>` and started with `wsl -d Glyphh-rrotor`, so no Docker is needed; otherwise Docker Desktop, Podman or Rancher Desktop when one is present. If WSL is not enabled, the mod guides the person through `wsl --install` (an administrator prompt and one restart, which the person does). Localhost from Windows reaches WSL2 by default (NAT mode's localhost forwarding, or mirrored mode); the local API listens on loopback only inside the distribution.
+
+**Linux** (designed). Docker or Podman directly; the same image and arguments (plus `apparmor=unconfined` where AppArmor confines containers).
+
+**Not every mod needs rrotor.** Workspaces and Drips are part of the base subscription and run without a VM: the Workspaces browser helper runs natively on the host as it does today, and switches its pages to rrotor's browser when rrotor is running (12). Programs, Gateway and Ada need rrotor.
+
+### Platforms, per mod
+
+| Mod | macOS | Windows | Linux | Needs rrotor | Host dependencies today |
+|---|---|---|---|---|---|
+| Workspaces | Works (native helper, or rrotor's browser) | To build | To build | No (rrotor's browser when present) | Node 22; Google Chrome in `/Applications`; `open`; `osascript` (the View menu, the folder chooser); `ioreg` (the machine id) |
+| Drips | Works; fullscreen needs Swift (Xcode Command Line Tools) | To build; window-only until an overlay exists | To build; window-only | No | `swift` for the fullscreen overlay; `ioreg` |
+| Programs | Works on Docker or OrbStack; Apple's `container` detected | WSL2 (designed) | Docker or Podman (designed) | Yes | A container runtime; `git` (bundles a commit); `ioreg` |
+| Gateway | Designed | Designed | Designed | Yes | As Programs |
+| Ada | Designed | Designed | Designed | Yes | As Programs |
+| The shared sign-in and licence | Works | To build | To build | No | `ioreg` (the machine id), `scutil` (the computer's name), `open` |
+
+**macOS-only today, and the Windows equivalents to build later:**
+
+| Today (macOS) | Where | On Windows |
+|---|---|---|
+| `ioreg -rd1 -c IOPlatformExpertDevice` for the machine id (hashed) | the shared licence module, every mod | `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` (hashed the same way) |
+| `scutil --get ComputerName` | the shared licence module | `%COMPUTERNAME%` |
+| `open <url>` | the shared licence module, Workspaces | `cmd /c start "" <url>` or `explorer <url>` |
+| `osascript` driving Claude's View menu, and `choose folder` | Workspaces (`desktop.ts`, the helper's folder chooser) | The View menu: a Claude command where one exists; the folder chooser: PowerShell's `FolderBrowserDialog` |
+| Google Chrome at `/Applications/Google Chrome.app` | the Workspaces helper (`chrome.mjs`) | Chrome or Edge from their install paths (`%ProgramFiles%\Google\Chrome\Application\chrome.exe`, `%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe`), or rrotor's browser |
+| The Swift overlay (`native/overlay.swift`) | Drips fullscreen | A small WebView2 app, or the window-only fallback |
+
+## 12. The browser and the stream
+
+**rrotor's browser is a small shared part, `browser`** (Chromium, its named profiles, and the stream), used by Workspaces and Programs alike, so one install serves both and either mod in the plan licenses it. The Programs part depends on it; it adds nothing to it but `ctx.browser`.
+
+- **Profiles are shared:** a named profile (`/data/profiles/<name>/`) is one Chromium user data folder; a site signed in once in a profile is signed in for a workspace's pages and for every program that declares that profile. One Chromium process per profile in use, started on demand, stopped after an hour idle.
+- **The stream speaks the Workspaces helper's frame protocol exactly**, so the layout page can take its pages from the helper or from rrotor with no change to the page. On rrotor's local API:
+
+| Route | As in the helper (`plugins/workspaces/helper/viewer.mjs`) |
+|---|---|
+| `GET /frames` | One `multipart/mixed; boundary=glyphhframe` stream of every page's JPEG screencast frames, each part with `X-Cell` (the page's key: the favourite's id, or `<cell>#popup`) and `X-Captured` (ms); the newest frame of each page first for a stream that joins |
+| `GET /events` | Server-sent events: `nav` {cell, url}, `title` {cell, title}, `popup` {cell, popup, url}, `popup-closed` {cell, popup}; a `: hello` comment first |
+| `POST /api/ops` | One op or a list, applied in order across requests (a release never overtakes its press; an op Chromium never answers holds the rest for 2 s at most): `open` {cell, url, w, h, scale, keepInPanel, profile?}, `resize`, `hide`, `navigate`, `back`, `forward`, `reload`, `mouse`, `wheel`, `key`, `text`, `close` |
+| `GET /api/text?cell=` | The page as text: {cell, url, title, text} |
+| `GET /api/browser` | The pages: [{cell, url, title, profile}] (the helper's `GET /api/state` `pages`) |
+| `GET /api/favicon?url=` | A page's icon, fetched by rrotor with time and size limits |
+
+- **The same gate:** every browser route takes the local token as `X-Token` or `?t=` (the helper's rule) besides `Authorization: Bearer`, compared in constant time; `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; an `Origin` other than rrotor's own is refused. The page itself stays served by the Workspaces helper, opened by its one-time key as today; rrotor serves no page, so it needs no keys.
+- **The same behaviour as `chrome.mjs`:** CDP over a private pipe (`--remote-debugging-pipe`), never a port; headless, no background throttling; a clean user agent and client hints (no "Headless"); popups and "Keep in panel" by the same rules as `popups.mjs` (a native app's link mapped to its web client, or refused: rrotor never opens a native app, since it has no desktop); keys and mouse as `input.mjs`.
+- **Chromium's own sandbox** stays on where the container allows it (it needs user namespaces, as bwrap does); where it cannot start, rrotor says so in `GET /v1/health` and the browser refuses to start rather than run without it.
+- **Until the part manager is built,** the `browser` part is baked into a second image tag, `ghcr.io/glyphh-ai/rrotor:<version>-browser` (the base plus Debian's Chromium); the part manager will install the same tree onto `/data/parts/browser/` instead.
+
+**Switching Workspaces over** (not done in this change; the Workspaces mod is unchanged):
+
+1. When rrotor is running and its health says the `browser` part is ready, the Workspaces mod starts its helper with `WORKSPACES_BROWSER=rrotor`, the local API's port and the local token (in the helper's environment, never on disk), instead of starting Chrome.
+2. The helper proxies `/frames`, `/events` (the browser's events, merged with its own), `/api/ops`, `/api/text` and `/api/favicon` to rrotor, adding the local token; `/api/state`'s `pages` come from `GET /api/browser`. The page keeps talking to the helper, same origin, unchanged.
+3. Each favourite gets a `profile` (default `default`), passed on `open`; the helper's lasting profile in `~/Library/Application Support/glyphh-workspaces/chrome` stays for the native path.
+4. When rrotor stops, the helper goes back to its own Chrome at the next start (the native fallback).
 
 ## Anthropic's terms
 
