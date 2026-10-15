@@ -1,0 +1,36 @@
+"""Shared fixtures: short folders for unix sockets, git repos and bundles of sample programs, restored signals."""
+
+from __future__ import annotations
+
+import shutil
+import signal
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from tests.fakes import GitRepo
+
+
+@pytest.fixture
+def short_dir() -> Iterator[Path]:
+    """A folder with a short path: a unix socket's path must fit in 104 bytes on macOS."""
+    path = Path(tempfile.mkdtemp(prefix="rr", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> GitRepo:
+    return GitRepo(tmp_path / "repo")
+
+
+@pytest.fixture
+def restore_signals() -> Iterator[None]:
+    """The worker installs handlers for SIGALRM and SIGUSR1 in this process: put them back."""
+    saved = {s: signal.getsignal(s) for s in (signal.SIGALRM, signal.SIGUSR1)}
+    yield
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    for s, handler in saved.items():
+        signal.signal(s, handler)

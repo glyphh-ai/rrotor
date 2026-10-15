@@ -98,7 +98,11 @@ class Gate:
             return self._refuse(writer, host, "could not connect", "502 Bad Gateway")
         writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
         await writer.drain()
-        first = await asyncio.wait_for(self._client_hello(reader), WAIT)
+        try:
+            first = await asyncio.wait_for(self._client_hello(reader), WAIT)
+        except BaseException:
+            up_writer.close()  # the client never said hello: the upstream connection goes too
+            raise
         name = server_name(first) if first else None
         if name != host:
             self.record({"proxy": "refused", "host": host, "why": f"TLS server name {name or 'missing'}"})

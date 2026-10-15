@@ -24,6 +24,10 @@ class Launcher(Protocol):
         """What the worker is told to lock itself to (its start message's `sandbox`)."""
         ...
 
+    def paths(self, mounts: bwrap.Mounts) -> dict[str, str]:
+        """Where the worker finds the program and its folder (its start message's `program` and `files`)."""
+        ...
+
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process: ...
 
 
@@ -33,6 +37,9 @@ class SandboxLauncher:
 
     def sandbox(self, mounts: bwrap.Mounts) -> dict[str, Any] | None:
         return {"landlock": bwrap.landlock_rules(mounts), "proxy_socket": bwrap.PROXY_SOCKET if mounts.proxy else None}
+
+    def paths(self, mounts: bwrap.Mounts) -> dict[str, str]:
+        return {"program": bwrap.PROGRAM, "files": bwrap.FILES}
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process:
         seccomp = (self._seccomp or Filter()).build()

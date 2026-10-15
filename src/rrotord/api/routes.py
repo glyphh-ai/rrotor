@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import tempfile
 from dataclasses import dataclass
@@ -15,12 +17,13 @@ from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.errors import BadRequest
 from rrotord.link.credentials import Credentials
-from rrotord.programs import Programs
+from rrotord.programs import Programs, Version
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Run
 from rrotord.sandbox.probe import Layers
 
-BUNDLE_MAX = 200 * 1024 * 1024
+BUNDLE_MAX = 64 * 1024 * 1024
+BODY_MAX = 96 * 1024 * 1024  # a bundle in base64, with room
 
 
 class LinkView(Protocol):
@@ -93,32 +96,34 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response({"programs": s.programs.describe()})
 
     async def deploy(request: web.Request) -> web.Response:
-        if request.content_type == "application/x-git-bundle":
-            commit = request.query.get("commit", "")
-            folder = s.config.run_dir / "bundles"
-            folder.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=folder, suffix=".bundle", delete=False) as f:
-                path, size = Path(f.name), 0
-                try:
-                    async for chunk in request.content.iter_chunked(1 << 20):
-                        size += len(chunk)
-                        if size > BUNDLE_MAX:
-                            raise BadRequest("The bundle is over 200 MB.", code="E_TOO_BIG")
-                        f.write(chunk)
-                except BaseException:
-                    path.unlink(missing_ok=True)
-                    raise
-            try:
-                version = await s.deployer.from_bundle(path, commit)
-            finally:
-                path.unlink(missing_ok=True)
+        data = await body(request)
+        commit, bundle, repo, token = data.get("commit"), data.get("bundle"), data.get("repo"), data.get("token")
+        if not isinstance(commit, str):
+            raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
+        if isinstance(bundle, str):
+            version = await deploy_bundle(bundle, commit)
+        elif isinstance(repo, str) and (token is None or isinstance(token, str)):
+            version = await s.deployer.from_repo(repo, commit, token)
         else:
-            data = await body(request)
-            repo, sha, token = data.get("repo"), data.get("commit"), data.get("token")
-            if not isinstance(repo, str) or not isinstance(sha, str) or not (token is None or isinstance(token, str)):
-                raise BadRequest("Send a git bundle, or {repo, commit, token}.")
-            version = await s.deployer.from_repo(repo, sha, token)
+            raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
         return web.json_response(version.to_json(), status=201)
+
+    async def deploy_bundle(encoded: str, commit: str) -> Version:
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise BadRequest("bundle is a git bundle in base64.", code="E_BUNDLE") from None
+        if len(raw) > BUNDLE_MAX:
+            raise BadRequest("The bundle is over 64 MB.", code="E_TOO_BIG")
+        folder = s.config.run_dir / "bundles"
+        folder.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=folder, suffix=".bundle", delete=False) as f:
+            f.write(raw)
+            path = Path(f.name)
+        try:
+            return await s.deployer.from_bundle(path, commit)
+        finally:
+            path.unlink(missing_ok=True)
 
     async def call(request: web.Request) -> web.Response:
         data = await body(request)

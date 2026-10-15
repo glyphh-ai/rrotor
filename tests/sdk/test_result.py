@@ -1,0 +1,35 @@
+from rrotor import STATUSES, Result
+
+
+def test_done_carries_its_data():
+    assert Result.done({"a": 1}).to_json() == {"status": "done", "data": {"a": 1}, "step": None, "prompt": None}
+
+
+def test_needs_input_carries_prompt_schema_and_options():
+    r = Result.needs_input("Which day?", {"type": "string"}, ["a", "b"])
+    assert (r.status, r.prompt, r.data) == (
+        "needs_input",
+        "Which day?",
+        {"schema": {"type": "string"}, "options": ["a", "b"]},
+    )
+    assert r.waiting
+
+
+def test_needs_approval_names_its_step():
+    r = Result.needs_approval("write", "Write it?")
+    assert (r.status, r.step, r.prompt, r.waiting) == ("needs_approval", "write", "Write it?", True)
+
+
+def test_needs_signin_names_profile_and_site():
+    r = Result.needs_signin("work", "example.com")
+    assert r.data == {"profile": "work", "site": "example.com"}
+    assert r.prompt == "Sign in to example.com in the profile work"
+
+
+def test_failed_is_not_waiting():
+    r = Result.failed("read", "no file")
+    assert (r.status, r.step, r.data, r.waiting) == ("failed", "read", {"reason": "no file"}, False)
+
+
+def test_statuses_are_the_five():
+    assert {"done", "needs_input", "needs_approval", "needs_signin", "failed"} == STATUSES

@@ -113,7 +113,7 @@ sequenceDiagram
     M->>R: the mod's tools call the local API on 127.0.0.1:#lt;port#gt; (Bearer local token)
 ```
 
-**State:** the Cloud's side built (the runtime token, `/v1/runtime/link`); the rrotor base (this repo) and the Programs mod starting it: being built (2026-10-15).
+**State:** built and checked live on 2026-10-15 (Docker Desktop on macOS 14): the Cloud's side (the runtime token, `/v1/runtime/link`), the rrotor base (this repo), and the Programs mod (`glyphh-ai/mods`, `plugins/programs`) detecting the runtime, making the container, handing in the token; the link online in `rrotors`; signing the install out refuses the link (4401). Apple's `container` and OrbStack are detected and started with the same steps but not yet run here (this Mac has neither).
 
 - **Next starts reuse the token** kept in `/data/runtime.json`: the mod asks the server for a new one only when rrotor says it has none or its link was refused (4401), because asking rotates it.
 - **The local token** never touches disk outside the mod's private state: rrotor gets only its SHA-256 (in its environment) and compares a request's token by hash, in constant time. The runtime token goes in over the local API, never in the container's environment (which `docker inspect` shows).
@@ -243,7 +243,7 @@ sequenceDiagram
     C-->>P: shows the result, fixes, commits and deploys again until it is right
 ```
 
-**State:** being built (2026-10-15): deploy by commit from a local folder, calls, `continue`, Results (`programs_list`, `program_deploy`, `program_call`, `program_continue`, `run_status` in the Programs mod). Designed: the live panel and profiles (the Programs part), the secrets vault.
+**State:** built (2026-10-15): deploy by commit from a local folder, calls, `continue`, Results (`programs_list`, `program_deploy`, `program_call`, `program_continue`, `run_status` in the Programs mod), checked live against rrotor. Designed: the live panel (the browser part streams; the panel does not exist yet), the secrets vault.
 
 ### 2.2 Deploy: to the hosted rrotor, through git, and the routine
 
@@ -693,7 +693,7 @@ The mods reach the local rrotor through its **local API**: HTTP on `127.0.0.1:<p
 | `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`), each sandbox layer, runs waiting |
 | `PUT /v1/runtime/token` | `{runtime_id, token}`: the runtime token the mod got from `POST /v1/runtime/local`; kept in `/data/runtime.json`; the link (re)connects |
 | `GET /v1/programs` | Each program, its versions (number, commit, when), the active one, its functions |
-| `POST /v1/programs/deploy` | A git bundle (`application/x-git-bundle`, `?commit=<sha>`), or `{repo, commit, token}` for a GitHub repo; answers `{program, version, commit_sha}` |
+| `POST /v1/programs/deploy` | `{bundle, commit}`: a git bundle of the commit, base64 (the mod's `$.http.fetch` carries text; up to 64 MB), or `{repo, commit, token}` for a GitHub repo; answers `{program, version, commit_sha}` |
 | `POST /v1/runs` | `{program, function, inputs, version?}`: opens a run and answers its first `Result` with `run_id` |
 | `POST /v1/runs/{id}/continue` | `{answer}`: the next `Result` |
 | `POST /v1/runs/{id}/cancel` | Stops it; `end` runs; `cancelled` |
@@ -715,7 +715,7 @@ Every call above against what the server has (branch `relaunch`):
 | Identities, linking | Built |
 | Plans, mods, Stripe checkout and webhook | Built |
 | Tables: `rrotors`, `programs`, `program_versions`, `deployments`, `runs`, `approvals`, `connector_grants` | Built (tables only) |
-| `/v1/runtime/link` (protocol 1; waking a stopped hosted runtime on Fly not built) | Built |
+| `/v1/runtime/link` (protocol 1; waking a stopped hosted runtime on Fly not built) | Built; rrotor's link client checked against it live (hello, welcome, deploy, call, results, approvals, continue, acks and sequence numbers) |
 | `/mcp` and its OAuth (the account tools) | Built |
 | Plan limits for `programs` (`programs`, `runs_per_day`: placeholders, TBD) | In the seed (2026-10-15, local) |
 | `/v1/programs`, `/v1/runs`, `/v1/runtime`, the programs tools on `/mcp` | Designed, not built |
@@ -841,6 +841,7 @@ A **part** is what a mod installs into rrotor beyond the base: Programs' Chromiu
 - **The same gate:** every browser route takes the local token as `X-Token` or `?t=` (the helper's rule) besides `Authorization: Bearer`, compared in constant time; `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; an `Origin` other than rrotor's own is refused. The page itself stays served by the Workspaces helper, opened by its one-time key as today; rrotor serves no page, so it needs no keys.
 - **The same behaviour as `chrome.mjs`:** CDP over a private pipe (`--remote-debugging-pipe`), never a port; headless, no background throttling; a clean user agent and client hints (no "Headless"); popups and "Keep in panel" by the same rules as `popups.mjs` (a native app's link mapped to its web client, or refused: rrotor never opens a native app, since it has no desktop); keys and mouse as `input.mjs`.
 - **Chromium's own sandbox** stays on where the container allows it (it needs user namespaces, as bwrap does); where it cannot start, rrotor says so in `GET /v1/health` and the browser refuses to start rather than run without it.
+- **Built and checked live (2026-10-15):** the routes above on rrotor's local API (`rrotord/browser/`), one page streamed from Chromium in the `-browser` image (frames, `nav` and `title` events, the page's text). Chromium's own sandbox runs inside the container with the same security options bwrap needs.
 - **Until the part manager is built,** the `browser` part is baked into a second image tag, `ghcr.io/glyphh-ai/rrotor:<version>-browser` (the base plus Debian's Chromium); the part manager will install the same tree onto `/data/parts/browser/` instead.
 
 **Switching Workspaces over** (not done in this change; the Workspaces mod is unchanged):
@@ -863,3 +864,5 @@ Quoted in the server's `docs/architecture.md` (checked 2026-10-14): third-party 
 - **Programs' limits:** the numbers for `programs` and `runs_per_day` per plan (placeholders in the seed).
 - **Part signing:** the release key's custody and rotation, and where the mods' CI builds parts.
 - **Gateway's and Ada's limits** in the licence.
+- **Not yet run here:** rrotor on Apple's `container` (needs macOS 26; this build's Mac is on 14) and on OrbStack; both are detected and started by the same steps, and are to be checked on a Mac that has them. How a `container` VM reaches the host's `localhost` (the dev server) is to be confirmed there.
+- **To build next:** the part manager (install, upgrade, remove, licensed parts), the secrets vault, the live panel on the browser part, Gateway, Ada, hosted rrotor on Fly, and the WSL distribution's install from the Programs mod on Windows.

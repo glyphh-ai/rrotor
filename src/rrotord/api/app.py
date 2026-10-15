@@ -6,14 +6,14 @@ from aiohttp import web
 
 from rrotord.api.errors import errors
 from rrotord.api.gate import gate
-from rrotord.api.routes import Services, setup
+from rrotord.api.routes import BODY_MAX, Services, setup
 
 
 def make(services: Services) -> web.Application:
     config = services.config
     app = web.Application(
         middlewares=[errors, gate(config.local_token_sha256, (config.host_port, config.local_port))],
-        client_max_size=1024 * 1024,
+        client_max_size=BODY_MAX,
     )
     setup(app, services)
     if services.browser is not None:

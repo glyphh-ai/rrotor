@@ -6,7 +6,6 @@ or cancelled stops where it is (a signal in the main thread) and `end` still run
 
 from __future__ import annotations
 
-import _thread
 import importlib.util
 import queue
 import signal
@@ -60,12 +59,13 @@ class Worker:
         self.landlock = landlock
         self.inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self.running = threading.Event()
+        self._main = threading.get_ident()  # a cancel is a signal to this thread: it interrupts a blocking call too
 
     def _read(self) -> None:
         while (message := self.channel.receive()) is not None:
             if message.get("op") == "cancel":
                 if self.running.is_set():
-                    _thread.interrupt_main(signal.SIGUSR1)
+                    signal.pthread_kill(self._main, signal.SIGUSR1)
                 continue
             self.inbox.put(message)
         self.inbox.put(None)

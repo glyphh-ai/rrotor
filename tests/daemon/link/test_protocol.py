@@ -1,0 +1,53 @@
+import uuid
+
+import pytest
+from pydantic import ValidationError
+
+from rrotord.link import protocol as p
+
+SHA = "a" * 40
+
+
+def test_down_messages_by_type():
+    run_id = str(uuid.uuid4())
+    assert isinstance(p.DOWN.validate_json('{"type":"welcome"}'), p.Welcome)
+    call = p.DOWN.validate_python(
+        {
+            "type": "call",
+            "id": "c1",
+            "run_id": run_id,
+            "program": "x",
+            "version": 1,
+            "function": "start",
+            "inputs": {},
+            "caller": "routine",
+        }
+    )
+    assert isinstance(call, p.Call) and str(call.run_id) == run_id
+    assert isinstance(p.DOWN.validate_python({"type": "continue", "run_id": run_id, "answer": 1}), p.Continue)
+    assert isinstance(p.DOWN.validate_python({"type": "cancel", "run_id": run_id}), p.Cancel)
+    deploy = p.DOWN.validate_python({"type": "activate", "program": "x", "version": 2, "commit_sha": SHA})
+    assert isinstance(deploy, p.Deploy) and deploy.repo is None
+    assert isinstance(p.DOWN.validate_python({"type": "live_open"}), p.Unbuilt)
+    assert isinstance(p.DOWN.validate_python({"type": "ack", "of": "m1"}), p.Ack)
+    assert isinstance(p.DOWN.validate_python({"type": "pong"}), p.Pong)
+
+
+def test_a_bad_message_is_refused():
+    with pytest.raises(ValidationError):
+        p.DOWN.validate_python({"type": "deploy", "program": "x", "version": 1, "commit_sha": "short"})
+
+
+def test_up_messages():
+    hello = p.hello("0.1.0", "local", "rid", [])
+    assert (hello["type"], hello["protocol"], hello["runtime_id"]) == ("hello", 1, "rid")
+    result = p.result(3, "r", {"status": "done", "data": 1, "extra": "no"}, 2.9)
+    assert result["result"] == {"status": "done", "data": 1, "step": None, "prompt": None}
+    assert (result["seq"], result["seconds"]) == (3, 2)
+    assert p.event(4, "x", "deploy_failed", {"a": 1})["kind"] == "deploy_failed"
+    assert p.deployed("x", 2, SHA)["commit_sha"] == SHA
+    assert p.Ping().model_dump()["type"] == "ping" and len(p.new_id()) == 32
+
+
+def test_stop_closes():
+    assert p.STOPS == {4401: "refused", 4409: "replaced", 4426: "upgrade_needed", 4400: "bad_hello"}

@@ -1,0 +1,94 @@
+# rrotor's checks on every push and pull request: lint, types, the tests with the 100% coverage gate, the sample
+# program's tests, the image (base and browser) with the sandbox tests inside it, and the WSL root filesystem.
+# On main, the images are pushed to ghcr.io/glyphh-ai/rrotor (multi-arch) and their digests reported.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check src tests examples && uv run ruff format --check src tests examples
+      - name: Types
+        run: uv run mypy
+      - name: Tests (100% line and branch coverage of rrotor and rrotord)
+        run: uv run pytest
+      - name: The sample program's tests
+        run: uv run pytest examples/daily_sales/tests -o addopts="" -p no:cacheprovider
+
+  image:
+    runs-on: ubuntu-24.04
+    needs: checks
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Version
+        id: v
+        run: echo "version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Build the base and the sandbox tests (amd64, for this runner)
+        run: |
+          docker buildx build -f image/Dockerfile --target base --load -t rrotor:ci .
+          docker buildx build -f image/Dockerfile --target sandbox-test --load -t rrotor:ci-sandbox-test .
+      - name: The sandbox holds (bwrap, Landlock, seccomp, the egress proxy) inside the image
+        run: |
+          docker run --rm --tmpfs /tmp:exec,mode=1777 \
+            --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined \
+            rrotor:ci-sandbox-test
+      - name: The daemon starts, checks every layer and answers its local API
+        run: |
+          token=$(openssl rand -hex 32); sha=$(printf %s "$token" | sha256sum | cut -d' ' -f1)
+          docker run -d --name smoke --read-only --tmpfs /tmp:exec,mode=1777 -v smoke:/data -p 127.0.0.1:7777:7777 \
+            --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined \
+            -e RROTOR_SERVER=http://127.0.0.1:9 -e RROTOR_LOCAL_TOKEN_SHA256="$sha" rrotor:ci
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:7777/healthz && break; sleep 1; done
+          curl -sf -H "Authorization: Bearer $token" http://127.0.0.1:7777/v1/health | tee health.json
+          python3 -c "import json; h=json.load(open('health.json')); assert h['sandbox']['ready'], h['sandbox']"
+          docker rm -f smoke
+      - name: The WSL root filesystem (Windows, designed): exported from the base image
+        run: |
+          id=$(docker create rrotor:ci)
+          docker export "$id" | gzip -9 > "rrotor-wsl-${{ steps.v.outputs.version }}-amd64.tar.gz"
+          docker rm "$id"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rrotor-wsl-${{ steps.v.outputs.version }}-amd64
+          path: rrotor-wsl-*.tar.gz
+          retention-days: 14
+      - name: Sign in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the images (amd64 and arm64)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          repo=ghcr.io/glyphh-ai/rrotor; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
+          for target in base browser; do
+            suffix=$([ "$target" = browser ] && echo -browser || true)
+            docker buildx build -f image/Dockerfile --target "$target" --platform linux/amd64,linux/arm64 \
+              --build-arg VERSION="$v" -t "$repo:$v$suffix" -t "$repo:$s$suffix" --push .
+            echo "$target: $(docker buildx imagetools inspect "$repo:$s$suffix" --format '{{json .Manifest.Digest}}')" >> "$GITHUB_STEP_SUMMARY"
+          done

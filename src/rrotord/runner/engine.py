@@ -173,8 +173,7 @@ class Runner:
             seconds_left=self._left(run, found),
             sandbox=self.launcher.sandbox(mounts),
             hosts=sorted(hosts),
-            files=bwrap.FILES,
-            program=bwrap.PROGRAM,
+            **self.launcher.paths(mounts),
         )
         await self._await_result(run, worker, found)
 
@@ -183,8 +182,8 @@ class Runner:
         message = await worker.next(self._left(run, found) + GRACE)
         run.seconds += time.monotonic() - began
         if message is None or message.get("op") != "result":
-            alive = worker.alive
-            await worker.stop(grace=0)
+            alive = worker.alive and not worker.closed  # a closed channel is a worker that stopped, reaped or not
+            await worker.stop(grace=0 if alive else 5.0)
             reason = (
                 "The run went past its seconds and was stopped."
                 if alive

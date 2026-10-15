@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import base64
+import uuid
+from typing import Any
+
+import pytest
+
+from rrotord.api import routes
+from rrotord.sandbox.probe import Layers
+from tests.daemon.api.conftest import Api, open_api
+from tests.fakes import GitRepo, install, manifest, token
+
+WAITS = """
+from rrotor import Result
+
+def start(ctx, inputs):
+    if ctx.ask_approval("write", "Write it?"):
+        return Result.done("written")
+    return Result.done("declined")
+"""
+
+
+async def send(api: Api, method: str, path: str, **kw: Any) -> tuple[int, Any]:
+    res = await api.client.request(method, path, headers=api.auth(), **kw)
+    return res.status, await res.json()
+
+
+def deploy_sample(api: Api, source: str = WAITS) -> None:
+    install(api.services.programs, manifest("sample", functions={"start": {"approvals": ["write"]}}), source)
+
+
+async def test_health_shows_the_runtime(api):
+    status, body = await send(api, "GET", "/v1/health")
+    assert status == 200
+    assert (body["mode"], body["runtime_id"], body["link"], body["approvals"], body["programs"]) == (
+        "local",
+        None,
+        {"state": "no_token"},
+        0,
+        0,
+    )
+    assert body["sandbox"]["ready"] and body["browser"] == {"ready": False, "detail": "not in this image"}
+
+
+async def test_health_shows_the_browser_when_it_is_here(tmp_path, short_dir):
+    class Browser:
+        def view(self) -> dict[str, Any]:
+            return {"ready": True}
+
+        def routes(self, app: Any) -> None:
+            pass
+
+    api = await open_api(tmp_path, short_dir, Browser())
+    try:
+        assert (await send(api, "GET", "/v1/health"))[1]["browser"] == {"ready": True}
+    finally:
+        await api.client.close()
+
+
+async def test_the_runtime_token_is_handed_in(api):
+    rid = str(uuid.uuid4())
+    status, body = await send(api, "PUT", "/v1/runtime/token", json={"runtime_id": rid, "token": token()})
+    assert (status, body) == (200, {"runtime_id": rid, "link": "connecting"})
+    assert api.services.credentials.changed.is_set()
+
+
+async def test_a_bad_runtime_token_is_refused(api):
+    status, body = await send(api, "PUT", "/v1/runtime/token", json={"runtime_id": "x", "token": token()})
+    assert (status, body["error"]["code"]) == (400, "E_RUNTIME_ID")
+
+
+@pytest.mark.parametrize("data", [b"not json", b"[1]", b"\xff"])
+async def test_a_body_that_is_not_a_json_object(api, data):
+    status, body = await send(api, "PUT", "/v1/runtime/token", data=data)
+    assert (status, body["error"]["code"]) == (400, "E_BAD_REQUEST")
+
+
+async def test_programs_lists_what_is_deployed(api):
+    deploy_sample(api)
+    status, body = await send(api, "GET", "/v1/programs")
+    assert status == 200 and body["programs"][0]["name"] == "sample"
+
+
+async def test_deploy_a_bundle(api, tmp_path):
+    repo = GitRepo(tmp_path / "src")
+    sha = repo.program(manifest("sample"))
+    bundle = base64.b64encode(repo.bundle(tmp_path / "b.bundle").read_bytes()).decode()
+    status, body = await send(api, "POST", "/v1/programs/deploy", json={"bundle": bundle, "commit": sha})
+    assert (status, body["program"], body["version"], body["commit_sha"]) == (201, "sample", 1, sha)
+    assert list((api.root / "run" / "bundles").iterdir()) == []
+
+
+async def test_deploy_a_bundle_that_is_not_base64(api):
+    status, body = await send(api, "POST", "/v1/programs/deploy", json={"bundle": "%%%", "commit": "a" * 40})
+    assert (status, body["error"]["code"]) == (400, "E_BUNDLE")
+
+
+async def test_deploy_a_bundle_too_big(api, monkeypatch):
+    monkeypatch.setattr(routes, "BUNDLE_MAX", 2)
+    status, body = await send(api, "POST", "/v1/programs/deploy", json={"bundle": "AAAA", "commit": "a" * 40})
+    assert (status, body["error"]["code"]) == (400, "E_TOO_BIG")
+
+
+async def test_deploy_a_bundle_that_git_refuses_leaves_no_file(api):
+    status, body = await send(api, "POST", "/v1/programs/deploy", json={"bundle": "AAAA", "commit": "a" * 40})
+    assert (status, body["error"]["code"]) == (422, "E_GIT")
+    assert list((api.root / "run" / "bundles").iterdir()) == []
+
+
+async def test_deploy_from_a_repo(api, tmp_path):
+    repo = GitRepo(tmp_path / "src")
+    sha = repo.program(manifest("sample"))
+    repo.bare(tmp_path / "github", "owner/sample")
+    status, body = await send(
+        api, "POST", "/v1/programs/deploy", json={"repo": "owner/sample", "commit": sha, "token": token()}
+    )
+    assert (status, body["commit_sha"]) == (201, sha)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"repo": "owner/x"},
+        {"commit": "a" * 40},
+        {"commit": "a" * 40, "repo": "owner/x", "token": 5},
+        {"commit": "a" * 40, "repo": 1},
+    ],
+)
+async def test_deploy_with_the_wrong_fields(api, data):
+    status, body = await send(api, "POST", "/v1/programs/deploy", json=data)
+    assert (status, body["error"]["code"]) == (400, "E_BAD_REQUEST")
+
+
+async def test_a_run_through_the_api(api):
+    deploy_sample(api)
+    status, first = await send(api, "POST", "/v1/runs", json={"program": "sample", "inputs": {}})
+    assert (status, first["status"], first["step"], first["prompt"]) == (200, "needs_approval", "write", "Write it?")
+    run_id = first["run_id"]
+    approvals = (await send(api, "GET", "/v1/approvals"))[1]["approvals"]
+    assert approvals[0]["run_id"] == run_id
+    assert (await send(api, "GET", "/v1/health"))[1]["approvals"] == 1
+    status, done = await send(api, "POST", f"/v1/runs/{run_id}/continue", json={"answer": {"approved": True}})
+    assert (done["status"], done["data"]) == ("done", "written")
+    status, view = await send(api, "GET", f"/v1/runs/{run_id}")
+    assert (view["status"], view["function"]) == ("done", "start")
+    status, log = await send(api, "GET", f"/v1/runs/{run_id}/log")
+    assert log["run_id"] == run_id and log["lines"][0]["event"] == "called"
+
+
+async def test_cancel_through_the_api(api):
+    deploy_sample(api)
+    run_id = (await send(api, "POST", "/v1/runs", json={"program": "sample", "function": "start", "version": 1}))[1][
+        "run_id"
+    ]
+    status, body = await send(api, "POST", f"/v1/runs/{run_id}/cancel")
+    assert (status, body["status"]) == (200, "cancelled")
+    status, body = await send(api, "POST", f"/v1/runs/{run_id}/cancel")
+    assert (status, body["error"]["code"]) == (409, "E_RUN_STATE")
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{}, {"program": "x", "function": 1}, {"program": "x", "inputs": [1]}, {"program": "x", "version": "1"}],
+)
+async def test_a_call_with_the_wrong_fields(api, data):
+    status, body = await send(api, "POST", "/v1/runs", json=data)
+    assert (status, body["error"]["code"]) == (400, "E_BAD_REQUEST")
+
+
+async def test_a_run_not_here(api):
+    status, body = await send(api, "GET", "/v1/runs/nope")
+    assert (status, body["error"]["code"]) == (404, "E_RUN_MISSING")
+    assert (await send(api, "GET", "/v1/runs/nope/log"))[0] == 404
+
+
+async def test_calls_are_refused_while_the_sandbox_is_not_ready(api):
+    api.services.runner.layers = Layers({"bubblewrap": {"ok": False, "detail": "not installed"}})
+    deploy_sample(api)
+    status, body = await send(api, "POST", "/v1/runs", json={"program": "sample"})
+    assert (status, body["error"]["code"]) == (503, "E_SANDBOX_UNAVAILABLE")

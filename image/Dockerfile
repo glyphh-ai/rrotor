@@ -42,7 +42,19 @@ CMD ["rrotord"]
 FROM base AS browser
 USER root
 RUN apt-get update \
- && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji \
+ && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-core fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 ENV RROTOR_CHROMIUM=/usr/bin/chromium
 USER rrotor
+
+# The sandbox's own tests, run inside the base image (they need bwrap, Landlock and libseccomp): CI only.
+FROM base AS sandbox-test
+USER root
+COPY pyproject.toml uv.lock /src/
+COPY tests /src/tests
+COPY examples /src/examples
+RUN uv pip install -q --no-cache --python /opt/rrotord/bin/python pytest pytest-asyncio \
+ && mkdir -p /src/.data && chown -R rrotor:rrotor /src
+USER rrotor
+WORKDIR /src
+CMD ["/opt/rrotord/bin/python", "-m", "pytest", "-m", "sandbox", "-o", "addopts=", "-p", "no:cacheprovider", "tests/sandbox"]

@@ -24,6 +24,7 @@ class Worker:
     ) -> None:
         self.proc, self.reader, self.writer, self.note = proc, reader, writer, note
         self.inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self.closed = False  # the worker's end of the channel is gone
         self.tasks = [asyncio.create_task(self._read())]
         for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
             if stream is not None:
@@ -48,6 +49,8 @@ class Worker:
                 try:
                     message = json.loads(line)
                 except ValueError:
+                    message = None
+                if not isinstance(message, dict):
                     self.note({"worker": "unreadable message"})
                     continue
                 if message.get("op") in ("checkpoint", "log"):
@@ -56,6 +59,7 @@ class Worker:
                     await self.inbox.put(message)
         except (ConnectionError, OSError, ValueError):
             pass
+        self.closed = True
         await self.inbox.put(None)
 
     async def _output(self, name: str, stream: asyncio.StreamReader) -> None:

@@ -57,6 +57,7 @@ class LinkClient:
         self.last_close: dict[str, Any] | None = None
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self.attempt = 0
+        self.reason: str | None = None  # what the Cloud said when it closed the link
         self.tasks: set[asyncio.Task[None]] = set()
 
     def _set(self, state: str) -> None:
@@ -124,7 +125,7 @@ class LinkClient:
         except (aiohttp.ClientError, OSError, TimeoutError) as err:
             self.last_close = {"code": None, "reason": type(err).__name__}
             return None
-        self.ws = ws
+        self.ws, self.reason = ws, None
         try:
             await ws.send_str(json.dumps(p.hello(self.version, self.mode, runtime_id, self.handler.deployed())))
             if not await self._welcomed(ws):
@@ -145,7 +146,7 @@ class LinkClient:
 
     def _closed(self, ws: aiohttp.ClientWebSocketResponse) -> int | None:
         code = ws.close_code
-        self.last_close = {"code": code, "reason": str(getattr(ws, "close_reason", "") or "")[:200] or None}
+        self.last_close = {"code": code, "reason": (self.reason or "")[:200] or None}
         return code
 
     async def _welcomed(self, ws: aiohttp.ClientWebSocketResponse) -> bool:
@@ -154,11 +155,16 @@ class LinkClient:
         except TimeoutError:
             return False
         if msg.type != aiohttp.WSMsgType.TEXT:
+            self._heard_close(msg)
             return False
         try:
             return isinstance(p.DOWN.validate_json(msg.data), p.Welcome)
         except ValidationError:
             return False
+
+    def _heard_close(self, msg: aiohttp.WSMessage) -> None:
+        if msg.type == aiohttp.WSMsgType.CLOSE and msg.extra:
+            self.reason = str(msg.extra)
 
     async def _serve(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         heard = time.monotonic()
@@ -168,6 +174,7 @@ class LinkClient:
             while True:
                 msg = await ws.receive()
                 if msg.type != aiohttp.WSMsgType.TEXT:
+                    self._heard_close(msg)
                     if msg.type in (
                         aiohttp.WSMsgType.CLOSE,
                         aiohttp.WSMsgType.CLOSING,
