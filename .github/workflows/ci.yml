@@ -50,6 +50,8 @@ jobs:
         run: |
           docker buildx build -f image/Dockerfile --target base --load -t rrotor:ci .
           docker buildx build -f image/Dockerfile --target sandbox-test --load -t rrotor:ci-sandbox-test .
+      - name: Let unprivileged user namespaces make their own network (Ubuntu 23.10+ restricts them through AppArmor)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: The sandbox holds (bwrap, Landlock, seccomp, the egress proxy) inside the image
         run: |
           docker run --rm --tmpfs /tmp:exec,mode=1777 \
