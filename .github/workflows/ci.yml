@@ -1,6 +1,8 @@
 # rrotor's checks on every push and pull request: lint, types, the tests with the 100% coverage gate, the sample
 # program's tests, the image (base and browser) with the sandbox tests inside it, and the WSL root filesystem.
-# On main, the images are pushed to ghcr.io/glyphh-ai/rrotor (multi-arch) and their digests reported.
+# On main, with the repository variable PUBLISH_IMAGES set to true, the images are pushed to ghcr.io/glyphh-ai/rrotor
+# (multi-arch) and their digests reported. It is off until the GHCR package lets this repository write to it (an org
+# admin: the package's settings, Manage Actions access, glyphh-ai/rrotor with the Write role).
 name: ci
 
 on:
@@ -78,14 +80,14 @@ jobs:
           path: rrotor-wsl-*.tar.gz
           retention-days: 14
       - name: Sign in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push the images (amd64 and arm64)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
         run: |
           repo=ghcr.io/glyphh-ai/rrotor; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
           for target in base browser; do
