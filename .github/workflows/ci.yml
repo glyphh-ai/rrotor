@@ -65,7 +65,7 @@ jobs:
           curl -sf -H "Authorization: Bearer $token" http://127.0.0.1:7777/v1/health | tee health.json
           python3 -c "import json; h=json.load(open('health.json')); assert h['sandbox']['ready'], h['sandbox']"
           docker rm -f smoke
-      - name: The WSL root filesystem (Windows, designed): exported from the base image
+      - name: "The WSL root filesystem (Windows, designed): exported from the base image"
         run: |
           id=$(docker create rrotor:ci)
           docker export "$id" | gzip -9 > "rrotor-wsl-${{ steps.v.outputs.version }}-amd64.tar.gz"
