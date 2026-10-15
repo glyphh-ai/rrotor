@@ -524,7 +524,7 @@ The base has no s6: everything above is one process under `tini`, and the part m
 | **Landlock** | Applied by the worker before it imports the program: reading only the read-only mounts, writing only `/files` and `/tmp`; on ABI 4 and later, TCP only to `127.0.0.1:3128`; on ABI 6, no abstract unix sockets or signals outside the sandbox. A kernel without Landlock refuses runs |
 | **seccomp** | A filter built by the runner (libseccomp) and handed to `bwrap --seccomp`: `ptrace`, `mount`, `unshare`, `setns`, `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `io_uring_*`, kernel modules, `kexec`, clocks, `reboot` and others refused; new user namespaces refused; sockets only `AF_UNIX`, `AF_INET`, `AF_INET6`. `no_new_privs` is set |
 | **egress proxy** | The only way out: inside the namespace the worker forwards `127.0.0.1:3128` to the run's proxy socket, so `HTTPS_PROXY` works for any library |
-| **limits** | `prlimit`: address space (the manifest's `memory_mb`), CPU seconds, open files, file size, no core files; the runner's wall clock (`limits.seconds`) kills the run |
+| **limits** | `prlimit`: data size (the manifest's `memory_mb`; address space would count thread stacks and allocator arenas), CPU seconds, open files, file size, no core files; the runner's wall clock (`limits.seconds`) kills the run |
 
 - **Every layer is checked at start** and shown in `GET /v1/health`; a layer that cannot work makes rrotor refuse runs (`E_SANDBOX_UNAVAILABLE`, naming the layer and why). Nothing is skipped silently.
 - **A uid per program** is the uid inside its user namespace; outside it every run is rrotor's own unprivileged user, so files are kept apart by the mounts and Landlock, not by host uids.

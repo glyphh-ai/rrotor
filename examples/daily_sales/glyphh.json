@@ -1,0 +1,23 @@
+{
+  "name": "daily_sales",
+  "version": 1,
+  "description": "A day's sales from the export in the program's folder, added up, converted to euros, and written to its ledger once approved",
+  "python": "3.13",
+  "functions": {
+    "start": {
+      "description": "Read a day's sales export, add it up, and write the total to the ledger (asks approval first)",
+      "inputs": {
+        "type": "object",
+        "properties": { "day": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" } },
+        "additionalProperties": false
+      },
+      "approvals": ["write"]
+    },
+    "summary": {
+      "description": "The ledger: each day written, its total in dollars and euros",
+      "inputs": { "type": "object", "additionalProperties": false }
+    }
+  },
+  "hosts": ["api.frankfurter.dev"],
+  "limits": { "seconds": 60, "memory_mb": 256 }
+}
