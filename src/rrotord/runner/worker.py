@@ -60,6 +60,7 @@ class Worker:
         except (ConnectionError, OSError, ValueError):
             pass
         self.closed = True
+        self.writer.close()  # a worker still sending to a channel nobody reads gets an error, not a wait forever
         await self.inbox.put(None)
 
     async def _output(self, name: str, stream: asyncio.StreamReader) -> None:

@@ -125,7 +125,8 @@ async def test_a_read_that_fails_ends_the_messages():
     w, theirs = await worker_on(proc)
     sending = asyncio.ensure_future(asyncio.to_thread(theirs.sendall, b"x" * (17 * 1024 * 1024)))
     assert await w.next(5) is None and w.closed
+    done = await asyncio.gather(sending, return_exceptions=True)
+    assert isinstance(done[0], OSError)  # the channel was closed under the sender
     theirs.close()
-    await asyncio.gather(sending, return_exceptions=True)
     proc.returncode = 0
     await w.stop()

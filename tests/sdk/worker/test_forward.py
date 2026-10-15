@@ -66,3 +66,10 @@ def test_a_pipe_that_breaks_shuts_both_ends():
     src, dst = Broken(), Broken()
     forward._pipe(src, dst)  # type: ignore[arg-type]
     assert src.shut and dst.shut
+
+
+def test_close_ends_the_accept_loop(short_dir):
+    fwd = forward.Forwarder(str(short_dir / "none.sock"), port=0).start()
+    fwd.close()
+    fwd.thread.join(5)
+    assert not fwd.thread.is_alive()

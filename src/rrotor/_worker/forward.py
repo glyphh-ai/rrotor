@@ -46,7 +46,8 @@ class Forwarder:
 
     def start(self) -> Forwarder:
         threading.stack_size(STACK)
-        threading.Thread(target=self._accept, daemon=True).start()
+        self.thread = threading.Thread(target=self._accept, daemon=True)
+        self.thread.start()
         return self
 
     def _accept(self) -> None:
@@ -58,4 +59,6 @@ class Forwarder:
             threading.Thread(target=_serve, args=(client, self.target), daemon=True).start()
 
     def close(self) -> None:
+        with contextlib.suppress(OSError):  # wakes a blocked accept on Linux; macOS refuses it on a listener
+            self.server.shutdown(socket.SHUT_RDWR)
         self.server.close()
