@@ -7,10 +7,12 @@ import os
 import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from rrotor._worker.landlock import Landlock
 from rrotord.proc import Done, run
+from rrotord.sandbox.bwrap import LINKS
 from rrotord.sandbox.seccomp import Filter
 
 Runner = Callable[..., Awaitable[Done]]
@@ -36,6 +38,7 @@ async def probe(
     seccomp: Filter | None = None,
     runner: Runner = run,
     which: Callable[[str], str | None] = shutil.which,
+    exists: Callable[[Path], bool] = Path.exists,
 ) -> Layers:
     layers = Layers()
 
@@ -43,6 +46,7 @@ async def probe(
     if bwrap is None:
         layers.checks["bubblewrap"] = {"ok": False, "detail": "bwrap is not installed"}
     else:
+        links = [arg for target, link in LINKS if exists(Path("/") / target) for arg in ("--symlink", target, link)]
         done = await runner(
             [
                 bwrap,
@@ -51,12 +55,7 @@ async def probe(
                 "--ro-bind",
                 "/usr",
                 "/usr",
-                "--symlink",
-                "usr/lib",
-                "/lib",
-                "--symlink",
-                "usr/bin",
-                "/bin",
+                *links,
                 "--proc",
                 "/proc",
                 "--dev",
