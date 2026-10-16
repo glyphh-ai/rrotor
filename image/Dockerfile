@@ -1,6 +1,5 @@
-# rrotor: the base image (docs/architecture.md, section 4), and the base plus the browser part (section 12).
-#   docker buildx build -f image/Dockerfile --target base    -t ghcr.io/glyphh-ai/rrotor:<version> .
-#   docker buildx build -f image/Dockerfile --target browser -t ghcr.io/glyphh-ai/rrotor:<version>-browser .
+# rrotor: the base image (docs/architecture.md, section 4).
+#   docker buildx build -f image/Dockerfile --target base -t ghcr.io/glyphh-ai/rrotor:<version> .
 
 FROM debian:trixie-slim AS os
 RUN apt-get update \
@@ -37,15 +36,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
   CMD ["/opt/rrotord/bin/python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:7777/healthz', timeout=2)"]
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["rrotord"]
-
-# The browser part, baked in until the part manager installs it on /data/parts/browser (docs, section 12).
-FROM base AS browser
-USER root
-RUN apt-get update \
- && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-core fonts-noto-color-emoji \
- && rm -rf /var/lib/apt/lists/*
-ENV RROTOR_CHROMIUM=/usr/bin/chromium
-USER rrotor
 
 # The sandbox's own tests, run inside the base image (they need bwrap, Landlock and libseccomp): CI only.
 FROM base AS sandbox-test

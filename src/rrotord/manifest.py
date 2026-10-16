@@ -43,11 +43,6 @@ class Limits(BaseModel):
     memory_mb: int = Field(512, ge=64, le=8192)
 
 
-class Profile(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    sites: list[str] = []
-
-
 class Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: Annotated[str, Field(pattern=NAME)]
@@ -58,7 +53,6 @@ class Manifest(BaseModel):
     hosts: list[str] = []
     secrets: list[Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")]] = []
     databases: list[Literal["postgres", "mongodb", "neo4j"]] = []
-    profiles: dict[Annotated[str, Field(pattern=NAME)], Profile] = {}
     limits: Limits = Limits()
     connectors: list[str] = []
     data: bool = False
@@ -89,7 +83,7 @@ class Manifest(BaseModel):
 
     def parts(self) -> list[str]:
         """The parts this program needs beside the base (docs/architecture.md, 10)."""
-        return [*self.databases, *(["programs"] if self.profiles else [])]
+        return list(self.databases)
 
 
 def _defined(program: Path) -> set[str]:

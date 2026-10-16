@@ -12,7 +12,7 @@ from typing import Any
 from rrotord.store import append_line, read_json, read_lines, write_json
 
 FINAL = frozenset({"done", "failed", "expired", "cancelled"})
-WAITING = frozenset({"needs_input", "needs_approval", "needs_signin"})
+WAITING = frozenset({"needs_input", "needs_approval"})
 LOG_LINE_MAX = 2000
 
 

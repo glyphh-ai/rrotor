@@ -39,7 +39,6 @@ class Services:
     credentials: Credentials
     link: LinkView
     layers: Layers
-    browser: Any = None  # the browser part's state, when it is in this image
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -79,9 +78,6 @@ def setup(app: web.Application, s: Services) -> None:
                 "runtime_id": s.credentials.runtime_id,
                 "link": s.link.view(),
                 "sandbox": s.layers.to_json(),
-                "browser": s.browser.view()
-                if s.browser is not None
-                else {"ready": False, "detail": "not in this image"},
                 "approvals": len(s.runner.approvals()),
                 "programs": len(s.programs.names()),
             }

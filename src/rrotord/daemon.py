@@ -7,7 +7,6 @@ import contextlib
 import logging
 import signal
 from dataclasses import dataclass, field
-from typing import Any
 
 import aiohttp
 from aiohttp import web
@@ -37,7 +36,6 @@ class Daemon:
     config: Config
     layers: Layers
     launcher: Launcher = field(default_factory=SandboxLauncher)
-    browser: Any = None
     deployer: Deployer = field(init=False)
     runner: Runner = field(init=False)
     link: LinkClient = field(init=False)
@@ -85,7 +83,6 @@ class Daemon:
             self.link.credentials,
             self.link,
             self.layers,
-            self.browser,
         )
 
     async def _expire(self) -> None:
@@ -103,15 +100,11 @@ class Daemon:
         await web.TCPSite(api, "0.0.0.0", self.config.local_port).start()  # noqa: S104  (published to loopback only)
         log.info("rrotor up", extra={"version": VERSION, "mode": self.config.mode, "sandbox": self.layers.ready})
         tasks = [asyncio.create_task(self.link.run()), asyncio.create_task(self._expire())]
-        if self.browser is not None:
-            tasks.append(asyncio.create_task(self.browser.run()))
         await stop.wait()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.runner.shutdown()
-        if self.browser is not None:
-            await self.browser.shutdown()
         await api.cleanup()
         if self.session is not None:
             await self.session.close()
@@ -119,8 +112,6 @@ class Daemon:
 
 
 async def main(config: Config) -> None:  # pragma: no cover  (the process itself: exercised by the image's tests)
-    from rrotord.browser.part import Browser
-
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -128,7 +119,6 @@ async def main(config: Config) -> None:  # pragma: no cover  (the process itself
     layers = await probe()
     if not layers.ready:
         log.warning("sandbox not ready: runs are refused", extra={"why": layers.why()})
-    browser = Browser.find(config)
-    daemon = Daemon(config, layers, browser=browser)
+    daemon = Daemon(config, layers)
     with contextlib.suppress(asyncio.CancelledError):
         await daemon.serve(stop)

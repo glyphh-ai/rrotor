@@ -1,7 +1,6 @@
 """Who may call the local API: the mod that holds the local token, from this machine. Host must be this API's
-loopback address (no DNS rebinding), an Origin other than its own is refused (no web page may call it), and the token
-(Bearer; for the browser's routes also X-Token or ?t=) is compared by its SHA-256,
-in constant time."""
+loopback address (no DNS rebinding), an Origin other than its own is refused (no web page may call it), and the bearer
+token is compared by its SHA-256, in constant time."""
 
 from __future__ import annotations
 
@@ -15,7 +14,6 @@ from aiohttp.typedefs import Middleware
 from rrotord.errors import Forbidden, Unauthorized
 
 OPEN = frozenset({"/healthz"})
-BROWSER = ("/frames", "/events", "/api/")
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
@@ -28,8 +26,6 @@ def presented(request: web.Request) -> str:
     scheme, _, value = request.headers.get("Authorization", "").partition(" ")
     if scheme.lower() == "bearer" and value.strip():
         return value.strip()
-    if request.path.startswith(BROWSER):
-        return request.headers.get("X-Token") or request.query.get("t", "")
     return ""
 
 

@@ -8,7 +8,7 @@ import pytest
 
 from rrotord.api import routes
 from rrotord.sandbox.probe import Layers
-from tests.daemon.api.conftest import Api, open_api
+from tests.daemon.api.conftest import Api
 from tests.fakes import GitRepo, install, manifest, token
 
 WAITS = """
@@ -40,22 +40,7 @@ async def test_health_shows_the_runtime(api):
         0,
         0,
     )
-    assert body["sandbox"]["ready"] and body["browser"] == {"ready": False, "detail": "not in this image"}
-
-
-async def test_health_shows_the_browser_when_it_is_here(tmp_path, short_dir):
-    class Browser:
-        def view(self) -> dict[str, Any]:
-            return {"ready": True}
-
-        def routes(self, app: Any) -> None:
-            pass
-
-    api = await open_api(tmp_path, short_dir, Browser())
-    try:
-        assert (await send(api, "GET", "/v1/health"))[1]["browser"] == {"ready": True}
-    finally:
-        await api.client.close()
+    assert body["sandbox"]["ready"] and "browser" not in body
 
 
 async def test_the_runtime_token_is_handed_in(api):

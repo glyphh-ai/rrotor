@@ -245,9 +245,9 @@ async def test_a_program_that_needs_a_part_fails(env):
 
 
 async def test_a_program_that_needs_one_part(env):
-    env.deploy(WAIT_RESULT, profiles={"work": {}})
+    env.deploy(WAIT_RESULT, databases=["postgres"])
     run = await env.runner.call(program="sample", function="start", inputs={})
-    assert "needs the part programs," in run.result["data"]["reason"]
+    assert "needs the part postgres," in run.result["data"]["reason"]
 
 
 async def test_no_run_while_the_sandbox_is_not_ready(tmp_path, short_dir):

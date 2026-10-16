@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-STATUSES: frozenset[str] = frozenset({"done", "needs_input", "needs_approval", "needs_signin", "failed"})
-WAITING: frozenset[str] = frozenset({"needs_input", "needs_approval", "needs_signin"})
+STATUSES: frozenset[str] = frozenset({"done", "needs_input", "needs_approval", "failed"})
+WAITING: frozenset[str] = frozenset({"needs_input", "needs_approval"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,13 +32,6 @@ class Result:
     def needs_approval(cls, step: str, prompt: str) -> Result:
         """About to act at `step`: the person approves or declines, and `continue` brings the answer."""
         return cls("needs_approval", None, step=step, prompt=prompt)
-
-    @classmethod
-    def needs_signin(cls, profile: str, site: str) -> Result:
-        """A site signed the program out: the person signs in through the live panel."""
-        return cls(
-            "needs_signin", {"profile": profile, "site": site}, prompt=f"Sign in to {site} in the profile {profile}"
-        )
 
     @classmethod
     def failed(cls, step: str, reason: str) -> Result:

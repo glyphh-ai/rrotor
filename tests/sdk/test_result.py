@@ -20,16 +20,10 @@ def test_needs_approval_names_its_step():
     assert (r.status, r.step, r.prompt, r.waiting) == ("needs_approval", "write", "Write it?", True)
 
 
-def test_needs_signin_names_profile_and_site():
-    r = Result.needs_signin("work", "example.com")
-    assert r.data == {"profile": "work", "site": "example.com"}
-    assert r.prompt == "Sign in to example.com in the profile work"
-
-
 def test_failed_is_not_waiting():
     r = Result.failed("read", "no file")
     assert (r.status, r.step, r.data, r.waiting) == ("failed", "read", {"reason": "no file"}, False)
 
 
-def test_statuses_are_the_five():
-    assert {"done", "needs_input", "needs_approval", "needs_signin", "failed"} == STATUSES
+def test_statuses_are_the_four():
+    assert {"done", "needs_input", "needs_approval", "failed"} == STATUSES

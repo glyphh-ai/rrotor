@@ -28,7 +28,7 @@ def test_down_messages_by_type():
     assert isinstance(p.DOWN.validate_python({"type": "cancel", "run_id": run_id}), p.Cancel)
     deploy = p.DOWN.validate_python({"type": "activate", "program": "x", "version": 2, "commit_sha": SHA})
     assert isinstance(deploy, p.Deploy) and deploy.repo is None
-    assert isinstance(p.DOWN.validate_python({"type": "live_open"}), p.Unbuilt)
+    assert isinstance(p.DOWN.validate_python({"type": "secret_set"}), p.Unbuilt)
     assert isinstance(p.DOWN.validate_python({"type": "ack", "of": "m1"}), p.Ack)
     assert isinstance(p.DOWN.validate_python({"type": "pong"}), p.Pong)
 

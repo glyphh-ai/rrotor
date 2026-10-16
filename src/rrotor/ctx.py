@@ -117,10 +117,6 @@ class Ctx:
         return (self._today() - dt.timedelta(days=1)).isoformat()
 
     @property
-    def browser(self) -> NoReturn:
-        raise PartMissing("The browser (ctx.browser)", "Programs")
-
-    @property
     def db(self) -> NoReturn:
         raise PartMissing("Databases (ctx.db)", "database")
 

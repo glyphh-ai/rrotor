@@ -27,13 +27,12 @@ def test_read_a_full_manifest(tmp_path):
         "functions": {"start": {"inputs": {"type": "object"}, "approvals": ["write"]}},
         "hosts": ["api.example.com", "*.cdn.example.com"],
         "databases": ["postgres"],
-        "profiles": {"work": {"sites": ["example.com"]}},
         "limits": {"seconds": 60, "memory_mb": 256},
         "data": True,
     }
     found = m.read(src(tmp_path, data))
     assert found.name == "daily_sales" and found.limits.seconds == 60
-    assert found.parts() == ["postgres", "programs"]
+    assert found.parts() == ["postgres"]
 
 
 def test_a_minimal_manifest_needs_no_part(tmp_path):

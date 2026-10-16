@@ -49,11 +49,9 @@ async def test_no_token_or_a_wrong_one_is_refused(api):
     assert await code_of(api, Authorization="Bearer ") == (401, "E_AUTH")
 
 
-async def test_x_token_and_query_token_only_for_the_browser_routes(api):
+async def test_only_a_bearer_token_is_taken(api):
     assert await code_of(api, **{"X-Token": api.token}) == (401, "E_AUTH")
-    assert (await code_of(api, "/api/browser", **{"X-Token": api.token}))[0] == 404
-    assert (await code_of(api, f"/api/browser?t={api.token}"))[0] == 404
-    assert await code_of(api, "/api/browser") == (401, "E_AUTH")
+    assert await code_of(api, f"/v1/health?t={api.token}") == (401, "E_AUTH")
 
 
 async def test_without_a_local_token_nothing_is_let_in():

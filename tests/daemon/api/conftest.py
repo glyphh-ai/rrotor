@@ -45,7 +45,7 @@ class Api:
         return {"Authorization": f"Bearer {self.token}", **extra}
 
 
-def services(root: Path, sock: Path, local_token: str, browser: Any = None) -> Services:
+def services(root: Path, sock: Path, local_token: str) -> Services:
     config = Config(
         data=root / "data",
         mode="local",
@@ -71,12 +71,12 @@ def services(root: Path, sock: Path, local_token: str, browser: Any = None) -> S
         root / "scratch",
         Tools(python=sys.executable, uv=shutil.which("uv") or "uv", github=f"file://{root / 'github'}"),
     )
-    return Services(config, programs, deployer, runner, Credentials(config.data), LinkView(), layers, browser)
+    return Services(config, programs, deployer, runner, Credentials(config.data), LinkView(), layers)
 
 
-async def open_api(root: Path, sock: Path, browser: Any = None) -> Api:
+async def open_api(root: Path, sock: Path) -> Api:
     secret = token()
-    s = services(root, sock, secret, browser)
+    s = services(root, sock, secret)
     client = TestClient(TestServer(make(s)), headers={"Host": f"127.0.0.1:{PORT}"})
     await client.start_server()
     return Api(client, s, secret, root)

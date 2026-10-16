@@ -25,47 +25,29 @@ def config(tmp_path: Path, short_dir: Path, server: str = "http://127.0.0.1:1") 
     return Config(tmp_path / "data", "local", server, 0, 0, "ab" * 32, Path(rrotor.__file__).parent, short_dir)
 
 
-class Browser:
-    def __init__(self) -> None:
-        self.ran = self.shut = False
-
-    async def run(self) -> None:
-        self.ran = True
-        await asyncio.Event().wait()
-
-    async def shutdown(self) -> None:
-        self.shut = True
-
-    def view(self) -> dict[str, Any]:
-        return {"ready": True}
-
-    def routes(self, app: web.Application) -> None:
-        pass
-
-
 def test_the_daemon_wires_its_parts(tmp_path, short_dir):
     d = Daemon(config(tmp_path, short_dir), ready())
     assert isinstance(d.launcher, SandboxLauncher)
     assert d.link.url == "ws://127.0.0.1:1/v1/runtime/link" and d.runner.notify is not None
     s = d.services()
-    assert (s.runner, s.link, s.credentials, s.browser) == (d.runner, d.link, d.link.credentials, None)
+    assert (s.runner, s.link, s.credentials) == (d.runner, d.link, d.link.credentials)
     assert d.deployer.scratch == short_dir / "deploy"
 
 
 async def test_serve_recovers_runs_and_stops_cleanly(tmp_path, short_dir):
-    d = Daemon(config(tmp_path, short_dir), ready(), launcher=LocalLauncher(), browser=Browser())
+    d = Daemon(config(tmp_path, short_dir), ready(), launcher=LocalLauncher())
     lost = Run(str(uuid.uuid4()), "p", 1, "a" * 40, "start", {}, "claude", "local")
     d.runner.records.save(lost)
     stop = asyncio.Event()
     serving = asyncio.create_task(d.serve(stop))
     for _ in range(100):
-        if d.browser.ran:
+        if d.runner.get(lost.id).status == "failed":
             break
         await asyncio.sleep(0.01)
     assert d.runner.get(lost.id).status == "failed" and d.link.state == "no_token"
     stop.set()
     await asyncio.wait_for(serving, 5)
-    assert d.browser.shut
+    assert serving.done() and serving.exception() is None
 
 
 async def test_the_link_connects_through_one_session(tmp_path, short_dir):

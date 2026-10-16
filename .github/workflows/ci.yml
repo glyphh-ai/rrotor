@@ -1,6 +1,6 @@
 # rrotor's checks on every push and pull request: lint, types, the tests with the 100% coverage gate, the sample
-# program's tests, the image (base and browser) with the sandbox tests inside it, and the WSL root filesystem.
-# On main, with the repository variable PUBLISH_IMAGES set to true, the images are pushed to ghcr.io/glyphh-ai/rrotor
+# program's tests, the image with the sandbox tests inside it, and the WSL root filesystem.
+# On main, with the repository variable PUBLISH_IMAGES set to true, the image is pushed to ghcr.io/glyphh-ai/rrotor
 # (multi-arch) and their digests reported. It is off until the GHCR package lets this repository write to it (an org
 # admin: the package's settings, Manage Actions access, glyphh-ai/rrotor with the Write role).
 name: ci
@@ -86,13 +86,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push the images (amd64 and arm64)
+      - name: Push the image (amd64 and arm64)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
         run: |
           repo=ghcr.io/glyphh-ai/rrotor; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
-          for target in base browser; do
-            suffix=$([ "$target" = browser ] && echo -browser || true)
-            docker buildx build -f image/Dockerfile --target "$target" --platform linux/amd64,linux/arm64 \
-              --build-arg VERSION="$v" -t "$repo:$v$suffix" -t "$repo:$s$suffix" --push .
-            echo "$target: $(docker buildx imagetools inspect "$repo:$s$suffix" --format '{{json .Manifest.Digest}}')" >> "$GITHUB_STEP_SUMMARY"
-          done
+          docker buildx build -f image/Dockerfile --target base --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$v" -t "$repo:$v" -t "$repo:$s" --push .
+          echo "base: $(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}')" >> "$GITHUB_STEP_SUMMARY"

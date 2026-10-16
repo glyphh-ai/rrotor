@@ -72,9 +72,9 @@ class Deploy(Message):
 
 
 class Unbuilt(Message):
-    """Messages rrotor does not handle yet (the vault, the live panel): logged, skipped."""
+    """Messages rrotor does not handle yet (the vault): logged, skipped."""
 
-    type: Literal["secret_set", "live_open", "live_close", "input"]
+    type: Literal["secret_set"]
 
 
 class Ping(Message):

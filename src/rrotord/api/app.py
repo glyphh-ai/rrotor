@@ -1,4 +1,4 @@
-"""The local API's application: the gate, the errors, the routes (and the browser's, when its part is here)."""
+"""The local API's application: the gate, the errors, the routes."""
 
 from __future__ import annotations
 
@@ -16,6 +16,4 @@ def make(services: Services) -> web.Application:
         client_max_size=BODY_MAX,
     )
     setup(app, services)
-    if services.browser is not None:
-        services.browser.routes(app)
     return app

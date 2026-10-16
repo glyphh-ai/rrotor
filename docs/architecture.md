@@ -11,12 +11,11 @@ These come first where anything below says otherwise.
 1. **The product is mods, sold by subscription.** The server holds accounts, plans with per-mod limits, Stripe and the Glyphh connector; nothing about compute or models. The mods: **Programs**, **Gateway** and **Ada**, which each need rrotor. **rrotor itself is not sold:** it is the shared runtime those three mods install into. See [The mods that use rrotor](#9-the-mods-that-use-rrotor).
 2. **Gateway is a mod, never hosted by Glyphh.** It runs in the person's own rrotor (local, or wherever they host it). Models and keys are added in the mod's UI and stay in rrotor, encrypted. It serves OpenAI- and Anthropic-compatible endpoints to programs and other mods: third-party inference for them. It never routes a Claude subscription and never offers a Claude login ([Anthropic's terms](#anthropics-terms)). Designed, not built ([9.2](#92-gateway)).
 3. **Ada is a mod** that depends on rrotor as Programs does. An Ada model is a program: a repo with `spec.json` and a small program file, deployed by commit, run in the program sandbox with no network, its precedent store in a persistent per-program data folder outside git. Designed, not built ([9.3](#93-ada)).
-4. **A small base image, and a part per mod.** The base: Python, Node, the program sandbox (bubblewrap, Landlock, seccomp, the egress proxy), the link client, the local API and the program runner. Each mod installs its own part into rrotor (Programs: Chromium and profiles; Gateway: its runtime; Ada: numpy and the kernel). Postgres with pgvector, MongoDB and Neo4j become parts a mod or a program asks for, not the base. Parts are versioned, come from the mod's own release, are verified, and are licensed by the plan ([Parts](#10-parts)).
+4. **A small base image, and a part per mod.** The base: Python, Node, the program sandbox (bubblewrap, Landlock, seccomp, the egress proxy), the link client, the local API and the program runner. Each mod installs its own part into rrotor (Gateway: its runtime; Ada: numpy and the kernel). Postgres with pgvector, MongoDB and Neo4j become parts a mod or a program asks for, not the base. Parts are versioned, come from the mod's own release, are verified, and are licensed by the plan ([Parts](#10-parts)).
 5. **rrotor has no sign-in of its own.** The mod is signed in (device flow, `~/.glyphh/install.json`); it asks the server for the runtime token (`POST /v1/runtime/local`) and hands it to rrotor at start; rrotor sends it on its outbound link; signing out the install cuts rrotor off (built on the server). A hosted rrotor gets its token from the server when it is provisioned (designed).
 6. **How Claude reaches rrotor.** Locally, **through the mods**: a mod registers tools (`$.tool.register`) and draws panels, and calls rrotor's **local API on 127.0.0.1** with a local token only the mod holds. Remotely (routines, other AI clients, a hosted rrotor), **through the Glyphh connector**, then the server, then the runtime link. rrotor serves no MCP to Claude, and no plugin carries an MCP server.
 7. **Local runtimes:** Docker, OrbStack or Apple's `container`, preferring `container` where it is present (a VM per container, the closest to the hosted Firecracker isolation). Hosted on Fly: designed only.
 8. **The mod installs rrotor; no separate install.** It finds a container runtime, pulls `ghcr.io/glyphh-ai/rrotor` at the version matching the mod (pinned by digest, verified), starts it with `/data` on a named volume and hands in the runtime token; updating the mod updates rrotor, and the data stays. PyPI carries only the `rrotor` program SDK. macOS: Apple's `container`, then OrbStack, then Docker; Windows: WSL2, preferably a WSL distribution of the same image (designed); Linux: Docker or Podman (designed) ([11](#11-where-rrotor-runs-and-how-it-is-installed)).
-9. **rrotor's browser** is a small shared part (`browser`): Chromium, named profiles shared by programs, and the stream's frame protocol on the local API ([12](#12-the-browser-and-the-stream)).
 
 ## The parts
 
@@ -180,31 +179,23 @@ sequenceDiagram
 
 ## 2. A program, end to end
 
-**The sample:** `daily_sales`. Every morning it reads yesterday's sales from `analytics.example.com` (a site the person signs in to) and its API (an API key), adds them up, and hands back rows for a dashboard in Claude.
+**The sample:** `daily_sales`. Every morning it reads yesterday's sales from an analytics API (an API key), adds them up, stores the total and hands back rows for a dashboard in Claude.
 
 ```python
 from rrotor import Ctx, Result
 
-def load(ctx: Ctx) -> None:
-    ctx.page = ctx.browser.open("work", "https://analytics.example.com")
-
 def start(ctx: Ctx, inputs: dict) -> Result:
-    if ctx.page.signed_out():
-        return Result.needs_signin(profile="work", site="analytics.example.com")
     day = inputs.get("day") or ctx.yesterday()
     rows = ctx.http.get("https://api.analytics.example.com/v1/sales",
                         params={"day": day}, key=ctx.secrets["ANALYTICS_KEY"]).json()
     total = sum(r["amount"] for r in rows)
     ctx.db.postgres.execute("insert into daily (day, total) values (%s, %s)", day, total)
     return Result.done({"day": day, "total": total, "rows": rows})
-
-def end(ctx: Ctx) -> None:
-    ctx.page.close()
 ```
 
-Its manifest declares the function `start` (input `day`, optional), the hosts `analytics.example.com` and `api.analytics.example.com`, the secret `ANALYTICS_KEY`, the profile `work`, and Postgres.
+Its manifest declares the function `start` (input `day`, optional), the host `api.analytics.example.com`, the secret `ANALYTICS_KEY`, and Postgres.
 
-This full version needs two parts beside the base: the Programs mod's part (Chromium and the profile `work`) and the Postgres part. The base edition in `examples/daily_sales/` runs on the base alone, so it is the one tested end to end: it reads the day's sales export from its own folder (`ctx.files`), converts the total with a public exchange-rate API (its one declared host), asks approval for its `write` step and writes the day's total to its ledger.
+This full version needs one part beside the base: Postgres. The base edition in `examples/daily_sales/` runs on the base alone, so it is the one tested end to end: it reads the day's sales export from its own folder (`ctx.files`), converts the total with a public exchange-rate API (its one declared host), asks approval for its `write` step and writes the day's total to its ledger.
 
 ### 2.1 Build, in Claude, against the local rrotor
 
@@ -217,7 +208,6 @@ sequenceDiagram
     participant C as Claude
     participant M as Mod (programs)
     participant R as Local rrotor
-    participant B as Pane / live panel
     P->>C: "Build a program that fills my sales dashboard every morning"
     C->>C: writes glyphh.json and program.py in a folder on the person's machine (Claude's own tools), commits it (git)
     C->>M: program_deploy {path, commit}
@@ -227,12 +217,6 @@ sequenceDiagram
     R-->>M: deployed {program, version, commit_sha}
     C->>M: program_call daily_sales start
     M->>R: POST /v1/runs: sandbox (bubblewrap, Landlock, seccomp#59; egress only to declared hosts), load → start
-    R-->>M: Result needs_signin {profile: work, site}
-    M-->>C: needs_signin
-    C->>B: open the live panel on the run (the profile's browser)
-    P->>B: takes control, signs in to analytics.example.com (Claude sees nothing)
-    B->>R: the sign-in stays in /data/profiles/work
-    C->>M: program_call again
     R-->>M: Result failed {step: secrets, missing: ANALYTICS_KEY}
     C-->>P: "Add your analytics API key" (a field in the mod's panel, never in the chat)
     P->>M: types the key
@@ -242,7 +226,7 @@ sequenceDiagram
     C-->>P: shows the result, fixes, commits and deploys again until it is right
 ```
 
-**State:** built (2026-10-15): deploy by commit from a local folder, calls, `continue`, Results (`programs_list`, `program_deploy`, `program_call`, `program_continue`, `run_status` in the Programs mod), checked live against rrotor. Designed: the live panel (the browser part streams; the panel does not exist yet), the secrets vault.
+**State:** built (2026-10-15): deploy by commit from a local folder, calls, `continue`, Results (`programs_list`, `program_deploy`, `program_call`, `program_continue`, `run_status` in the Programs mod), checked live against rrotor. Designed: the live panel, the secrets vault.
 
 ### 2.2 Deploy: to the hosted rrotor, through git, and the routine
 
@@ -269,7 +253,7 @@ sequenceDiagram
     H-->>G: deployed {commit_sha}
     G->>G: deployments row (hosted rrotor, version 1, active)
     G-->>M: deployed
-    Note over H: the hosted rrotor has its own browser profiles and secrets: its first run that needs the site answers needs_signin, signed in once through the live panel, and secrets are set on it the same way
+    Note over H: the hosted rrotor has its own secrets: they are set on it the same way
     C->>C: create the routine (Claude's routines), its repo the program's, with the Glyphh connector included
 ```
 
@@ -319,7 +303,7 @@ sequenceDiagram
     G->>G: check the grant, the plan's hours left
     G->>H: wake (Fly start) → link up → call {run_id, start, inputs}
     H->>H: sandbox: load → start
-    H-->>L: frames and steps (relayed by the Cloud, WebRTC where it connects)
+    H-->>L: steps and log (relayed by the Cloud)
     C->>L: open the live panel (MCP App from the connector)
     H-->>G: Result needs_approval {step: "write Monday's total"}
     G-->>C: needs_approval
@@ -485,8 +469,6 @@ flowchart TB
             Prog["the program (rrotor SDK)<br/>load → function → end"]
         end
         subgraph PartsBox["parts on /data/parts, each from its mod's release"]
-            PBrowser["browser: Chromium, profiles, the stream"]
-            PChrome["programs: ctx.browser on the browser part"]
             PGateway["gateway: its runtime"]
             PAda["ada: numpy, the kernel"]
             PDB["postgres / mongodb / neo4j"]
@@ -496,7 +478,7 @@ flowchart TB
         Engine --> Sandbox
         Parts --> PartsBox
         Prog -- "HTTPS via 127.0.0.1:3128 in its netns → unix socket" --> Proxy
-        Prog -. "ctx.browser, ctx.db, ctx.gateway (when the part is installed)" .-> PartsBox
+        Prog -. "ctx.db, ctx.gateway (when the part is installed)" .-> PartsBox
         Engine --> Data
     end
     Mod["the mod, in Claude (host)"]
@@ -513,7 +495,7 @@ flowchart TB
 | **egress proxy** | The only network a run has: an HTTP `CONNECT` proxy on a unix socket per run; lets through port 443 of the hosts its manifest declares, checks the TLS SNI matches, refuses addresses that resolve to loopback, private or link-local ranges, refuses and records anything else |
 | **part manager** | Installs, upgrades and removes the parts the mods ask for, checks each against its mod's release and the plan's licence, and starts a part's services on demand ([10](#10-parts)) |
 
-The base has no s6: everything above is one process under `tini`, and the part manager starts and stops a part's services (a database, Chromium) itself, on demand, as the doc always meant them to run.
+The base has no s6: everything above is one process under `tini`, and the part manager starts and stops a part's services (a database) itself, on demand, as the doc always meant them to run.
 
 **The sandbox.** Each run is one worker process started with `bwrap`:
 
@@ -545,7 +527,6 @@ The base has no s6: everything above is one process under `tini`, and the part m
 | `parts/<mod>/<version>/` | A mod's installed part |
 | `secrets/<name>.enc` | A program's secrets, encrypted (the vault, designed) |
 | `db/` | The database parts' data |
-| `profiles/<name>/` | Named Chromium profiles (the Programs part) |
 
 **The base image:** Debian 13 (trixie) slim; amd64 and arm64; `tini`; Python 3.13 (Debian's, for the runner and programs), Node 22 LTS, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates. No browser, no database. A non-root user (`rrotor`, uid 10001); the root filesystem read-only with a tmpfs `/tmp`; everything kept on `/data`. A new version is a new image tag; the mod moves the local one, the Cloud the hosted ones (designed).
 
@@ -577,17 +558,16 @@ A git repo in the person's GitHub account; a version is a commit:
       "approvals": ["write"]
     }
   },
-  "hosts": ["analytics.example.com", "api.analytics.example.com"],
+  "hosts": ["api.analytics.example.com"],
   "secrets": ["ANALYTICS_KEY"],
   "databases": ["postgres"],
-  "profiles": { "work": { "sites": ["analytics.example.com"] } },
   "limits": { "seconds": 300, "memory_mb": 512 },
   "connectors": ["slack"]
 }
 ```
 
 - **`functions`:** each callable function with a JSON Schema for its inputs and the named steps that need approval; `start` is the default.
-- **`hosts`, `secrets`, `databases`, `profiles`:** everything a run may reach; nothing undeclared exists inside the sandbox. A database is a part (`postgres`, `mongodb`, `neo4j`) and `profiles` need the Programs part: a run whose part is not installed fails with `E_PART_MISSING` and names the part.
+- **`hosts`, `secrets`, `databases`:** everything a run may reach; nothing undeclared exists inside the sandbox. A database is a part (`postgres`, `mongodb`, `neo4j`): a run whose part is not installed fails with `E_PART_MISSING` and names the part.
 - **`limits`:** per run, capped by the plan.
 - **`connectors`:** the Claude connectors its routine needs (written into the routine, never used by the program).
 - **`data`:** `true` mounts the program's persistent data folder (`/data/programs/<name>/data`, outside git) at `/data` in its sandbox; Ada's models use it for their precedent store.
@@ -603,7 +583,6 @@ from rrotor import Ctx, Result
 Result.done(data)                                     # finished: data (JSON)
 Result.needs_input(prompt, schema=None, options=None) # a value or a choice
 Result.needs_approval(step, prompt)                   # about to act; continue answers it
-Result.needs_signin(profile, site)                    # a site signed the program out
 Result.failed(step, reason)                           # stopped, with why
 
 ctx.inputs              # the call's inputs, checked against the manifest's schema
@@ -614,7 +593,6 @@ ctx.checkpoint(key, fn) # run fn once per run; a resumed run reads the stored va
 ctx.http                # HTTPS to declared hosts only, through the egress proxy (any library works too: HTTPS_PROXY is set)
 ctx.files               # its folder, a pathlib.Path
 ctx.log(message, **detail)
-ctx.browser             # the Programs part (Chromium, profiles); E_PART_MISSING without it
 ctx.db                  # the database parts; E_PART_MISSING without them
 ctx.gateway             # the Gateway mod's client (OpenAI- and Anthropic-compatible); E_PART_MISSING until Gateway ships
 ctx.secrets["NAME"]     # declared secrets (the vault, designed)
@@ -630,7 +608,7 @@ stateDiagram-v2
     [*] --> loading: call
     loading --> running: load ok
     loading --> failed: load raised
-    running --> waiting: needs_input / needs_approval / needs_signin
+    running --> waiting: needs_input / needs_approval
     waiting --> running: continue (answer)
     waiting --> expired: no continue in 15 min
     waiting --> cancelled: cancel
@@ -664,21 +642,17 @@ JSON messages over the WebSocket `/v1/runtime/link`, one per frame, each with `t
 | Cloud → rrotor | `deploy` / `activate` / `remove` | program, version, repo, commit SHA, a short-lived repo-scoped token (the rrotor fetches that commit from GitHub and checks the SHA) |
 | rrotor → Cloud | `deployed` | program, version, commit SHA |
 | Cloud → rrotor | `secret_set` | program, name, value encrypted to the rrotor's public key |
-| Cloud → rrotor | `live_open` / `live_close` | `run_id` or profile: start or stop frames |
-| rrotor → Cloud | `frame` | `run_id`, image (JPEG), sequence number |
-| Cloud → rrotor | `input` | `run_id`, take control and give back, clicks, keys, paste |
 | rrotor → Cloud | `event` | `seq`, program, kind, data, and the routine trigger to fire, if any (one of the program owner's) |
 | both | `ping` / `pong` | every 20 s |
 | both | `ack` | `of`: the `id` it acknowledges (the Cloud acks every result, event and `deployed`) |
 
 - **Order and replay:** results and events carry a sequence number, one rising counter per runtime for both; the rrotor keeps the unacknowledged ones on `/data` and replays them after a reconnect, and the Cloud applies each number once, so nothing is lost or doubled. A new runtime token (a fresh `/data`) starts the counter again.
-- **Frames** are best effort: dropped under pressure, never queued.
 - **A different protocol** is closed with code 4426 and an update is asked for.
 - **Closes:** 4401 the token is not valid or its install was signed out (do not retry with it); 4400 the first message was not a good `hello` for this runtime (sent within 10 s); 4408 nothing heard for three pings; 4409 a newer link of the same runtime took over (do not reconnect); 1011 the Cloud could not record a message (reconnect and replay); 1012 the server is restarting (reconnect).
 
 - **What rrotor does with each close:** 4401 stops the link and shows `refused` (the mod hands in a new token); 4409 stops it (`replaced`); 4426 stops it (`upgrade_needed`); 4400 stops it (`bad_hello`, a bug to report); 4408, 1011, 1012 and any other close or a dropped connection reconnect with backoff. A `welcome` not heard within 10 s after `hello` closes and reconnects.
 - **A deploy without a repo** (`repo` and `token` null: a program never pushed to GitHub) names a commit the rrotor already holds from a local deploy; `activate` makes it active, and both answer `deployed`. A deploy that cannot be done (the commit is missing, the SHA does not match, the manifest is refused) answers an `event` of kind `deploy_failed` with `{version, commit_sha, code, message}`, since protocol 1 has no refusal of its own.
-- **Not handled yet:** `secret_set` (the vault), `live_open`, `live_close` and `input` (the Programs part's live panel) are logged with `E_NOT_BUILT` and skipped; the link stays.
+- **Not handled yet:** `secret_set` (the vault) is logged with `E_NOT_BUILT` and skipped; the link stays.
 - **Runs called through the local API** stay on the machine: the server has no row for them, so their results do not go up the link. Runs the Cloud calls (`call`) answer `result` up the link, with the run id the Cloud gave.
 
 ## 7. The mods and the local rrotor
@@ -700,7 +674,7 @@ The mods reach the local rrotor through its **local API**: HTTP on `127.0.0.1:<p
 | `GET /v1/runs/{id}/log` | The run's log lines |
 | `GET /v1/approvals` | Runs waiting for approval: run, program, step, prompt, when |
 
-**The Programs mod's tools** (built now): `programs_list`, `program_deploy` (a local folder at a commit, bundled by the mod; or a repo and commit), `program_call`, `program_continue`, `run_status`. A status line shows rrotor's state and the approvals waiting. Designed for later: the live panel (MCP App from the Glyphh connector, or a local page), profiles, secrets, versions and activate.
+**The Programs mod's tools** (built now): `programs_list`, `program_deploy` (a local folder at a commit, bundled by the mod; or a repo and commit), `program_call`, `program_continue`, `run_status`. A status line shows rrotor's state and the approvals waiting. Designed for later: the live panel (MCP App from the Glyphh connector, or a local page), secrets, versions and activate.
 
 **Deploying goes through git:** locally the mod sends a bundle of the commit (the folder is never mounted into rrotor); for hosted runs the person pushes the commit to the program's repo, the Cloud records it (`POST /v1/programs/{id}/versions`) and hands the hosted rrotor the commit and a short-lived token to fetch it.
 
@@ -737,7 +711,7 @@ rrotor is not sold. Three mods install into it, each its own product in the plan
 
 | Mod | Its part in rrotor | Limits (the licence) | State |
 |---|---|---|---|
-| **Programs** (`programs`) | `ctx.browser`, on the shared `browser` part (Chromium, named profiles, the stream) | `programs` (deployed programs), `runs_per_day` (placeholders, TBD) | Mod built minimal (start rrotor, deploy, call, continue, status); its part designed |
+| **Programs** (`programs`) | None: programs run on the base, and ask for the database parts they need | `programs` (deployed programs), `runs_per_day` (placeholders, TBD) | Mod built minimal (start rrotor, deploy, call, continue, status) |
 | **Gateway** (`gateway`) | The gateway's runtime | Designed with the mod | Designed |
 | **Ada** (`ada`) | numpy and the Ada kernel | Designed with the mod | Designed |
 
@@ -772,13 +746,13 @@ Everything in sections 2, 5 and 7: programs written with Claude, deployed by com
 
 ## 10. Parts
 
-A **part** is what a mod installs into rrotor beyond the base: Programs' Chromium and profiles, Gateway's runtime, Ada's numpy and kernel, and the database parts (Postgres with pgvector, MongoDB, Neo4j) a mod or a program asks for. Designed, not built.
+A **part** is what a mod installs into rrotor beyond the base: Gateway's runtime, Ada's numpy and kernel, and the database parts (Postgres with pgvector, MongoDB, Neo4j) a mod or a program asks for. Designed, not built.
 
-- **What a part is:** a self-contained tree built in the mod's own CI on the same Debian base (its binaries and the shared libraries they need, under its own prefix), and `part.json`: `{mod, name, version, arch, rrotor (the lowest base version it needs), sha256, services, mounts, env}`. `services` are processes the part manager runs on demand (Postgres, Chromium per profile); `mounts` are what a sandbox of a program that uses the part gets (read-only).
+- **What a part is:** a self-contained tree built in the mod's own CI on the same Debian base (its binaries and the shared libraries they need, under its own prefix), and `part.json`: `{mod, name, version, arch, rrotor (the lowest base version it needs), sha256, services, mounts, env}`. `services` are processes the part manager runs on demand (Postgres); `mounts` are what a sandbox of a program that uses the part gets (read-only).
 - **Where it comes from:** the mod's own release (an asset of the mod's release in the marketplace, `rrotor-part-<name>-<version>-<arch>.tar.zst`), signed with Glyphh's release key (Ed25519, a different key from the licence's); the base image carries the public key. rrotor checks the signature and the SHA-256 before it unpacks anything.
 - **Install, upgrade, remove:** the mod asks over the local API (`POST /v1/parts {mod, name, version, url}`, `DELETE /v1/parts/{name}`). rrotor downloads, checks, unpacks to `/data/parts/<name>/<version>/`, and switches `/data/parts/<name>/current` in one rename; the previous version stays until the next upgrade, so a failed start rolls back. Removing a part stops its services and keeps its data (`/data/db/<name>`) unless the mod asks for it to go.
 - **Licensed by the plan:** the mod hands rrotor its signed licence (`PUT /v1/licence`); rrotor checks it with Glyphh's licence key, as the mods do, and installs or starts a part only while the licence includes its mod. A licence that expires or drops the mod stops the part's services and refuses runs that need it (`E_NOT_IN_PLAN`), keeping its data. Per-part limits (a database's size, Ada's precedents) come from the mod's limits in the same licence.
-- **A program asks for a part** in its manifest (`databases`, `profiles`, `gateway`, Ada's kernel); a run whose part is missing fails with `E_PART_MISSING` naming the part and the mod that brings it.
+- **A program asks for a part** in its manifest (`databases`, `gateway`, Ada's kernel); a run whose part is missing fails with `E_PART_MISSING` naming the part and the mod that brings it.
 
 ## 11. Where rrotor runs, and how it is installed
 
@@ -814,35 +788,13 @@ A **part** is what a mod installs into rrotor beyond the base: Programs' Chromiu
 | `scutil --get ComputerName` | the shared licence module | `%COMPUTERNAME%` |
 | `open <url>` | the shared licence module | `cmd /c start "" <url>` or `explorer <url>` |
 
-## 12. The browser and the stream
-
-**rrotor's browser is a small shared part, `browser`** (Chromium, its named profiles, and the stream). The Programs part depends on it; it adds nothing to it but `ctx.browser`.
-
-- **Profiles are shared:** a named profile (`/data/profiles/<name>/`) is one Chromium user data folder; a site signed in once in a profile is signed in for every program that declares that profile. One Chromium process per profile in use, started on demand, stopped after an hour idle.
-- **The stream's frame protocol**, on rrotor's local API:
-
-| Route | What it does |
-|---|---|
-| `GET /frames` | One `multipart/mixed; boundary=glyphhframe` stream of every page's JPEG screencast frames, each part with `X-Cell` (the page's key: its cell, or `<cell>#popup`) and `X-Captured` (ms); the newest frame of each page first for a stream that joins |
-| `GET /events` | Server-sent events: `nav` {cell, url}, `title` {cell, title}, `popup` {cell, popup, url}, `popup-closed` {cell, popup}; a `: hello` comment first |
-| `POST /api/ops` | One op or a list, applied in order across requests (a release never overtakes its press; an op Chromium never answers holds the rest for 2 s at most): `open` {cell, url, w, h, scale, keepInPanel, profile?}, `resize`, `hide`, `navigate`, `back`, `forward`, `reload`, `mouse`, `wheel`, `key`, `text`, `close` |
-| `GET /api/text?cell=` | The page as text: {cell, url, title, text} |
-| `GET /api/browser` | The pages: [{cell, url, title, profile}] |
-| `GET /api/favicon?url=` | A page's icon, fetched by rrotor with time and size limits |
-
-- **The same gate:** every browser route takes the local token as `X-Token` or `?t=` besides `Authorization: Bearer`, compared in constant time; `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; an `Origin` other than rrotor's own is refused. rrotor serves no page, so it needs no keys.
-- **How it drives Chromium:** CDP over a private pipe (`--remote-debugging-pipe`), never a port; headless, no background throttling; a clean user agent and client hints (no "Headless"); popups and "Keep in panel" by its rules (`rrotord/browser/rules.py`: a native app's link mapped to its web client, or refused: rrotor never opens a native app, since it has no desktop); keys and mouse replayed over CDP.
-- **Chromium's own sandbox** stays on where the container allows it (it needs user namespaces, as bwrap does); where it cannot start, rrotor says so in `GET /v1/health` and the browser refuses to start rather than run without it.
-- **Built and checked live (2026-10-15):** the routes above on rrotor's local API (`rrotord/browser/`), one page streamed from Chromium in the `-browser` image (frames, `nav` and `title` events, the page's text). Chromium's own sandbox runs inside the container with the same security options bwrap needs.
-- **Until the part manager is built,** the `browser` part is baked into a second image tag, `ghcr.io/glyphh-ai/rrotor:<version>-browser` (the base plus Debian's Chromium); the part manager will install the same tree onto `/data/parts/browser/` instead.
-
 ## Anthropic's terms
 
 Quoted in the server's `docs/architecture.md` (checked 2026-10-14): third-party developers may not offer Claude.ai login, route requests through someone's subscription, or collect, store or intermediate Claude.ai credentials or session tokens. So: rrotor has no Claude in it; Gateway serves third-party models with the person's own API keys and never a Claude subscription or login; Claude reaches rrotor only as Claude, on the person's own subscription, through the mods' tools or the Glyphh connector.
 
 ## Open
 
-- **The live panel's transport:** frames over the link and the relay first; WebRTC end to end later.
+- **The live panel's transport:** a run's events over the link and the server's relay.
 - **Secrets on the hosted rrotor:** set again there (2.2), or carried from the local one encrypted to the hosted rrotor's key.
 - **The Glyphh GitHub App's permissions:** repository contents (read and write, for the person's program repos) and metadata; the person picks which repos it may reach.
 - **Per-program isolation in Neo4j:** the free edition holds one database.
@@ -850,5 +802,5 @@ Quoted in the server's `docs/architecture.md` (checked 2026-10-14): third-party 
 - **Part signing:** the release key's custody and rotation, and where the mods' CI builds parts.
 - **Gateway's and Ada's limits** in the licence.
 - **Not yet run here:** rrotor on Apple's `container` (needs macOS 26; this build's Mac is on 14) and on OrbStack; both are detected and started by the same steps, and are to be checked on a Mac that has them. How a `container` VM reaches the host's `localhost` (the dev server) is to be confirmed there.
-- **To build next:** the part manager (install, upgrade, remove, licensed parts), the secrets vault, the live panel on the browser part, Gateway, Ada, hosted rrotor on Fly, and the WSL distribution's install from the Programs mod on Windows.
+- **To build next:** the part manager (install, upgrade, remove, licensed parts), the secrets vault, the live panel, Gateway, Ada, hosted rrotor on Fly, and the WSL distribution's install from the Programs mod on Windows.
 - **Publishing the image:** CI builds and tests both images on every push and exports the WSL root filesystem, but pushing to `ghcr.io/glyphh-ai/rrotor` waits for an org admin to give this repository write access to the package (its settings, Manage Actions access), then the repository variable `PUBLISH_IMAGES=true`. Until then the Programs mod pins no digest, and its `rrotor image` setting names a local build.
