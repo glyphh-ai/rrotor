@@ -180,6 +180,17 @@ def ready() -> Layers:
     return Layers({"bubblewrap": {"ok": True, "detail": "test"}})
 
 
+KERNEL = Path(__file__).parent / "kernel"
+
+
+def ada_part(tmp: Path, version: str = "3.1.0") -> tuple[bytes, str, str]:
+    """The Ada part as the tests build it: the vendored kernel under lib/ (numpy comes from the test's own Python)."""
+    files = {
+        f"lib/{name}": (KERNEL / name).read_text() for name in ("glyphh_kernel.py", "glyphh_spec.py", "glyphh_nsm.py")
+    }
+    return part_archive(tmp / "ada-part", name="ada", version=version, mod="ada", files=files)
+
+
 def _part_folders(path: Path) -> list[str]:
     try:
         return list(json.loads((path / "part.json").read_text()).get("env", {}).get("PYTHONPATH", []))
@@ -197,8 +208,8 @@ class LocalLauncher:
     def sandbox(self, mounts: bwrap.Mounts) -> dict[str, Any] | None:
         return None
 
-    def paths(self, mounts: bwrap.Mounts) -> dict[str, str]:
-        return {"model": str(mounts.src), "files": str(mounts.files)}
+    def paths(self, mounts: bwrap.Mounts) -> dict[str, str | None]:
+        return {"model": str(mounts.src), "files": str(mounts.files), "data": str(mounts.data) if mounts.data else None}
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process:
         self.specs.append(spec)

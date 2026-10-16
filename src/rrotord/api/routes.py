@@ -135,15 +135,20 @@ def setup(app: web.Application, s: Services) -> None:
     async def call(request: web.Request) -> web.Response:
         data = await body(request)
         model, function = data.get("model"), data.get("function", "start")
-        inputs, version = data.get("inputs") or {}, data.get("version")
+        inputs, version, clearance = data.get("inputs") or {}, data.get("version"), data.get("clearance", 1.0)
         if (
             not isinstance(model, str)
             or not isinstance(function, str)
             or not isinstance(inputs, dict)
             or not (version is None or isinstance(version, int))
+            or isinstance(clearance, bool)
+            or not isinstance(clearance, int | float)
+            or not 0 <= clearance <= 1
         ):
-            raise BadRequest("Send {model, function, inputs, version?}.")
-        run = await s.runner.call(model=model, function=function, inputs=inputs, version=version, caller="claude")
+            raise BadRequest("Send {model, function, inputs, version?, clearance? (0 to 1)}.")
+        run = await s.runner.call(
+            model=model, function=function, inputs=inputs, version=version, caller="claude", clearance=float(clearance)
+        )
         return web.json_response(answer(run))
 
     async def resume(request: web.Request) -> web.Response:

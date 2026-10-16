@@ -595,8 +595,13 @@ ctx.needs_input(prompt, schema=None, options=None) -> value   # the answer once 
 ctx.checkpoint(key, fn) # run fn once per run; a resumed run reads the stored value
 ctx.http                # HTTPS to declared hosts only, through the egress proxy (any library works too: HTTPS_PROXY is set)
 ctx.files               # its folder, a pathlib.Path
+ctx.data                # its persistent data folder ("data": true), else None
+ctx.home                # where its code is (spec.json beside model.py)
+ctx.clearance           # who asks, 0 to 1 (Ada); 1 unless the call says
+ctx.caller              # claude, routine, panel, test; rrotor for its own operations
 ctx.log(message, **detail)
 ctx.db                  # the database parts; E_PART_MISSING without them
+rrotor.ada.open(ctx)    # an Ada model: the spec and the store, on the Ada part (9)
 ctx.secrets["NAME"]     # declared secrets (the vault, designed)
 ```
 
@@ -637,7 +642,7 @@ JSON messages over the WebSocket `/v1/runtime/link`, one per frame, each with `t
 |---|---|---|
 | rrotor → Cloud | `hello` | protocol 1, rrotor version, mode, runtime id, deployed versions |
 | Cloud → rrotor | `welcome` | accepted, the plan's limits for runs |
-| Cloud → rrotor | `call` | `run_id`, model, version (or active), function, inputs, caller |
+| Cloud → rrotor | `call` | `run_id`, model, version (or active), function, inputs, caller, clearance (0 to 1, 1 unless given) |
 | Cloud → rrotor | `continue` | `run_id`, answer |
 | Cloud → rrotor | `cancel` | `run_id` |
 | rrotor → Cloud | `result` | `seq`, `run_id`, `Result` (status, data; `needs_approval` also its step and prompt; `expired` or `cancelled` when a run ends without one), seconds so far |
@@ -669,7 +674,7 @@ The mods reach the local rrotor through its **local API**: HTTP on `127.0.0.1:<p
 | `PUT /v1/runtime/token` | `{runtime_id, token}`: the runtime token the mod got from `POST /v1/runtime/local`; kept in `/data/runtime.json`; the link (re)connects |
 | `GET /v1/models` | Each model, its versions (number, commit, when), the active one, its functions |
 | `POST /v1/models/deploy` | `{bundle, commit}`: a git bundle of the commit, base64 (the mod's `$.http.fetch` carries text; up to 64 MB), or `{repo, commit, token}` for a GitHub repo; answers `{model, version, commit_sha}` |
-| `POST /v1/runs` | `{model, function, inputs, version?}`: opens a run and answers its first `Result` with `run_id` |
+| `POST /v1/runs` | `{model, function, inputs, version?, clearance?}`: opens a run and answers its first `Result` with `run_id` |
 | `POST /v1/runs/{id}/continue` | `{answer}`: the next `Result` |
 | `POST /v1/runs/{id}/cancel` | Stops it; `end` runs; `cancelled` |
 | `GET /v1/runs/{id}` | Status, function, times, seconds, the last `Result` |
@@ -711,17 +716,32 @@ What the flows needed that the server's design did not have; now in it, so the i
 
 ## 9. Ada
 
-rrotor is not sold. One mod installs into it, Ada, its own product in the plan's licence (`payload.mods.ada.limits`): its part is numpy and the Ada kernel; its limits `models` and `precedents` (placeholders, TBD). The mod starts rrotor (or finds it already running, by the container's name `glyphh-rrotor`), deploys models and calls them, as sections 2, 5 and 7 describe for a model.
+rrotor is not sold. One mod installs into it, Ada, its own product in the plan's licence (`payload.mods.ada.limits`): its part is the Ada kernel and numpy ([10](#10-parts)); its limits `models` and `precedents` (placeholders, TBD). The mod starts rrotor (or finds it already running, by the container's name `glyphh-rrotor`), installs the part, deploys models and calls them, as sections 2, 5 and 7 describe. **The runtime side is built** (2026-10-15); the mod is designed ([9.1](#91-the-ada-mod)).
 
-**Ada is a library, and an Ada model is a model.** Designed, not built.
+**An Ada model is a program to rrotor:** a repo with `glyphh.json` (`"needs": ["ada"]`, `"data": true`), `spec.json` (the Ada spec: what a record looks like, its seed and dimension) and `model.py`, whose functions call the kernel through `rrotor.ada`:
 
-- **The library:** `glyphh_kernel.py`, `glyphh_spec.py` and `glyphh_nsm.py` from `glyphh-ai/ada-private-archive`, branch `kernel-spec`, v3.1.0; numpy only. An Ada model is a typed JSON spec plus a SQLite precedent store; nothing is trained. Its calls: `record`, `query`, `facts`, `probabilities`, `decide`.
-- **In rrotor:** a model is a model repo with `spec.json` and a small `model.py` whose functions call the kernel (`record`, `query`, `facts`, `probabilities`, `decide`), deployed by commit like any model. The Ada part brings numpy and the three files, vendored at that version; a model imports them from the part's mount (`/opt/parts/ada`), read-only.
-- **No network:** its manifest declares no hosts, so its sandbox has no way out.
-- **The precedent store** lives in the model's persistent data folder (`/data/models/<name>/data/precedents.sqlite`, `"data": true` in its manifest), outside git and outside the version, so it survives every redeploy.
-- **A redeploy that changes the encoding** (the spec's `seed`, `dim`, `encoding` or `spec_id`) re-encodes the store from its recorded facts before the new version is active, or refuses the deploy (`E_ADA_ENCODING`) when the old facts cannot be read by the new spec. Any other change deploys as usual.
-- **`clearance`** comes from the caller's Glyphh identity: the run's `caller` and the person's plan and org role, passed in the call (never from the inputs), so a model's facts are filtered by who asks.
+```python
+from rrotor import Result, ada
+
+def load(ctx):
+    ada.open(ctx)                      # the spec read, the store opened; the model on ctx.ada
+
+def record(ctx, inputs):
+    return Result.done({"id": ctx.ada.record(inputs["data"], inputs.get("outcome"))})
+
+def query(ctx, inputs):
+    return Result.done(ctx.ada.query(inputs["data"], clearance=ctx.clearance).to_json())
+```
+
+- **The store** is `precedents.sqlite` in the model's persistent data folder (`/data/models/<name>/data`, mounted at `/data`, outside git), so it outlives every version.
+- **A changed encoding** (the spec's `seed` or `dimension`) between the active version and the one deployed makes rrotor run its own operation in the new version's sandbox before it goes active, `rrotor.ada.reencode`: every precedent's glyph rebuilt from its recorded situation under the new spec. When that fails (the store is not readable), the deploy is refused with `E_ADA_ENCODING` and the version before stays active; the new version is not kept. Any other change deploys as usual. The spec is checked at deploy: an Ada model without a data folder or without a readable `spec.json` is refused (`E_MANIFEST`).
+- **`clearance`** (0 to 1) comes with the call (`POST /v1/runs {clearance}` on the local API, `call {clearance}` on the link), from the caller's Glyphh identity (the mod's reading of the person's plan and org role), never from the inputs; the model passes `ctx.clearance` to the kernel, which cuts what a reader may see.
+- **The example:** `examples/ada_tickets/`, a support-ticket triage model (`record`, `query`, `facts`, `probabilities`, `decide`, which asks for the outcome when no precedent is close enough), with its own tests on `rrotor.testing.Harness` and the kernel the repo's tests carry (`tests/kernel/`).
 - **Size:** about 16 KB of RAM per precedent; the part's limits come from the licence.
+
+### 9.1 The Ada mod
+
+Designed, not built: signs in on the account (`shared/licence/`), installs and starts rrotor, hands it the licence and the Ada part, deploys a model from a folder at a commit, calls it and continues it, shows runs and approvals; `/ada` and the tools Claude uses. The Programs mod it is built from held the runtime half (`glyphh-ai/mods`, before 2026-10-15).
 
 ## 10. Parts
 
@@ -779,5 +799,5 @@ Quoted in the server's `docs/architecture.md` (checked 2026-10-14): third-party 
 - **Part signing:** the release key's custody and rotation; `RROTOR_RELEASE_KEY` lives in this repo's CI for the Ada part today.
 - **Ada's limits** in the licence: `models` and `precedents` per plan (placeholders in the seed).
 - **Not yet run here:** rrotor on Apple's `container` (needs macOS 26; this build's Mac is on 14) and on OrbStack; both are detected and started by the same steps, and are to be checked on a Mac that has them. How a `container` VM reaches the host's `localhost` (the dev server) is to be confirmed there.
-- **To build next:** the secrets vault, the live panel, the Ada mod and part, hosted rrotor on Fly, and the WSL distribution's install from the Ada mod on Windows.
+- **To build next:** the secrets vault, the live panel, the Ada mod, hosted rrotor on Fly, and the WSL distribution's install from the Ada mod on Windows.
 - **Publishing the image:** CI builds and tests the image on every push and exports the WSL root filesystem, but pushing to `ghcr.io/glyphh-ai/rrotor` waits for an org admin to give this repository write access to the package (its settings, Manage Actions access), then the repository variable `PUBLISH_IMAGES=true`. Until then no mod pins a digest, and a mod's `rrotor image` setting names a local build.

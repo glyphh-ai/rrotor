@@ -38,7 +38,9 @@ def test_sandbox_tells_the_worker_its_landlock_rules_and_proxy():
 
 
 def test_paths_are_the_sandboxs():
-    assert SandboxLauncher().paths(MOUNTS) == {"model": "/model", "files": "/files"}
+    assert SandboxLauncher().paths(MOUNTS) == {"model": "/model", "files": "/files", "data": None}
+    with_data = bwrap.Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, MOUNTS.proxy, Path("/d"))
+    assert SandboxLauncher().paths(with_data)["data"] == "/data"
 
 
 def test_the_launcher_interface_has_no_behaviour():

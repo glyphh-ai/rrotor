@@ -51,7 +51,8 @@ Sink = Callable[[str, dict[str, Any]], None]
 
 
 class Ctx:
-    """The run's context. Models read `inputs`, `answer` and `files`, and call the methods below."""
+    """The run's context. Models read `inputs`, `answer`, `files`, `data`, `home`, `clearance` and `caller`, and call
+    the methods below."""
 
     def __init__(
         self,
@@ -64,7 +65,13 @@ class Ctx:
         answer: Any = None,
         sink: Sink | None = None,
         today: Callable[[], dt.date] | None = None,
+        data: Path | None = None,
+        home: Path | None = None,
+        clearance: float = 1.0,
+        caller: str = "claude",
     ) -> None:
+        self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
+        self.ada: Any = None  # the Ada model, once rrotor.ada.open(ctx) has run
         self.inputs: dict[str, Any] = inputs
         self.answer: Any = answer
         self.files: Path = files

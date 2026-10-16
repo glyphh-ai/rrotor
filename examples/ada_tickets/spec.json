@@ -1,0 +1,31 @@
+{
+  "name": "tickets",
+  "seed": 42,
+  "dimension": 4096,
+  "temporal_source": "meta.time.opened",
+  "layers": [
+    {
+      "name": "issue",
+      "segments": [
+        {
+          "name": "body",
+          "roles": [
+            { "name": "title", "text_encoding": "bag_of_words" },
+            { "name": "component", "lexicons": ["area"] },
+            { "name": "severity", "numeric_config": { "min_value": 0, "max_value": 10, "bin_width": 1 } },
+            { "name": "labels" },
+            { "name": "id", "key_part": true, "similarity_weight": 0 }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "meta",
+      "security_weight": 0.8,
+      "segments": [
+        { "name": "time", "roles": [{ "name": "opened" }] },
+        { "name": "owner", "roles": [{ "name": "team" }] }
+      ]
+    }
+  ]
+}

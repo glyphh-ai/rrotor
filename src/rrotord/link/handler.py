@@ -46,6 +46,7 @@ class LinkHandler:
                 caller=message.caller,
                 origin="link",
                 run_id=str(message.run_id),
+                clearance=message.clearance,
             )
         except RrotorError as err:
             await self._answer(str(message.run_id), failed("call", err.code, err.message))
@@ -87,7 +88,7 @@ class LinkHandler:
                         f"The commit's glyphh.json names {version.model}, not {message.model}.", code="E_MANIFEST"
                     )
             else:
-                version = self.deployer.held(message.model, message.commit_sha, message.version)
+                version = await self.deployer.held(message.model, message.commit_sha, message.version)
         except RrotorError as err:
             log.warning("deploy failed", extra={"model": message.model, "code": err.code})
             if self.link is not None:

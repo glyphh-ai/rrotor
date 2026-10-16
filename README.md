@@ -4,6 +4,10 @@ The isolated runtime Ada installs into. It runs models: deterministic Python job
 
 The design is in `glyphh-ai/server`, `docs/architecture.md` ("`ada`: models and rrotor", and "rrotor"); how the parts call each other is in this repo's `docs/architecture.md`.
 
+## Ada
+
+An Ada model is a program rrotor runs: `rrotor.ada` opens its spec and precedent store on the Ada part; a changed encoding re-encodes the store on deploy or refuses it (`docs/architecture.md`, section 9). `examples/ada_tickets/` is one, with its tests.
+
 ## Parts
 
 What a mod installs into rrotor beyond the base, signed with Glyphh's release key and licensed by the plan (`docs/architecture.md`, section 10). `scripts/part.py` builds and signs one; `parts/ada/` is the Ada part's recipe, built in CI.

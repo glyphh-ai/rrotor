@@ -32,7 +32,7 @@ jobs:
         run: uv run mypy
       - name: Tests (100% line and branch coverage of rrotor and rrotord)
         run: uv run pytest
-      - name: The sample model's tests
+      - name: The sample models' tests
         run: uv run pytest examples/daily_sales/tests -o addopts="" -p no:cacheprovider
 
   image:

@@ -31,6 +31,7 @@ class Run:
     caller: str
     origin: str  # "link" (the Cloud called it) or "local" (the local API)
     status: str = "running"
+    clearance: float = 1.0  # who asks, as a share of what the model may show (Ada): 1 sees everything
     created_at: str = field(default_factory=now)
     updated_at: str = field(default_factory=now)
     waiting_since: str | None = None

@@ -24,8 +24,9 @@ class Launcher(Protocol):
         """What the worker is told to lock itself to (its start message's `sandbox`)."""
         ...
 
-    def paths(self, mounts: bwrap.Mounts) -> dict[str, str]:
-        """Where the worker finds the model and its folder (its start message's `model` and `files`)."""
+    def paths(self, mounts: bwrap.Mounts) -> dict[str, str | None]:
+        """Where the worker finds the model, its folder and its data folder (its start message's `model`, `files`
+        and `data`, the last None when the manifest asks for none)."""
         ...
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process: ...
@@ -38,8 +39,8 @@ class SandboxLauncher:
     def sandbox(self, mounts: bwrap.Mounts) -> dict[str, Any] | None:
         return {"landlock": bwrap.landlock_rules(mounts), "proxy_socket": bwrap.PROXY_SOCKET if mounts.proxy else None}
 
-    def paths(self, mounts: bwrap.Mounts) -> dict[str, str]:
-        return {"model": bwrap.MODEL, "files": bwrap.FILES}
+    def paths(self, mounts: bwrap.Mounts) -> dict[str, str | None]:
+        return {"model": bwrap.MODEL, "files": bwrap.FILES, "data": bwrap.DATA if mounts.data else None}
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process:
         seccomp = (self._seccomp or Filter()).build()

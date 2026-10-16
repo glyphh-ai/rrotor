@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 from tests.daemon.api.conftest import Api, open_api
@@ -64,7 +67,6 @@ async def test_the_request_is_checked_and_a_bad_archive_or_not_a_tarball_is_refu
         assert (status, body["error"]["code"]) == (400, code), ask
     _data, _sha, _sig = part_archive(tmp_path)
     plain = base64.b64encode(b"not gzip").decode()
-    import hashlib
 
     ask = {
         "name": "ada",
@@ -107,3 +109,54 @@ async def test_a_base_part_installs_without_a_licence(api, tmp_path):
     ask = {"name": "postgres", "version": "1.0.0", "sha256": sha, "signature": sig, "archive": archive}
     status, _ = await send(api, "POST", "/v1/parts", json=ask)
     assert status == 201
+
+
+async def test_an_ada_model_deploys_and_a_changed_encoding_that_cannot_be_reencoded_is_refused(api, tmp_path):
+    """Through the API: the part installed, the model deployed from a bundle, a precedent recorded, then a version
+    with a new seed over a store that is not a database: refused, and the first version stays active."""
+    from rrotor import ada
+    from tests.fakes import GitRepo, ada_part
+
+    data, sha, sig = ada_part(tmp_path)
+    await _licensed(api, ["ada"])
+    ask = {
+        "name": "ada",
+        "version": "3.1.0",
+        "sha256": sha,
+        "signature": sig,
+        "archive": base64.b64encode(data).decode(),
+    }
+    assert (await send(api, "POST", "/v1/parts", json=ask))[0] == 201
+    here = Path(__file__).parent.parent.parent.parent / "examples" / "ada_tickets"
+    spec = json.loads((here / "spec.json").read_text())
+    repo = GitRepo(tmp_path / "repo")
+    first = repo.model(
+        json.loads((here / "glyphh.json").read_text()),
+        (here / "model.py").read_text(),
+        **{"spec.json": json.dumps(spec)},
+    )
+    bundle = base64.b64encode(repo.bundle(tmp_path / "v1.bundle").read_bytes()).decode()
+    status, body = await send(api, "POST", "/v1/models/deploy", json={"bundle": bundle, "commit": first})
+    assert status == 201, body
+    ticket = {
+        "issue": {"body": {"title": "login fails", "area": "auth", "severity": 8, "id": 1}},
+        "meta": {"time": {"opened": "2026-10-01T12:00:00Z"}, "owner": {"team": "infra"}},
+    }
+    status, body = await send(
+        api,
+        "POST",
+        "/v1/runs",
+        json={"model": "tickets", "function": "record", "inputs": {"data": ticket, "outcome": "page oncall"}},
+    )
+    assert (status, body["status"]) == (200, "done"), body
+    (api.services.models.data("tickets") / ada.STORE).write_bytes(b"not a database")
+    second = repo.model(
+        json.loads((here / "glyphh.json").read_text()),
+        (here / "model.py").read_text(),
+        **{"spec.json": json.dumps({**spec, "seed": 7})},
+    )
+    bundle = base64.b64encode(repo.bundle(tmp_path / "v2.bundle").read_bytes()).decode()
+    status, body = await send(api, "POST", "/v1/models/deploy", json={"bundle": bundle, "commit": second})
+    assert (status, body["error"]["code"]) == (422, "E_ADA_ENCODING"), body
+    active = api.services.models.active("tickets")
+    assert active is not None and active.commit_sha == first and api.services.models.by_sha("tickets", second) is None

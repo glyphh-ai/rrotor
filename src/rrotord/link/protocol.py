@@ -49,6 +49,7 @@ class Call(Message):
     function: Name
     inputs: dict[str, Any]
     caller: Literal["routine", "claude", "panel", "test"]
+    clearance: float = Field(1.0, ge=0, le=1)
 
 
 class Continue(Message):

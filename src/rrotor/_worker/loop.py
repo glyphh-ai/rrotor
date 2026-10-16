@@ -16,6 +16,7 @@ from pathlib import Path
 from types import FrameType, ModuleType
 from typing import Any
 
+from rrotor import ada
 from rrotor._worker.channel import Channel
 from rrotor._worker.forward import Forwarder
 from rrotor._worker.landlock import Landlock, Rules
@@ -120,6 +121,10 @@ class Worker:
             http=Http(frozenset(start.get("hosts") or ()), PROXY_URL if box.get("proxy_socket") else None),
             answer=start.get("answer"),
             sink=self._sink,
+            data=Path(start["data"]) if start.get("data") else None,
+            home=Path(start.get("model", "/model")),
+            clearance=float(start.get("clearance", 1.0)),
+            caller=str(start.get("caller", "claude")),
         )
         try:
             model = import_model(str(start.get("model", "/model")))
@@ -127,7 +132,10 @@ class Worker:
             self.channel.send("result", result=crash("load", err).to_json(), pending=None)
             return self._finish(None, ctx)
         seconds = float(start.get("seconds_left", 300))
-        outcome = self._timed(seconds, lambda: self._load(model, ctx), "load")
+        # rrotor's own re-encode runs before the model could open its store under the new spec: no load for it
+        outcome = (
+            Outcome(_DONE) if function == ada.REENCODE else self._timed(seconds, lambda: self._load(model, ctx), "load")
+        )
         if outcome.result.status == "done":
             outcome = self._timed(seconds, lambda: self._call(model, function, ctx), function)
         while True:
@@ -146,6 +154,8 @@ class Worker:
 
     @staticmethod
     def _call(model: ModuleType, function: str, ctx: Ctx) -> Outcome:
+        if function == ada.REENCODE:  # rrotor's own maintenance on a deploy, never a model's function
+            return invoke(function, lambda c: Result.done({"reencoded": ada.reencode(c)}), ctx)
         fn = getattr(model, function, None)
         if function.startswith("_") or function in ("load", "end") or not callable(fn):
             return Outcome(failure(function, "E_FUNCTION_MISSING", f"model.py has no function {function}."))

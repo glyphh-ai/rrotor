@@ -183,19 +183,19 @@ async def test_a_lock_with_a_wrong_hash_is_e_deps(tmp_path, repo: GitRepo):
     assert caught.value.code == "E_DEPS"
 
 
-def test_held_activates_and_renumbers(tmp_path):
+async def test_held_activates_and_renumbers(tmp_path):
     from tests.fakes import install
 
     d = deployer(tmp_path)
     v = install(d.models, manifest("sample"), "", sha="c" * 40)
-    assert d.held("sample", "c" * 40).version == v.version
-    assert d.held("sample", "c" * 40, version=v.version).version == v.version
-    assert d.held("sample", "c" * 40, version=4).version == 4
+    assert (await d.held("sample", "c" * 40)).version == v.version
+    assert (await d.held("sample", "c" * 40, version=v.version)).version == v.version
+    assert (await d.held("sample", "c" * 40, version=4)).version == 4
 
 
-def test_held_a_commit_not_here(tmp_path):
+async def test_held_a_commit_not_here(tmp_path):
     with pytest.raises(DeployError) as caught:
-        deployer(tmp_path).held("sample", "c" * 40)
+        await deployer(tmp_path).held("sample", "c" * 40)
     assert caught.value.code == "E_COMMIT_MISSING"
 
 

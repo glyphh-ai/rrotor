@@ -164,3 +164,18 @@ async def test_calls_are_refused_while_the_sandbox_is_not_ready(api):
     deploy_sample(api)
     status, body = await send(api, "POST", "/v1/runs", json={"model": "sample"})
     assert (status, body["error"]["code"]) == (503, "E_SANDBOX_UNAVAILABLE")
+
+
+async def test_a_call_carries_clearance_and_refuses_one_out_of_range(api):
+    install(
+        api.services.models,
+        manifest("sample"),
+        "from rrotor import Result\ndef start(ctx, inputs):\n    return Result.done(ctx.clearance)\n",
+    )
+    status, body = await send(api, "POST", "/v1/runs", json={"model": "sample", "clearance": 0.4})
+    assert (status, body["data"]) == (200, 0.4)
+    status, body = await send(api, "POST", "/v1/runs", json={"model": "sample"})
+    assert (status, body["data"]) == (200, 1.0)
+    for bad in (2, -0.1, "1", True):
+        status, body = await send(api, "POST", "/v1/runs", json={"model": "sample", "clearance": bad})
+        assert (status, body["error"]["code"]) == (400, "E_BAD_REQUEST"), bad

@@ -2,6 +2,7 @@
 
 from rrotor.testing import Harness, FakeHttp
 h = Harness(model, tmp_path, approvals={"start": {"write"}}, http=FakeHttp({"https://api.x/": {"ok": 1}}))
+# an Ada model: data=<its data folder> (the store), home=<where spec.json is>, clearance=<who asks>
 r = h.call("start", {"day": "2026-10-14"})   # Result needs_approval
 r = h.resume({"approved": True})               # Result done
 """
@@ -80,8 +81,14 @@ class Harness:
         approvals: Mapping[str, set[str]] | None = None,
         http: Http | None = None,
         today: Callable[[], Any] | None = None,
+        data: Path | None = None,
+        home: Path | None = None,
+        clearance: float = 1.0,
+        caller: str = "claude",
     ) -> None:
         self.model, self.files = model, files
+        self.data, self.clearance, self.caller = data, clearance, caller
+        self.home = home if home is not None else Path(str(getattr(model, "__file__", "."))).parent
         self.approvals = {k: frozenset(v) for k, v in (approvals or {}).items()}
         self.http = http or FakeHttp({})
         self.today = today
@@ -106,6 +113,10 @@ class Harness:
             answer=answer,
             sink=sink,
             today=self.today,
+            data=self.data,
+            home=self.home,
+            clearance=self.clearance,
+            caller=self.caller,
         )
 
     def _run(self, answer: Any) -> Result:

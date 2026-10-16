@@ -79,6 +79,7 @@ class Runner:
         caller: str = "claude",
         origin: str = "local",
         run_id: str | None = None,
+        clearance: float = 1.0,
     ) -> Run:
         if not self.layers.ready:
             raise Unavailable(
@@ -90,6 +91,7 @@ class Runner:
             raise NotFound(f"{model} has no function {function}.", code="E_FUNCTION_MISSING")
         check_inputs(fn, inputs)
         run = Run(run_id or new_id(), model, found.version, found.commit_sha, function, inputs, caller, origin)
+        run.clearance = clearance
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
         async with self._lock(run.id):
@@ -165,21 +167,55 @@ class Runner:
     def _left(self, run: Run, found: Version) -> float:
         return max(found.manifest.limits.seconds - run.seconds, 0.0)
 
-    async def _go(self, run: Run, found: Version, answer: Any) -> None:
+    def _mounts(self, model: str, found: Version, socket: Path | None) -> bwrap.Mounts:
         manifest = found.manifest
-        files = self.models.files(run.model)
+        files = self.models.files(model)
         files.mkdir(parents=True, exist_ok=True)
-        data = self.models.data(run.model) if manifest.data else None
+        data = self.models.data(model) if manifest.data else None
         if data:
             data.mkdir(parents=True, exist_ok=True)
-        hosts = frozenset(manifest.hosts)
-        socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
         needed = manifest.parts()
         part_mounts, _ = self.parts.resolve(needed) if self.parts else ([], [])
         pythonpath = self.parts.env(needed, bwrap.PARTS) if self.parts else []
-        mounts = bwrap.Mounts(
-            found.src, found.venv, self.sdk, files, socket, data, tuple(part_mounts), tuple(pythonpath)
-        )
+        return bwrap.Mounts(found.src, found.venv, self.sdk, files, socket, data, tuple(part_mounts), tuple(pythonpath))
+
+    async def maintain(self, found: Version, op: str) -> dict[str, Any]:
+        """rrotor's own work in a version's sandbox (a re-encode on deploy): one call of `op`, its Result."""
+        refused = self._parts_refused(found.manifest.name, found)
+        if refused:
+            return refused
+        mounts = self._mounts(found.manifest.name, found, None)
+        limits = bwrap.Limits(found.manifest.limits.memory_mb, found.manifest.limits.seconds + 5)
+        try:
+            worker = await Worker.start(self.launcher, lambda fd: Spec(mounts, limits, fd), lambda m: None)
+        except OSError as err:
+            return failed("sandbox", "E_SANDBOX", f"The sandbox did not start: {err}")
+        try:
+            await worker.send(
+                "start",
+                function=op,
+                inputs={},
+                approvals=[],
+                state={},
+                answer=None,
+                seconds_left=float(found.manifest.limits.seconds),
+                sandbox=self.launcher.sandbox(mounts),
+                hosts=[],
+                caller="rrotor",
+                **self.launcher.paths(mounts),
+            )
+            message = await worker.next(found.manifest.limits.seconds + GRACE)
+        finally:
+            await worker.stop(grace=5.0)
+        if message is None or message.get("op") != "result":
+            return failed(op, "E_WORKER", "The model's process stopped before it answered.")
+        return dict(message["result"])
+
+    async def _go(self, run: Run, found: Version, answer: Any) -> None:
+        manifest = found.manifest
+        hosts = frozenset(manifest.hosts)
+        socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
+        mounts = self._mounts(run.model, found, socket)
         limits = bwrap.Limits(manifest.limits.memory_mb, manifest.limits.seconds + 5)
         try:
             worker = await Worker.start(
@@ -202,6 +238,8 @@ class Runner:
             seconds_left=self._left(run, found),
             sandbox=self.launcher.sandbox(mounts),
             hosts=sorted(hosts),
+            clearance=run.clearance,
+            caller=run.caller,
             **self.launcher.paths(mounts),
         )
         await self._await_result(run, worker, found)
