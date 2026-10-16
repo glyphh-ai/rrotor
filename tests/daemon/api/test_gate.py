@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -74,3 +75,16 @@ async def test_without_a_local_token_nothing_is_let_in(api):
     async with TestClient(TestServer(app), headers={"Host": f"127.0.0.1:{PORT}"}) as client:
         res = await client.get("/x", headers={"Authorization": f"Bearer {token()}"})
         assert res.status == 401
+
+
+async def test_the_local_token_is_not_a_runtime_key_and_is_never_counted(api):
+    async def ok(_: web.Request) -> web.Response:
+        return web.json_response({})
+
+    access = Access(api.services.config.data, (hashlib.sha256(api.token.encode()).hexdigest(),))
+    app = web.Application(middlewares=[errors, gate(api.services.config, access)])
+    app.router.add_get("/x", ok)
+    async with TestClient(TestServer(app), headers={"Host": f"127.0.0.1:{PORT}"}) as client:
+        res = await client.get("/x", headers=api.auth())
+        assert res.status == 200
+    assert access.usage.take() == []

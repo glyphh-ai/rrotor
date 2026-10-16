@@ -9,7 +9,8 @@ for, rrotord/introspect.py), at this machine's own address, `<machine>.<domain>`
 address is answered with `fly-replay: instance=<machine>`, and Fly's proxy carries it there (the doorman machine
 answers every request this way); any other Host is 421. A refusal names where to sign in (`WWW-Authenticate`, RFC
 9728), and the resource metadata it points at is open. A paused rrotor (the plan's hours spent) answers 402 to
-everything but its health."""
+everything but its health. Each request served with a runtime key is counted for that key (access.Usage); a Glyphh
+sign-in is no key and is not counted."""
 
 from __future__ import annotations
 
@@ -130,7 +131,8 @@ def gate(config: Config, access: Access, introspect: Introspector | None = None)
         token = presented(request)
         if not token:
             raise challenge(request, token_sent=False)
-        if not access.allows(token) and not (introspect is not None and await introspect.active(token)):
+        key = access.match(token)
+        if key is None and not (introspect is not None and await introspect.active(token)):
             raise challenge(request, token_sent=True)
         if access.paused is not None:
             raise RrotorError(
@@ -140,6 +142,8 @@ def gate(config: Config, access: Access, introspect: Introspector | None = None)
                 limit="runtime_hours",
                 reason=access.paused.get("reason"),
             )
+        if key is not None:
+            access.usage.count(key)
         return await handler(request)
 
     return hosted if config.mode == "hosted" else local

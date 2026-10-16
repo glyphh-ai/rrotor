@@ -57,3 +57,24 @@ def test_up_messages():
 
 def test_stop_closes():
     assert p.STOPS == {4401: "refused", 4409: "replaced", 4426: "upgrade_needed", 4400: "bad_hello"}
+
+
+def test_deployed_carries_the_repo_and_the_manifest_or_nulls():
+    full = p.deployed("x", 2, SHA, "owner/x", {"name": "x"})
+    assert full == {
+        "type": "deployed",
+        "id": full["id"],
+        "model": "x",
+        "version": 2,
+        "commit_sha": SHA,
+        "repo": "owner/x",
+        "manifest": {"name": "x"},
+    }
+    bare = p.deployed("x", 2, SHA)
+    assert (bare["repo"], bare["manifest"]) == (None, None) and len(bare["id"]) == 32 and bare["id"] != full["id"]
+
+
+def test_usage_is_numbered_and_carries_each_keys_calls():
+    keys = [{"key_sha256": "a" * 64, "calls": 3, "last_used_at": "2026-10-16T09:00:00+00:00"}]
+    message = p.usage(7, keys)
+    assert message == {"type": "usage", "id": message["id"], "seq": 7, "keys": keys} and len(message["id"]) == 32

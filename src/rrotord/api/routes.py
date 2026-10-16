@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -21,7 +22,7 @@ from rrotord.errors import BadRequest
 from rrotord.introspect import Introspector
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
-from rrotord.models import Models
+from rrotord.models import Models, Version
 from rrotord.parts import BASE_MOD, Parts
 from rrotord.runner.engine import Runner
 from rrotord.sandbox.probe import Layers
@@ -31,6 +32,9 @@ BODY_MAX = 96 * 1024 * 1024  # a bundle in base64, with room
 
 class Fetch(Protocol):
     async def __call__(self, url: str) -> bytes: ...
+
+
+Report = Callable[[Version, str | None], Awaitable[None]]  # `deployed` up the link: the version and its repo, if any
 
 
 class LinkView(Protocol):
@@ -51,6 +55,7 @@ class Services:
     fetch: Fetch | None = None  # downloads a part by URL; none in tests
     access: Access | None = None  # hosted: the runtime keys and the pause
     introspect: Introspector | None = None  # hosted: a Glyphh sign-in checked with the Cloud
+    report: Report | None = None  # after every deploy, `deployed` up the link; none in tests without a link
 
 
 async def body(request: web.Request) -> dict[str, Any]:

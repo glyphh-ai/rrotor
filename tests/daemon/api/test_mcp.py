@@ -7,8 +7,8 @@ import json
 from typing import Any
 
 from rrotord.api import mcp
-from tests.daemon.api.conftest import Api
-from tests.fakes import DONE_MODEL, install, manifest
+from tests.daemon.api.conftest import Api, linked
+from tests.fakes import DONE_MODEL, GitRepo, install, manifest, token
 
 WAITS = "from rrotor import Result\n\ndef start(ctx, inputs):\n    return Result.needs_input('day?')\n"
 META = {"_meta": {mcp.VERSION_META: mcp.MODERN}}
@@ -108,3 +108,21 @@ async def test_refusals_are_tool_errors_and_bad_rpc_is_refused(api):
         res = await api.client.post("/mcp", json=body, headers=api.auth())
         assert res.status == 400 and (await res.json())["error"]["code"] == mcp.INVALID_REQUEST, body
     assert mcp.failure(mcp.RpcError(1, "x"))["jsonrpc"] == "2.0" and "id" not in mcp.failure(mcp.RpcError(1, "x"))
+
+
+async def test_model_deploy_deploys_a_repo_commit_and_reports_it_up_the_link(api, tmp_path):
+    repo = GitRepo(tmp_path / "src")
+    sha = repo.model(manifest("sample"))
+    repo.bare(tmp_path / "github", "owner/sample")
+    link = linked(api)
+    done = await tool(api, "model_deploy", repo="owner/sample", commit=sha, token=token())
+    assert done.get("isError") is not True and done["structuredContent"]["commit_sha"] == sha
+    [sent] = link.sent
+    assert (sent["type"], sent["model"], sent["version"], sent["commit_sha"], sent["repo"]) == (
+        "deployed",
+        "sample",
+        1,
+        sha,
+        "owner/sample",
+    )
+    assert sent["manifest"] == api.services.models.active("sample").manifest.model_dump(mode="json")

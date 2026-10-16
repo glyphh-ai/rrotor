@@ -53,16 +53,19 @@ async def deploy_bundle(s: Services, encoded: str, commit: str) -> Version:
 
 
 async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
-    """A version from a git bundle of the commit (base64) or from a GitHub repo at the commit."""
+    """A version from a git bundle of the commit (base64) or from a GitHub repo at the commit; `deployed` goes up
+    the link either way (the repo only for a repo deploy)."""
     commit, bundle, repo, token = data.get("commit"), data.get("bundle"), data.get("repo"), data.get("token")
     if not isinstance(commit, str):
         raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
     if isinstance(bundle, str):
-        version = await deploy_bundle(s, bundle, commit)
+        version, source = await deploy_bundle(s, bundle, commit), None
     elif isinstance(repo, str) and (token is None or isinstance(token, str)):
-        version = await s.deployer.from_repo(repo, commit, token)
+        version, source = await s.deployer.from_repo(repo, commit, token), repo
     else:
         raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
+    if s.report is not None:
+        await s.report(version, source)
     return version.to_json()
 
 
