@@ -67,3 +67,17 @@ async def test_a_paused_runtime_answers_402_to_everything_but_its_health(hosted)
     assert (await code_of(hosted, "/healthz"))[0] == 200
     hosted.services.access.resume()
     assert (await code_of(hosted, "/v1/models", **hosted.auth()))[0] == 200
+
+
+async def test_in_development_one_exact_host_stands_in_for_the_machines_address(hosted):
+    hosted.services.config = dataclasses.replace(hosted.services.config, public_host="dev-tunnel.ngrok-free.app")
+    client: TestClient[web.Request, web.Application] = TestClient(TestServer(make(hosted.services)))
+    await client.start_server()
+    try:
+        res = await client.get("/v1/health", headers={**hosted.auth(), "Host": "Dev-Tunnel.ngrok-free.app:443"})
+        assert res.status == 200
+        for host in (HOST, "a1b2c3d4e5f6a7.glyphh.app", "evil.example.com"):
+            res = await client.get("/v1/health", headers={**hosted.auth(), "Host": host})
+            assert res.status == 421 and "fly-replay" not in res.headers, host
+    finally:
+        await client.close()

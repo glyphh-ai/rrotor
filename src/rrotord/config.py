@@ -34,6 +34,7 @@ class Config:
     public_domain: str = "glyphh.app"  # hosted and doorman: the runtimes' addresses are <machine>.<domain>
     machine_id: str | None = None  # hosted: this machine's id (Fly's FLY_MACHINE_ID), its own address
     keys_sha256: tuple[str, ...] = ()  # hosted: the runtime keys' SHA-256s at first; the Cloud's list after
+    public_host: str | None = None  # hosted, development: this exact Host instead of <machine>.<domain> (an ngrok name)
 
     @property
     def link_url(self) -> str:
@@ -57,8 +58,12 @@ def load(env: Mapping[str, str] | None = None) -> Config:
     if mode == "hosted" and (runtime_id is None) != (runtime_token is None):
         raise RrotorError("A hosted rrotor takes RROTOR_RUNTIME_ID and RROTOR_RUNTIME_TOKEN together.", code="E_CONFIG")
     machine_id = env.get("RROTOR_MACHINE_ID") or env.get("FLY_MACHINE_ID") or None
-    if mode == "hosted" and machine_id is None:
-        raise RrotorError("A hosted rrotor needs its machine id (FLY_MACHINE_ID): its own address.", code="E_CONFIG")
+    public_host = (env.get("RROTOR_PUBLIC_HOST") or "").strip().lower().rstrip(".") or None
+    if mode == "hosted" and machine_id is None and public_host is None:
+        raise RrotorError(
+            "A hosted rrotor needs its machine id (FLY_MACHINE_ID), or RROTOR_PUBLIC_HOST in development.",
+            code="E_CONFIG",
+        )
     keys = tuple(k.strip().lower() for k in env.get("RROTOR_KEYS_SHA256", "").split(",") if k.strip())
     if any(not HEX64.match(k) for k in keys):
         raise RrotorError("RROTOR_KEYS_SHA256 is a comma-separated list of SHA-256 hex digests.", code="E_CONFIG")
@@ -82,4 +87,5 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         public_domain=env.get("RROTOR_PUBLIC_DOMAIN", "glyphh.app").strip().lower().rstrip("."),
         machine_id=machine_id.lower() if machine_id else None,
         keys_sha256=keys,
+        public_host=public_host,
     )

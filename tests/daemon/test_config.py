@@ -51,6 +51,8 @@ def test_a_hosted_rrotor_takes_its_runtime_credentials_and_built_in_parts_from_t
     c = config.load({**env, "RROTOR_BUILTIN_PARTS": "/parts"})
     assert (c.runtime_id, c.runtime_token, c.builtin_parts) == ("r", "t", Path("/parts"))
     assert (c.machine_id, c.keys_sha256, c.public_domain) == ("abc123", ("a" * 64, "b" * 64), "dev.glyphh.app")
+    dev = config.load({"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "RROTOR_PUBLIC_HOST": "X.ngrok-free.app."})
+    assert (dev.machine_id, dev.public_host) == (None, "x.ngrok-free.app")
     doorman = config.load({"RROTOR_MODE": "doorman"})
     assert (doorman.mode, doorman.server, doorman.public_domain) == ("doorman", "http://doorman.invalid", "glyphh.app")
 

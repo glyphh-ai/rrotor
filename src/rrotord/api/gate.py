@@ -59,8 +59,13 @@ def misdirected(host: str) -> RrotorError:
     return RrotorError(f"This address is not served here: {host}.", code="E_HOST", status=421)
 
 
-def route_by_host(request: web.Request, domain: str, own: str | None) -> web.Response | None:
-    """A replay for another machine's address, nothing for this machine's own; 421 for anything else."""
+def route_by_host(request: web.Request, domain: str, own: str | None, exact: str | None = None) -> web.Response | None:
+    """A replay for another machine's address, nothing for this machine's own (or, in development, for the one exact
+    Host it was given); 421 for anything else."""
+    if exact is not None:
+        if request.host.rsplit(":", 1)[0].lower().rstrip(".") == exact:
+            return None
+        raise misdirected(request.host)
     machine = machine_of(request.host, domain)
     if machine is None:
         raise misdirected(request.host)
@@ -93,7 +98,7 @@ def gate(config: Config, access: Access) -> Middleware:
     async def hosted(request: web.Request, handler: Handler) -> web.StreamResponse:
         if request.path in OPEN:
             return await handler(request)
-        elsewhere = route_by_host(request, config.public_domain, config.machine_id)
+        elsewhere = route_by_host(request, config.public_domain, config.machine_id, config.public_host)
         if elsewhere is not None:
             return elsewhere
         token = presented(request)

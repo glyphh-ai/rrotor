@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from rrotord.api import ops, routes
+from rrotord.api import ops
 from rrotord.sandbox.probe import Layers
 from tests.daemon.api.conftest import Api
 from tests.fakes import GitRepo, install, manifest, token
