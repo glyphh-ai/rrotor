@@ -20,7 +20,7 @@ from rrotord.api.routes import Services
 from rrotord.config import Config
 from rrotord.deploy import Deployer, Tools
 from rrotord.link.credentials import Credentials
-from rrotord.programs import Programs
+from rrotord.models import Models
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
@@ -56,10 +56,10 @@ def services(root: Path, sock: Path, local_token: str) -> Services:
         sdk=Path(rrotor.__file__).parent,
         run_dir=root / "run",
     )
-    programs = Programs(config.data)
+    models = Models(config.data)
     layers = ready()
     runner = Runner(
-        programs=programs,
+        models=models,
         records=Records(config.data),
         proxy=EgressProxy(sock),
         launcher=LocalLauncher(),
@@ -67,11 +67,11 @@ def services(root: Path, sock: Path, local_token: str) -> Services:
         layers=layers,
     )
     deployer = Deployer(
-        programs,
+        models,
         root / "scratch",
         Tools(python=sys.executable, uv=shutil.which("uv") or "uv", github=f"file://{root / 'github'}"),
     )
-    return Services(config, programs, deployer, runner, Credentials(config.data), LinkView(), layers)
+    return Services(config, models, deployer, runner, Credentials(config.data), LinkView(), layers)
 
 
 async def open_api(root: Path, sock: Path) -> Api:

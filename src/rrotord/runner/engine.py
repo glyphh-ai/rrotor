@@ -1,7 +1,7 @@
 """Runs: a call opens one, each continue resumes it, cancel and expiry end it; `end` always runs. The worker stays
 up while a run waits (up to 15 minutes); if it is gone (rrotor restarted), a continue starts a new one that loads
 again and reads its checkpoints back (docs/architecture.md, 5.4). Every call answers a Result, never an exception:
-the errors raised here are about the call itself (no such program, inputs refused), never about the program."""
+the errors raised here are about the call itself (no such model, inputs refused), never about the model."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from typing import Any
 from rrotor.ctx import RunState
 from rrotord.errors import Conflict, NotFound, Unavailable
 from rrotord.manifest import check_inputs
-from rrotord.programs import Programs, Version
+from rrotord.models import Models, Version
 from rrotord.proxy import EgressProxy
 from rrotord.runner.launch import Launcher, Spec
 from rrotord.runner.record import WAITING, Records, Run, new_id, now
@@ -40,7 +40,7 @@ class Runner:
     def __init__(
         self,
         *,
-        programs: Programs,
+        models: Models,
         records: Records,
         proxy: EgressProxy,
         launcher: Launcher,
@@ -49,7 +49,7 @@ class Runner:
         notify: Notify | None = None,
         wait_limit: float = WAIT_LIMIT,
     ) -> None:
-        self.programs, self.records, self.proxy, self.launcher = programs, records, proxy, launcher
+        self.models, self.records, self.proxy, self.launcher = models, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
         self.notify = notify
         self.workers: dict[str, Worker] = {}
@@ -67,7 +67,7 @@ class Runner:
     async def call(
         self,
         *,
-        program: str,
+        model: str,
         function: str,
         inputs: dict[str, Any],
         version: int | None = None,
@@ -77,22 +77,20 @@ class Runner:
     ) -> Run:
         if not self.layers.ready:
             raise Unavailable(
-                f"The sandbox is not ready, so no program runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
+                f"The sandbox is not ready, so no model runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
             )
-        found = self.programs.get(program, version)
+        found = self.models.get(model, version)
         fn = found.manifest.functions.get(function)
         if fn is None:
-            raise NotFound(f"{program} has no function {function}.", code="E_FUNCTION_MISSING")
+            raise NotFound(f"{model} has no function {function}.", code="E_FUNCTION_MISSING")
         check_inputs(fn, inputs)
-        run = Run(run_id or new_id(), program, found.version, found.commit_sha, function, inputs, caller, origin)
+        run = Run(run_id or new_id(), model, found.version, found.commit_sha, function, inputs, caller, origin)
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
         async with self._lock(run.id):
             missing = found.manifest.parts()
             if missing:
-                reason = (
-                    f"{program} needs the part{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not installed."
-                )
+                reason = f"{model} needs the part{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not installed."
                 await self._finish(run, failed("parts", "E_PART_MISSING", reason))
             else:
                 await self._go(run, found, None)
@@ -108,7 +106,7 @@ class Runner:
             run.state, run.status, run.waiting_since = state.to_json(), "running", None
             self.records.save(run)
             self.records.log(run.id, {"event": "continued", "pending": run.pending})
-            found = self.programs.by_sha(run.program, run.commit_sha)
+            found = self.models.by_sha(run.model, run.commit_sha)
             worker = self.workers.get(run.id)
             if found is None:
                 await self._finish(run, failed("deploy", "E_VERSION_MISSING", "This run's version is no longer here."))
@@ -143,9 +141,9 @@ class Runner:
 
     async def _go(self, run: Run, found: Version, answer: Any) -> None:
         manifest = found.manifest
-        files = self.programs.files(run.program)
+        files = self.models.files(run.model)
         files.mkdir(parents=True, exist_ok=True)
-        data = self.programs.data(run.program) if manifest.data else None
+        data = self.models.data(run.model) if manifest.data else None
         if data:
             data.mkdir(parents=True, exist_ok=True)
         hosts = frozenset(manifest.hosts)
@@ -187,7 +185,7 @@ class Runner:
             reason = (
                 "The run went past its seconds and was stopped."
                 if alive
-                else f"The program's process stopped (exit {worker.proc.returncode})."
+                else f"The model's process stopped (exit {worker.proc.returncode})."
             )
             await self._end(run, None, failed(run.function, "E_LIMIT_SECONDS" if alive else "E_WORKER", reason))
             return
@@ -275,7 +273,7 @@ class Runner:
         return [
             {
                 "run_id": r.id,
-                "program": r.program,
+                "model": r.model,
                 "function": r.function,
                 "origin": r.origin,
                 "step": (r.result or {}).get("step"),

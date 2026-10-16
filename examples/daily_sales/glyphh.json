@@ -1,7 +1,7 @@
 {
   "name": "daily_sales",
   "version": 1,
-  "description": "A day's sales from the export in the program's folder, added up, converted to euros, and written to its ledger once approved",
+  "description": "A day's sales from the export in the model's folder, added up, converted to euros, and written to its ledger once approved",
   "python": "3.13",
   "functions": {
     "start": {

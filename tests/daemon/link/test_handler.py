@@ -14,26 +14,26 @@ import rrotor
 from rrotord.deploy import Deployer, Tools
 from rrotord.link import protocol as p
 from rrotord.link.handler import LinkHandler
-from rrotord.programs import Programs
+from rrotord.models import Models
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
-from tests.fakes import DONE_PROGRAM, FakeLink, GitRepo, LocalLauncher, install, manifest, ready, token
+from tests.fakes import DONE_MODEL, FakeLink, GitRepo, LocalLauncher, install, manifest, ready, token
 
 WAITS = "from rrotor import Result\n\ndef start(ctx, inputs):\n    return Result.needs_input('day?')\n"
 
 
 class Env:
     def __init__(self, root: Path, sock: Path) -> None:
-        self.programs = Programs(root / "data")
+        self.models = Models(root / "data")
         self.deployer = Deployer(
-            self.programs,
+            self.models,
             root / "scratch",
             Tools(python=sys.executable, uv=shutil.which("uv") or "uv", github=f"file://{root / 'github'}"),
         )
-        self.handler = LinkHandler(self.programs, cast(Runner, None), self.deployer)
+        self.handler = LinkHandler(self.models, cast(Runner, None), self.deployer)
         self.runner = Runner(
-            programs=self.programs,
+            models=self.models,
             records=Records(root / "data"),
             proxy=EgressProxy(sock),
             launcher=LocalLauncher(),
@@ -56,11 +56,11 @@ async def env(tmp_path, short_dir):
     await e.runner.shutdown()
 
 
-def call(program: str = "sample", function: str = "start", run_id: str | None = None) -> p.Call:
+def call(model: str = "sample", function: str = "start", run_id: str | None = None) -> p.Call:
     return p.Call(
         type="call",
         run_id=uuid.UUID(run_id or str(uuid.uuid4())),
-        program=program,
+        model=model,
         version=1,
         function=function,
         inputs={},
@@ -69,12 +69,12 @@ def call(program: str = "sample", function: str = "start", run_id: str | None = 
 
 
 async def test_deployed_is_the_active_versions(env):
-    install(env.programs, manifest("sample"), DONE_PROGRAM)
-    assert env.handler.deployed() == [{"program": "sample", "version": 1, "commit_sha": "a" * 40}]
+    install(env.models, manifest("sample"), DONE_MODEL)
+    assert env.handler.deployed() == [{"model": "sample", "version": 1, "commit_sha": "a" * 40}]
 
 
 async def test_a_call_answers_its_result_up_the_link(env):
-    install(env.programs, manifest("sample"), DONE_PROGRAM)
+    install(env.models, manifest("sample"), DONE_MODEL)
     message = call()
     await env.handler.on_call(message)
     result = env.results()[0]
@@ -82,13 +82,13 @@ async def test_a_call_answers_its_result_up_the_link(env):
 
 
 async def test_a_call_that_is_refused_answers_failed(env):
-    message = call(program="missing")
+    message = call(model="missing")
     await env.handler.on_call(message)
-    assert env.results()[0]["result"]["data"]["code"] == "E_PROGRAM_MISSING"
+    assert env.results()[0]["result"]["data"]["code"] == "E_MODEL_MISSING"
 
 
 async def test_continue_and_cancel_of_a_waiting_run(env):
-    install(env.programs, manifest("sample"), WAITS)
+    install(env.models, manifest("sample"), WAITS)
     message = call()
     await env.handler.on_call(message)
     await env.handler.on_continue(p.Continue(type="continue", run_id=message.run_id, answer="x"))
@@ -102,7 +102,7 @@ async def test_continue_of_a_run_not_here(env):
 
 
 async def test_continue_of_a_run_that_ended_is_only_logged(env, caplog):
-    install(env.programs, manifest("sample"), DONE_PROGRAM)
+    install(env.models, manifest("sample"), DONE_MODEL)
     message = call()
     await env.handler.on_call(message)
     await env.handler.on_continue(p.Continue(type="continue", run_id=message.run_id, answer=1))
@@ -115,7 +115,7 @@ async def test_cancel_of_a_run_not_here_answers_cancelled(env):
 
 
 async def test_cancel_of_an_ended_run_answers_nothing(env):
-    install(env.programs, manifest("sample"), DONE_PROGRAM)
+    install(env.models, manifest("sample"), DONE_MODEL)
     message = call()
     await env.handler.on_call(message)
     await env.handler.on_cancel(p.Cancel(type="cancel", run_id=message.run_id))
@@ -123,41 +123,41 @@ async def test_cancel_of_an_ended_run_answers_nothing(env):
 
 
 async def test_local_runs_and_a_handler_without_a_link_send_nothing(env):
-    install(env.programs, manifest("sample"), DONE_PROGRAM)
-    await env.runner.call(program="sample", function="start", inputs={})
+    install(env.models, manifest("sample"), DONE_MODEL)
+    await env.runner.call(model="sample", function="start", inputs={})
     env.handler.link = None
     await env.handler.on_call(call())
-    await env.handler.on_call(call(program="missing"))
+    await env.handler.on_call(call(model="missing"))
     assert env.link.sent == []
 
 
-def deploy(kind: str, sha: str, program: str = "sample", repo: str | None = None) -> p.Deploy:
-    return p.Deploy(type=kind, program=program, version=4, commit_sha=sha, repo=repo, token=token() if repo else None)
+def deploy(kind: str, sha: str, model: str = "sample", repo: str | None = None) -> p.Deploy:
+    return p.Deploy(type=kind, model=model, version=4, commit_sha=sha, repo=repo, token=token() if repo else None)
 
 
 async def test_deploy_from_the_repo_answers_deployed(env, tmp_path):
     repo = GitRepo(tmp_path / "src")
-    sha = repo.program(manifest("sample"))
+    sha = repo.model(manifest("sample"))
     repo.bare(tmp_path / "github", "owner/sample")
     await env.handler.on_deploy(deploy("deploy", sha, repo="owner/sample"))
     assert env.link.sent == [
-        {"type": "deployed", "id": env.link.sent[0]["id"], "program": "sample", "version": 4, "commit_sha": sha}
+        {"type": "deployed", "id": env.link.sent[0]["id"], "model": "sample", "version": 4, "commit_sha": sha}
     ]
-    assert env.programs.active("sample").version == 4
+    assert env.models.active("sample").version == 4
 
 
-async def test_deploy_of_a_commit_naming_another_program_is_refused(env, tmp_path):
+async def test_deploy_of_a_commit_naming_another_model_is_refused(env, tmp_path):
     repo = GitRepo(tmp_path / "src")
-    sha = repo.program(manifest("other"))
+    sha = repo.model(manifest("other"))
     repo.bare(tmp_path / "github", "owner/sample")
     await env.handler.on_deploy(deploy("deploy", sha, repo="owner/sample"))
     event = env.link.sent[0]
     assert (event["type"], event["kind"], event["data"]["code"]) == ("event", "deploy_failed", "E_MANIFEST")
-    assert env.programs.versions("other") == []
+    assert env.models.versions("other") == []
 
 
 async def test_activate_a_held_commit(env):
-    install(env.programs, manifest("sample"), DONE_PROGRAM, sha="c" * 40)
+    install(env.models, manifest("sample"), DONE_MODEL, sha="c" * 40)
     await env.handler.on_deploy(deploy("activate", "c" * 40))
     assert env.link.sent[0]["type"] == "deployed" and env.link.sent[0]["version"] == 4
 
@@ -173,7 +173,7 @@ async def test_activate_a_commit_not_held_answers_deploy_failed(env):
 
 
 async def test_remove_a_version_and_one_not_here(env):
-    found = install(env.programs, manifest("sample"), DONE_PROGRAM, sha="c" * 40)
+    found = install(env.models, manifest("sample"), DONE_MODEL, sha="c" * 40)
     await env.handler.on_deploy(deploy("remove", "c" * 40))
     await env.handler.on_deploy(deploy("remove", "c" * 40))
     assert not found.root.exists() and env.link.sent == []
@@ -181,7 +181,7 @@ async def test_remove_a_version_and_one_not_here(env):
 
 async def test_deploy_without_a_link_says_nothing(env):
     env.handler.link = None
-    install(env.programs, manifest("sample"), DONE_PROGRAM, sha="c" * 40)
+    install(env.models, manifest("sample"), DONE_MODEL, sha="c" * 40)
     await env.handler.on_deploy(deploy("activate", "c" * 40))
     await env.handler.on_deploy(deploy("activate", "d" * 40))
     assert env.link.sent == []

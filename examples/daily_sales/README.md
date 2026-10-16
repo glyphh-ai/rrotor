@@ -1,6 +1,6 @@
 # daily_sales
 
-The sample program of rrotor's `docs/architecture.md` (section 2), base edition: it runs on the base image alone.
+The sample model of rrotor's `docs/architecture.md` (section 2), base edition: it runs on the base image alone.
 
 - `start {day?}` reads `sales/<day>.csv` from its folder (yesterday by default), adds it up, converts the total to
   euros with `api.frankfurter.dev` (its one declared host), asks approval for its `write` step and writes the day to

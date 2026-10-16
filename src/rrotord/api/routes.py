@@ -17,7 +17,7 @@ from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.errors import BadRequest
 from rrotord.link.credentials import Credentials
-from rrotord.programs import Programs, Version
+from rrotord.models import Models, Version
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Run
 from rrotord.sandbox.probe import Layers
@@ -33,7 +33,7 @@ class LinkView(Protocol):
 @dataclass(slots=True)
 class Services:
     config: Config
-    programs: Programs
+    models: Models
     deployer: Deployer
     runner: Runner
     credentials: Credentials
@@ -55,7 +55,7 @@ def answer(run: Run) -> dict[str, Any]:
     result = run.result or {}
     return {
         "run_id": run.id,
-        "program": run.program,
+        "model": run.model,
         "version": run.version,
         "function": run.function,
         "status": run.status,
@@ -79,7 +79,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "link": s.link.view(),
                 "sandbox": s.layers.to_json(),
                 "approvals": len(s.runner.approvals()),
-                "programs": len(s.programs.names()),
+                "models": len(s.models.names()),
             }
         )
 
@@ -88,8 +88,8 @@ def setup(app: web.Application, s: Services) -> None:
         s.credentials.set(data.get("runtime_id"), data.get("token"))  # type: ignore[arg-type]
         return web.json_response({"runtime_id": s.credentials.runtime_id, "link": "connecting"})
 
-    async def programs(_: web.Request) -> web.Response:
-        return web.json_response({"programs": s.programs.describe()})
+    async def models(_: web.Request) -> web.Response:
+        return web.json_response({"models": s.models.describe()})
 
     async def deploy(request: web.Request) -> web.Response:
         data = await body(request)
@@ -123,16 +123,16 @@ def setup(app: web.Application, s: Services) -> None:
 
     async def call(request: web.Request) -> web.Response:
         data = await body(request)
-        program, function = data.get("program"), data.get("function", "start")
+        model, function = data.get("model"), data.get("function", "start")
         inputs, version = data.get("inputs") or {}, data.get("version")
         if (
-            not isinstance(program, str)
+            not isinstance(model, str)
             or not isinstance(function, str)
             or not isinstance(inputs, dict)
             or not (version is None or isinstance(version, int))
         ):
-            raise BadRequest("Send {program, function, inputs, version?}.")
-        run = await s.runner.call(program=program, function=function, inputs=inputs, version=version, caller="claude")
+            raise BadRequest("Send {model, function, inputs, version?}.")
+        run = await s.runner.call(model=model, function=function, inputs=inputs, version=version, caller="claude")
         return web.json_response(answer(run))
 
     async def resume(request: web.Request) -> web.Response:
@@ -156,8 +156,8 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/v1/health", health)
     app.router.add_put("/v1/runtime/token", runtime_token)
-    app.router.add_get("/v1/programs", programs)
-    app.router.add_post("/v1/programs/deploy", deploy)
+    app.router.add_get("/v1/models", models)
+    app.router.add_post("/v1/models/deploy", deploy)
     app.router.add_post("/v1/runs", call)
     app.router.add_post("/v1/runs/{run_id}/continue", resume)
     app.router.add_post("/v1/runs/{run_id}/cancel", cancel)

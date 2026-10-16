@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from rrotor.ctx import Ctx, RunState
-from rrotor.errors import NotJson, PartMissing, ProgramError, StepUndeclared, Wait
+from rrotor.errors import ModelError, NotJson, PartMissing, StepUndeclared, Wait
 from rrotor.http import Http
 
 
@@ -114,6 +114,6 @@ def test_parts_not_installed_raise_part_missing(tmp_path, name):
 
 
 def test_secrets_are_not_built(tmp_path):
-    with pytest.raises(ProgramError) as caught:
+    with pytest.raises(ModelError) as caught:
         _ = make(tmp_path).secrets
     assert caught.value.code == "E_NOT_BUILT"

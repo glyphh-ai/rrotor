@@ -1,5 +1,5 @@
 """The seccomp filter every run gets, built with libseccomp (through ctypes, no Python binding) and handed to
-`bwrap --seccomp <fd>` as BPF. Allow by default, refuse what a program never needs and what could break out:
+`bwrap --seccomp <fd>` as BPF. Allow by default, refuse what a model never needs and what could break out:
 namespaces, mounts, tracing, kernel modules, BPF, io_uring, keyrings, clocks; new user namespaces through clone;
 sockets other than unix, IPv4 and IPv6 (no netlink, no raw packets). clone3 answers ENOSYS so the C library falls
 back to clone, whose flags the filter can read."""

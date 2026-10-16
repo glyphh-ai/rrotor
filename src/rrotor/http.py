@@ -13,16 +13,16 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
-from rrotor.errors import ProgramError
+from rrotor.errors import ModelError
 
 USER_AGENT = "rrotor/0.1 (+https://glyphh.ai)"
 
 
-class HttpError(ProgramError):
+class HttpError(ModelError):
     code = "E_HTTP"
 
 
-class HostUndeclared(ProgramError):
+class HostUndeclared(ModelError):
     code = "E_HOST_UNDECLARED"
 
 
@@ -80,7 +80,7 @@ class Http:
         if parts.scheme != "https" or not parts.hostname:
             raise HostUndeclared(f"Only https:// addresses can be reached, not {parts.scheme or 'this'}.")
         if not host_allowed(parts.hostname, self.hosts):
-            raise HostUndeclared(f"{parts.hostname} is not in this program's hosts in glyphh.json.")
+            raise HostUndeclared(f"{parts.hostname} is not in this model's hosts in glyphh.json.")
         if params:
             query = urllib.parse.urlencode(params, doseq=True)
             url = urllib.parse.urlunsplit(parts._replace(query=f"{parts.query}&{query}" if parts.query else query))

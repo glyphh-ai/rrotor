@@ -1,4 +1,4 @@
-"""The real sandbox holds against a hostile program: bwrap, Landlock, seccomp and the egress proxy, as rrotor runs them.
+"""The real sandbox holds against a hostile model: bwrap, Landlock, seccomp and the egress proxy, as rrotor runs them.
 
 Linux only, inside the image (bwrap, libseccomp, prlimit, Python 3.13 at /usr/bin/python3.13, git, uv), with /data
 writable: `pytest -m sandbox -o addopts='' tests/sandbox`."""
@@ -16,7 +16,7 @@ import pytest
 
 import rrotor
 from rrotord.deploy import Deployer
-from rrotord.programs import Programs
+from rrotord.models import Models
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.launch import SandboxLauncher
@@ -72,8 +72,8 @@ def probe(ctx, inputs):
     checks = {
         "read_runtime_json": _try(lambda: _read(inputs["runtime_json"])),
         "read_data_runtime_json": _try(lambda: _read("/data/runtime.json")),
-        "read_other_program": _try(lambda: os.listdir(inputs["other_files"])),
-        "write_program": _try(lambda: _write("/program/owned.txt")),
+        "read_other_model": _try(lambda: os.listdir(inputs["other_files"])),
+        "write_model": _try(lambda: _write("/model/owned.txt")),
         "write_own_folder": _try(lambda: _write(str(ctx.files / "mine.txt"))),
         "local_api": _try(lambda: _connect("127.0.0.1", 7777)),
         "direct_internet": _try(lambda: _connect("1.1.1.1", 443)),
@@ -90,7 +90,7 @@ def probe(ctx, inputs):
 @dataclass
 class Box:
     root: Path
-    programs: Programs
+    models: Models
     runner: Runner
 
 
@@ -100,32 +100,32 @@ async def box() -> AsyncIterator[Box]:
     assert layers.ready, layers.why()
     root = Path(tempfile.mkdtemp(prefix="sandbox-test-", dir="/data"))
     (root / "runtime.json").write_text(f'{{"token": "{token()}"}}')
-    programs = Programs(root)
-    deployer = Deployer(programs, Path(tempfile.mkdtemp(prefix="rr-deploy-")))
+    models = Models(root)
+    deployer = Deployer(models, Path(tempfile.mkdtemp(prefix="rr-deploy-")))
     for name, source, hosts in (("hostile", HOSTILE, [DECLARED]), ("other", "def start(ctx, inputs):\n    pass\n", [])):
         repo = GitRepo(Path(tempfile.mkdtemp(prefix="rr-repo-")) / name)
         functions: dict[str, Any] = {"probe": {}} if name == "hostile" else {"start": {}}
-        sha = repo.program(manifest(name, functions=functions, hosts=hosts), source, **{"files/seed.txt": "seed"})
+        sha = repo.model(manifest(name, functions=functions, hosts=hosts), source, **{"files/seed.txt": "seed"})
         await deployer.from_bundle(repo.bundle(repo.path.parent / f"{name}.bundle"), sha)
     runner = Runner(
-        programs=programs,
+        models=models,
         records=Records(root),
         proxy=EgressProxy(Path(tempfile.mkdtemp(prefix="rr-proxy-", dir="/tmp"))),
         launcher=SandboxLauncher(),
         sdk=Path(rrotor.__file__).parent,
         layers=layers,
     )
-    yield Box(root, programs, runner)
+    yield Box(root, models, runner)
     await runner.shutdown()
 
 
 async def checks(box: Box) -> dict[str, Any]:
     inputs = {
         "runtime_json": str(box.root / "runtime.json"),
-        "other_files": str(box.programs.files("other")),
+        "other_files": str(box.models.files("other")),
         "host": DECLARED,
     }
-    run = await box.runner.call(program="hostile", function="probe", inputs=inputs)
+    run = await box.runner.call(model="hostile", function="probe", inputs=inputs)
     assert run.status == "done", run.result
     data: dict[str, Any] = run.result["data"]  # type: ignore[index]
     return data
@@ -135,10 +135,10 @@ async def test_files_outside_its_own_folder_cannot_be_reached(box):
     found = await checks(box)
     assert found["read_runtime_json"] == "blocked"
     assert found["read_data_runtime_json"] == "blocked"
-    assert found["read_other_program"] == "blocked"
-    assert found["write_program"] == "blocked"
+    assert found["read_other_model"] == "blocked"
+    assert found["write_model"] == "blocked"
     assert found["write_own_folder"] == "open"
-    assert (box.programs.files("hostile") / "mine.txt").read_text() == "owned"
+    assert (box.models.files("hostile") / "mine.txt").read_text() == "owned"
 
 
 async def test_the_network_is_only_the_proxy(box):

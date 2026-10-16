@@ -1,4 +1,4 @@
-"""Shared fakes and helpers: git repos of sample programs, a launcher with no sandbox, and small stand-ins."""
+"""Shared fakes and helpers: git repos of sample models, a launcher with no sandbox, and small stand-ins."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 
 import rrotor
 from rrotord import manifest as manifests
-from rrotord.programs import Programs, Version
+from rrotord.models import Models, Version
 from rrotord.runner.launch import Spec
 from rrotord.sandbox import bwrap
 from rrotord.sandbox.probe import Layers
@@ -29,7 +29,7 @@ GIT_ENV = {
     "GIT_COMMITTER_EMAIL": "test@example.com",
 }
 
-DONE_PROGRAM = """
+DONE_MODEL = """
 from rrotor import Result
 
 def start(ctx, inputs):
@@ -54,7 +54,7 @@ def git(cwd: Path, *args: str) -> str:
 
 
 class GitRepo:
-    """A program's repo: write files, commit, bundle."""
+    """A model's repo: write files, commit, bundle."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -73,8 +73,8 @@ class GitRepo:
         git(self.path, "commit", "-q", "--allow-empty", "-m", message)
         return git(self.path, "rev-parse", "HEAD")
 
-    def program(self, data: dict[str, Any] | None = None, source: str = DONE_PROGRAM, **files: str) -> str:
-        return self.commit({"glyphh.json": json.dumps(data or manifest()), "program.py": source, **files})
+    def model(self, data: dict[str, Any] | None = None, source: str = DONE_MODEL, **files: str) -> str:
+        return self.commit({"glyphh.json": json.dumps(data or manifest()), "model.py": source, **files})
 
     def bundle(self, out: Path) -> Path:
         git(self.path, "bundle", "create", "-q", str(out), "main")
@@ -90,18 +90,18 @@ class GitRepo:
 
 
 def install(
-    programs: Programs, data: dict[str, Any], source: str, sha: str = "a" * 40, version: int = 1, files: bool = True
+    models: Models, data: dict[str, Any], source: str, sha: str = "a" * 40, version: int = 1, files: bool = True
 ) -> Version:
     """A version on /data as a deploy leaves it, with no git and no venv (the test launcher runs the host Python)."""
     found = manifests.Manifest.model_validate(data)
-    root = programs.version_root(found.name, sha)
+    root = models.version_root(found.name, sha)
     (root / "src").mkdir(parents=True)
-    (root / "src" / "program.py").write_text(source)
+    (root / "src" / "model.py").write_text(source)
     (root / "venv").mkdir()
     if files:
-        programs.files(found.name).mkdir(parents=True, exist_ok=True)
-    made = programs.record(found.name, version, sha, found)
-    programs.activate(made)
+        models.files(found.name).mkdir(parents=True, exist_ok=True)
+    made = models.record(found.name, version, sha, found)
+    models.activate(made)
     return made
 
 
@@ -120,7 +120,7 @@ class LocalLauncher:
         return None
 
     def paths(self, mounts: bwrap.Mounts) -> dict[str, str]:
-        return {"program": str(mounts.src), "files": str(mounts.files)}
+        return {"model": str(mounts.src), "files": str(mounts.files)}
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process:
         self.specs.append(spec)

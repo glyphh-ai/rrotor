@@ -11,7 +11,7 @@ from rrotord.deploy import Deployer
 from rrotord.errors import RrotorError
 from rrotord.link import protocol as p
 from rrotord.link.client import LinkClient
-from rrotord.programs import Programs
+from rrotord.models import Models
 from rrotord.runner.engine import Runner, failed
 from rrotord.runner.record import Run
 
@@ -19,12 +19,12 @@ log = logging.getLogger("rrotor.link")
 
 
 class LinkHandler:
-    def __init__(self, programs: Programs, runner: Runner, deployer: Deployer) -> None:
-        self.programs, self.runner, self.deployer = programs, runner, deployer
+    def __init__(self, models: Models, runner: Runner, deployer: Deployer) -> None:
+        self.models, self.runner, self.deployer = models, runner, deployer
         self.link: LinkClient | None = None
 
     def deployed(self) -> list[dict[str, Any]]:
-        return self.programs.deployed()
+        return self.models.deployed()
 
     async def notify(self, run: Run) -> None:
         """A Result of a run the Cloud called goes up the link, numbered, until acknowledged."""
@@ -39,7 +39,7 @@ class LinkHandler:
     async def on_call(self, message: p.Call) -> None:
         try:
             await self.runner.call(
-                program=message.program,
+                model=message.model,
                 function=message.function,
                 inputs=message.inputs,
                 version=message.version,
@@ -73,23 +73,23 @@ class LinkHandler:
     async def on_deploy(self, message: p.Deploy) -> None:
         try:
             if message.type == "remove":
-                found = self.programs.by_sha(message.program, message.commit_sha)
+                found = self.models.by_sha(message.model, message.commit_sha)
                 if found is not None:
-                    self.programs.remove(found)
+                    self.models.remove(found)
                 return
             if message.type == "deploy" and message.repo:
                 version = await self.deployer.from_repo(
                     message.repo, message.commit_sha, message.token, message.version
                 )
-                if version.program != message.program:
-                    self.programs.remove(version)
+                if version.model != message.model:
+                    self.models.remove(version)
                     raise RrotorError(
-                        f"The commit's glyphh.json names {version.program}, not {message.program}.", code="E_MANIFEST"
+                        f"The commit's glyphh.json names {version.model}, not {message.model}.", code="E_MANIFEST"
                     )
             else:
-                version = self.deployer.held(message.program, message.commit_sha, message.version)
+                version = self.deployer.held(message.model, message.commit_sha, message.version)
         except RrotorError as err:
-            log.warning("deploy failed", extra={"program": message.program, "code": err.code})
+            log.warning("deploy failed", extra={"model": message.model, "code": err.code})
             if self.link is not None:
                 data = {
                     "version": message.version,
@@ -97,9 +97,9 @@ class LinkHandler:
                     "code": err.code,
                     "message": err.message,
                 }
-                await self.link.owe(lambda seq: p.event(seq, message.program, "deploy_failed", data))
+                await self.link.owe(lambda seq: p.event(seq, message.model, "deploy_failed", data))
             return
         if self.link is not None:
             await self.link.owe(
-                lambda _seq: p.deployed(version.program, version.version, version.commit_sha), numbered=False
+                lambda _seq: p.deployed(version.model, version.version, version.commit_sha), numbered=False
             )

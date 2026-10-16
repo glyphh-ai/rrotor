@@ -1,7 +1,7 @@
-"""Run a program in its own tests, with no sandbox: the same calls, Results and waits as in rrotor.
+"""Run a model in its own tests, with no sandbox: the same calls, Results and waits as in rrotor.
 
 from rrotor.testing import Harness, FakeHttp
-h = Harness(program, tmp_path, approvals={"start": {"write"}}, http=FakeHttp({"https://api.x/": {"ok": 1}}))
+h = Harness(model, tmp_path, approvals={"start": {"write"}}, http=FakeHttp({"https://api.x/": {"ok": 1}}))
 r = h.call("start", {"day": "2026-10-14"})   # Result needs_approval
 r = h.resume({"approved": True})               # Result done
 """
@@ -70,18 +70,18 @@ class FakeHttp(Http):
 
 
 class Harness:
-    """One run of a program module: `call`, then `resume` with each answer, as rrotor would."""
+    """One run of a model module: `call`, then `resume` with each answer, as rrotor would."""
 
     def __init__(
         self,
-        program: ModuleType,
+        model: ModuleType,
         files: Path,
         *,
         approvals: Mapping[str, set[str]] | None = None,
         http: Http | None = None,
         today: Callable[[], Any] | None = None,
     ) -> None:
-        self.program, self.files = program, files
+        self.model, self.files = model, files
         self.approvals = {k: frozenset(v) for k, v in (approvals or {}).items()}
         self.http = http or FakeHttp({})
         self.today = today
@@ -110,13 +110,13 @@ class Harness:
 
     def _run(self, answer: Any) -> Result:
         ctx = self._ctx(answer)
-        failed = lifecycle("load", getattr(self.program, "load", None), ctx)
+        failed = lifecycle("load", getattr(self.model, "load", None), ctx)
         outcome = (
-            Outcome(failed) if failed else invoke(self.function, getattr(self.program, self.function), ctx, self.inputs)
+            Outcome(failed) if failed else invoke(self.function, getattr(self.model, self.function), ctx, self.inputs)
         )
         self.pending = outcome.pending
         if not outcome.result.waiting:
-            lifecycle("end", getattr(self.program, "end", None), ctx)
+            lifecycle("end", getattr(self.model, "end", None), ctx)
             self.ended = True
         return outcome.result
 

@@ -1,5 +1,5 @@
 """The proxy's door inside the sandbox: 127.0.0.1:3128 in the run's own network namespace, each connection piped to
-the run's egress proxy, a unix socket the runner bound in. Programs' HTTPS_PROXY points here, so any library works,
+the run's egress proxy, a unix socket the runner bound in. Models' HTTPS_PROXY points here, so any library works,
 and the proxy outside decides what passes."""
 
 from __future__ import annotations

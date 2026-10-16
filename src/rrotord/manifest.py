@@ -1,5 +1,5 @@
-"""glyphh.json, the program's manifest (docs/architecture.md, 5.2): read, checked, and its functions found in
-program.py without running it (its syntax tree), since no program code runs outside the sandbox."""
+"""glyphh.json, the model's manifest (docs/architecture.md, 5.2): read, checked, and its functions found in
+model.py without running it (its syntax tree), since no model code runs outside the sandbox."""
 
 from __future__ import annotations
 
@@ -82,25 +82,25 @@ class Manifest(BaseModel):
         return self
 
     def parts(self) -> list[str]:
-        """The parts this program needs beside the base (docs/architecture.md, 10)."""
+        """The parts this model needs beside the base (docs/architecture.md, 10)."""
         return list(self.databases)
 
 
-def _defined(program: Path) -> set[str]:
+def _defined(model: Path) -> set[str]:
     try:
-        tree = ast.parse(program.read_bytes(), filename="program.py")
+        tree = ast.parse(model.read_bytes(), filename="model.py")
     except SyntaxError as err:
-        raise DeployError(f"program.py does not parse: line {err.lineno}: {err.msg}", code="E_MANIFEST") from None
+        raise DeployError(f"model.py does not parse: line {err.lineno}: {err.msg}", code="E_MANIFEST") from None
     return {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
 def read(src: Path) -> Manifest:
     """The manifest of a checked-out version, refused with E_MANIFEST and why."""
-    path, program = src / "glyphh.json", src / "program.py"
+    path, model = src / "glyphh.json", src / "model.py"
     if not path.is_file():
         raise DeployError("The commit has no glyphh.json.", code="E_MANIFEST")
-    if not program.is_file():
-        raise DeployError("The commit has no program.py.", code="E_MANIFEST")
+    if not model.is_file():
+        raise DeployError("The commit has no model.py.", code="E_MANIFEST")
     try:
         manifest = Manifest.model_validate(json.loads(path.read_text()))
     except (ValueError, ValidationError) as err:
@@ -111,9 +111,9 @@ def read(src: Path) -> Manifest:
             else str(err)
         )
         raise DeployError(f"glyphh.json is refused: {why}", code="E_MANIFEST") from None
-    missing = sorted(set(manifest.functions) - _defined(program))
+    missing = sorted(set(manifest.functions) - _defined(model))
     if missing:
-        raise DeployError(f"program.py has no function {', '.join(missing)}.", code="E_MANIFEST")
+        raise DeployError(f"model.py has no function {', '.join(missing)}.", code="E_MANIFEST")
     return manifest
 
 

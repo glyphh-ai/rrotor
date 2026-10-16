@@ -1,5 +1,5 @@
 """JSON logs on stdout, one object per line. Secrets never go in: anything that looks like a token is masked, and
-no code logs a token, a key or a program's inputs."""
+no code logs a token, a key or a model's inputs."""
 
 from __future__ import annotations
 

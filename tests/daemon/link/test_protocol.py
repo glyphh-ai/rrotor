@@ -16,7 +16,7 @@ def test_down_messages_by_type():
             "type": "call",
             "id": "c1",
             "run_id": run_id,
-            "program": "x",
+            "model": "x",
             "version": 1,
             "function": "start",
             "inputs": {},
@@ -26,7 +26,7 @@ def test_down_messages_by_type():
     assert isinstance(call, p.Call) and str(call.run_id) == run_id
     assert isinstance(p.DOWN.validate_python({"type": "continue", "run_id": run_id, "answer": 1}), p.Continue)
     assert isinstance(p.DOWN.validate_python({"type": "cancel", "run_id": run_id}), p.Cancel)
-    deploy = p.DOWN.validate_python({"type": "activate", "program": "x", "version": 2, "commit_sha": SHA})
+    deploy = p.DOWN.validate_python({"type": "activate", "model": "x", "version": 2, "commit_sha": SHA})
     assert isinstance(deploy, p.Deploy) and deploy.repo is None
     assert isinstance(p.DOWN.validate_python({"type": "secret_set"}), p.Unbuilt)
     assert isinstance(p.DOWN.validate_python({"type": "ack", "of": "m1"}), p.Ack)
@@ -35,7 +35,7 @@ def test_down_messages_by_type():
 
 def test_a_bad_message_is_refused():
     with pytest.raises(ValidationError):
-        p.DOWN.validate_python({"type": "deploy", "program": "x", "version": 1, "commit_sha": "short"})
+        p.DOWN.validate_python({"type": "deploy", "model": "x", "version": 1, "commit_sha": "short"})
 
 
 def test_up_messages():

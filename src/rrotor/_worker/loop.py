@@ -42,13 +42,13 @@ def _on_cancel(_sig: int, _frame: FrameType | None) -> None:
     raise Stop("cancelled", "E_CANCELLED")
 
 
-def import_program(folder: str) -> ModuleType:
-    path = Path(folder) / "program.py"
-    spec = importlib.util.spec_from_file_location("program", path)
+def import_model(folder: str) -> ModuleType:
+    path = Path(folder) / "model.py"
+    spec = importlib.util.spec_from_file_location("model", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"{path} cannot be loaded")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["program"] = module
+    sys.modules["model"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -122,40 +122,40 @@ class Worker:
             sink=self._sink,
         )
         try:
-            program = import_program(str(start.get("program", "/program")))
-        except BaseException as err:  # noqa: BLE001  (a program that cannot import is a failed run)
+            model = import_model(str(start.get("model", "/model")))
+        except BaseException as err:  # noqa: BLE001  (a model that cannot import is a failed run)
             self.channel.send("result", result=crash("load", err).to_json(), pending=None)
             return self._finish(None, ctx)
         seconds = float(start.get("seconds_left", 300))
-        outcome = self._timed(seconds, lambda: self._load(program, ctx), "load")
+        outcome = self._timed(seconds, lambda: self._load(model, ctx), "load")
         if outcome.result.status == "done":
-            outcome = self._timed(seconds, lambda: self._call(program, function, ctx), function)
+            outcome = self._timed(seconds, lambda: self._call(model, function, ctx), function)
         while True:
             self.channel.send("result", result=outcome.result.to_json(), pending=outcome.pending)
             message = self.inbox.get()
             if message is None or message.get("op") != "continue":
-                return self._finish(program, ctx)
+                return self._finish(model, ctx)
             ctx._state = RunState.from_json(message.get("state"))
             ctx.answer = message.get("answer")
             left = float(message.get("seconds_left", seconds))
-            outcome = self._timed(left, lambda: self._call(program, function, ctx), function)
+            outcome = self._timed(left, lambda: self._call(model, function, ctx), function)
 
     @staticmethod
-    def _load(program: ModuleType, ctx: Ctx) -> Outcome:
-        return Outcome(lifecycle("load", getattr(program, "load", None), ctx) or _DONE)
+    def _load(model: ModuleType, ctx: Ctx) -> Outcome:
+        return Outcome(lifecycle("load", getattr(model, "load", None), ctx) or _DONE)
 
     @staticmethod
-    def _call(program: ModuleType, function: str, ctx: Ctx) -> Outcome:
-        fn = getattr(program, function, None)
+    def _call(model: ModuleType, function: str, ctx: Ctx) -> Outcome:
+        fn = getattr(model, function, None)
         if function.startswith("_") or function in ("load", "end") or not callable(fn):
-            return Outcome(failure(function, "E_FUNCTION_MISSING", f"program.py has no function {function}."))
+            return Outcome(failure(function, "E_FUNCTION_MISSING", f"model.py has no function {function}."))
         return invoke(function, fn, ctx, ctx.inputs)
 
-    def _finish(self, program: ModuleType | None, ctx: Ctx | None) -> int:
-        """`end` always runs (when there is a program to end), then `ended`."""
+    def _finish(self, model: ModuleType | None, ctx: Ctx | None) -> int:
+        """`end` always runs (when there is a model to end), then `ended`."""
         result = None
-        if program is not None and ctx is not None:
-            ending = getattr(program, "end", None)
+        if model is not None and ctx is not None:
+            ending = getattr(model, "end", None)
             outcome = self._timed(30.0, lambda: Outcome(lifecycle("end", ending, ctx) or _DONE), "end")
             result = outcome.result.to_json() if outcome.result.status != "done" else None
         self.channel.send("ended", result=result)

@@ -1,4 +1,4 @@
-"""daily_sales, the base edition (docs/architecture.md, section 2): a day's sales export from the program's own
+"""daily_sales, the base edition (docs/architecture.md, section 2): a day's sales export from the model's own
 folder, added up, converted to euros with a public exchange-rate API (its one declared host), and written to its
 ledger once the person approves the `write` step."""
 
@@ -46,7 +46,7 @@ def start(ctx: Ctx, inputs: dict[str, Any]) -> Result:
     day = inputs.get("day") or ctx.yesterday()
     export = ctx.files / "sales" / f"{day}.csv"
     if not export.is_file():
-        return Result.failed("read", f"There is no sales export for {day} (sales/{day}.csv in the program's folder).")
+        return Result.failed("read", f"There is no sales export for {day} (sales/{day}.csv in the model's folder).")
     rows = _rows(export)
     total = sum((Decimal(r["amount"]) for r in rows), Decimal("0"))
     rate = Decimal(ctx.checkpoint(f"rate:{day}", lambda: _usd_to_eur(ctx)))

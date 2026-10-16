@@ -1,7 +1,7 @@
 [project]
 name = "rrotor"
 version = "0.1.0"
-description = "rrotor: Glyphh's per-person runtime. The daemon (rrotord: link client, local API, program runner, sandbox, egress proxy) and the SDK programs import (rrotor)"
+description = "rrotor: Glyphh's per-person runtime. The daemon (rrotord: link client, local API, model runner, sandbox, egress proxy) and the SDK models import (rrotor)"
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.11",

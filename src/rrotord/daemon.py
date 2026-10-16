@@ -20,7 +20,7 @@ from rrotord.link.client import LinkClient
 from rrotord.link.credentials import Credentials
 from rrotord.link.handler import LinkHandler
 from rrotord.link.outbox import Outbox
-from rrotord.programs import Programs
+from rrotord.models import Models
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
@@ -43,11 +43,11 @@ class Daemon:
 
     def __post_init__(self) -> None:
         c = self.config
-        programs = Programs(c.data)
-        self.deployer = Deployer(programs, c.run_dir / "deploy")
-        handler = LinkHandler(programs, None, self.deployer)  # type: ignore[arg-type]
+        models = Models(c.data)
+        self.deployer = Deployer(models, c.run_dir / "deploy")
+        handler = LinkHandler(models, None, self.deployer)  # type: ignore[arg-type]
         self.runner = Runner(
-            programs=programs,
+            models=models,
             records=Records(c.data),
             proxy=EgressProxy(c.run_dir / "proxy"),
             launcher=self.launcher,
@@ -77,7 +77,7 @@ class Daemon:
     def services(self) -> Services:
         return Services(
             self.config,
-            self.runner.programs,
+            self.runner.models,
             self.deployer,
             self.runner,
             self.link.credentials,

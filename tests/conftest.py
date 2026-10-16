@@ -1,4 +1,4 @@
-"""Shared fixtures: short folders for unix sockets, git repos and bundles of sample programs, restored signals."""
+"""Shared fixtures: short folders for unix sockets, git repos and bundles of sample models, restored signals."""
 
 from __future__ import annotations
 

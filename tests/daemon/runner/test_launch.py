@@ -38,7 +38,7 @@ def test_sandbox_tells_the_worker_its_landlock_rules_and_proxy():
 
 
 def test_paths_are_the_sandboxs():
-    assert SandboxLauncher().paths(MOUNTS) == {"program": "/program", "files": "/files"}
+    assert SandboxLauncher().paths(MOUNTS) == {"model": "/model", "files": "/files"}
 
 
 def test_the_launcher_interface_has_no_behaviour():

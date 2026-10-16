@@ -88,7 +88,7 @@ class Handler:
         self.calls: list[tuple[str, Any]] = []
 
     def deployed(self) -> list[dict[str, Any]]:
-        return [{"program": "x", "version": 1, "commit_sha": SHA}]
+        return [{"model": "x", "version": 1, "commit_sha": SHA}]
 
     async def on_call(self, message: p.Call) -> None:
         self.calls.append(("call", message))
@@ -187,7 +187,7 @@ async def test_it_says_hello_goes_online_and_replays_what_it_owes(tmp_path, sess
     await until(lambda: bool(cloud.of("event")))
     assert cloud.headers == [f"Bearer {secret}"]
     hello = cloud.hellos[0]
-    assert (hello["protocol"], hello["runtime_id"], hello["deployed"][0]["program"]) == (1, str(uuid.UUID(int=1)), "x")
+    assert (hello["protocol"], hello["runtime_id"], hello["deployed"][0]["model"]) == (1, str(uuid.UUID(int=1)), "x")
     assert link.client.state == "online" and link.client.attempt == 0
     await link.client.owe(lambda seq: p.result(seq, "r", {"status": "done"}, 1))
     await until(lambda: bool(cloud.of("result")))
@@ -212,7 +212,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
             {
                 "type": "call",
                 "run_id": run_id,
-                "program": "x",
+                "model": "x",
                 "version": 1,
                 "function": "start",
                 "inputs": {},
@@ -220,7 +220,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
             },
             {"type": "continue", "run_id": run_id, "answer": {"approved": True}},
             {"type": "cancel", "run_id": run_id},
-            {"type": "deploy", "program": "x", "version": 2, "commit_sha": SHA},
+            {"type": "deploy", "model": "x", "version": 2, "commit_sha": SHA},
             {"type": "secret_set"},
             {"type": "pong"},
         ):

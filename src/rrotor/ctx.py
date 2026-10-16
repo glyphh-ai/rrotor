@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
-from rrotor.errors import NotJson, PartMissing, ProgramError, StepUndeclared, Wait
+from rrotor.errors import ModelError, NotJson, PartMissing, StepUndeclared, Wait
 from rrotor.http import Http
 from rrotor.result import Result
 
@@ -51,7 +51,7 @@ Sink = Callable[[str, dict[str, Any]], None]
 
 
 class Ctx:
-    """The run's context. Programs read `inputs`, `answer` and `files`, and call the methods below."""
+    """The run's context. Models read `inputs`, `answer` and `files`, and call the methods below."""
 
     def __init__(
         self,
@@ -121,6 +121,6 @@ class Ctx:
 
     @property
     def secrets(self) -> NoReturn:
-        err = ProgramError("Secrets (ctx.secrets) come with rrotor's vault, which is not built yet.")
+        err = ModelError("Secrets (ctx.secrets) come with rrotor's vault, which is not built yet.")
         err.code = "E_NOT_BUILT"
         raise err

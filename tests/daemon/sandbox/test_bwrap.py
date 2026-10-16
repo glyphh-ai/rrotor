@@ -13,7 +13,7 @@ def after(argv: list[str], flag: str) -> list[list[str]]:
 def test_landlock_rules_without_proxy_or_data():
     rules = bwrap.landlock_rules(MOUNTS)
     assert rules["write"] == ["/files", "/tmp", "/dev"] and rules["tcp_ports"] == []
-    assert "/program" in rules["read"]  # type: ignore[operator]
+    assert "/model" in rules["read"]  # type: ignore[operator]
 
 
 def test_landlock_rules_with_proxy_and_data():
@@ -44,7 +44,7 @@ def test_command_without_proxy_binds_only_what_the_run_has():
     ]
     assert after(argv, "--ro-bind") == [
         ["/usr", "/usr"],
-        ["/d/src", "/program"],
+        ["/d/src", "/model"],
         ["/d/venv", "/venv"],
         ["/sdk/rrotor", "/opt/rrotor/rrotor"],
     ]
@@ -52,7 +52,7 @@ def test_command_without_proxy_binds_only_what_the_run_has():
     assert after(argv, "--symlink") == []
     env = dict(after(argv, "--setenv"))
     assert env["RROTOR_CHANNEL_FD"] == "9" and "HTTPS_PROXY" not in env
-    assert argv[-8:] == ["--seccomp", "7", "--chdir", "/program", "--", "/venv/bin/python", "-m", "rrotor._worker"]
+    assert argv[-8:] == ["--seccomp", "7", "--chdir", "/model", "--", "/venv/bin/python", "-m", "rrotor._worker"]
 
 
 def test_command_with_proxy_and_data():

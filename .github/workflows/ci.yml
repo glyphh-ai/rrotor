@@ -1,5 +1,5 @@
 # rrotor's checks on every push and pull request: lint, types, the tests with the 100% coverage gate, the sample
-# program's tests, the image with the sandbox tests inside it, and the WSL root filesystem.
+# model's tests, the image with the sandbox tests inside it, and the WSL root filesystem.
 # On main, with the repository variable PUBLISH_IMAGES set to true, the image is pushed to ghcr.io/glyphh-ai/rrotor
 # (multi-arch) and their digests reported. It is off until the GHCR package lets this repository write to it (an org
 # admin: the package's settings, Manage Actions access, glyphh-ai/rrotor with the Write role).
@@ -32,7 +32,7 @@ jobs:
         run: uv run mypy
       - name: Tests (100% line and branch coverage of rrotor and rrotord)
         run: uv run pytest
-      - name: The sample program's tests
+      - name: The sample model's tests
         run: uv run pytest examples/daily_sales/tests -o addopts="" -p no:cacheprovider
 
   image:

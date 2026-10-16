@@ -44,7 +44,7 @@ class Welcome(Message):
 class Call(Message):
     type: Literal["call"]
     run_id: uuid.UUID
-    program: Name
+    model: Name
     version: int
     function: Name
     inputs: dict[str, Any]
@@ -64,7 +64,7 @@ class Cancel(Message):
 
 class Deploy(Message):
     type: Literal["deploy", "activate", "remove"]
-    program: Name
+    model: Name
     version: int
     repo: str | None = None
     commit_sha: Sha
@@ -114,9 +114,9 @@ def result(seq: int, run_id: str, outcome: dict[str, Any], seconds: float) -> di
     return {"type": "result", "id": new_id(), "seq": seq, "run_id": run_id, "result": keep, "seconds": int(seconds)}
 
 
-def event(seq: int, program: str, kind: str, data: Any) -> dict[str, Any]:
-    return {"type": "event", "id": new_id(), "seq": seq, "program": program, "kind": kind, "data": data}
+def event(seq: int, model: str, kind: str, data: Any) -> dict[str, Any]:
+    return {"type": "event", "id": new_id(), "seq": seq, "model": model, "kind": kind, "data": data}
 
 
-def deployed(program: str, version: int, commit_sha: str) -> dict[str, Any]:
-    return {"type": "deployed", "id": new_id(), "program": program, "version": version, "commit_sha": commit_sha}
+def deployed(model: str, version: int, commit_sha: str) -> dict[str, Any]:
+    return {"type": "deployed", "id": new_id(), "model": model, "version": version, "commit_sha": commit_sha}

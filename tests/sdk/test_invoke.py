@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from rrotor.ctx import Ctx, RunState
-from rrotor.errors import ProgramError, Wait
+from rrotor.errors import ModelError, Wait
 from rrotor.http import Http
 from rrotor.invoke import crash, failure, invoke, lifecycle
 from rrotor.result import Result
@@ -20,18 +20,18 @@ def test_failure_carries_code_and_reason():
     }
 
 
-def test_crash_names_the_program_line():
+def test_crash_names_the_model_line():
     namespace: dict[str, object] = {}
-    exec(compile("def fail():\n    raise ValueError('bad')\n", "/program/program.py", "exec"), namespace)  # noqa: S102
+    exec(compile("def fail():\n    raise ValueError('bad')\n", "/model/model.py", "exec"), namespace)  # noqa: S102
     try:
         namespace["fail"]()  # type: ignore[operator]
     except ValueError as err:
         result = crash("start", err)
-    assert result.data["reason"] == "ValueError: bad (program.py line 2)"
+    assert result.data["reason"] == "ValueError: bad (model.py line 2)"
     assert result.data["code"] == "E_CRASH"
 
 
-def test_crash_outside_the_program_has_no_line():
+def test_crash_outside_the_model_has_no_line():
     assert crash("start", RuntimeError("x")).data["reason"] == "RuntimeError: x"
 
 
@@ -65,11 +65,11 @@ def test_invoke_a_wait_without_a_result_fails(tmp_path):
     assert invoke("start", fn, ctx(tmp_path)).result.data["code"] == "E_BAD_RESULT"
 
 
-def test_invoke_a_program_error_keeps_its_code(tmp_path):
+def test_invoke_a_model_error_keeps_its_code(tmp_path):
     def fn(c):
-        raise ProgramError("no")
+        raise ModelError("no")
 
-    assert invoke("start", fn, ctx(tmp_path)).result.data == {"reason": "no", "code": "E_PROGRAM"}
+    assert invoke("start", fn, ctx(tmp_path)).result.data == {"reason": "no", "code": "E_MODEL"}
 
 
 def test_invoke_a_crash_is_a_failed_result(tmp_path):

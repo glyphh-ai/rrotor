@@ -23,7 +23,7 @@ def now() -> str:
 @dataclass(slots=True)
 class Run:
     id: str
-    program: str
+    model: str
     version: int
     commit_sha: str
     function: str
@@ -48,7 +48,7 @@ class Run:
         """What the local API shows: never the inputs' values in a list, only on the run itself."""
         return {
             "run_id": self.id,
-            "program": self.program,
+            "model": self.model,
             "version": self.version,
             "function": self.function,
             "caller": self.caller,

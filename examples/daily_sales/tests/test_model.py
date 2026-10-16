@@ -18,8 +18,8 @@ HERE = Path(__file__).resolve().parent.parent
 RATES = "https://api.frankfurter.dev/v1/latest"
 
 
-def program() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("daily_sales_program", HERE / "program.py")
+def model() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("daily_sales_model", HERE / "model.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -36,7 +36,7 @@ def harness(folder: Path, http: FakeHttp | None = None) -> Harness:
     manifest = json.loads((HERE / "glyphh.json").read_text())
     approvals = {name: set(f.get("approvals", [])) for name, f in manifest["functions"].items()}
     rates = http or FakeHttp({RATES: {"amount": 1.0, "base": "USD", "rates": {"EUR": 0.9}}})
-    return Harness(program(), folder, approvals=approvals, http=rates, today=lambda: date(2026, 10, 15))
+    return Harness(model(), folder, approvals=approvals, http=rates, today=lambda: date(2026, 10, 15))
 
 
 def test_a_day_waits_for_approval_then_is_written(folder: Path) -> None:

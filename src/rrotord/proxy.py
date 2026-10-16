@@ -85,7 +85,7 @@ class Gate:
         if port != "443":
             return self._refuse(writer, host, f"port {port or '?'}: only 443 leaves a run")
         if not host_allowed(host, self.hosts):
-            return self._refuse(writer, host, "not in the program's hosts")
+            return self._refuse(writer, host, "not in the model's hosts")
         try:
             addresses = [a for a in await asyncio.wait_for(self.resolver(host, 443), WAIT) if public(a)]
         except (OSError, TimeoutError):
