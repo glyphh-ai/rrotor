@@ -11,6 +11,9 @@ SHA = "a" * 40
 def test_down_messages_by_type():
     run_id = str(uuid.uuid4())
     assert isinstance(p.DOWN.validate_json('{"type":"welcome"}'), p.Welcome)
+    welcome = p.DOWN.validate_python({"type": "welcome", "licence": {"payload": {"plan": "Pro"}, "signature": "s"}})
+    assert isinstance(welcome, p.Welcome) and welcome.licence is not None and welcome.licence.signature == "s"
+    assert p.DOWN.validate_python({"type": "welcome"}).licence is None  # type: ignore[union-attr]
     call = p.DOWN.validate_python(
         {
             "type": "call",

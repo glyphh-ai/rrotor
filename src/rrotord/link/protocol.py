@@ -35,10 +35,19 @@ class Limits(BaseModel):
     runtime_hours: int | None = None
 
 
+class Signed(BaseModel):
+    """The plan's licence as the server signed it: what the mod hands a local rrotor over its local API, and what a
+    hosted one, with no mod, gets in its welcome."""
+
+    payload: dict[str, Any]
+    signature: str
+
+
 class Welcome(Message):
     type: Literal["welcome"]
     accepted: bool = True
     limits: Limits = Limits()
+    licence: Signed | None = None
 
 
 class Call(Message):

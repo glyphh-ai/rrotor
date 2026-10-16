@@ -4,6 +4,7 @@ stopped."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from rrotord.daemon import Daemon
 from rrotord.errors import RrotorError
 from rrotord.runner.launch import SandboxLauncher
 from rrotord.runner.record import Run
-from tests.fakes import LocalLauncher, ready
+from tests.fakes import LocalLauncher, keys, part_archive, ready
 
 
 def config(tmp_path: Path, short_dir: Path, server: str = "http://127.0.0.1:1") -> Config:
@@ -131,3 +132,49 @@ async def test_a_part_is_fetched_by_url_and_a_refusal_is_an_error(tmp_path, shor
         if d.session is not None:
             await d.session.close()
         await server.close()
+
+
+def test_a_hosted_daemon_takes_its_credentials_from_its_config_once(tmp_path, short_dir):
+    runtime_id = str(uuid.uuid4())
+    c = Config(tmp_path / "data", "hosted", "http://127.0.0.1:1", 0, 0, None, Path(rrotor.__file__).parent, short_dir)
+    assert Daemon(c, ready()).link.credentials.token is None
+    hosted = dataclasses.replace(c, runtime_id=runtime_id, runtime_token="tok_" + "a" * 20)
+    d = Daemon(hosted, ready())
+    assert (d.link.credentials.runtime_id, d.link.credentials.token) == (runtime_id, "tok_" + "a" * 20)
+    again = Daemon(hosted, ready())  # the same credentials: nothing rewritten, the link not restarted
+    assert again.link.credentials.token == "tok_" + "a" * 20 and not again.link.credentials.changed.is_set()
+
+
+async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged(tmp_path, short_dir, caplog):
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    data, sha, sig = part_archive(tmp_path / "p", name="ada", version="3.1.0", arch="any")
+    (builtin / "ada-3.1.0-any.tar.gz").write_bytes(data)
+    (builtin / "ada-3.1.0-any.sha256").write_text(sha + "\n")
+    (builtin / "ada-3.1.0-any.sig").write_text(sig + "\n")
+    (builtin / "zeta-1.0.0-any.tar.gz").write_bytes(b"not a part")  # no .sha256 beside it
+    c = Config(
+        tmp_path / "data",
+        "hosted",
+        "http://127.0.0.1:1",
+        0,
+        0,
+        None,
+        Path(rrotor.__file__).parent,
+        short_dir,
+        release_key=keys().public_text,
+        builtin_parts=builtin,
+    )
+    d = Daemon(c, ready(), launcher=LocalLauncher())
+    with caplog.at_level("WARNING", logger="rrotor"):
+        assert d.install_builtin() == ["ada-3.1.0-any"]
+    assert "a built-in part was not installed" in caplog.text
+    assert [i.info.version for i in d.parts.installed()] == ["3.1.0"]
+    assert d.install_builtin() == []  # already there at this version
+    none = dataclasses.replace(c, builtin_parts=tmp_path / "nowhere")
+    assert Daemon(none, ready(), launcher=LocalLauncher()).install_builtin() == []
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level("INFO", logger="rrotor"):
+        await Daemon(dataclasses.replace(c, data=tmp_path / "data2"), ready(), launcher=LocalLauncher()).serve(stop)
+    assert "built-in part installed" in caplog.text

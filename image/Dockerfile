@@ -42,6 +42,14 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["rrotord"]
 
+# The hosted rrotor: the base with the Ada part built in (dist/parts, from parts/ada/build.sh for this
+# architecture), installed at boot. Its runtime id and token, and Glyphh's address, come from its machine's secrets
+# (RROTOR_RUNTIME_ID, RROTOR_RUNTIME_TOKEN, RROTOR_SERVER). Private: it carries the kernel.
+FROM base AS hosted
+COPY --chown=rrotor:rrotor dist/parts/ /opt/parts-builtin/
+ENV RROTOR_MODE=hosted
+LABEL org.opencontainers.image.description="rrotor: Glyphh's per-person runtime (hosted, with the Ada part)"
+
 # The sandbox's own tests, run inside the base image (they need bwrap, Landlock and libseccomp): CI only.
 FROM base AS sandbox-test
 USER root

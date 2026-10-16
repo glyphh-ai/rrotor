@@ -53,7 +53,7 @@ class Daemon:
         self.deployer = Deployer(models, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
         self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None)
-        handler = LinkHandler(models, None, self.deployer)  # type: ignore[arg-type]
+        handler = LinkHandler(models, None, self.deployer, self.licence)  # type: ignore[arg-type]
         self.runner = Runner(
             models=models,
             records=Records(c.data),
@@ -66,11 +66,18 @@ class Daemon:
             licence=self.licence,
         )
         handler.runner = self.runner
+        credentials = Credentials(c.data)
+        if (
+            c.runtime_id
+            and c.runtime_token
+            and (credentials.runtime_id, credentials.token) != (c.runtime_id, c.runtime_token)
+        ):
+            credentials.set(c.runtime_id, c.runtime_token)  # hosted: handed in by the machine's secrets, not a mod
         self.link = LinkClient(
             url=c.link_url,
             version=VERSION,
             mode=c.mode,
-            credentials=Credentials(c.data),
+            credentials=credentials,
             outbox=Outbox(c.data / "link"),
             handler=handler,
             connect=self._connect,
@@ -109,6 +116,30 @@ class Daemon:
             self._fetch,
         )
 
+    def install_builtin(self) -> list[str]:
+        """The parts the image carries (<name>-<version>-<arch>.tar.gz with its .sha256 and .sig beside it), each
+        installed once; a hosted rrotor has no mod to install any. Answers what was installed now."""
+        done: list[str] = []
+        folder = self.config.builtin_parts
+        if not folder.is_dir():
+            return done
+        for archive in sorted(folder.glob("*.tar.gz")):
+            stem = archive.name[: -len(".tar.gz")]
+            name, _, rest = stem.partition("-")
+            version = rest.rsplit("-", 1)[0]
+            have = self.parts.get(name)
+            if have is not None and have.info.version == version:
+                continue
+            try:
+                sha256 = (folder / f"{stem}.sha256").read_text().strip()
+                signature = (folder / f"{stem}.sig").read_text().strip()
+                self.parts.install(name, version, archive.read_bytes(), sha256, signature)
+            except (OSError, RrotorError) as err:
+                log.warning("a built-in part was not installed", extra={"part": stem, "reason": str(err)})
+                continue
+            done.append(stem)
+        return done
+
     async def _expire(self) -> None:
         while True:
             await asyncio.sleep(EXPIRE_EVERY)
@@ -118,6 +149,8 @@ class Daemon:
                 log.exception("expiring waiting runs failed")
 
     async def serve(self, stop: asyncio.Event) -> None:
+        for stem in self.install_builtin():
+            log.info("built-in part installed", extra={"part": stem})
         await self.runner.recover()
         api = web.AppRunner(make(self.services()), access_log=None)
         await api.setup()

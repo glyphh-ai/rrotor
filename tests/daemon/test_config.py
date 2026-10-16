@@ -35,6 +35,13 @@ def test_load_defaults():
     c = config.load({"RROTOR_SERVER": "http://localhost:8080", "RROTOR_MODE": "hosted"})
     assert (c.data, c.local_port, c.host_port, c.local_token_sha256) == (Path("/data"), 7777, 7777, None)
     assert c.link_url == "ws://localhost:8080/v1/runtime/link"
+    assert (c.runtime_id, c.runtime_token, c.builtin_parts) == (None, None, Path("/opt/parts-builtin"))
+
+
+def test_a_hosted_rrotor_takes_its_runtime_credentials_and_built_in_parts_from_the_environment():
+    env = {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "RROTOR_RUNTIME_ID": "r", "RROTOR_RUNTIME_TOKEN": "t"}
+    c = config.load({**env, "RROTOR_BUILTIN_PARTS": "/parts"})
+    assert (c.runtime_id, c.runtime_token, c.builtin_parts) == ("r", "t", Path("/parts"))
 
 
 def test_load_from_the_process_environment(monkeypatch):
@@ -51,6 +58,7 @@ def test_load_from_the_process_environment(monkeypatch):
         {"RROTOR_SERVER": "http://s/path", "RROTOR_LOCAL_TOKEN_SHA256": DIGEST},
         {"RROTOR_SERVER": "http://s", "RROTOR_LOCAL_TOKEN_SHA256": "XYZ"},
         {"RROTOR_SERVER": "http://s"},
+        {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "RROTOR_RUNTIME_TOKEN": "t"},
     ],
 )
 def test_load_refuses_bad_settings(env):

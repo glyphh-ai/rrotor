@@ -36,9 +36,12 @@ async def receive(ws: web.WebSocketResponse) -> dict[str, Any]:
             return data
 
 
+LICENCE = {"payload": {"plan": "Pro", "mods": {"ada": {"limits": {}}}}, "signature": "c2ln"}
+
+
 async def welcome(ws: web.WebSocketResponse, cloud: Cloud) -> None:
     cloud.hellos.append(await receive(ws))
-    await ws.send_json({"type": "welcome", "id": p.new_id()})
+    await ws.send_json({"type": "welcome", "id": p.new_id(), "licence": LICENCE})
 
 
 async def hold(ws: web.WebSocketResponse, cloud: Cloud) -> None:
@@ -89,6 +92,9 @@ class Handler:
 
     def deployed(self) -> list[dict[str, Any]]:
         return [{"model": "x", "version": 1, "commit_sha": SHA}]
+
+    async def on_welcome(self, message: p.Welcome) -> None:
+        self.calls.append(("welcome", message))
 
     async def on_call(self, message: p.Call) -> None:
         self.calls.append(("call", message))
@@ -189,6 +195,8 @@ async def test_it_says_hello_goes_online_and_replays_what_it_owes(tmp_path, sess
     hello = cloud.hellos[0]
     assert (hello["protocol"], hello["runtime_id"], hello["deployed"][0]["model"]) == (1, str(uuid.UUID(int=1)), "x")
     assert link.client.state == "online" and link.client.attempt == 0
+    welcomed = [m for kind, m in link.handler.calls if kind == "welcome"]
+    assert len(welcomed) == 1 and welcomed[0].licence is not None and welcomed[0].licence.payload == LICENCE["payload"]
     await link.client.owe(lambda seq: p.result(seq, "r", {"status": "done"}, 1))
     await until(lambda: bool(cloud.of("result")))
     assert cloud.of("result")[0]["seq"] == 2
@@ -237,8 +245,8 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
     await link.client.owe(lambda seq: p.event(seq, "x", "k", {}))
     link.start()
     await asyncio.wait_for(acked.wait(), 5)
-    await until(lambda: len(link.handler.calls) == 4)
-    assert [c[0] for c in link.handler.calls] == ["call", "continue", "cancel", "deploy"]
+    await until(lambda: len(link.handler.calls) == 5)
+    assert [c[0] for c in link.handler.calls] == ["welcome", "call", "continue", "cancel", "deploy"]
     await until(lambda: not link.client.outbox.pending)
     await until(lambda: "a message from the Cloud failed" in caplog.text)
     assert "unreadable message skipped" in caplog.text and "message not handled yet" in caplog.text

@@ -1,6 +1,7 @@
 """rrotord's settings, from its environment (set by whoever starts the container: the mod, or the hosted
-provisioning). Secrets never come through here: the runtime token is handed in over the local API, and the local
-token arrives only as its SHA-256."""
+provisioning). Locally no secret comes through here: the runtime token is handed in over the local API, and the
+local token arrives only as its SHA-256. A hosted rrotor has no mod to hand anything in: its runtime id and token
+are in its machine's secrets, and the parts it ships with are installed from the image at boot."""
 
 from __future__ import annotations
 
@@ -27,6 +28,9 @@ class Config:
     run_dir: Path  # sockets and scratch, on tmpfs
     release_key: str | None = None  # Glyphh's release public key: what signs a part
     licence_key: str | None = None  # Glyphh's licence public key: what signs the plan's licence
+    runtime_id: str | None = None  # hosted: the runtime this machine is, from its secrets
+    runtime_token: str | None = None  # hosted: its token for the link, from its secrets
+    builtin_parts: Path = Path("/opt/parts-builtin")  # parts the image carries, installed at boot
 
     @property
     def link_url(self) -> str:
@@ -46,6 +50,9 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         raise RrotorError("RROTOR_LOCAL_TOKEN_SHA256 must be 64 lowercase hex digits.", code="E_CONFIG")
     if mode == "local" and digest is None:
         raise RrotorError("A local rrotor needs RROTOR_LOCAL_TOKEN_SHA256 (its mod's local token).", code="E_CONFIG")
+    runtime_id, runtime_token = env.get("RROTOR_RUNTIME_ID") or None, env.get("RROTOR_RUNTIME_TOKEN") or None
+    if mode == "hosted" and (runtime_id is None) != (runtime_token is None):
+        raise RrotorError("A hosted rrotor takes RROTOR_RUNTIME_ID and RROTOR_RUNTIME_TOKEN together.", code="E_CONFIG")
     import rrotor
 
     port = int(env.get("RROTOR_LOCAL_PORT", "7777"))
@@ -60,4 +67,7 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         run_dir=Path(env.get("RROTOR_RUN_DIR", "/tmp/rrotor")),  # noqa: S108  (tmpfs in the container)
         release_key=env.get("RROTOR_RELEASE_PUBLIC_KEY") or None,
         licence_key=env.get("RROTOR_LICENCE_PUBLIC_KEY") or None,
+        runtime_id=runtime_id,
+        runtime_token=runtime_token,
+        builtin_parts=Path(env.get("RROTOR_BUILTIN_PARTS", "/opt/parts-builtin")),
     )

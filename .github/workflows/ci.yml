@@ -94,6 +94,39 @@ jobs:
             --build-arg VERSION="$v" -t "$repo:$v" -t "$repo:$s" --push .
           echo "base: $(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}')" >> "$GITHUB_STEP_SUMMARY"
 
+  # The hosted image: the base with the Ada part built in, for the machines the Glyphh server provisions. Pushed to
+  # ghcr.io/glyphh-ai/rrotor-hosted, a private package (it carries the kernel); the server pulls it with a registry
+  # token. Built only when the part was (both secrets set) and images are published.
+  image-hosted:
+    runs-on: ubuntu-24.04
+    needs: [image, part-ada]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rrotor-part-ada
+          path: dist/parts
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Version
+        id: v
+        run: echo "version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the hosted image (amd64 and arm64)
+        run: |
+          repo=ghcr.io/glyphh-ai/rrotor-hosted; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
+          docker buildx build -f image/Dockerfile --target hosted --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$v" -t "$repo:$v" -t "$repo:$s" --push .
+          echo "hosted: $(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}')" >> "$GITHUB_STEP_SUMMARY"
+
   # The Ada part, for both architectures: the kernel from glyphh-ai/ada-private-archive (branch kernel-spec, read
   # with ADA_KERNEL_TOKEN) and numpy, signed with RROTOR_RELEASE_KEY when it is set (else built unsigned-checked:
   # the signature step needs the key). The tarballs are kept as artifacts, and published as the release

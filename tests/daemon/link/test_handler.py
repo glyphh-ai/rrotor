@@ -12,13 +12,14 @@ import pytest
 
 import rrotor
 from rrotord.deploy import Deployer, Tools
+from rrotord.licence import Licence
 from rrotord.link import protocol as p
 from rrotord.link.handler import LinkHandler
 from rrotord.models import Models
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
-from tests.fakes import DONE_MODEL, FakeLink, GitRepo, LocalLauncher, install, manifest, ready, token
+from tests.fakes import DONE_MODEL, FakeLink, GitRepo, LocalLauncher, install, keys, manifest, ready, token
 
 WAITS = "from rrotor import Result\n\ndef start(ctx, inputs):\n    return Result.needs_input('day?')\n"
 
@@ -185,3 +186,17 @@ async def test_deploy_without_a_link_says_nothing(env):
     await env.handler.on_deploy(deploy("activate", "c" * 40))
     await env.handler.on_deploy(deploy("activate", "d" * 40))
     assert env.link.sent == []
+
+
+async def test_a_welcomes_licence_is_kept_when_it_checks_and_logged_when_it_does_not(env, tmp_path, caplog):
+    await env.handler.on_welcome(p.Welcome(type="welcome", licence=p.Signed(payload={"plan": "Pro"}, signature="x")))
+    env.handler.licence = Licence(tmp_path / "lic", keys().public)
+    await env.handler.on_welcome(p.Welcome(type="welcome"))
+    assert env.handler.licence.mods() == []
+    given = keys().licence(["ada"])
+    await env.handler.on_welcome(p.Welcome(type="welcome", licence=p.Signed(**given)))
+    assert env.handler.licence.mods() == ["ada"]
+    with caplog.at_level("WARNING", logger="rrotor.link"):
+        bad = p.Signed(payload={**given["payload"], "plan": "Team"}, signature=given["signature"])
+        await env.handler.on_welcome(p.Welcome(type="welcome", licence=bad))
+    assert "the welcome's licence was refused" in caplog.text and env.handler.licence.mods() == ["ada"]

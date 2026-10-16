@@ -26,6 +26,7 @@ log = logging.getLogger("rrotor.link")
 
 class Handler(Protocol):
     def deployed(self) -> list[dict[str, Any]]: ...
+    async def on_welcome(self, message: p.Welcome) -> None: ...
     async def on_call(self, message: p.Call) -> None: ...
     async def on_continue(self, message: p.Continue) -> None: ...
     async def on_cancel(self, message: p.Cancel) -> None: ...
@@ -158,9 +159,13 @@ class LinkClient:
             self._heard_close(msg)
             return False
         try:
-            return isinstance(p.DOWN.validate_json(msg.data), p.Welcome)
+            welcome = p.DOWN.validate_json(msg.data)
         except ValidationError:
             return False
+        if not isinstance(welcome, p.Welcome):
+            return False
+        await self.handler.on_welcome(welcome)
+        return True
 
     def _heard_close(self, msg: aiohttp.WSMessage) -> None:
         if msg.type == aiohttp.WSMsgType.CLOSE and msg.extra:

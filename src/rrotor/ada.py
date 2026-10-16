@@ -98,7 +98,7 @@ def _cap(model: Any, precedents: Any) -> None:
             raise AdaError(
                 f"This plan allows {precedents} precedents in a model; this one holds {len(model)}.",
                 code="E_LIMIT_PRECEDENTS",
-            )  # noqa: E501
+            )
         return record(*args, **kwargs)
 
     model.record = capped

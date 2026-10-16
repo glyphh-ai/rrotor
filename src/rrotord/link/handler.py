@@ -1,6 +1,6 @@
-"""What the Cloud's messages do here: a call opens a run, continue and cancel go to it, deploy, activate and remove
-change the versions. Every run the Cloud called answers its Results up the link; a deploy answers `deployed`, or an
-event `deploy_failed` (protocol 1 has no refusal of its own)."""
+"""What the Cloud's messages do here: a welcome's licence is kept, a call opens a run, continue and cancel go to it,
+deploy, activate and remove change the versions. Every run the Cloud called answers its Results up the link; a
+deploy answers `deployed`, or an event `deploy_failed` (protocol 1 has no refusal of its own)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 
 from rrotord.deploy import Deployer
 from rrotord.errors import RrotorError
+from rrotord.licence import Licence
 from rrotord.link import protocol as p
 from rrotord.link.client import LinkClient
 from rrotord.models import Models
@@ -19,12 +20,21 @@ log = logging.getLogger("rrotor.link")
 
 
 class LinkHandler:
-    def __init__(self, models: Models, runner: Runner, deployer: Deployer) -> None:
-        self.models, self.runner, self.deployer = models, runner, deployer
+    def __init__(self, models: Models, runner: Runner, deployer: Deployer, licence: Licence | None = None) -> None:
+        self.models, self.runner, self.deployer, self.licence = models, runner, deployer, licence
         self.link: LinkClient | None = None
 
     def deployed(self) -> list[dict[str, Any]]:
         return self.models.deployed()
+
+    async def on_welcome(self, message: p.Welcome) -> None:
+        """The licence the welcome carries (a hosted rrotor's only way to one) is kept when it checks out."""
+        if message.licence is None or self.licence is None:
+            return
+        try:
+            self.licence.set(message.licence.payload, message.licence.signature)
+        except RrotorError as err:
+            log.warning("the welcome's licence was refused", extra={"code": err.code, "reason": err.message})
 
     async def notify(self, run: Run) -> None:
         """A Result of a run the Cloud called goes up the link, numbered, until acknowledged."""

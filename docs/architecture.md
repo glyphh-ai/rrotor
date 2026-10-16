@@ -13,7 +13,7 @@ These come first where anything below says otherwise.
 3. **A small base image, and a part per mod.** The base: Python, Node, the model sandbox (bubblewrap, Landlock, seccomp, the egress proxy), the link client, the local API and the model runner. A mod installs its own part into rrotor (Ada: numpy and the kernel). Postgres with pgvector, MongoDB and Neo4j become parts a mod or a model asks for, not the base. Parts are versioned, come from the mod's own release, are verified, and are licensed by the plan ([Parts](#10-parts)).
 4. **rrotor has no sign-in of its own.** The mod is signed in (device flow, `~/.glyphh/install.json`); it asks the server for the runtime token (`POST /v1/runtime/local`) and hands it to rrotor at start; rrotor sends it on its outbound link; signing out the install cuts rrotor off (built on the server). A hosted rrotor gets its token from the server when it is provisioned (designed).
 5. **How Claude reaches rrotor.** Locally, **through the mods**: a mod registers tools (`$.tool.register`) and draws panels, and calls rrotor's **local API on 127.0.0.1** with a local token only the mod holds. Remotely (routines, other AI clients, a hosted rrotor), **through the Glyphh connector**, then the server, then the runtime link. rrotor serves no MCP to Claude, and no plugin carries an MCP server.
-6. **Local runtimes:** Docker, OrbStack or Apple's `container`, preferring `container` where it is present (a VM per container, the closest to the hosted Firecracker isolation). Hosted on Fly: designed only.
+6. **Local runtimes:** Docker, OrbStack or Apple's `container`, preferring `container` where it is present (a VM per container, the closest to the hosted Firecracker isolation). **Hosted on Fly:** the `hosted` image target (the base with the Ada part built in, installed at boot from `/opt/parts-builtin`), started by the Glyphh server with `RROTOR_MODE=hosted`, `RROTOR_SERVER`, and the runtime's id and token in the machine's secrets (`RROTOR_RUNTIME_ID`, `RROTOR_RUNTIME_TOKEN`); its licence arrives in `welcome`. No mod, no local API caller.
 7. **The mod installs rrotor; no separate install.** It finds a container runtime, pulls `ghcr.io/glyphh-ai/rrotor` at the version matching the mod (pinned by digest, verified), starts it with `/data` on a named volume and hands in the runtime token; updating the mod updates rrotor, and the data stays. PyPI carries only the `rrotor` model SDK. macOS: Apple's `container`, then OrbStack, then Docker; Windows: WSL2, preferably a WSL distribution of the same image (designed); Linux: Docker or Podman (designed) ([11](#11-where-rrotor-runs-and-how-it-is-installed)).
 
 ## The parts
@@ -641,7 +641,7 @@ JSON messages over the WebSocket `/v1/runtime/link`, one per frame, each with `t
 | Direction | `type` | Carries |
 |---|---|---|
 | rrotor → Cloud | `hello` | protocol 1, rrotor version, mode, runtime id, deployed versions |
-| Cloud → rrotor | `welcome` | accepted, the plan's limits for runs |
+| Cloud → rrotor | `welcome` | accepted, the plan's limits for runs, and for a hosted rrotor the plan's signed licence (`licence: {payload, signature}`, the same the mod hands a local one over `PUT /v1/licence`) |
 | Cloud → rrotor | `call` | `run_id`, model, version (or active), function, inputs, caller, clearance (0 to 1, 1 unless given) |
 | Cloud → rrotor | `continue` | `run_id`, answer |
 | Cloud → rrotor | `cancel` | `run_id` |
