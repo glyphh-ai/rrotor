@@ -8,7 +8,7 @@ Each step is marked by its state: **built** (in `glyphh-ai/server` on branch `re
 
 These come first where anything below says otherwise.
 
-1. **The product is mods, sold by subscription.** The server holds accounts, plans with per-mod limits, Stripe and the Glyphh connector; nothing about compute or models. The mods: **Workspaces** and **Drips** (no rrotor), and **Programs**, **Gateway** and **Ada**, which each need rrotor. **rrotor itself is not sold:** it is the shared runtime those three mods install into. See [The mods that use rrotor](#9-the-mods-that-use-rrotor).
+1. **The product is mods, sold by subscription.** The server holds accounts, plans with per-mod limits, Stripe and the Glyphh connector; nothing about compute or models. The mods: **Workspaces** (no rrotor), and **Programs**, **Gateway** and **Ada**, which each need rrotor. **rrotor itself is not sold:** it is the shared runtime those three mods install into. See [The mods that use rrotor](#9-the-mods-that-use-rrotor).
 2. **Gateway is a mod, never hosted by Glyphh.** It runs in the person's own rrotor (local, or wherever they host it). Models and keys are added in the mod's UI and stay in rrotor, encrypted. It serves OpenAI- and Anthropic-compatible endpoints to programs and other mods: third-party inference for them. It never routes a Claude subscription and never offers a Claude login ([Anthropic's terms](#anthropics-terms)). Designed, not built ([9.2](#92-gateway)).
 3. **Ada is a mod** that depends on rrotor as Programs does. An Ada model is a program: a repo with `spec.json` and a small program file, deployed by commit, run in the program sandbox with no network, its precedent store in a persistent per-program data folder outside git. Designed, not built ([9.3](#93-ada)).
 4. **A small base image, and a part per mod.** The base: Python, Node, the program sandbox (bubblewrap, Landlock, seccomp, the egress proxy), the link client, the local API and the program runner. Each mod installs its own part into rrotor (Programs: Chromium and profiles; Gateway: its runtime; Ada: numpy and the kernel). Postgres with pgvector, MongoDB and Neo4j become parts a mod or a program asks for, not the base. Parts are versioned, come from the mod's own release, are verified, and are licensed by the plan ([Parts](#10-parts)).
@@ -25,7 +25,7 @@ These come first where anything below says otherwise.
 |---|---|---|
 | **Person** | The user, in Claude | |
 | **Claude** | Claude Code (desktop Code tab or CLI), and Claude's routines on Anthropic's machines | Their machine; Anthropic |
-| **Mod** | The Glyphh mods (`glyphh-ai/mods`): `workspaces`, `drips`, and the three that use rrotor, `programs`, `gateway`, `ada`. Each carries the shared sign-in and licence module | Inside Claude on their machine |
+| **Mod** | The Glyphh mods (`glyphh-ai/mods`): `workspaces`, and the three that use rrotor, `programs`, `gateway`, `ada`. Each carries the shared sign-in and licence module | Inside Claude on their machine |
 | **Pane** | Claude's own browser pane | Their machine |
 | **Local rrotor** | The local runtime: the base image plus the parts its mods installed | Their machine (Apple's `container`, OrbStack or Docker) |
 | **Cloud** | The Glyphh server: API, device sign-in pages, Glyphh connector (`/mcp`), the runtime link | Glyphh's cloud |
@@ -798,14 +798,13 @@ A **part** is what a mod installs into rrotor beyond the base: Programs' Chromiu
 
 **Linux** (designed). Docker or Podman directly; the same image and arguments (plus `apparmor=unconfined` where AppArmor confines containers). Ubuntu 23.10 and later also restrict unprivileged user namespaces through AppArmor (`kernel.apparmor_restrict_unprivileged_userns=1`): bwrap then cannot bring up its loopback (`Failed RTM_NEWADDR`), so the host needs that set to 0, or an AppArmor profile that allows user namespaces for the container; rrotor's health says so rather than run without it (seen in CI on GitHub's Ubuntu 24.04).
 
-**Not every mod needs rrotor.** Workspaces and Drips are part of the base subscription and run without a VM: the Workspaces browser helper runs natively on the host as it does today, and switches its pages to rrotor's browser when rrotor is running (12). Programs, Gateway and Ada need rrotor.
+**Not every mod needs rrotor.** Workspaces is part of the base subscription and runs without a VM: the Workspaces browser helper runs natively on the host as it does today, and switches its pages to rrotor's browser when rrotor is running (12). Programs, Gateway and Ada need rrotor.
 
 ### Platforms, per mod
 
 | Mod | macOS | Windows | Linux | Needs rrotor | Host dependencies today |
 |---|---|---|---|---|---|
 | Workspaces | Works (native helper, or rrotor's browser) | To build | To build | No (rrotor's browser when present) | Node 22; Google Chrome in `/Applications`; `open`; `osascript` (the View menu, the folder chooser); `ioreg` (the machine id) |
-| Drips | Works; fullscreen needs Swift (Xcode Command Line Tools) | To build; window-only until an overlay exists | To build; window-only | No | `swift` for the fullscreen overlay; `ioreg` |
 | Programs | Works on Docker or OrbStack; Apple's `container` detected | WSL2 (designed) | Docker or Podman (designed) | Yes | A container runtime; `git` (bundles a commit); `ioreg` |
 | Gateway | Designed | Designed | Designed | Yes | As Programs |
 | Ada | Designed | Designed | Designed | Yes | As Programs |
@@ -820,7 +819,6 @@ A **part** is what a mod installs into rrotor beyond the base: Programs' Chromiu
 | `open <url>` | the shared licence module, Workspaces | `cmd /c start "" <url>` or `explorer <url>` |
 | `osascript` driving Claude's View menu, and `choose folder` | Workspaces (`desktop.ts`, the helper's folder chooser) | The View menu: a Claude command where one exists; the folder chooser: PowerShell's `FolderBrowserDialog` |
 | Google Chrome at `/Applications/Google Chrome.app` | the Workspaces helper (`chrome.mjs`) | Chrome or Edge from their install paths (`%ProgramFiles%\Google\Chrome\Application\chrome.exe`, `%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe`), or rrotor's browser |
-| The Swift overlay (`native/overlay.swift`) | Drips fullscreen | A small WebView2 app, or the window-only fallback |
 
 ## 12. The browser and the stream
 
