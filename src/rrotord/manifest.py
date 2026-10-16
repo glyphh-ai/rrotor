@@ -53,6 +53,7 @@ class Manifest(BaseModel):
     hosts: list[str] = []
     secrets: list[Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")]] = []
     databases: list[Literal["postgres", "mongodb", "neo4j"]] = []
+    needs: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,39}$")]] = []  # parts by name (Ada: ada)
     limits: Limits = Limits()
     connectors: list[str] = []
     data: bool = False
@@ -82,8 +83,9 @@ class Manifest(BaseModel):
         return self
 
     def parts(self) -> list[str]:
-        """The parts this model needs beside the base (docs/architecture.md, 10)."""
-        return list(self.databases)
+        """The parts this model needs beside the base (docs/architecture.md, 10): its databases, and the ones it
+        names (Ada's kernel), each once, in order."""
+        return list(dict.fromkeys([*self.databases, *self.needs]))
 
 
 def _defined(model: Path) -> set[str]:

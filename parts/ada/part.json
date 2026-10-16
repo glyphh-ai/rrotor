@@ -1,0 +1,9 @@
+{
+  "name": "ada",
+  "version": "3.1.0",
+  "mod": "ada",
+  "arch": "ARCH",
+  "rrotor": "0.1.0",
+  "env": { "PYTHONPATH": ["lib"] },
+  "services": []
+}

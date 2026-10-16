@@ -21,6 +21,10 @@ RUN uv pip install -q --no-cache --no-deps --python /opt/rrotord/bin/python . \
 
 FROM os AS base
 ARG VERSION=dev
+# The two public keys rrotor checks signatures with: Glyphh's release key (parts) and its licence key (the plan's
+# licence). Neither is a secret; the mod can also hand them in as environment when it starts the container.
+ARG RELEASE_PUBLIC_KEY=
+ARG LICENCE_PUBLIC_KEY=
 LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/rrotor" \
       org.opencontainers.image.description="rrotor: Glyphh's per-person runtime (base)" \
       org.opencontainers.image.version="${VERSION}"
@@ -28,7 +32,8 @@ COPY --from=build /opt/rrotord /opt/rrotord
 RUN useradd --uid 10001 --user-group --create-home --home-dir /home/rrotor --shell /usr/sbin/nologin rrotor \
  && mkdir -p /data && chown rrotor:rrotor /data
 ENV PATH=/opt/rrotord/bin:/usr/local/bin:/usr/bin:/bin \
-    RROTOR_DATA=/data RROTOR_LOCAL_PORT=7777 PYTHONDONTWRITEBYTECODE=1
+    RROTOR_DATA=/data RROTOR_LOCAL_PORT=7777 PYTHONDONTWRITEBYTECODE=1 \
+    RROTOR_RELEASE_PUBLIC_KEY=$RELEASE_PUBLIC_KEY RROTOR_LICENCE_PUBLIC_KEY=$LICENCE_PUBLIC_KEY
 USER rrotor
 VOLUME /data
 EXPOSE 7777

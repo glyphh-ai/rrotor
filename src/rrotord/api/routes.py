@@ -16,14 +16,20 @@ from rrotord import VERSION
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.errors import BadRequest
+from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
 from rrotord.models import Models, Version
+from rrotord.parts import BASE_MOD, Parts
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Run
 from rrotord.sandbox.probe import Layers
 
 BUNDLE_MAX = 64 * 1024 * 1024
 BODY_MAX = 96 * 1024 * 1024  # a bundle in base64, with room
+
+
+class Fetch(Protocol):
+    async def __call__(self, url: str) -> bytes: ...
 
 
 class LinkView(Protocol):
@@ -39,6 +45,9 @@ class Services:
     credentials: Credentials
     link: LinkView
     layers: Layers
+    parts: Parts
+    licence: Licence
+    fetch: Fetch | None = None  # downloads a part by URL; none in tests
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -78,6 +87,8 @@ def setup(app: web.Application, s: Services) -> None:
                 "runtime_id": s.credentials.runtime_id,
                 "link": s.link.view(),
                 "sandbox": s.layers.to_json(),
+                "parts": Parts.view(s.parts.installed()),
+                "licence": s.licence.view(),
                 "approvals": len(s.runner.approvals()),
                 "models": len(s.models.names()),
             }
@@ -153,6 +164,49 @@ def setup(app: web.Application, s: Services) -> None:
     async def approvals(_: web.Request) -> web.Response:
         return web.json_response({"approvals": s.runner.approvals()})
 
+    async def parts_list(_: web.Request) -> web.Response:
+        return web.json_response({"parts": Parts.view(s.parts.installed())})
+
+    async def part_install(request: web.Request) -> web.Response:
+        data = await body(request)
+        name, version, sha256, signature = (
+            data.get("name"),
+            data.get("version"),
+            data.get("sha256"),
+            data.get("signature"),
+        )
+        archive, url = data.get("archive"), data.get("url")
+        if not all(isinstance(v, str) for v in (name, version, sha256, signature)) or not (
+            isinstance(archive, str) or isinstance(url, str)
+        ):
+            raise BadRequest("Send {name, version, sha256, signature, archive (base64) | url}.")
+        if isinstance(archive, str):
+            try:
+                raw = base64.b64decode(archive, validate=True)
+            except (binascii.Error, ValueError):
+                raise BadRequest("archive is the part's tarball in base64.", code="E_PART_ARCHIVE") from None
+        elif s.fetch is None:
+            raise BadRequest("This rrotor takes a part as archive (base64), not by url.", code="E_PART_ARCHIVE")
+        else:
+            raw = await s.fetch(str(url))
+        info = Parts.read_info(raw) if raw[:2] == b"\x1f\x8b" else None
+        if info is not None and info.mod != BASE_MOD:
+            s.licence.require(info.mod)
+        installed = s.parts.install(str(name), str(version), raw, str(sha256), str(signature))
+        return web.json_response(Parts.view([installed])[0], status=201)
+
+    async def part_remove(request: web.Request) -> web.Response:
+        s.parts.remove(request.match_info["name"])
+        return web.json_response({"removed": request.match_info["name"]})
+
+    async def licence_get(_: web.Request) -> web.Response:
+        return web.json_response({"licence": s.licence.view()})
+
+    async def licence_put(request: web.Request) -> web.Response:
+        data = await body(request)
+        s.licence.set(data.get("payload"), data.get("signature"))
+        return web.json_response({"licence": s.licence.view()})
+
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/v1/health", health)
     app.router.add_put("/v1/runtime/token", runtime_token)
@@ -164,3 +218,8 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/v1/runs/{run_id}", run_status)
     app.router.add_get("/v1/runs/{run_id}/log", run_log)
     app.router.add_get("/v1/approvals", approvals)
+    app.router.add_get("/v1/parts", parts_list)
+    app.router.add_post("/v1/parts", part_install)
+    app.router.add_delete("/v1/parts/{name}", part_remove)
+    app.router.add_get("/v1/licence", licence_get)
+    app.router.add_put("/v1/licence", licence_put)

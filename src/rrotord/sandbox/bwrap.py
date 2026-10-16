@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-MODEL, VENV, SDK, FILES, DATA = "/model", "/venv", "/opt/rrotor", "/files", "/data"
+MODEL, VENV, SDK, FILES, DATA, PARTS = "/model", "/venv", "/opt/rrotor", "/files", "/data", "/opt/parts"
 PROXY_SOCKET = "/run/rrotor/proxy.sock"
 SYSTEM_RO = ("/usr", "/etc/ssl", "/etc/ca-certificates", "/etc/localtime", "/etc/alternatives")
 LINKS = (("usr/bin", "/bin"), ("usr/sbin", "/sbin"), ("usr/lib", "/lib"), ("usr/lib64", "/lib64"))
@@ -20,6 +20,8 @@ class Mounts:
     files: Path
     proxy: Path | None
     data: Path | None = None  # the model's persistent data folder, when its manifest asks
+    parts: tuple[tuple[str, Path], ...] = ()  # the parts its manifest asks for: (name, where it is installed)
+    pythonpath: tuple[str, ...] = ()  # the parts' PYTHONPATH entries, as paths inside the sandbox
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +36,7 @@ def landlock_rules(mounts: Mounts) -> dict[str, object]:
     """What the worker locks itself to, as paths inside the sandbox."""
     write = [FILES, "/tmp", "/dev"] + ([DATA] if mounts.data else [])
     return {
-        "read": [*SYSTEM_RO, MODEL, VENV, SDK, "/proc"],
+        "read": [*SYSTEM_RO, MODEL, VENV, SDK, "/proc", *(f"{PARTS}/{name}" for name, _ in mounts.parts)],
         "write": write,
         "tcp_ports": [3128] if mounts.proxy else [],
     }
@@ -100,12 +102,14 @@ def command(
     ]
     if mounts.data:
         argv += ["--bind", str(mounts.data), DATA]
+    for name, where in mounts.parts:
+        argv += ["--ro-bind", str(where), f"{PARTS}/{name}"]
     if mounts.proxy:
         argv += ["--bind", str(mounts.proxy), PROXY_SOCKET]
     env = {
         "PATH": f"{VENV}/bin:/usr/bin:/bin",
         "HOME": "/tmp",
-        "PYTHONPATH": SDK,
+        "PYTHONPATH": ":".join([SDK, *mounts.pythonpath]),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
         "PYTHONUNBUFFERED": "1",

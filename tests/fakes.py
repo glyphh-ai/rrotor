@@ -3,20 +3,38 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import importlib.util
 import json
 import os
 import secrets
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 import rrotor
 from rrotord import manifest as manifests
+from rrotord.keys import canonical
 from rrotord.models import Models, Version
 from rrotord.runner.launch import Spec
 from rrotord.sandbox import bwrap
 from rrotord.sandbox.probe import Layers
+
+
+def _load_part_script() -> Any:
+    spec = importlib.util.spec_from_file_location("part_script", Path(__file__).parent.parent / "scripts" / "part.py")
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+part = _load_part_script()
 
 GIT_ENV = {
     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -40,6 +58,59 @@ def start(ctx, inputs):
 def token() -> str:
     """A generated test token, never a real one."""
     return secrets.token_urlsafe(32)
+
+
+@dataclass(frozen=True)
+class Keys:
+    """A signing key pair made for the tests: the private half signs parts and licences, the public one is what a
+    rrotor under test is configured with."""
+
+    private: Ed25519PrivateKey
+    public: Ed25519PublicKey
+
+    @property
+    def public_text(self) -> str:
+        return base64.b64encode(self.public.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+
+    def sign(self, message: bytes) -> str:
+        return base64.b64encode(self.private.sign(message)).decode()
+
+    def licence(self, mods: list[str], expires: str = "2999-01-01T00:00:00Z", plan: str = "Pro") -> dict[str, Any]:
+        payload = {"plan": plan, "mods": {m: {"limits": {}} for m in mods}, "expires_at": expires, "install_id": "i-1"}
+        return {"payload": payload, "signature": self.sign(canonical(payload))}
+
+
+_KEYS: Keys | None = None
+
+
+def keys() -> Keys:
+    """One pair for the whole test run."""
+    global _KEYS
+    if _KEYS is None:
+        private = Ed25519PrivateKey.generate()
+        _KEYS = Keys(private, private.public_key())
+    return _KEYS
+
+
+def part_archive(
+    tmp: Path,
+    name: str = "ada",
+    version: str = "1.0.0",
+    mod: str = "ada",
+    arch: str = "arm64",
+    files: dict[str, str] | None = None,
+    **info: Any,
+) -> tuple[bytes, str, str]:
+    """A part's tarball as the build script makes it, with its SHA-256 and its signature by the test key."""
+    folder = tmp / f"part-{name}-{version}"
+    folder.mkdir(parents=True)
+    manifest = {"name": name, "version": version, "mod": mod, "arch": arch, "env": {"PYTHONPATH": ["lib"]}, **info}
+    (folder / "part.json").write_text(json.dumps(manifest))
+    for path, text in (files or {"lib/kernel.py": "VALUE = 7\n"}).items():
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_text(text)
+    data = part.tarball(folder)
+    return data, hashlib.sha256(data).hexdigest(), keys().sign(data)
 
 
 def manifest(name: str = "sample", **extra: Any) -> dict[str, Any]:
@@ -109,6 +180,13 @@ def ready() -> Layers:
     return Layers({"bubblewrap": {"ok": True, "detail": "test"}})
 
 
+def _part_folders(path: Path) -> list[str]:
+    try:
+        return list(json.loads((path / "part.json").read_text()).get("env", {}).get("PYTHONPATH", []))
+    except (OSError, ValueError):
+        return []
+
+
 class LocalLauncher:
     """The worker with no sandbox: the host's Python, the version's own folders. Tests only."""
 
@@ -126,9 +204,10 @@ class LocalLauncher:
         self.specs.append(spec)
         if self.fail is not None:
             raise self.fail
+        extra = [str(path / folder) for _, path in spec.mounts.parts for folder in _part_folders(path)]
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "PYTHONPATH": str(Path(rrotor.__file__).parent.parent),
+            "PYTHONPATH": ":".join([str(Path(rrotor.__file__).parent.parent), *extra]),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONUNBUFFERED": "1",
             "RROTOR_CHANNEL_FD": str(spec.channel_fd),

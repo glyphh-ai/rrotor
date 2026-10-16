@@ -7,6 +7,7 @@ dependencies = [
     "aiohttp>=3.11",
     "pydantic>=2.10",
     "jsonschema>=4.23",
+    "cryptography>=43",
 ]
 
 [project.scripts]

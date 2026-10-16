@@ -25,6 +25,8 @@ class Config:
     local_token_sha256: str | None
     sdk: Path  # the rrotor SDK package, mounted into every sandbox
     run_dir: Path  # sockets and scratch, on tmpfs
+    release_key: str | None = None  # Glyphh's release public key: what signs a part
+    licence_key: str | None = None  # Glyphh's licence public key: what signs the plan's licence
 
     @property
     def link_url(self) -> str:
@@ -56,4 +58,6 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         local_token_sha256=digest,
         sdk=Path(rrotor.__file__).parent,
         run_dir=Path(env.get("RROTOR_RUN_DIR", "/tmp/rrotor")),  # noqa: S108  (tmpfs in the container)
+        release_key=env.get("RROTOR_RELEASE_PUBLIC_KEY") or None,
+        licence_key=env.get("RROTOR_LICENCE_PUBLIC_KEY") or None,
     )

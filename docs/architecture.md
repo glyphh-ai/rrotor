@@ -185,10 +185,12 @@ rrotor runs models; the product that ships them is Ada, whose models are models.
 ```python
 from rrotor import Ctx, Result
 
+
 def start(ctx: Ctx, inputs: dict) -> Result:
     day = inputs.get("day") or ctx.yesterday()
-    rows = ctx.http.get("https://api.analytics.example.com/v1/sales",
-                        params={"day": day}, key=ctx.secrets["ANALYTICS_KEY"]).json()
+    rows = ctx.http.get(
+        "https://api.analytics.example.com/v1/sales", params={"day": day}, key=ctx.secrets["ANALYTICS_KEY"]
+    ).json()
     total = sum(r["amount"] for r in rows)
     ctx.db.postgres.execute("insert into daily (day, total) values (%s, %s)", day, total)
     return Result.done({"day": day, "total": total, "rows": rows})
@@ -570,6 +572,7 @@ A git repo in the person's GitHub account; a version is a commit:
 - **`hosts`, `secrets`, `databases`:** everything a run may reach; nothing undeclared exists inside the sandbox. A database is a part (`postgres`, `mongodb`, `neo4j`): a run whose part is not installed fails with `E_PART_MISSING` and names the part.
 - **`limits`:** per run, capped by the plan.
 - **`connectors`:** the Claude connectors its routine needs (written into the routine, never used by the model).
+- **`needs`:** the parts the model imports from, by name (`["ada"]`): each must be installed and in the plan, and is mounted read-only at `/opt/parts/<name>` ([10](#10-parts)).
 - **`data`:** `true` mounts the model's persistent data folder (`/data/models/<name>/data`, outside git) at `/data` in its sandbox; Ada's models use it for their precedent store.
 - A version is **immutable**: a commit, identified by its SHA. A deploy refuses a manifest whose `name` differs from the model's, an unknown key, or a function that is not in `model.py`.
 
@@ -672,6 +675,8 @@ The mods reach the local rrotor through its **local API**: HTTP on `127.0.0.1:<p
 | `GET /v1/runs/{id}` | Status, function, times, seconds, the last `Result` |
 | `GET /v1/runs/{id}/log` | The run's log lines |
 | `GET /v1/approvals` | Runs waiting for approval: run, model, step, prompt, when |
+| `GET /v1/parts`, `POST /v1/parts`, `DELETE /v1/parts/{name}` | The parts installed; install one (`{name, version, sha256, signature, archive \| url}`, checked before it is unpacked); remove one ([10](#10-parts)) |
+| `GET /v1/licence`, `PUT /v1/licence` | The plan's licence held; hand one in (`{payload, signature}`, checked with Glyphh's licence key) |
 
 **The mod's tools** (built in the Models mod before it was dropped; the Ada mod carries the same): `models_list`, `model_deploy` (a local folder at a commit, bundled by the mod; or a repo and commit), `model_call`, `model_continue`, `run_status`. A status line shows rrotor's state and the approvals waiting. Designed for later: the live panel (MCP App from the Glyphh connector, or a local page), secrets, versions and activate.
 
@@ -720,13 +725,14 @@ rrotor is not sold. One mod installs into it, Ada, its own product in the plan's
 
 ## 10. Parts
 
-A **part** is what a mod installs into rrotor beyond the base: Ada's numpy and kernel, and the database parts (Postgres with pgvector, MongoDB, Neo4j) a mod or a model asks for. Designed, not built.
+A **part** is what a mod installs into rrotor beyond the base: Ada's kernel and numpy, and the database parts (Postgres with pgvector, MongoDB, Neo4j) a mod or a model asks for. **Built** (2026-10-15): the part store, the licence gate, the routes, the mounts; the Ada part's build (`parts/ada/`, in CI). The database parts are designed.
 
-- **What a part is:** a self-contained tree built in the mod's own CI on the same Debian base (its binaries and the shared libraries they need, under its own prefix), and `part.json`: `{mod, name, version, arch, rrotor (the lowest base version it needs), sha256, services, mounts, env}`. `services` are processes the part manager runs on demand (Postgres); `mounts` are what a sandbox of a model that uses the part gets (read-only).
-- **Where it comes from:** the mod's own release (an asset of the mod's release in the marketplace, `rrotor-part-<name>-<version>-<arch>.tar.zst`), signed with Glyphh's release key (Ed25519, a different key from the licence's); the base image carries the public key. rrotor checks the signature and the SHA-256 before it unpacks anything.
-- **Install, upgrade, remove:** the mod asks over the local API (`POST /v1/parts {mod, name, version, url}`, `DELETE /v1/parts/{name}`). rrotor downloads, checks, unpacks to `/data/parts/<name>/<version>/`, and switches `/data/parts/<name>/current` in one rename; the previous version stays until the next upgrade, so a failed start rolls back. Removing a part stops its services and keeps its data (`/data/db/<name>`) unless the mod asks for it to go.
-- **Licensed by the plan:** the mod hands rrotor its signed licence (`PUT /v1/licence`); rrotor checks it with Glyphh's licence key, as the mods do, and installs or starts a part only while the licence includes its mod. A licence that expires or drops the mod stops the part's services and refuses runs that need it (`E_NOT_IN_PLAN`), keeping its data. Per-part limits (a database's size, Ada's precedents) come from the mod's limits in the same licence.
-- **A model asks for a part** in its manifest (`databases`, Ada's kernel); a run whose part is missing fails with `E_PART_MISSING` naming the part and the mod that brings it.
+- **What a part is:** a gzipped tarball with `part.json` at its top, `{name, version, mod, arch (amd64 | arm64 | any), rrotor (the lowest base version it needs), env: {PYTHONPATH: [folders]}, services}`, and its tree beside it (`lib/` for Python). `scripts/part.py build <folder>` makes one, deterministically, with its SHA-256 and its Ed25519 signature by Glyphh's release key (`RROTOR_RELEASE_KEY` in the mod's CI; `scripts/part.py keygen` makes a pair).
+- **Where it comes from:** the mod's own release: the tarball, `<name>-<version>-<arch>.tar.gz`, its `.sha256` and its `.sig`. The Ada part is built by this repo's CI (`parts/ada/build.sh`, both architectures) and carried by the Ada mod's release.
+- **Install, upgrade, remove:** the mod asks over the local API: `POST /v1/parts {name, version, sha256, signature, archive (base64) | url}`, `GET /v1/parts`, `DELETE /v1/parts/{name}`. rrotor checks the hash and the signature with the release public key it was started with (`RROTOR_RELEASE_PUBLIC_KEY`) before it unpacks anything, then the manifest (the part asked for, this architecture, this rrotor), unpacks to `/data/parts/<name>/<version>/` beside the version before, and switches `/data/parts/<name>/current` in one rename; the older version then goes. A failed install leaves the one before. Removing a part removes its folder.
+- **Licensed by the plan:** the mod hands rrotor its signed licence (`PUT /v1/licence {payload, signature}`, the server's answer as it came); rrotor checks it with Glyphh's licence key (`RROTOR_LICENCE_PUBLIC_KEY`), keeps it on `/data`, and installs a part, or runs a model that needs one, only while the licence names the part's mod (`E_NOT_IN_PLAN` says why: no licence, expired, or not in the plan). The database parts are rrotor's own (`mod: rrotor`) and need no plan.
+- **A model asks for a part** in its manifest: `databases`, and `needs` by name (`"needs": ["ada"]`). Each is mounted read-only at `/opt/parts/<name>` in its sandbox, its `env.PYTHONPATH` folders after the SDK's on `PYTHONPATH`, and Landlock lets the model read it. A run whose part is not installed fails with `E_PART_MISSING` naming the part and the mod that brings it.
+- **Health** (`GET /v1/health`) lists the parts installed and the licence held.
 
 ## 11. Where rrotor runs, and how it is installed
 
@@ -770,8 +776,8 @@ Quoted in the server's `docs/architecture.md` (checked 2026-10-14): third-party 
 - **Secrets on the hosted rrotor:** set again there (2.2), or carried from the local one encrypted to the hosted rrotor's key.
 - **The Glyphh GitHub App's permissions:** repository contents (read and write, for the person's model repos) and metadata; the person picks which repos it may reach.
 - **Per-model isolation in Neo4j:** the free edition holds one database.
-- **Part signing:** the release key's custody and rotation, and where the mods' CI builds parts.
+- **Part signing:** the release key's custody and rotation; `RROTOR_RELEASE_KEY` lives in this repo's CI for the Ada part today.
 - **Ada's limits** in the licence: `models` and `precedents` per plan (placeholders in the seed).
 - **Not yet run here:** rrotor on Apple's `container` (needs macOS 26; this build's Mac is on 14) and on OrbStack; both are detected and started by the same steps, and are to be checked on a Mac that has them. How a `container` VM reaches the host's `localhost` (the dev server) is to be confirmed there.
-- **To build next:** the part manager (install, upgrade, remove, licensed parts), the secrets vault, the live panel, the Ada mod and part, hosted rrotor on Fly, and the WSL distribution's install from the Ada mod on Windows.
+- **To build next:** the secrets vault, the live panel, the Ada mod and part, hosted rrotor on Fly, and the WSL distribution's install from the Ada mod on Windows.
 - **Publishing the image:** CI builds and tests the image on every push and exports the WSL root filesystem, but pushing to `ghcr.io/glyphh-ai/rrotor` waits for an org admin to give this repository write access to the package (its settings, Manage Actions access), then the repository variable `PUBLISH_IMAGES=true`. Until then no mod pins a digest, and a mod's `rrotor image` setting names a local build.

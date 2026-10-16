@@ -19,12 +19,14 @@ from rrotord.api.app import make
 from rrotord.api.routes import Services
 from rrotord.config import Config
 from rrotord.deploy import Deployer, Tools
+from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
 from rrotord.models import Models
+from rrotord.parts import Parts
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
-from tests.fakes import LocalLauncher, ready, token
+from tests.fakes import LocalLauncher, keys, ready, token
 
 PORT = 7777
 
@@ -45,7 +47,7 @@ class Api:
         return {"Authorization": f"Bearer {self.token}", **extra}
 
 
-def services(root: Path, sock: Path, local_token: str) -> Services:
+def services(root: Path, sock: Path, local_token: str, fetch: Any = None) -> Services:
     config = Config(
         data=root / "data",
         mode="local",
@@ -58,6 +60,8 @@ def services(root: Path, sock: Path, local_token: str) -> Services:
     )
     models = Models(config.data)
     layers = ready()
+    parts = Parts(config.data, keys().public, "arm64")
+    licence = Licence(config.data, keys().public)
     runner = Runner(
         models=models,
         records=Records(config.data),
@@ -65,18 +69,22 @@ def services(root: Path, sock: Path, local_token: str) -> Services:
         launcher=LocalLauncher(),
         sdk=config.sdk,
         layers=layers,
+        parts=parts,
+        licence=licence,
     )
     deployer = Deployer(
         models,
         root / "scratch",
         Tools(python=sys.executable, uv=shutil.which("uv") or "uv", github=f"file://{root / 'github'}"),
     )
-    return Services(config, models, deployer, runner, Credentials(config.data), LinkView(), layers)
+    return Services(
+        config, models, deployer, runner, Credentials(config.data), LinkView(), layers, parts, licence, fetch
+    )
 
 
-async def open_api(root: Path, sock: Path) -> Api:
+async def open_api(root: Path, sock: Path, fetch: Any = None) -> Api:
     secret = token()
-    s = services(root, sock, secret)
+    s = services(root, sock, secret, fetch)
     client = TestClient(TestServer(make(s)), headers={"Host": f"127.0.0.1:{PORT}"})
     await client.start_server()
     return Api(client, s, secret, root)

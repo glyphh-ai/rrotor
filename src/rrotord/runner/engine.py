@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from rrotor.ctx import RunState
-from rrotord.errors import Conflict, NotFound, Unavailable
+from rrotord.errors import Conflict, NotFound, RrotorError, Unavailable
+from rrotord.licence import Licence
 from rrotord.manifest import check_inputs
 from rrotord.models import Models, Version
+from rrotord.parts import BASE_MOD, KNOWN, Parts
 from rrotord.proxy import EgressProxy
 from rrotord.runner.launch import Launcher, Spec
 from rrotord.runner.record import WAITING, Records, Run, new_id, now
@@ -48,9 +50,12 @@ class Runner:
         layers: Layers,
         notify: Notify | None = None,
         wait_limit: float = WAIT_LIMIT,
+        parts: Parts | None = None,
+        licence: Licence | None = None,
     ) -> None:
         self.models, self.records, self.proxy, self.launcher = models, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
+        self.parts, self.licence = parts, licence
         self.notify = notify
         self.workers: dict[str, Worker] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -88,13 +93,34 @@ class Runner:
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
         async with self._lock(run.id):
-            missing = found.manifest.parts()
-            if missing:
-                reason = f"{model} needs the part{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not installed."
-                await self._finish(run, failed("parts", "E_PART_MISSING", reason))
+            refused = self._parts_refused(model, found)
+            if refused:
+                await self._finish(run, refused)
             else:
                 await self._go(run, found, None)
         return run
+
+    def _parts_refused(self, model: str, found: Version) -> dict[str, Any] | None:
+        """Why the run cannot go: a part its manifest asks for is not installed, or not in the plan."""
+        needed = found.manifest.parts()
+        if not needed:
+            return None
+        _, missing = self.parts.resolve(needed) if self.parts else ([], needed)
+        if missing:
+            brings = sorted({KNOWN.get(name, name) for name in missing})
+            reason = (
+                f"{model} needs the part{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not installed "
+                f"(from the {', '.join(brings)} mod{'s' if len(brings) > 1 else ''})."
+            )
+            return failed("parts", "E_PART_MISSING", reason)
+        for name in needed:
+            installed = self.parts.get(name) if self.parts else None
+            try:
+                if installed is not None and self.licence is not None and installed.info.mod != BASE_MOD:
+                    self.licence.require(installed.info.mod)
+            except RrotorError as err:
+                return failed("parts", err.code, err.message)
+        return None
 
     async def resume(self, run_id: str, answer: Any) -> Run:
         async with self._lock(run_id):
@@ -148,7 +174,12 @@ class Runner:
             data.mkdir(parents=True, exist_ok=True)
         hosts = frozenset(manifest.hosts)
         socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
-        mounts = bwrap.Mounts(found.src, found.venv, self.sdk, files, socket, data)
+        needed = manifest.parts()
+        part_mounts, _ = self.parts.resolve(needed) if self.parts else ([], [])
+        pythonpath = self.parts.env(needed, bwrap.PARTS) if self.parts else []
+        mounts = bwrap.Mounts(
+            found.src, found.venv, self.sdk, files, socket, data, tuple(part_mounts), tuple(pythonpath)
+        )
         limits = bwrap.Limits(manifest.limits.memory_mb, manifest.limits.seconds + 5)
         try:
             worker = await Worker.start(
