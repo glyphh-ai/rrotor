@@ -741,7 +741,7 @@ def query(ctx, inputs):
 
 ### 9.1 The Ada mod
 
-Designed, not built: signs in on the account (`shared/licence/`), installs and starts rrotor, hands it the licence and the Ada part, deploys a model from a folder at a commit, calls it and continues it, shows runs and approvals; `/ada` and the tools Claude uses. The Programs mod it is built from held the runtime half (`glyphh-ai/mods`, before 2026-10-15).
+**Built** (`glyphh-ai/mods`, `plugins/ada`): signs in on the account (`shared/licence/`), installs and starts rrotor with the two public keys in its environment, hands it the plan's licence as the server signed it (`PUT /v1/licence`, again whenever rrotor's copy is not the current one) and the Ada part (`POST /v1/parts`: from this mod's release assets by URL, or from a developer's build folder set in `/config`), deploys a model from a folder at a commit, calls it and continues it, shows runs and approvals; `/ada [start | stop | part | signin | signout]` and the tools `ada_models`, `ada_deploy`, `ada_call`, `ada_continue`, `ada_run`. The `models` limit is enforced by the mod at deploy; `precedents` by rrotor, from the licence.
 
 ## 10. Parts
 
