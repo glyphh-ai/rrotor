@@ -111,6 +111,10 @@ def command(
         "HOME": "/tmp",
         "PYTHONPATH": ":".join([SDK, *mounts.pythonpath]),
         "PYTHONDONTWRITEBYTECODE": "1",
+        # numpy's BLAS on one thread: its per-thread buffers would not fit the data limit on a many-core host
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
         "PYTHONNOUSERSITE": "1",
         "PYTHONUNBUFFERED": "1",
         "LANG": "C.UTF-8",
