@@ -69,8 +69,10 @@ class Ctx:
         home: Path | None = None,
         clearance: float = 1.0,
         caller: str = "claude",
+        limits: dict[str, Any] | None = None,
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
+        self.limits: dict[str, Any] = dict(limits or {})  # the plan's limits for the mod whose part this run uses
         self.ada: Any = None  # the Ada model, once rrotor.ada.open(ctx) has run
         self.inputs: dict[str, Any] = inputs
         self.answer: Any = answer

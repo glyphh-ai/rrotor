@@ -120,3 +120,28 @@ async def test_the_internal_operation_is_never_a_models_function(tmp_path, short
     )
     run = await plain.runner.call(model="sample", function="start", inputs={}, clearance=0.25)
     assert run.result["data"] == 0.25
+
+
+async def test_the_licences_limits_reach_the_model(tmp_path, short_dir):
+    from rrotord.keys import canonical
+
+    env, store = ada_ready(tmp_path, short_dir)
+    given = keys().licence(["ada"])
+    given["payload"]["mods"]["ada"] = {"limits": {"models": 3, "precedents": 1}}
+    given["signature"] = keys().sign(canonical(given["payload"]))
+    env.runner.licence.set(given["payload"], given["signature"])
+    tickets_version(env.models)
+    one = {"data": ticket(1, "login fails", "auth", 8), "outcome": "page oncall"}
+    two = {"data": ticket(2, "login slow", "auth", 5), "outcome": "page oncall"}
+    first = await env.runner.call(model="tickets", function="record", inputs=one)
+    assert first.result["status"] == "done"
+    second = await env.runner.call(model="tickets", function="record", inputs=two)
+    assert second.result["status"] == "failed" and second.result["data"]["code"] == "E_LIMIT_PRECEDENTS"
+    v1 = env.models.active("tickets")
+    assert env.runner._limits(v1) == {"models": 3, "precedents": 1}
+    env.runner.licence.payload = None
+    assert env.runner._limits(v1) == {}
+    env.runner.licence.payload = {**given["payload"], "mods": {"ada": {"limits": "junk"}}}
+    assert env.runner._limits(v1) == {}
+    store.remove("ada")
+    assert env.runner._limits(v1) == {}

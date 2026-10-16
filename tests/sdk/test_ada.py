@@ -118,3 +118,18 @@ def test_the_workers_internal_reencode_is_not_a_models_function(tmp_path, kernel
     (tmp_path / "spec.json").write_text(json.dumps(SPEC))
     outcome = loop.Worker._call(types.ModuleType("model"), ada.REENCODE, ctx(tmp_path, tmp_path / "data"))
     assert outcome.result.status == "done" and outcome.result.data == {"reencoded": 0}
+
+
+def test_the_plans_precedents_limit_caps_record(tmp_path, kernel):
+    (tmp_path / "spec.json").write_text(json.dumps(SPEC))
+    c = ctx(tmp_path, tmp_path / "data")
+    c.limits = {"precedents": 2, "models": 1}
+    model = ada.open(c)
+    model.record({"a": {"b": {"x": "one"}}}, "yes")
+    model.record({"a": {"b": {"x": "two"}}}, "yes")
+    with pytest.raises(ModelError, match="allows 2 precedents") as caught:
+        model.record({"a": {"b": {"x": "three"}}}, "yes")
+    assert caught.value.code == "E_LIMIT_PRECEDENTS" and len(model) == 2
+    free = ctx(tmp_path, tmp_path / "data2")
+    free.limits = {"precedents": None}
+    assert ada.open(free).record({"a": {"b": {"x": "one"}}}, "yes")

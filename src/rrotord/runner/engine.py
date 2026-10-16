@@ -179,6 +179,19 @@ class Runner:
         pythonpath = self.parts.env(needed, bwrap.PARTS) if self.parts else []
         return bwrap.Mounts(found.src, found.venv, self.sdk, files, socket, data, tuple(part_mounts), tuple(pythonpath))
 
+    def _limits(self, found: Version) -> dict[str, Any]:
+        """The plan's limits for the mods whose parts this version uses (the licence's mods.<mod>.limits), merged."""
+        out: dict[str, Any] = {}
+        if self.parts is None or self.licence is None or self.licence.payload is None:
+            return out
+        mods = self.licence.payload.get("mods") or {}
+        for name in found.manifest.parts():
+            installed = self.parts.get(name)
+            entry = mods.get(installed.info.mod) if installed else None
+            if isinstance(entry, dict) and isinstance(entry.get("limits"), dict):
+                out.update(entry["limits"])
+        return out
+
     async def maintain(self, found: Version, op: str) -> dict[str, Any]:
         """rrotor's own work in a version's sandbox (a re-encode on deploy): one call of `op`, its Result."""
         refused = self._parts_refused(found.manifest.name, found)
@@ -240,6 +253,7 @@ class Runner:
             hosts=sorted(hosts),
             clearance=run.clearance,
             caller=run.caller,
+            limits=self._limits(found),
             **self.launcher.paths(mounts),
         )
         await self._await_result(run, worker, found)

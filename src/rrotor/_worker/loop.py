@@ -125,6 +125,7 @@ class Worker:
             home=Path(start.get("model", "/model")),
             clearance=float(start.get("clearance", 1.0)),
             caller=str(start.get("caller", "claude")),
+            limits=dict(start.get("limits") or {}),
         )
         try:
             model = import_model(str(start.get("model", "/model")))

@@ -30,6 +30,11 @@ REENCODE = "__ada_reencode__"  # the maintenance operation rrotor runs in the sa
 class AdaError(ModelError):
     code = "E_ADA"
 
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        if code:
+            self.code = code
+
 
 def encoding_of(spec: dict[str, Any]) -> dict[str, Any]:
     """What a spec fixes about the store's glyphs: a change here needs a re-encode."""
@@ -77,8 +82,26 @@ def open(ctx: Ctx, *, author: str | None = None, k: int = 15, min_sim: float = 0
     except glyphh_spec.SpecError as err:
         raise AdaError(f"{SPEC} is refused: {err}") from None
     model = glyphh_spec.Model(spec, k=k, min_sim=min_sim, author=author or ctx.caller, path=str(store), tau=tau)
+    _cap(model, ctx.limits.get("precedents"))
     ctx.ada = model
     return model
+
+
+def _cap(model: Any, precedents: Any) -> None:
+    """The plan's `precedents` limit: a record past it is refused (E_LIMIT_PRECEDENTS); null or absent is unlimited."""
+    if not isinstance(precedents, int) or isinstance(precedents, bool):
+        return
+    record = model.record
+
+    def capped(*args: Any, **kwargs: Any) -> Any:
+        if len(model) >= precedents:
+            raise AdaError(
+                f"This plan allows {precedents} precedents in a model; this one holds {len(model)}.",
+                code="E_LIMIT_PRECEDENTS",
+            )  # noqa: E501
+        return record(*args, **kwargs)
+
+    model.record = capped
 
 
 def reencode(ctx: Ctx) -> int:
