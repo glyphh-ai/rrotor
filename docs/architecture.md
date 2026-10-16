@@ -145,7 +145,7 @@ sequenceDiagram
     Note over G,H: idle → Cloud stops the machine, a call → Cloud starts it (Fly starts a stopped machine in seconds)
 ```
 
-**State:** checkout and webhook built; provisioning designed, not built (hosting is design only for now). The server makes the hosted runtime's token when it provisions the machine and puts it in the machine's secrets; nobody signs in on it.
+**State:** built. The server makes the hosted runtime's token when it makes the machine (the person's first `POST /v1/runtime/start`) and puts it in the machine's environment (`RROTOR_RUNTIME_ID`, `RROTOR_RUNTIME_TOKEN`); nobody signs in on it. The licence comes in `welcome`; the Ada part is built into the hosted image.
 
 ### 1.4 The Glyphh connector: Claude and its routines allowed to call Glyphh
 
@@ -697,7 +697,7 @@ Every call above against what the server has (branch `relaunch`):
 | Identities, linking | Built |
 | Plans, mods, Stripe checkout and webhook | Built |
 | Tables: `rrotors`, `models`, `model_versions`, `deployments`, `runs`, `approvals`, `connector_grants` | Built (tables only) |
-| `/v1/runtime/link` (protocol 1; waking a stopped hosted runtime on Fly not built) | Built; rrotor's link client checked against it live (hello, welcome, deploy, call, results, approvals, continue, acks and sequence numbers) |
+| `/v1/runtime/link` (protocol 1; a stopped hosted runtime woken per call) | Built; rrotor's link client checked against it live (hello, welcome, deploy, call, results, approvals, continue, acks and sequence numbers) |
 | `/mcp` and its OAuth (the account tools) | Built |
 | Plan limits for `models` (`models`, `runs_per_day`: placeholders, TBD) | In the seed (2026-10-15, local) |
 | `/v1/models`, `/v1/runs`, `/v1/runtime`, the models tools on `/mcp` | Designed, not built |
