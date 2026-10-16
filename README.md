@@ -11,3 +11,7 @@ An Ada model is a program rrotor runs: `rrotor.ada` opens its spec and precedent
 ## Parts
 
 What a mod installs into rrotor beyond the base, signed with Glyphh's release key and licensed by the plan (`docs/architecture.md`, section 10). `scripts/part.py` builds and signs one; `parts/ada/` is the Ada part's recipe, built in CI.
+
+## Benchmarks
+
+`benchmarks/credit/`: an Ada model against an LLM and a classic model on real loan decisions, the same hold-out for all, with cost and time (2026-10-16). `benchmarks/issues/`: free-text issue triage, kept as the counter-example.
