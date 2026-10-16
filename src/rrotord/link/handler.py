@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from rrotord.access import Access
 from rrotord.deploy import Deployer
 from rrotord.errors import RrotorError
 from rrotord.licence import Licence
@@ -20,21 +21,43 @@ log = logging.getLogger("rrotor.link")
 
 
 class LinkHandler:
-    def __init__(self, models: Models, runner: Runner, deployer: Deployer, licence: Licence | None = None) -> None:
-        self.models, self.runner, self.deployer, self.licence = models, runner, deployer, licence
+    def __init__(
+        self,
+        models: Models,
+        runner: Runner,
+        deployer: Deployer,
+        licence: Licence | None = None,
+        access: Access | None = None,
+    ) -> None:
+        self.models, self.runner, self.deployer, self.licence, self.access = models, runner, deployer, licence, access
         self.link: LinkClient | None = None
 
     def deployed(self) -> list[dict[str, Any]]:
         return self.models.deployed()
 
     async def on_welcome(self, message: p.Welcome) -> None:
-        """The licence the welcome carries (a hosted rrotor's only way to one) is kept when it checks out."""
+        """The licence and the keys the welcome carries (a hosted rrotor's only way to either) are kept."""
+        if message.keys is not None and self.access is not None:
+            self.access.set_keys(message.keys)
         if message.licence is None or self.licence is None:
             return
         try:
             self.licence.set(message.licence.payload, message.licence.signature)
         except RrotorError as err:
             log.warning("the welcome's licence was refused", extra={"code": err.code, "reason": err.message})
+
+    async def on_access(self, message: p.Keys | p.Pause | p.Resume) -> None:
+        """The keys changed, or the plan's hours ran out (or came back)."""
+        if self.access is None:
+            return
+        if isinstance(message, p.Keys):
+            self.access.set_keys(message.hashes)
+        elif isinstance(message, p.Pause):
+            self.access.pause(message.reason)
+            log.warning("paused by the Cloud", extra={"reason": message.reason})
+        else:
+            self.access.resume()
+            log.info("resumed by the Cloud")
 
     async def notify(self, run: Run) -> None:
         """A Result of a run the Cloud called goes up the link, numbered, until acknowledged."""

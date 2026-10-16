@@ -12,6 +12,7 @@ import aiohttp
 from aiohttp import web
 
 from rrotord import VERSION
+from rrotord.access import Access
 from rrotord.api.app import make
 from rrotord.api.routes import Services
 from rrotord.config import Config
@@ -43,6 +44,7 @@ class Daemon:
     deployer: Deployer = field(init=False)
     parts: Parts = field(init=False)
     licence: Licence = field(init=False)
+    access: Access = field(init=False)
     runner: Runner = field(init=False)
     link: LinkClient = field(init=False)
     session: aiohttp.ClientSession | None = None
@@ -53,7 +55,8 @@ class Daemon:
         self.deployer = Deployer(models, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
         self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None)
-        handler = LinkHandler(models, None, self.deployer, self.licence)  # type: ignore[arg-type]
+        self.access = Access(c.data, c.keys_sha256)
+        handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
         self.runner = Runner(
             models=models,
             records=Records(c.data),
@@ -114,6 +117,7 @@ class Daemon:
             self.parts,
             self.licence,
             self._fetch,
+            self.access,
         )
 
     def install_builtin(self) -> list[str]:

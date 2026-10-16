@@ -1,30 +1,29 @@
-"""The local API's routes: the same operations the link carries, for the mods' tools (docs/architecture.md, 7)."""
+"""The API's routes (docs/architecture.md, 7): on loopback for a local rrotor's mod, at `<machine>.<domain>` for a
+hosted one's callers. The operations themselves are in ops.py, shared with the MCP server (mcp.py)."""
 
 from __future__ import annotations
 
 import base64
 import binascii
 import json
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol
 
 from aiohttp import web
 
 from rrotord import VERSION
+from rrotord.access import Access
+from rrotord.api import mcp, ops
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.errors import BadRequest
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
-from rrotord.models import Models, Version
+from rrotord.models import Models
 from rrotord.parts import BASE_MOD, Parts
 from rrotord.runner.engine import Runner
-from rrotord.runner.record import Run
 from rrotord.sandbox.probe import Layers
 
-BUNDLE_MAX = 64 * 1024 * 1024
 BODY_MAX = 96 * 1024 * 1024  # a bundle in base64, with room
 
 
@@ -48,6 +47,7 @@ class Services:
     parts: Parts
     licence: Licence
     fetch: Fetch | None = None  # downloads a part by URL; none in tests
+    access: Access | None = None  # hosted: the runtime keys and the pause
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -58,21 +58,6 @@ async def body(request: web.Request) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise BadRequest("The body must be a JSON object.")
     return data
-
-
-def answer(run: Run) -> dict[str, Any]:
-    result = run.result or {}
-    return {
-        "run_id": run.id,
-        "model": run.model,
-        "version": run.version,
-        "function": run.function,
-        "status": run.status,
-        "data": result.get("data"),
-        "step": result.get("step"),
-        "prompt": result.get("prompt"),
-        "seconds": round(run.seconds, 3),
-    }
 
 
 def setup(app: web.Application, s: Services) -> None:
@@ -89,6 +74,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "sandbox": s.layers.to_json(),
                 "parts": Parts.view(s.parts.installed()),
                 "licence": s.licence.view(),
+                "access": s.access.view() if s.access is not None else None,
                 "approvals": len(s.runner.approvals()),
                 "models": len(s.models.names()),
             }
@@ -103,68 +89,23 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response({"models": s.models.describe()})
 
     async def deploy(request: web.Request) -> web.Response:
-        data = await body(request)
-        commit, bundle, repo, token = data.get("commit"), data.get("bundle"), data.get("repo"), data.get("token")
-        if not isinstance(commit, str):
-            raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
-        if isinstance(bundle, str):
-            version = await deploy_bundle(bundle, commit)
-        elif isinstance(repo, str) and (token is None or isinstance(token, str)):
-            version = await s.deployer.from_repo(repo, commit, token)
-        else:
-            raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
-        return web.json_response(version.to_json(), status=201)
-
-    async def deploy_bundle(encoded: str, commit: str) -> Version:
-        try:
-            raw = base64.b64decode(encoded, validate=True)
-        except (binascii.Error, ValueError):
-            raise BadRequest("bundle is a git bundle in base64.", code="E_BUNDLE") from None
-        if len(raw) > BUNDLE_MAX:
-            raise BadRequest("The bundle is over 64 MB.", code="E_TOO_BIG")
-        folder = s.config.run_dir / "bundles"
-        folder.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=folder, suffix=".bundle", delete=False) as f:
-            f.write(raw)
-            path = Path(f.name)
-        try:
-            return await s.deployer.from_bundle(path, commit)
-        finally:
-            path.unlink(missing_ok=True)
+        return web.json_response(await ops.deploy(s, await body(request)), status=201)
 
     async def call(request: web.Request) -> web.Response:
-        data = await body(request)
-        model, function = data.get("model"), data.get("function", "start")
-        inputs, version, clearance = data.get("inputs") or {}, data.get("version"), data.get("clearance", 1.0)
-        if (
-            not isinstance(model, str)
-            or not isinstance(function, str)
-            or not isinstance(inputs, dict)
-            or not (version is None or isinstance(version, int))
-            or isinstance(clearance, bool)
-            or not isinstance(clearance, int | float)
-            or not 0 <= clearance <= 1
-        ):
-            raise BadRequest("Send {model, function, inputs, version?, clearance? (0 to 1)}.")
-        run = await s.runner.call(
-            model=model, function=function, inputs=inputs, version=version, caller="claude", clearance=float(clearance)
-        )
-        return web.json_response(answer(run))
+        return web.json_response(await ops.call(s, await body(request)))
 
     async def resume(request: web.Request) -> web.Response:
         data = await body(request)
-        run = await s.runner.resume(request.match_info["run_id"], data.get("answer"))
-        return web.json_response(answer(run))
+        return web.json_response(await ops.resume(s, request.match_info["run_id"], data.get("answer")))
 
     async def cancel(request: web.Request) -> web.Response:
-        return web.json_response(answer(await s.runner.cancel(request.match_info["run_id"])))
+        return web.json_response(await ops.cancel(s, request.match_info["run_id"]))
 
     async def run_status(request: web.Request) -> web.Response:
-        return web.json_response(s.runner.get(request.match_info["run_id"]).view())
+        return web.json_response(ops.run_status(s, request.match_info["run_id"]))
 
     async def run_log(request: web.Request) -> web.Response:
-        run = s.runner.get(request.match_info["run_id"])
-        return web.json_response({"run_id": run.id, "lines": s.runner.records.lines(run.id)})
+        return web.json_response(ops.run_log(s, request.match_info["run_id"]))
 
     async def approvals(_: web.Request) -> web.Response:
         return web.json_response({"approvals": s.runner.approvals()})
@@ -228,3 +169,4 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_delete("/v1/parts/{name}", part_remove)
     app.router.add_get("/v1/licence", licence_get)
     app.router.add_put("/v1/licence", licence_put)
+    app.router.add_post("/mcp", mcp.route(s))

@@ -31,6 +31,7 @@ class Handler(Protocol):
     async def on_continue(self, message: p.Continue) -> None: ...
     async def on_cancel(self, message: p.Cancel) -> None: ...
     async def on_deploy(self, message: p.Deploy) -> None: ...
+    async def on_access(self, message: p.Keys | p.Pause | p.Resume) -> None: ...
 
 
 Connect = Callable[[str, dict[str, str]], Awaitable[aiohttp.ClientWebSocketResponse]]
@@ -228,6 +229,8 @@ class LinkClient:
             self._spawn(self.handler.on_cancel(message))
         elif isinstance(message, p.Deploy):
             self._spawn(self.handler.on_deploy(message))
+        elif isinstance(message, p.Keys | p.Pause | p.Resume):
+            self._spawn(self.handler.on_access(message))
         elif isinstance(message, p.Unbuilt):
             log.info("message not handled yet", extra={"type": message.type, "code": "E_NOT_BUILT"})
 

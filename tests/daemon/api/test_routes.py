@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from rrotord.api import routes
+from rrotord.api import ops, routes
 from rrotord.sandbox.probe import Layers
 from tests.daemon.api.conftest import Api
 from tests.fakes import GitRepo, install, manifest, token
@@ -82,7 +82,7 @@ async def test_deploy_a_bundle_that_is_not_base64(api):
 
 
 async def test_deploy_a_bundle_too_big(api, monkeypatch):
-    monkeypatch.setattr(routes, "BUNDLE_MAX", 2)
+    monkeypatch.setattr(ops, "BUNDLE_MAX", 2)
     status, body = await send(api, "POST", "/v1/models/deploy", json={"bundle": "AAAA", "commit": "a" * 40})
     assert (status, body["error"]["code"]) == (400, "E_TOO_BIG")
 

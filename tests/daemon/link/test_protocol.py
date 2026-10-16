@@ -14,6 +14,9 @@ def test_down_messages_by_type():
     welcome = p.DOWN.validate_python({"type": "welcome", "licence": {"payload": {"plan": "Pro"}, "signature": "s"}})
     assert isinstance(welcome, p.Welcome) and welcome.licence is not None and welcome.licence.signature == "s"
     assert p.DOWN.validate_python({"type": "welcome"}).licence is None  # type: ignore[union-attr]
+    assert isinstance(p.DOWN.validate_python({"type": "keys", "hashes": ["a" * 64]}), p.Keys)
+    assert isinstance(p.DOWN.validate_python({"type": "pause"}), p.Pause)
+    assert isinstance(p.DOWN.validate_python({"type": "resume"}), p.Resume)
     call = p.DOWN.validate_python(
         {
             "type": "call",

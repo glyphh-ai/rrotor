@@ -31,6 +31,9 @@ class Config:
     runtime_id: str | None = None  # hosted: the runtime this machine is, from its secrets
     runtime_token: str | None = None  # hosted: its token for the link, from its secrets
     builtin_parts: Path = Path("/opt/parts-builtin")  # parts the image carries, installed at boot
+    public_domain: str = "glyphh.app"  # hosted and doorman: the runtimes' addresses are <machine>.<domain>
+    machine_id: str | None = None  # hosted: this machine's id (Fly's FLY_MACHINE_ID), its own address
+    keys_sha256: tuple[str, ...] = ()  # hosted: the runtime keys' SHA-256s at first; the Cloud's list after
 
     @property
     def link_url(self) -> str:
@@ -40,9 +43,9 @@ class Config:
 def load(env: Mapping[str, str] | None = None) -> Config:
     env = os.environ if env is None else env
     mode = env.get("RROTOR_MODE", "local")
-    if mode not in ("local", "hosted"):
-        raise RrotorError("RROTOR_MODE must be local or hosted.", code="E_CONFIG")
-    server = env.get("RROTOR_SERVER", "")
+    if mode not in ("local", "hosted", "doorman"):
+        raise RrotorError("RROTOR_MODE must be local, hosted or doorman.", code="E_CONFIG")
+    server = env.get("RROTOR_SERVER", "http://doorman.invalid" if mode == "doorman" else "")
     if not re.match(r"^https?://[^/\s]+$", server.rstrip("/")):
         raise RrotorError("RROTOR_SERVER must be the Glyphh server's address, http(s)://host[:port].", code="E_CONFIG")
     digest = env.get("RROTOR_LOCAL_TOKEN_SHA256") or None
@@ -53,6 +56,12 @@ def load(env: Mapping[str, str] | None = None) -> Config:
     runtime_id, runtime_token = env.get("RROTOR_RUNTIME_ID") or None, env.get("RROTOR_RUNTIME_TOKEN") or None
     if mode == "hosted" and (runtime_id is None) != (runtime_token is None):
         raise RrotorError("A hosted rrotor takes RROTOR_RUNTIME_ID and RROTOR_RUNTIME_TOKEN together.", code="E_CONFIG")
+    machine_id = env.get("RROTOR_MACHINE_ID") or env.get("FLY_MACHINE_ID") or None
+    if mode == "hosted" and machine_id is None:
+        raise RrotorError("A hosted rrotor needs its machine id (FLY_MACHINE_ID): its own address.", code="E_CONFIG")
+    keys = tuple(k.strip().lower() for k in env.get("RROTOR_KEYS_SHA256", "").split(",") if k.strip())
+    if any(not HEX64.match(k) for k in keys):
+        raise RrotorError("RROTOR_KEYS_SHA256 is a comma-separated list of SHA-256 hex digests.", code="E_CONFIG")
     import rrotor
 
     port = int(env.get("RROTOR_LOCAL_PORT", "7777"))
@@ -70,4 +79,7 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         runtime_id=runtime_id,
         runtime_token=runtime_token,
         builtin_parts=Path(env.get("RROTOR_BUILTIN_PARTS", "/opt/parts-builtin")),
+        public_domain=env.get("RROTOR_PUBLIC_DOMAIN", "glyphh.app").strip().lower().rstrip("."),
+        machine_id=machine_id.lower() if machine_id else None,
+        keys_sha256=keys,
     )

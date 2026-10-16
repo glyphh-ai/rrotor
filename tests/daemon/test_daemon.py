@@ -141,6 +141,9 @@ def test_a_hosted_daemon_takes_its_credentials_from_its_config_once(tmp_path, sh
     hosted = dataclasses.replace(c, runtime_id=runtime_id, runtime_token="tok_" + "a" * 20)
     d = Daemon(hosted, ready())
     assert (d.link.credentials.runtime_id, d.link.credentials.token) == (runtime_id, "tok_" + "a" * 20)
+    assert d.access.keys == [] and d.services().access is d.access
+    keyed = dataclasses.replace(hosted, data=tmp_path / "keyed", keys_sha256=("a" * 64,))
+    assert Daemon(keyed, ready()).access.keys == ["a" * 64]
     again = Daemon(hosted, ready())  # the same credentials: nothing rewritten, the link not restarted
     assert again.link.credentials.token == "tok_" + "a" * 20 and not again.link.credentials.changed.is_set()
 

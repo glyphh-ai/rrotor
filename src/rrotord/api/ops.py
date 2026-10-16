@@ -1,0 +1,110 @@
+"""What the API does, shared by its REST routes and its MCP tools: each takes the request's data as a dict, checks
+it, and answers a JSON-ready dict. A refusal is a RrotorError with its stable code."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import tempfile
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from rrotord.errors import BadRequest
+from rrotord.models import Version
+from rrotord.runner.record import Run
+
+if TYPE_CHECKING:
+    from rrotord.api.routes import Services
+
+BUNDLE_MAX = 64 * 1024 * 1024
+
+
+def answer(run: Run) -> dict[str, Any]:
+    result = run.result or {}
+    return {
+        "run_id": run.id,
+        "model": run.model,
+        "version": run.version,
+        "function": run.function,
+        "status": run.status,
+        "data": result.get("data"),
+        "step": result.get("step"),
+        "prompt": result.get("prompt"),
+        "seconds": round(run.seconds, 3),
+    }
+
+
+async def deploy_bundle(s: Services, encoded: str, commit: str) -> Version:
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise BadRequest("bundle is a git bundle in base64.", code="E_BUNDLE") from None
+    if len(raw) > BUNDLE_MAX:
+        raise BadRequest("The bundle is over 64 MB.", code="E_TOO_BIG")
+    folder = s.config.run_dir / "bundles"
+    folder.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=folder, suffix=".bundle", delete=False) as f:
+        f.write(raw)
+        path = Path(f.name)
+    try:
+        return await s.deployer.from_bundle(path, commit)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
+    """A version from a git bundle of the commit (base64) or from a GitHub repo at the commit."""
+    commit, bundle, repo, token = data.get("commit"), data.get("bundle"), data.get("repo"), data.get("token")
+    if not isinstance(commit, str):
+        raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
+    if isinstance(bundle, str):
+        version = await deploy_bundle(s, bundle, commit)
+    elif isinstance(repo, str) and (token is None or isinstance(token, str)):
+        version = await s.deployer.from_repo(repo, commit, token)
+    else:
+        raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
+    return version.to_json()
+
+
+async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dict[str, Any]:
+    """Open a run of a model's function; the first Result, with its data."""
+    model, function = data.get("model"), data.get("function", "start")
+    inputs, version, clearance = data.get("inputs") or {}, data.get("version"), data.get("clearance", 1.0)
+    if (
+        not isinstance(model, str)
+        or not isinstance(function, str)
+        or not isinstance(inputs, dict)
+        or not (version is None or isinstance(version, int))
+        or isinstance(clearance, bool)
+        or not isinstance(clearance, int | float)
+        or not 0 <= clearance <= 1
+    ):
+        raise BadRequest("Send {model, function, inputs, version?, clearance? (0 to 1)}.")
+    run = await s.runner.call(
+        model=model, function=function, inputs=inputs, version=version, caller=caller, clearance=float(clearance)
+    )
+    return answer(run)
+
+
+async def resume(s: Services, run_id: str, value: Any) -> dict[str, Any]:
+    return answer(await s.runner.resume(run_id, value))
+
+
+async def cancel(s: Services, run_id: str) -> dict[str, Any]:
+    return answer(await s.runner.cancel(run_id))
+
+
+def run_status(s: Services, run_id: str) -> dict[str, Any]:
+    return s.runner.get(run_id).view()
+
+
+def run_log(s: Services, run_id: str) -> dict[str, Any]:
+    run = s.runner.get(run_id)
+    return {"run_id": run.id, "lines": s.runner.records.lines(run.id)}
+
+
+def run_id_of(data: dict[str, Any]) -> str:
+    run_id = data.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise BadRequest("Send {run_id}.")
+    return run_id

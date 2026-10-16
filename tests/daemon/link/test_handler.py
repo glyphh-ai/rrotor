@@ -11,6 +11,7 @@ from typing import Any, cast
 import pytest
 
 import rrotor
+from rrotord.access import Access
 from rrotord.deploy import Deployer, Tools
 from rrotord.licence import Licence
 from rrotord.link import protocol as p
@@ -200,3 +201,17 @@ async def test_a_welcomes_licence_is_kept_when_it_checks_and_logged_when_it_does
         bad = p.Signed(payload={**given["payload"], "plan": "Team"}, signature=given["signature"])
         await env.handler.on_welcome(p.Welcome(type="welcome", licence=bad))
     assert "the welcome's licence was refused" in caplog.text and env.handler.licence.mods() == ["ada"]
+
+
+async def test_keys_and_the_pause_reach_the_access_store(env, tmp_path):
+    await env.handler.on_access(p.Keys(type="keys", hashes=["a" * 64]))  # no store: nothing
+    await env.handler.on_welcome(p.Welcome(type="welcome", keys=["a" * 64]))
+    env.handler.access = Access(tmp_path / "access")
+    await env.handler.on_welcome(p.Welcome(type="welcome", keys=["a" * 64]))
+    assert env.handler.access.keys == ["a" * 64]
+    await env.handler.on_access(p.Keys(type="keys", hashes=["b" * 64, "c" * 64]))
+    assert env.handler.access.keys == ["b" * 64, "c" * 64]
+    await env.handler.on_access(p.Pause(type="pause", reason="runtime_hours"))
+    assert env.handler.access.paused == {"reason": "runtime_hours"}
+    await env.handler.on_access(p.Resume(type="resume"))
+    assert env.handler.access.paused is None

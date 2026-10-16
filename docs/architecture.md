@@ -641,7 +641,9 @@ JSON messages over the WebSocket `/v1/runtime/link`, one per frame, each with `t
 | Direction | `type` | Carries |
 |---|---|---|
 | rrotor → Cloud | `hello` | protocol 1, rrotor version, mode, runtime id, deployed versions |
-| Cloud → rrotor | `welcome` | accepted, the plan's limits for runs, and for a hosted rrotor the plan's signed licence (`licence: {payload, signature}`, the same the mod hands a local one over `PUT /v1/licence`) |
+| Cloud → rrotor | `welcome` | accepted, the plan's limits for runs, and for a hosted rrotor the plan's signed licence (`licence: {payload, signature}`, the same the mod hands a local one over `PUT /v1/licence`) and the runtime keys' SHA-256s (`keys`, the whole list) |
+| Cloud → rrotor | `keys` | `hashes`: the runtime keys' SHA-256s, the whole list (one revoked is one gone) |
+| Cloud → rrotor | `pause` / `resume` | the plan's hosted hours are spent: refuse every call (402) until `resume` |
 | Cloud → rrotor | `call` | `run_id`, model, version (or active), function, inputs, caller, clearance (0 to 1, 1 unless given) |
 | Cloud → rrotor | `continue` | `run_id`, answer |
 | Cloud → rrotor | `cancel` | `run_id` |
@@ -662,11 +664,13 @@ JSON messages over the WebSocket `/v1/runtime/link`, one per frame, each with `t
 - **Not handled yet:** `secret_set` (the vault) is logged with `E_NOT_BUILT` and skipped; the link stays.
 - **Runs called through the local API** stay on the machine: the server has no row for them, so their results do not go up the link. Runs the Cloud calls (`call`) answer `result` up the link, with the run id the Cloud gave.
 
-## 7. The mods and the local rrotor
+## 7. The API: on loopback locally, at `<machine>.glyphh.app` hosted
 
-The mods reach the local rrotor through its **local API**: HTTP on `127.0.0.1:<port>` (rrotor listens on `:7777` inside its container; the port is published on the host's loopback only). rrotor serves no MCP: the mod registers the tools Claude sees (`$.tool.register`) and draws the panels, and each tool calls the local API.
+rrotor serves one API (and its own MCP at `POST /mcp`, below). **Locally** it is on `127.0.0.1:<port>` (rrotor listens on `:7777` inside its container; the port is published on the host's loopback only) for a mod's tools: `Authorization: Bearer <local token>`, compared by SHA-256 in constant time; `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; a request with any `Origin` is refused (no web page may call it).
 
-**Every request:** `Authorization: Bearer <local token>`, compared by SHA-256 in constant time; `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; a request with any `Origin` is refused (no web page may call it). Refusals are `{"error": {"code", "message"}}` with a stable code.
+**Hosted** it is public at the machine's own address, `https://<machine>.<domain>` (`RROTOR_PUBLIC_DOMAIN`, `glyphh.app`; the machine id from Fly's `FLY_MACHINE_ID`), behind Fly's proxy and nothing of Glyphh's: `Authorization: Bearer <runtime key>`, one of the keys whose SHA-256s rrotor holds (`/data/access.json`: from `RROTOR_KEYS_SHA256` at first, then the whole list in `welcome` and in `keys` down the link). A request for **another machine's address** is answered with `fly-replay: instance=<machine>` and Fly's proxy carries it there, starting that machine if it was stopped; the **doorman** (`RROTOR_MODE=doorman`, one always-on machine in the app) answers every request that way, so the first hop lands on it. Any other `Host` is 421 `E_HOST`. A rrotor the Cloud **paused** (`pause` down the link: the plan's hosted hours spent) answers 402 `E_LIMIT` (`limit: runtime_hours`) to everything but `/healthz` until `resume`.
+
+Refusals are `{"error": {"code", "message"}}` with a stable code.
 
 | Call | Does |
 |---|---|
@@ -683,7 +687,7 @@ The mods reach the local rrotor through its **local API**: HTTP on `127.0.0.1:<p
 | `GET /v1/parts`, `POST /v1/parts`, `DELETE /v1/parts/{name}` | The parts installed; install one (`{name, version, sha256, signature, archive \| url}`, checked before it is unpacked); remove one ([10](#10-parts)) |
 | `GET /v1/licence`, `PUT /v1/licence` | The plan's licence held; hand one in (`{payload, signature}`, checked with Glyphh's licence key) |
 
-**The mod's tools** (built in the Models mod before it was dropped; the Ada mod carries the same): `models_list`, `model_deploy` (a local folder at a commit, bundled by the mod; or a repo and commit), `model_call`, `model_continue`, `run_status`. A status line shows rrotor's state and the approvals waiting. Designed for later: the live panel (MCP App from the Glyphh connector, or a local page), secrets, versions and activate.
+**MCP, served by rrotor itself:** `POST /mcp` (Streamable HTTP, stateless, one JSON-RPC message per POST; MCP 2026-07-28 with `server/discover` and each request's `_meta` naming the version, and the earlier `initialize` revisions), behind the same gate, so Claude adds a hosted runtime as a connector with a runtime key and talks to it directly. Its tools are the API's operations (`api/ops.py`, shared with the routes): `models_list`, `model_call` (the first `Result`, with its data), `model_continue`, `model_cancel`, `run_status`, `run_log`, `approvals`, `model_deploy` (a commit of a GitHub repo). A refusal is a tool error carrying the API's `{error}`. Designed for later: the live panel, secrets, versions and activate.
 
 **Deploying goes through git:** locally the mod sends a bundle of the commit (the folder is never mounted into rrotor); for hosted runs the person pushes the commit to the model's repo, the Cloud records it (`POST /v1/models/{id}/versions`) and hands the hosted rrotor the commit and a short-lived token to fetch it.
 
@@ -758,11 +762,11 @@ A **part** is what a mod installs into rrotor beyond the base: Ada's kernel and 
 
 **The mod installs rrotor; there is no separate install** (Chris, 2026-10-15). The first mod that needs it finds a container runtime, pulls `ghcr.io/glyphh-ai/rrotor` at the version that matches the mod, **pinned by digest** (the mod carries the image's digest for each architecture, and the runtime checks the pulled image against it), starts it with `/data` on a named volume (`glyphh-rrotor-data`) and the local API on the host's loopback, and hands in the runtime token (1.2). Updating the mod pulls the new digest and replaces the container; `/data` stays. PyPI carries only the `rrotor` model SDK (and later perhaps a developer CLI), never the runtime.
 
-| | Local | Hosted (designed only) |
+| | Local | Hosted (built; the public address designed 2026-10-16) |
 |---|---|---|
 | How | The mod starts it (below, per system) | The server provisions one Fly machine and its volume, the image as the VM (Firecracker) |
 | Token | The mod's sign-in gets it (`POST /v1/runtime/local`) and hands it in | The server makes it at provisioning |
-| Reached by | Claude through the mods (local API); the Cloud through the link | The Cloud through the link: routines and other AI clients via the Glyphh connector |
+| Reached by | Claude through a mod (loopback API); the Cloud through the link | Anyone with a runtime key at `https://<machine>.glyphh.app` (REST and `/mcp`), through Fly's proxy and the doorman's replay; the Cloud only through the link (section 7) |
 | Sandbox | As section 4; on Docker and OrbStack the container needs seccomp and systempaths unconfined for bwrap; on Apple's `container` and WSL2 it is its own VM | As section 4, plus a cgroup per run |
 
 **macOS.** Apple's `container` first (macOS 26 on Apple silicon: a lightweight VM per container, the closest to the hosted Firecracker machine), then OrbStack (it answers the `docker` command through its own context), then Docker Desktop. With none of them, the mod offers to install Apple's `container`: Apple's signed installer package from its GitHub releases, which macOS installs after the person enters their password once (they approve; the mod never asks for the password itself). On a Mac older than macOS 26, or an Intel Mac, the mod points to OrbStack instead. **Built now:** detection of `container`, OrbStack and Docker, and starting rrotor on Docker or OrbStack; `container` is detected and started with the same arguments, but not tested on this build's Mac (macOS 14).

@@ -48,6 +48,25 @@ class Welcome(Message):
     accepted: bool = True
     limits: Limits = Limits()
     licence: Signed | None = None
+    keys: list[str] | None = None  # hosted: the runtime keys' SHA-256s, the whole list
+
+
+class Keys(Message):
+    """The runtime keys changed: the whole list of their SHA-256s (one revoked is one gone)."""
+
+    type: Literal["keys"]
+    hashes: list[str]
+
+
+class Pause(Message):
+    """The plan's hosted hours are spent: refuse every call (402) until `resume`."""
+
+    type: Literal["pause"]
+    reason: str | None = None
+
+
+class Resume(Message):
+    type: Literal["resume"]
 
 
 class Call(Message):
@@ -100,7 +119,10 @@ class Ack(Message):
     of: Id
 
 
-Down = Annotated[Welcome | Call | Continue | Cancel | Deploy | Unbuilt | Ping | Pong | Ack, Field(discriminator="type")]
+Down = Annotated[
+    Welcome | Call | Continue | Cancel | Deploy | Keys | Pause | Resume | Unbuilt | Ping | Pong | Ack,
+    Field(discriminator="type"),
+]
 DOWN: TypeAdapter[Down] = TypeAdapter(Down)
 
 

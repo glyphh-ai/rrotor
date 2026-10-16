@@ -109,6 +109,9 @@ class Handler:
     async def on_deploy(self, message: p.Deploy) -> None:
         self.calls.append(("deploy", message))
 
+    async def on_access(self, message: p.Keys | p.Pause | p.Resume) -> None:
+        self.calls.append((message.type, message))
+
 
 async def fast(delay: float) -> None:
     await asyncio.sleep(min(delay, 0.05))
@@ -229,6 +232,9 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
             {"type": "continue", "run_id": run_id, "answer": {"approved": True}},
             {"type": "cancel", "run_id": run_id},
             {"type": "deploy", "model": "x", "version": 2, "commit_sha": SHA},
+            {"type": "keys", "hashes": ["a" * 64]},
+            {"type": "pause", "reason": "runtime_hours"},
+            {"type": "resume"},
             {"type": "secret_set"},
             {"type": "pong"},
         ):
@@ -245,8 +251,17 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
     await link.client.owe(lambda seq: p.event(seq, "x", "k", {}))
     link.start()
     await asyncio.wait_for(acked.wait(), 5)
-    await until(lambda: len(link.handler.calls) == 5)
-    assert [c[0] for c in link.handler.calls] == ["welcome", "call", "continue", "cancel", "deploy"]
+    await until(lambda: len(link.handler.calls) == 8)
+    assert [c[0] for c in link.handler.calls] == [
+        "welcome",
+        "call",
+        "continue",
+        "cancel",
+        "deploy",
+        "keys",
+        "pause",
+        "resume",
+    ]
     await until(lambda: not link.client.outbox.pending)
     await until(lambda: "a message from the Cloud failed" in caplog.text)
     assert "unreadable message skipped" in caplog.text and "message not handled yet" in caplog.text

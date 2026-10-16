@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
+
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from rrotord.access import Access
 from rrotord.api.errors import errors
-from rrotord.api.gate import gate, same
+from rrotord.api.gate import gate, machine_of, same
 from tests.daemon.api.conftest import PORT, Api
 from tests.fakes import token
 
@@ -54,11 +57,19 @@ async def test_only_a_bearer_token_is_taken(api):
     assert await code_of(api, f"/v1/health?t={api.token}") == (401, "E_AUTH")
 
 
-async def test_without_a_local_token_nothing_is_let_in():
+def test_the_machine_a_host_names():
+    assert machine_of("3d8f1a2b3c4d5e.glyphh.app", "glyphh.app") == "3d8f1a2b3c4d5e"
+    assert machine_of("ABC123.Glyphh.App:443", "glyphh.app") == "abc123"
+    for host in ("glyphh.app", "a.b.glyphh.app", "x.glyphh.app", "3d8f1a2b3c4d5e.other.app", "-bad-.glyphh.app", ""):
+        assert machine_of(host, "glyphh.app") is None, host
+
+
+async def test_without_a_local_token_nothing_is_let_in(api):
     async def ok(_: web.Request) -> web.Response:
         return web.json_response({})
 
-    app = web.Application(middlewares=[errors, gate(None, (PORT,))])
+    config = dataclasses.replace(api.services.config, local_token_sha256=None)
+    app = web.Application(middlewares=[errors, gate(config, Access(config.data))])
     app.router.add_get("/x", ok)
     async with TestClient(TestServer(app), headers={"Host": f"127.0.0.1:{PORT}"}) as client:
         res = await client.get("/x", headers={"Authorization": f"Bearer {token()}"})

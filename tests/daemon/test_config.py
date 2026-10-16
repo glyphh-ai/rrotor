@@ -32,21 +32,33 @@ def test_load_reads_the_environment():
 
 
 def test_load_defaults():
-    c = config.load({"RROTOR_SERVER": "http://localhost:8080", "RROTOR_MODE": "hosted"})
+    c = config.load(
+        {"RROTOR_SERVER": "http://localhost:8080", "RROTOR_MODE": "hosted", "FLY_MACHINE_ID": "3D8F1A2B3C4D5E"}
+    )
     assert (c.data, c.local_port, c.host_port, c.local_token_sha256) == (Path("/data"), 7777, 7777, None)
     assert c.link_url == "ws://localhost:8080/v1/runtime/link"
     assert (c.runtime_id, c.runtime_token, c.builtin_parts) == (None, None, Path("/opt/parts-builtin"))
+    assert (c.public_domain, c.machine_id, c.keys_sha256) == ("glyphh.app", "3d8f1a2b3c4d5e", ())
 
 
 def test_a_hosted_rrotor_takes_its_runtime_credentials_and_built_in_parts_from_the_environment():
     env = {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "RROTOR_RUNTIME_ID": "r", "RROTOR_RUNTIME_TOKEN": "t"}
+    env |= {
+        "RROTOR_MACHINE_ID": "abc123",
+        "RROTOR_KEYS_SHA256": f"{'A' * 64}, {'b' * 64}",
+        "RROTOR_PUBLIC_DOMAIN": "Dev.Glyphh.App.",
+    }
     c = config.load({**env, "RROTOR_BUILTIN_PARTS": "/parts"})
     assert (c.runtime_id, c.runtime_token, c.builtin_parts) == ("r", "t", Path("/parts"))
+    assert (c.machine_id, c.keys_sha256, c.public_domain) == ("abc123", ("a" * 64, "b" * 64), "dev.glyphh.app")
+    doorman = config.load({"RROTOR_MODE": "doorman"})
+    assert (doorman.mode, doorman.server, doorman.public_domain) == ("doorman", "http://doorman.invalid", "glyphh.app")
 
 
 def test_load_from_the_process_environment(monkeypatch):
     monkeypatch.setenv("RROTOR_SERVER", "http://s")
     monkeypatch.setenv("RROTOR_MODE", "hosted")
+    monkeypatch.setenv("FLY_MACHINE_ID", "abc123")
     assert config.load().server == "http://s"
 
 
@@ -58,7 +70,9 @@ def test_load_from_the_process_environment(monkeypatch):
         {"RROTOR_SERVER": "http://s/path", "RROTOR_LOCAL_TOKEN_SHA256": DIGEST},
         {"RROTOR_SERVER": "http://s", "RROTOR_LOCAL_TOKEN_SHA256": "XYZ"},
         {"RROTOR_SERVER": "http://s"},
-        {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "RROTOR_RUNTIME_TOKEN": "t"},
+        {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "RROTOR_RUNTIME_TOKEN": "t", "FLY_MACHINE_ID": "a"},
+        {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted"},
+        {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "FLY_MACHINE_ID": "a", "RROTOR_KEYS_SHA256": "zz"},
     ],
 )
 def test_load_refuses_bad_settings(env):
