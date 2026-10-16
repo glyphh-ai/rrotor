@@ -1,5 +1,5 @@
 """One Chromium per named profile: one page per cell, each screencasting JPEG frames, input replayed over CDP, popups
-and native links by the Workspaces helper's rules (its chrome.mjs, the same behaviour in Python)."""
+and native links by the browser's rules (rules.py)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Any
 from rrotord.browser import rules
 from rrotord.browser.cdp import Cdp, CdpError
 
-WORLD = "workspaces"
+WORLD = "glyphh"
 Frame = Callable[[str, bytes, float], None]
 Emit = Callable[[dict[str, Any]], None]
 Factory = Callable[[Callable[[dict[str, Any]], None]], Cdp]

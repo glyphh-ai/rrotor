@@ -1,7 +1,6 @@
-"""The browser part on the local API: the Workspaces helper's routes (/frames, /events, /api/ops, /api/text,
-/api/favicon, and the pages as /api/browser), so its layout page can take its pages from rrotor unchanged
-(docs/architecture.md, section 12). Pages are keyed by cell; each cell's page lives in a named profile's Chromium,
-shared with programs."""
+"""The browser part on the local API: its routes (/frames, /events, /api/ops, /api/text, /api/favicon, and the pages
+as /api/browser), the stream and its frame protocol (docs/architecture.md, section 12). Pages are keyed by cell; each
+cell's page lives in a named profile's Chromium, shared with programs."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Who may call the local API: the mod that holds the local token, from this machine. Host must be this API's
 loopback address (no DNS rebinding), an Origin other than its own is refused (no web page may call it), and the token
-(Bearer; for the browser's routes also X-Token or ?t=, as the Workspaces helper takes it) is compared by its SHA-256,
+(Bearer; for the browser's routes also X-Token or ?t=) is compared by its SHA-256,
 in constant time."""
 
 from __future__ import annotations

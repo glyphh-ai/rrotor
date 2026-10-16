@@ -1,2 +1,2 @@
-"""The `browser` part: Chromium, named profiles shared by workspaces and programs, and the stream in the Workspaces
-helper's frame protocol (docs/architecture.md, section 12)."""
+"""The `browser` part: Chromium, named profiles shared by programs, and the stream in its frame protocol
+(docs/architecture.md, section 12)."""

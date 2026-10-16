@@ -1,4 +1,4 @@
-"""The browser part's state and its routes (the Workspaces helper's frame protocol), with fake profiles."""
+"""The browser part's state and its routes (its frame protocol), with fake profiles."""
 
 from __future__ import annotations
 

@@ -1,6 +1,5 @@
-"""What a page may do outside its cell, its keys and clicks, and its icons: the Workspaces helper's pure modules
-(`popups.mjs`, `input.mjs`, `favicon.mjs`), the same rules in Python. rrotor has no desktop, so a native app's link
-is never opened here: kept in panel it becomes its web client, otherwise it is ignored."""
+"""What a page may do outside its cell, its keys and clicks, and its icons, as pure rules. rrotor has no desktop, so a
+native app's link is never opened here: kept in panel it becomes its web client, otherwise it is ignored."""
 
 from __future__ import annotations
 
@@ -9,7 +8,7 @@ from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 MIN_CHROME_MAJOR, SPOOF_CHROME = 137, "140.0.0.0"
-NATIVE_BINDING = "__workspacesNative"
+NATIVE_BINDING = "__glyphhNative"
 NATIVE_LINK_SCRIPT = f"""addEventListener("click", e => {{
   const a = e.target && e.target.closest && e.target.closest("a[href]")
   if (!a || /^(https?|about|javascript|blob|data):/i.test(a.href)) return
