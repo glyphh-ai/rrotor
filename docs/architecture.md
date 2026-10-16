@@ -8,14 +8,13 @@ Each step is marked by its state: **built** (in `glyphh-ai/server` on branch `re
 
 These come first where anything below says otherwise.
 
-1. **The product is mods, sold by subscription.** The server holds accounts, plans with per-mod limits, Stripe and the Glyphh connector; nothing about compute or models. The mods: **Programs**, **Gateway** and **Ada**, which each need rrotor. **rrotor itself is not sold:** it is the shared runtime those three mods install into. See [The mods that use rrotor](#9-the-mods-that-use-rrotor).
-2. **Gateway is a mod, never hosted by Glyphh.** It runs in the person's own rrotor (local, or wherever they host it). Models and keys are added in the mod's UI and stay in rrotor, encrypted. It serves OpenAI- and Anthropic-compatible endpoints to programs and other mods: third-party inference for them. It never routes a Claude subscription and never offers a Claude login ([Anthropic's terms](#anthropics-terms)). Designed, not built ([9.2](#92-gateway)).
-3. **Ada is a mod** that depends on rrotor as Programs does. An Ada model is a program: a repo with `spec.json` and a small program file, deployed by commit, run in the program sandbox with no network, its precedent store in a persistent per-program data folder outside git. Designed, not built ([9.3](#93-ada)).
-4. **A small base image, and a part per mod.** The base: Python, Node, the program sandbox (bubblewrap, Landlock, seccomp, the egress proxy), the link client, the local API and the program runner. Each mod installs its own part into rrotor (Gateway: its runtime; Ada: numpy and the kernel). Postgres with pgvector, MongoDB and Neo4j become parts a mod or a program asks for, not the base. Parts are versioned, come from the mod's own release, are verified, and are licensed by the plan ([Parts](#10-parts)).
-5. **rrotor has no sign-in of its own.** The mod is signed in (device flow, `~/.glyphh/install.json`); it asks the server for the runtime token (`POST /v1/runtime/local`) and hands it to rrotor at start; rrotor sends it on its outbound link; signing out the install cuts rrotor off (built on the server). A hosted rrotor gets its token from the server when it is provisioned (designed).
-6. **How Claude reaches rrotor.** Locally, **through the mods**: a mod registers tools (`$.tool.register`) and draws panels, and calls rrotor's **local API on 127.0.0.1** with a local token only the mod holds. Remotely (routines, other AI clients, a hosted rrotor), **through the Glyphh connector**, then the server, then the runtime link. rrotor serves no MCP to Claude, and no plugin carries an MCP server.
-7. **Local runtimes:** Docker, OrbStack or Apple's `container`, preferring `container` where it is present (a VM per container, the closest to the hosted Firecracker isolation). Hosted on Fly: designed only.
-8. **The mod installs rrotor; no separate install.** It finds a container runtime, pulls `ghcr.io/glyphh-ai/rrotor` at the version matching the mod (pinned by digest, verified), starts it with `/data` on a named volume and hands in the runtime token; updating the mod updates rrotor, and the data stays. PyPI carries only the `rrotor` program SDK. macOS: Apple's `container`, then OrbStack, then Docker; Windows: WSL2, preferably a WSL distribution of the same image (designed); Linux: Docker or Podman (designed) ([11](#11-where-rrotor-runs-and-how-it-is-installed)).
+1. **The product is mods, sold by subscription.** The server holds accounts, plans with per-mod limits, Stripe and the Glyphh connector; nothing about compute or models. The mod that uses rrotor: **Ada**. **rrotor itself is not sold:** it is the runtime Ada installs into, and an Ada model is a program it runs. See [Ada](#9-ada).
+2. **Ada is a mod** that depends on rrotor. An Ada model is a program: a repo with `spec.json` and a small program file, deployed by commit, run in the program sandbox with no network, its precedent store in a persistent per-program data folder outside git. Designed, not built ([9.3](#93-ada)).
+3. **A small base image, and a part per mod.** The base: Python, Node, the program sandbox (bubblewrap, Landlock, seccomp, the egress proxy), the link client, the local API and the program runner. A mod installs its own part into rrotor (Ada: numpy and the kernel). Postgres with pgvector, MongoDB and Neo4j become parts a mod or a program asks for, not the base. Parts are versioned, come from the mod's own release, are verified, and are licensed by the plan ([Parts](#10-parts)).
+4. **rrotor has no sign-in of its own.** The mod is signed in (device flow, `~/.glyphh/install.json`); it asks the server for the runtime token (`POST /v1/runtime/local`) and hands it to rrotor at start; rrotor sends it on its outbound link; signing out the install cuts rrotor off (built on the server). A hosted rrotor gets its token from the server when it is provisioned (designed).
+5. **How Claude reaches rrotor.** Locally, **through the mods**: a mod registers tools (`$.tool.register`) and draws panels, and calls rrotor's **local API on 127.0.0.1** with a local token only the mod holds. Remotely (routines, other AI clients, a hosted rrotor), **through the Glyphh connector**, then the server, then the runtime link. rrotor serves no MCP to Claude, and no plugin carries an MCP server.
+6. **Local runtimes:** Docker, OrbStack or Apple's `container`, preferring `container` where it is present (a VM per container, the closest to the hosted Firecracker isolation). Hosted on Fly: designed only.
+7. **The mod installs rrotor; no separate install.** It finds a container runtime, pulls `ghcr.io/glyphh-ai/rrotor` at the version matching the mod (pinned by digest, verified), starts it with `/data` on a named volume and hands in the runtime token; updating the mod updates rrotor, and the data stays. PyPI carries only the `rrotor` program SDK. macOS: Apple's `container`, then OrbStack, then Docker; Windows: WSL2, preferably a WSL distribution of the same image (designed); Linux: Docker or Podman (designed) ([11](#11-where-rrotor-runs-and-how-it-is-installed)).
 
 ## The parts
 
@@ -23,7 +22,7 @@ These come first where anything below says otherwise.
 |---|---|---|
 | **Person** | The user, in Claude | |
 | **Claude** | Claude Code (desktop Code tab or CLI), and Claude's routines on Anthropic's machines | Their machine; Anthropic |
-| **Mod** | The Glyphh mods (`glyphh-ai/mods`): the three that use rrotor, `programs`, `gateway`, `ada`. Each carries the shared sign-in and licence module | Inside Claude on their machine |
+| **Mod** | The Ada mod (`glyphh-ai/mods`, `ada`), which carries the shared sign-in and licence module | Inside Claude on their machine |
 | **Pane** | Claude's own browser pane | Their machine |
 | **Local rrotor** | The local runtime: the base image plus the parts its mods installed | Their machine (Apple's `container`, OrbStack or Docker) |
 | **Cloud** | The Glyphh server: API, device sign-in pages, Glyphh connector (`/mcp`), the runtime link | Glyphh's cloud |
@@ -84,14 +83,14 @@ sequenceDiagram
 
 ### 1.2 The local rrotor starts and links
 
-The first mod that needs rrotor (Programs today; Gateway and Ada later) starts it once the machine is signed in. rrotor has no sign-in of its own: the mod's sign-in gets the runtime token and hands it in.
+The Ada mod starts rrotor once the machine is signed in. rrotor has no sign-in of its own: the mod's sign-in gets the runtime token and hands it in.
 
 ![Local rrotor](img/seq-local-rrotor.png)
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant M as Mod (programs)
+    participant M as Mod (ada)
     participant D as container / OrbStack / Docker
     participant R as Local rrotor
     participant G as Cloud
@@ -111,7 +110,7 @@ sequenceDiagram
     M->>R: the mod's tools call the local API on 127.0.0.1:#lt#59;port#gt#59; (Bearer local token)
 ```
 
-**State:** built and checked live on 2026-10-15 (Docker Desktop on macOS 14): the Cloud's side (the runtime token, `/v1/runtime/link`), the rrotor base (this repo), and the Programs mod (`glyphh-ai/mods`, `plugins/programs`) detecting the runtime, making the container, handing in the token; the link online in `rrotors`; signing the install out refuses the link (4401). Apple's `container` and OrbStack are detected and started with the same steps but not yet run here (this Mac has neither).
+**State:** built and checked live on 2026-10-15 (Docker Desktop on macOS 14): the Cloud's side (the runtime token, `/v1/runtime/link`), the rrotor base (this repo), and the mod side (built in the Programs mod before it was dropped on 2026-10-15; the Ada mod carries the same code) detecting the runtime, making the container, handing in the token; the link online in `rrotors`; signing the install out refuses the link (4401). Apple's `container` and OrbStack are detected and started with the same steps but not yet run here (this Mac has neither).
 
 - **Next starts reuse the token** kept in `/data/runtime.json`: the mod asks the server for a new one only when rrotor says it has none or its link was refused (4401), because asking rotates it.
 - **The local token** never touches disk outside the mod's private state: rrotor gets only its SHA-256 (in its environment) and compares a request's token by hash, in constant time. The runtime token goes in over the local API, never in the container's environment (which `docker inspect` shows).
@@ -126,7 +125,7 @@ sequenceDiagram
     autonumber
     actor P as Person
     participant C as Claude
-    participant M as Mod (programs)
+    participant M as Mod (ada)
     participant B as Pane
     participant S as Stripe
     participant G as Cloud
@@ -179,6 +178,8 @@ sequenceDiagram
 
 ## 2. A program, end to end
 
+rrotor runs programs; the product that ships them is Ada, whose models are programs. `daily_sales` is the sample program the runtime is built and tested with.
+
 **The sample:** `daily_sales`. Every morning it reads yesterday's sales from an analytics API (an API key), adds them up, stores the total and hands back rows for a dashboard in Claude.
 
 ```python
@@ -206,7 +207,7 @@ sequenceDiagram
     autonumber
     actor P as Person
     participant C as Claude
-    participant M as Mod (programs)
+    participant M as Mod (ada)
     participant R as Local rrotor
     P->>C: "Build a program that fills my sales dashboard every morning"
     C->>C: writes glyphh.json and program.py in a folder on the person's machine (Claude's own tools), commits it (git)
@@ -226,7 +227,7 @@ sequenceDiagram
     C-->>P: shows the result, fixes, commits and deploys again until it is right
 ```
 
-**State:** built (2026-10-15): deploy by commit from a local folder, calls, `continue`, Results (`programs_list`, `program_deploy`, `program_call`, `program_continue`, `run_status` in the Programs mod), checked live against rrotor. Designed: the live panel, the secrets vault.
+**State:** built (2026-10-15): deploy by commit from a local folder, calls, `continue`, Results (`programs_list`, `program_deploy`, `program_call`, `program_continue`, `run_status`, built in the Programs mod before it was dropped; the Ada mod carries the same), checked live against rrotor. Designed: the live panel, the secrets vault.
 
 ### 2.2 Deploy: to the hosted rrotor, through git, and the routine
 
@@ -238,7 +239,7 @@ Each program is a repo in the person's GitHub account; a version is a commit. Gi
 sequenceDiagram
     autonumber
     participant C as Claude
-    participant M as Mod (programs)
+    participant M as Mod (ada)
     participant GH as GitHub
     participant G as Cloud
     participant H as Hosted rrotor
@@ -267,7 +268,7 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant C as Claude
-    participant M as Mod (programs)
+    participant M as Mod (ada)
     participant R as Local rrotor
     participant GH as GitHub
     participant G as Cloud
@@ -366,7 +367,7 @@ A step that needs approval is a row in `approvals` (the record, kept until answe
 sequenceDiagram
     autonumber
     actor P as Person
-    participant M as Mod (programs), in Claude
+    participant M as Mod (ada), in Claude
     participant G as Cloud
     participant Q as Redis
     participant H as rrotor
@@ -414,7 +415,7 @@ sequenceDiagram
 **How the Cloud calls a routine.** Through the routine's **API trigger**, the documented way to start a routine from outside Claude (Anthropic's routines documentation, checked 2026-10-14):
 
 1. **The person adds an API trigger** to the routine at claude.ai/code/routines (Edit → Add another trigger → API) and generates its token. The token is shown once and starts **that routine only**: it is not a Claude login, so the Cloud never holds one.
-2. **The person gives the Cloud the trigger** (its URL and token) in the programs mod, as they would a secret. The Cloud keeps it encrypted (`routine_triggers`, see [Server gaps](#server-gaps)).
+2. **The person gives the Cloud the trigger** (its URL and token) in the Ada mod, as they would a secret. The Cloud keeps it encrypted (`routine_triggers`, see [Server gaps](#server-gaps)).
 3. **The Cloud fires it** when the program's event happens (a run finished, a watched page changed, a waiting step was approved):
 
 ```
@@ -469,7 +470,6 @@ flowchart TB
             Prog["the program (rrotor SDK)<br/>load → function → end"]
         end
         subgraph PartsBox["parts on /data/parts, each from its mod's release"]
-            PGateway["gateway: its runtime"]
             PAda["ada: numpy, the kernel"]
             PDB["postgres / mongodb / neo4j"]
         end
@@ -478,7 +478,7 @@ flowchart TB
         Engine --> Sandbox
         Parts --> PartsBox
         Prog -- "HTTPS via 127.0.0.1:3128 in its netns → unix socket" --> Proxy
-        Prog -. "ctx.db, ctx.gateway (when the part is installed)" .-> PartsBox
+        Prog -. "ctx.db (when the part is installed)" .-> PartsBox
         Engine --> Data
     end
     Mod["the mod, in Claude (host)"]
@@ -594,7 +594,6 @@ ctx.http                # HTTPS to declared hosts only, through the egress proxy
 ctx.files               # its folder, a pathlib.Path
 ctx.log(message, **detail)
 ctx.db                  # the database parts; E_PART_MISSING without them
-ctx.gateway             # the Gateway mod's client (OpenAI- and Anthropic-compatible); E_PART_MISSING until Gateway ships
 ctx.secrets["NAME"]     # declared secrets (the vault, designed)
 ```
 
@@ -674,7 +673,7 @@ The mods reach the local rrotor through its **local API**: HTTP on `127.0.0.1:<p
 | `GET /v1/runs/{id}/log` | The run's log lines |
 | `GET /v1/approvals` | Runs waiting for approval: run, program, step, prompt, when |
 
-**The Programs mod's tools** (built now): `programs_list`, `program_deploy` (a local folder at a commit, bundled by the mod; or a repo and commit), `program_call`, `program_continue`, `run_status`. A status line shows rrotor's state and the approvals waiting. Designed for later: the live panel (MCP App from the Glyphh connector, or a local page), secrets, versions and activate.
+**The mod's tools** (built in the Programs mod before it was dropped; the Ada mod carries the same): `programs_list`, `program_deploy` (a local folder at a commit, bundled by the mod; or a repo and commit), `program_call`, `program_continue`, `run_status`. A status line shows rrotor's state and the approvals waiting. Designed for later: the live panel (MCP App from the Glyphh connector, or a local page), secrets, versions and activate.
 
 **Deploying goes through git:** locally the mod sends a bundle of the commit (the folder is never mounted into rrotor); for hosted runs the person pushes the commit to the program's repo, the Cloud records it (`POST /v1/programs/{id}/versions`) and hands the hosted rrotor the commit and a short-lived token to fetch it.
 
@@ -705,34 +704,9 @@ What the flows needed that the server's design did not have; now in it, so the i
 6. **The connector's Allow page.**
 7. **No bundle storage:** `bundle_ref` is gone.
 
-## 9. The mods that use rrotor
+## 9. Ada
 
-rrotor is not sold. Three mods install into it, each its own product in the plan's licence (`payload.mods.<mod>.limits`):
-
-| Mod | Its part in rrotor | Limits (the licence) | State |
-|---|---|---|---|
-| **Programs** (`programs`) | None: programs run on the base, and ask for the database parts they need | `programs` (deployed programs), `runs_per_day` (placeholders, TBD) | Mod built minimal (start rrotor, deploy, call, continue, status) |
-| **Gateway** (`gateway`) | The gateway's runtime | Designed with the mod | Designed |
-| **Ada** (`ada`) | numpy and the Ada kernel | Designed with the mod | Designed |
-
-The first of them that starts finds rrotor already running (any mod's start reuses it, by the container's name `glyphh-rrotor`) or starts it.
-
-### 9.1 Programs
-
-Everything in sections 2, 5 and 7: programs written with Claude, deployed by commit, run in the sandbox, called by Claude through the mod, and by routines through the Glyphh connector. The mod enforces its limits from the licence: `programs` refuses a deploy of a new program past the count, `runs_per_day` refuses a call past the day's count; a run the Cloud sends is counted by the server (designed).
-
-### 9.2 Gateway
-
-**Third-party inference for programs and mods, inside the person's rrotor; never hosted by Glyphh.** Designed, not built.
-
-- **Where it runs:** its part in rrotor, local or wherever the person hosts rrotor. Glyphh's cloud never sees a prompt, a model's answer or a key.
-- **Models and keys:** added in the Gateway mod's panel (a provider, its base URL, its key, the models allowed), handed to rrotor over the local API, kept in rrotor's vault encrypted with the runtime key (`/data/secrets/gateway.enc`), never in a chat, a log or the mod's files.
-- **What it serves:** OpenAI-compatible (`/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/models`) and Anthropic-compatible (`/v1/messages`) endpoints, on a unix socket inside rrotor. A program reaches it as `ctx.gateway` (the SDK's client) or with any OpenAI or Anthropic library pointed at it: the runner mounts the socket into the sandbox of a program whose manifest says `"gateway": true`, and forwards it to `127.0.0.1:3129` in its namespace. Other mods reach it through the local API (`/v1/gateway/...`, the same local token).
-- **Per program:** which models it may use and a spend cap per day, set in the panel; usage counted per program and shown in the panel.
-- **Never Claude:** it never routes a Claude subscription, never offers a Claude login and never takes a Claude.ai credential or session token ([Anthropic's terms](#anthropics-terms)). An Anthropic API key the person adds is their own API account, like any provider's key.
-- **The SDK today:** `ctx.gateway` is an interface that raises `E_PART_MISSING` ("comes with the Gateway mod") until the part is installed; there is no fake behaviour.
-
-### 9.3 Ada
+rrotor is not sold. One mod installs into it, Ada, its own product in the plan's licence (`payload.mods.ada.limits`): its part is numpy and the Ada kernel; its limits `models` and `precedents` (placeholders, TBD). The mod starts rrotor (or finds it already running, by the container's name `glyphh-rrotor`), deploys models and calls them, as sections 2, 5 and 7 describe for a program.
 
 **Ada is a library, and an Ada model is a program.** Designed, not built.
 
@@ -746,13 +720,13 @@ Everything in sections 2, 5 and 7: programs written with Claude, deployed by com
 
 ## 10. Parts
 
-A **part** is what a mod installs into rrotor beyond the base: Gateway's runtime, Ada's numpy and kernel, and the database parts (Postgres with pgvector, MongoDB, Neo4j) a mod or a program asks for. Designed, not built.
+A **part** is what a mod installs into rrotor beyond the base: Ada's numpy and kernel, and the database parts (Postgres with pgvector, MongoDB, Neo4j) a mod or a program asks for. Designed, not built.
 
 - **What a part is:** a self-contained tree built in the mod's own CI on the same Debian base (its binaries and the shared libraries they need, under its own prefix), and `part.json`: `{mod, name, version, arch, rrotor (the lowest base version it needs), sha256, services, mounts, env}`. `services` are processes the part manager runs on demand (Postgres); `mounts` are what a sandbox of a program that uses the part gets (read-only).
 - **Where it comes from:** the mod's own release (an asset of the mod's release in the marketplace, `rrotor-part-<name>-<version>-<arch>.tar.zst`), signed with Glyphh's release key (Ed25519, a different key from the licence's); the base image carries the public key. rrotor checks the signature and the SHA-256 before it unpacks anything.
 - **Install, upgrade, remove:** the mod asks over the local API (`POST /v1/parts {mod, name, version, url}`, `DELETE /v1/parts/{name}`). rrotor downloads, checks, unpacks to `/data/parts/<name>/<version>/`, and switches `/data/parts/<name>/current` in one rename; the previous version stays until the next upgrade, so a failed start rolls back. Removing a part stops its services and keeps its data (`/data/db/<name>`) unless the mod asks for it to go.
 - **Licensed by the plan:** the mod hands rrotor its signed licence (`PUT /v1/licence`); rrotor checks it with Glyphh's licence key, as the mods do, and installs or starts a part only while the licence includes its mod. A licence that expires or drops the mod stops the part's services and refuses runs that need it (`E_NOT_IN_PLAN`), keeping its data. Per-part limits (a database's size, Ada's precedents) come from the mod's limits in the same licence.
-- **A program asks for a part** in its manifest (`databases`, `gateway`, Ada's kernel); a run whose part is missing fails with `E_PART_MISSING` naming the part and the mod that brings it.
+- **A program asks for a part** in its manifest (`databases`, Ada's kernel); a run whose part is missing fails with `E_PART_MISSING` naming the part and the mod that brings it.
 
 ## 11. Where rrotor runs, and how it is installed
 
@@ -775,9 +749,7 @@ A **part** is what a mod installs into rrotor beyond the base: Gateway's runtime
 
 | Mod | macOS | Windows | Linux | Needs rrotor | Host dependencies today |
 |---|---|---|---|---|---|
-| Programs | Works on Docker or OrbStack; Apple's `container` detected | WSL2 (designed) | Docker or Podman (designed) | Yes | A container runtime; `git` (bundles a commit); `ioreg` |
-| Gateway | Designed | Designed | Designed | Yes | As Programs |
-| Ada | Designed | Designed | Designed | Yes | As Programs |
+| Ada (the runtime side works; the mod is designed) | Works on Docker or OrbStack; Apple's `container` detected | WSL2 (designed) | Docker or Podman (designed) | Yes | A container runtime; `git` (bundles a commit); `ioreg` |
 | The shared sign-in and licence | Works | To build | To build | No | `ioreg` (the machine id), `scutil` (the computer's name), `open` |
 
 **macOS-only today, and the Windows equivalents to build later:**
@@ -798,9 +770,8 @@ Quoted in the server's `docs/architecture.md` (checked 2026-10-14): third-party 
 - **Secrets on the hosted rrotor:** set again there (2.2), or carried from the local one encrypted to the hosted rrotor's key.
 - **The Glyphh GitHub App's permissions:** repository contents (read and write, for the person's program repos) and metadata; the person picks which repos it may reach.
 - **Per-program isolation in Neo4j:** the free edition holds one database.
-- **Programs' limits:** the numbers for `programs` and `runs_per_day` per plan (placeholders in the seed).
 - **Part signing:** the release key's custody and rotation, and where the mods' CI builds parts.
-- **Gateway's and Ada's limits** in the licence.
+- **Ada's limits** in the licence: `models` and `precedents` per plan (placeholders in the seed).
 - **Not yet run here:** rrotor on Apple's `container` (needs macOS 26; this build's Mac is on 14) and on OrbStack; both are detected and started by the same steps, and are to be checked on a Mac that has them. How a `container` VM reaches the host's `localhost` (the dev server) is to be confirmed there.
-- **To build next:** the part manager (install, upgrade, remove, licensed parts), the secrets vault, the live panel, Gateway, Ada, hosted rrotor on Fly, and the WSL distribution's install from the Programs mod on Windows.
-- **Publishing the image:** CI builds and tests both images on every push and exports the WSL root filesystem, but pushing to `ghcr.io/glyphh-ai/rrotor` waits for an org admin to give this repository write access to the package (its settings, Manage Actions access), then the repository variable `PUBLISH_IMAGES=true`. Until then the Programs mod pins no digest, and its `rrotor image` setting names a local build.
+- **To build next:** the part manager (install, upgrade, remove, licensed parts), the secrets vault, the live panel, the Ada mod and part, hosted rrotor on Fly, and the WSL distribution's install from the Ada mod on Windows.
+- **Publishing the image:** CI builds and tests the image on every push and exports the WSL root filesystem, but pushing to `ghcr.io/glyphh-ai/rrotor` waits for an org admin to give this repository write access to the package (its settings, Manage Actions access), then the repository variable `PUBLISH_IMAGES=true`. Until then no mod pins a digest, and a mod's `rrotor image` setting names a local build.

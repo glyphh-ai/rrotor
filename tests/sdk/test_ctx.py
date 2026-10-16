@@ -107,7 +107,7 @@ def test_today_defaults_to_utc(tmp_path):
     assert make(tmp_path).today() == dt.datetime.now(dt.UTC).date().isoformat()
 
 
-@pytest.mark.parametrize("name", ["db", "gateway"])
+@pytest.mark.parametrize("name", ["db"])
 def test_parts_not_installed_raise_part_missing(tmp_path, name):
     with pytest.raises(PartMissing):
         getattr(make(tmp_path), name)

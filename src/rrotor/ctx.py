@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from rrotor.errors import NotJson, PartMissing, ProgramError, StepUndeclared, Wait
-from rrotor.gateway import Gateway
 from rrotor.http import Http
 from rrotor.result import Result
 
@@ -119,10 +118,6 @@ class Ctx:
     @property
     def db(self) -> NoReturn:
         raise PartMissing("Databases (ctx.db)", "database")
-
-    @property
-    def gateway(self) -> Gateway:
-        raise PartMissing("Model inference (ctx.gateway)", "Gateway")
 
     @property
     def secrets(self) -> NoReturn:
