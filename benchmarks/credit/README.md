@@ -68,12 +68,39 @@ Ada's ingest is paid once; every decision after is a query.
   Ada's reasons to exist are the receipts (which precedents), the clearance layers, and learning one confirmed case at
   a time with no retraining.
 
+## After calibration, the same 200 once more
+
+`calibrate.py`, run after the table above and reported whatever it said. Nothing in it looks at the 200: the
+weights and the curve come from the 800 alone, the threshold from the cost matrix alone.
+
+1. **Role weights learned from the 800**: each field's information gain about the decision, scaled so the best
+   weighs 1 — `checking` 1.0, `duration_months` 0.51, `history` 0.39, `amount` 0.34, `savings` 0.30, `purpose`
+   0.21, `age` 0.16, … `job` 0.01, `dependants` 0.0. The hand-set segment weights are dropped.
+2. **Calibration by five-fold cross-validation inside the 800**: every learned case voted on by a model of the
+   other four fifths; an isotonic curve (61 steps) from the vote share for "bad" to P(bad).
+3. **The rule from the costs**: refuse when 5 × P(bad) > P(good), i.e. P(bad) > 1/6.
+
+| | Accuracy | Bad approved (×5) | Good refused | Bank's cost |
+|---|---|---|---|---|
+| Ada, learned weights | 76.5% | 38 | 9 | 199 |
+| **Ada, learned weights, calibrated, cost rule** | 67.0% | 11 | 55 | **110** |
+| for reference: LLM runs 1 and 2 | 77.0% / 79.0% | 16 / 18 | 30 / 24 | 110 / 114 |
+| for reference: logistic regression, cost-aware | 68.5% | 10 | 53 | 103 |
+
+Cross-validated accuracy inside the 800 was 71.8%, so this hold-out runs a little easy for every contestant; the
+ranking is what to read, not the third digit.
+
+So: on the bank's cost, calibration took Ada from 121 to 110 — level with the LLM, 7 behind the thresholded classic
+model — with every choice made before the hold-out was opened. The one-off calibration cost 627 s of CPU (the
+cross-validation's 800 queries at ~0.8 s each), which the vectorised query below makes seconds.
+
 ## What would move Ada
 
-1. **Learned role weights**: how well each role separates the outcomes, from the store, written back as
-   `similarity_weight` (today every role weighs what the spec says, by hand).
-2. **Calibration and a cost matrix in the spec**: leave-one-out over the store maps the vote to P(bad);
-   `output.costs` makes the threshold fall out of the costs.
+1. **Learned role weights and calibration in the kernel**, as `calibrate.py` does them here by hand: `learn` writes
+   the information-gain weights into the spec, `calibrate` keeps the cross-validated curve with the store, and
+   `output.costs` in the spec makes the threshold fall out of the costs.
+2. **Cheaper calibration**: leave-one-out without rebuilding the model (drop one precedent, query, put it back), so the
+   curve refreshes as cases are recorded.
 3. **Abstain by expected cost**: `ask` in the band where either answer is costly; the person's answer is recorded.
 4. **A vectorised query**: 0.97 s per query at 800 precedents is the Python loop; one matmul makes it milliseconds.
 
@@ -82,6 +109,7 @@ Ada's ingest is paid once; every decision after is a query.
 ```sh
 benchmarks/credit/fetch.sh                         # german.data (CC BY 4.0, UCI)
 uv run python benchmarks/credit/run.py             # the split, Ada and the baseline; ~4 minutes
+uv run python benchmarks/credit/calibrate.py       # learned weights, calibration, the cost rule; ~14 minutes
 uv run python benchmarks/credit/score.py benchmarks/credit/results/llm_run1.json   # any answers file
 ```
 
