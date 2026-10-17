@@ -135,6 +135,8 @@ the loss here; both are reported.
 2. **Three-way interactions**, and pairs with a text role (a bag of words cannot be paired today).
 3. **The ask as a product control** in the platform: who answers, and what their answer records.
 
+Rerun on kernel 3.8.0 (the seeded lexicon, word pairs): every number on this page unchanged, as it should be with no text role.
+
 Done since the first run: learned role and value weights, costs and `decide` in the kernel; the priced `ask`; a
 model that learns from its own store and refreshes as cases arrive (`refresh_every`); the vectorised query;
 interactions between roles; a finer temperature grid and the fit by cost.

@@ -31,10 +31,13 @@ Nothing was tuned on the 3,080 or on the 200.
 
 | | 3,080 held out | The 200 sample |
 |---|---|---|
-| Ada, one bag-of-words role, every word the same | 77.2% | 77.0% |
+| Ada, one bag-of-words role, every word the same (kernel 3.5.0) | 77.2% | 77.0% |
+| the same, read through the seeded lexicon (kernel 3.8.0) | 77.7% | 78.5% |
 | Multinomial naive Bayes | 78.8% | 78.5% |
-| **Ada, learned word weights** (kernel 3.6.0) | **83.1%** | 87.5% |
-| Ada, the same, learned from its own store (`learn()`, the store rewritten) | 83.1% | 87.5% |
+| **Ada, learned word weights, the lexicon** (kernel 3.8.0) | **83.1%** | 88.0% |
+| the same, without the lexicon | 83.0% | 87.0% |
+| the same, word pairs on | 83.1% | 88.0% |
+| Ada, the same, learned from its own store (`learn()`, the store rewritten) | 83.1% | 88.0% |
 | TF-IDF + softmax regression, tuned inside the training set | 90.3% | 92.0% |
 | Claude, run 1 (read ~8,100 of the 10,003) | — | 97.0% |
 | Claude, run 2 (read all 10,003) | — | 97.5% |
@@ -62,6 +65,15 @@ as the credit page, $5/M in and $25/M out to $15/M in and $75/M out). Ada's inge
   same, "card", "my" and "the" weighed as much as "stolen" and Ada sat at 77%. Learned word weights took it to
   83%, past naive Bayes; the classic model's remaining 7 points are a weight per word *per intent*, which a
   similarity has no place for.
+- **The seeds and the pairs are levers, not wins, here.** Kernel 3.8.0 ships Ada's two seeds (WordNet 3.0's
+  77,817 words with their synonyms and near words, the Moby list's 192,960 forms with their parts of speech), and
+  every text role reads its words through them, so "arrive" and "come" correlate. On this data that is worth half
+  a point on plain bags and a tenth of one on learned bags: a bank's customers say "card", "transfer" and "top
+  up", and no synonym settles which of 77 intents they mean. Word pairs ("top" + "up", learned among the common
+  words that a partner settles) moved nothing on the hold-out and took 0.1 to 0.4 inside the training set, so
+  they default off. Both were chosen on the 1,000 inside the training set first (`tune_reading.py`) and the
+  hold-out run once; both stay as settings (`lexicon`, `word_pairs`, `max_word_pairs`) for a model whose words
+  are rarer or whose intents are phrases.
 - **The second lesson was how a weight becomes a voice.** The first weighting, information gain, made it worse
   (48%): with 77 outcomes, gain crowns the words that split them into big groups ("card", "top", "up"), not the
   ones that name one. Weighing a word by how far it moves some outcome from its base rate fixed the ranking and
@@ -77,12 +89,14 @@ as the credit page, $5/M in and $25/M out to $15/M in and $75/M out). Ada's inge
 
 ## What would move Ada
 
-1. **Word pairs.** The interactions the credit page added, for words ("top up" + "failed"; "card" + "arrive").
-2. **A weight per word per outcome.** What the classic model has and a similarity does not: the kernel's
-   probabilities could weigh a precedent's vote by how its words bear on *its* outcome.
-3. **The NSM layer.** The kernel's primes could stand in for a word's meaning, so "stolen" and "taken" meet.
+1. **A weight per word per outcome.** What the classic model has and a similarity does not: the kernel's
+   probabilities could weigh a precedent's vote by how its words bear on *its* outcome. That is where the
+   remaining 7 points are.
+2. **Phrases, not pairs.** "top up" is one token to a person; a tokenizer that keeps the set's own phrases
+   would do what word pairs were meant to.
 
-Done on this page: learned word weights (kernel 3.6.0), 77% to 83%.
+Done on this page: learned word weights (kernel 3.6.0), 77% to 83%; the seeded lexicon and word pairs as
+levers (3.8.0), measured and kept.
 
 ## Reproduce
 
@@ -90,6 +104,7 @@ Done on this page: learned word weights (kernel 3.6.0), 77% to 83%.
 benchmarks/banking77/fetch.sh                      # train.csv, test.csv
 uv run python benchmarks/banking77/run.py          # Ada, plain and with learned words, the classic models, the grids; ~6 minutes
 uv run python benchmarks/banking77/tune_words.py   # how a word's weight became its voice, inside the training set
+uv run python benchmarks/banking77/tune_reading.py # the lexicon and word pairs, on and off, inside the training set
 uv run python benchmarks/banking77/score.py benchmarks/banking77/results/llm_run1.json   # a judge's answers
 ```
 
