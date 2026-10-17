@@ -4,10 +4,11 @@ The counterpart to [`../credit`](../credit/README.md). There the cases were type
 the case is nothing but free text, which is where a developer reaches for a language model today, and the question
 is the same: can a precedent store route a message as well as Claude, deterministically, for nothing per call?
 
-**The answer, honestly: nearly there.** On this data Claude routes 97% right, a classic text model 90%, and Ada
-88% once it learned which words matter and what each says of each outcome (77% at the start of the page). This
-page is kept because a benchmark that only shows wins is not a benchmark; most of it is what each run taught the
-kernel.
+**The answer, honestly: nearly there, and together, past it.** On this data the best Claude routes 96.5% right,
+a classic text model 90%, and Ada 88% once it learned which words matter and what each says of each outcome (77%
+at the start of the page). Ada deciding where it is sure and handing the rest to Claude routes 97.5% with Claude
+seeing a fifth of the traffic. This page is kept because a benchmark that only shows wins is not a benchmark;
+most of it is what each run taught the kernel, including the sample that leaked and had to be reissued.
 
 ## The test
 
@@ -23,10 +24,15 @@ kernel.
   word weights**: `Spec.learned` over the 10,003 gives every word a weight, and the bag is bundled by them.
 - **Classic models:** multinomial naive Bayes, and TF-IDF with softmax regression (numpy, no library), its
   epochs, learning rate and L2 chosen on the same 1,000 inside the 10,003.
-- **The LLM:** two fresh Claude Fable 5.1 agents (effort medium), each given the 10,003 as a file and the 77
-  names, told to route the 200 by judgement alone (`judge_prompt.md`), no code allowed.
+- **The LLMs:** fresh Claude agents (effort medium), each given the 10,003 as a file and the 77 names, told to
+  route the 200 by judgement alone (`judge_prompt.md`), no code allowed: Fable 5.1 twice, Opus 5.5, Sonnet 5.5
+  and Haiku 4.5 once each.
 
-Nothing was tuned on the 3,080 or on the 200.
+Nothing was tuned on the 3,080 or on the 200. **The sample was reissued once:** the first round's ids were the
+test file's row numbers, in order, and that file is sorted by intent, so the id leaked the label (Opus noticed).
+Every judge had said it routed by the text, but the numbers could no longer prove it; the same 200 messages were
+given opaque ids in shuffled order and every judge rerun. The first round is in `results/leaky/`, superseded,
+and scored a point higher than the clean one.
 
 ## Results
 
@@ -41,12 +47,16 @@ Nothing was tuned on the 3,080 or on the 200.
 | Ada, the same, learned from its own store, word evidence 0 | 83.3% | 88.0% |
 | **Ada, learned from its own store, word evidence 2** (kernel 3.9.0) | **88.2%** | 90.0% |
 | TF-IDF + softmax regression, tuned inside the training set | 90.3% | 92.0% |
-| Claude, run 1 (read ~8,100 of the 10,003) | — | 97.0% |
-| Claude, run 2 (read all 10,003) | — | 97.5% |
+| Claude Fable 5.1, two runs (read all 10,003) | — | 96.5%, 96.5% |
+| Claude Opus 5.5 (read all 10,003) | — | 96.0% |
+| Claude Sonnet 5.5 (read none: zero-shot) | — | 86.0% |
+| Claude Haiku 4.5 (read ~5,500) | — | 81.0% |
 
-The two Claude runs agreed with each other on 199 of the 200. The published state of the art on this set, fine-tuned
-BERT-class models, is around 93% on the 3,080; Claude's 97% is on a 200 sample and reads a little high for the same
-reason every sample does, but the gap to everything else is real.
+The two Fable runs agreed with each other on 199 of the 200. The published state of the art on this set, fine-tuned
+BERT-class models, is around 93% on the 3,080; Fable's 96.5% is on a 200 sample and reads a little high for the same
+reason every sample does, but the gap to everything else is real. Sonnet chose not to read the examples at all and
+paid eleven points for it; Haiku read half and paid more. Ada with word evidence, at 90.0% on the same 200, is
+above both of the smaller models and four points under the largest.
 
 ## Ada and the LLM together
 
@@ -55,24 +65,35 @@ paying the LLM to re-read ten thousand examples a thousand times. The answer is 
 sure, and hands the rest to the LLM with its three nearest precedents in the prompt instead of the file. Every
 answer the LLM gives is recorded, so next time that case is Ada's.
 
-On the 200 sample, with Ada's calibrated probability as the bar and Claude's second run as the hand-off (both
-already on disk; `hybrid.py`, nothing tuned on the sample):
+On the 200 sample, with Ada's calibrated probability as the bar and each model's answers as the hand-off (all
+already on disk; `hybrid.py`, nothing tuned on the sample). Ada keeps 156 of the 200 at a bar of 0.7 and is right
+on 98.7% of them; the other 44 go to the model:
 
-| Confidence bar | Ada takes | Ada right on those | Claude takes | Together | LLM share |
-|---|---|---|---|---|---|
-| none (Ada alone) | 200 | 90.0% | 0 | 90.0% | 0% |
-| 0.5 | 180 | 95.6% | 20 | 95.0% | 10% |
-| 0.6 | 172 | 97.1% | 28 | 96.5% | 14% |
-| 0.7 | 156 | 98.7% | 44 | **98.0%** | 22% |
-| 0.8 | 143 | 98.6% | 57 | 98.0% | 28% |
-| 0.9 | 122 | 100% | 78 | 97.5% | 39% |
-| Claude alone | 0 | | 200 | 97.5% | 100% |
+| Hand-off model | Alone | With Ada, bar 0.7 | LLM share |
+|---|---|---|---|
+| Fable 5.1 | 96.5% | **97.5%** | 22% |
+| Opus 5.5 | 96.0% | 97.0% | 22% |
+| Sonnet 5.5 | 86.0% | 94.0% | 22% |
+| Haiku 4.5 | 81.0% | 91.5% | 22% |
+| none (Ada alone) | 90.0% | | 0% |
 
-At a bar of 0.7 the pair is more accurate than Claude alone: Ada is right on 98.7% of what it keeps and hands over
-the ones it should. The LLM sees a fifth of the traffic, and that fifth is cheap: a call carries the message and
-three precedents with their paths, a few hundred tokens, not the 150,000 of re-sending the examples. Per thousand
-messages that is about 220 calls of a few hundred tokens against a thousand of 150,000, three orders of magnitude
-off the bill, with accuracy up and the store improving on every hand-off.
+With the two largest models the pair is more accurate than the model alone; with the two smaller ones it adds
+eight to ten points, because Ada keeps the easy 78% and the small model only has to be right on the hard 22%.
+The bar is a dial, from Ada alone at 90.0% (bar 0) through 95.0% at 0.5, 97.5% at 0.7 and 0.8, to the model
+alone: the user's choice between a dearer misroute and a dearer LLM.
+
+The LLM's fifth is cheap: a call carries the message and three precedents with their paths, a few hundred tokens,
+not the 150,000 of re-sending the examples. For the 200, each case its own call as a chatbot makes them, at the
+models' list prices (Fable $10/$50, Opus $4/$20, Sonnet $2/$10, Haiku $1/$5 per million tokens in/out):
+
+| | Fable 5.1 | Opus 5.5 | Sonnet 5.5 | Haiku 4.5 |
+|---|---|---|---|---|
+| LLM alone: 200 calls, the examples sent each time (~150k in, 20 out) | $300 | $120 | $60 | $30 |
+| Both at 0.7: 44 calls of ~400 in, 20 out | $0.22 | $0.09 | $0.04 | $0.02 |
+| Ada alone: 200 queries, 6 ms each on a $0.019/h machine | $0.000006 | | | |
+
+So on these 200 the pair is a thousand times cheaper than the model alone and at least as accurate, and each
+hand-off is recorded, so the 22% falls over time.
 
 The bar is the user's: higher for a dearer misroute, lower for a cheaper LLM. The same dial is `output.ask` in the
 spec, priced in the bank's own units, as the credit page uses it.
@@ -84,11 +105,12 @@ spec, priced in the bank's own units, as the credit page uses it.
 | Ada | 4 s, once (7 s with `learn()`) | 5.9 ms | ~$0.00000003 on a $0.019/h machine |
 | Naive Bayes | instant | 0.1 ms | ~0 |
 | TF-IDF softmax | 12 s, once | 0.01 ms | ~0 |
-| Claude, batched as here (200 at once, examples read once) | — | ~1,800 tokens, 0.6 s | ≈ $0.01–$0.03 |
-| Claude, as an app would call it (the examples resent) | — | ~150,000 tokens | ≈ $0.75–$2.25 |
+| Fable, batched as the judges ran (200 at once, examples read once) | — | ~1,950 tokens, 0.9 s | ≈ $0.02 |
+| Fable, as a chatbot calls it (the examples resent) | — | ~150,000 tokens | ≈ $1.50 |
 
-Claude's two runs: 359,197 and 384,065 tokens, 108 s each (the token price bracketed by the same two public rates
-as the credit page, $5/M in and $25/M out to $15/M in and $75/M out). Ada's ingest is paid once.
+The judge runs, at list prices: Fable 391,685 and 389,260 tokens, 183 and 160 s, $4.23 and $4.20; Opus 390,963
+tokens, 153 s, $1.69; Sonnet 56,828 tokens, 38 s, $0.12; Haiku 125,230 tokens, 40 s, $0.14. Ada's ingest is paid
+once.
 
 ## What it says
 
@@ -146,5 +168,5 @@ uv run python benchmarks/banking77/hybrid.py        # Ada and Claude together, a
 uv run python benchmarks/banking77/score.py benchmarks/banking77/results/llm_run1.json   # a judge's answers
 ```
 
-`results/` holds the 200 sample and its labels, both judges' answers, and Ada's 3,080 guesses (learned words;
-with word evidence).
+`results/` holds the 200 sample (opaque ids, shuffled) and its labels, the five judges' answers in `clean/`, the
+superseded first round in `leaky/`, and Ada's 3,080 guesses (learned words; with word evidence).

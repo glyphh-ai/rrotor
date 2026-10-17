@@ -6,12 +6,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sample = json.loads((HERE / "results" / "sample.json").read_text())
-truth = dict(
-    zip(
-        (str(s["i"]) for s in sample["sample"]),
-        json.loads((HERE / "results" / "sample_labels.json").read_text())["labels"],
-    )
-)
+truth = json.loads((HERE / "results" / "sample_labels.json").read_text())["labels"]  # opaque id -> intent
 intents = set(sample["intents"])
 for name in sys.argv[1:]:
     answers = json.loads(Path(name).read_text())

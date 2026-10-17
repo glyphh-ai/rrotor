@@ -6,6 +6,7 @@ sample of the 3,080 (seed 7) is written out for the LLM judges, and every model 
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import random
@@ -189,12 +190,20 @@ def main() -> None:
     sample = sorted(random.Random(7).sample(range(len(test)), 200))
     sample_truth = [truth[i] for i in sample]
     (HERE / "results").mkdir(exist_ok=True)
+    # the judges' file: opaque ids in shuffled order (the test file is sorted by intent, so a row number leaks it)
+    opaque = {i: hashlib.sha256(f"banking77-sample-{i}".encode()).hexdigest()[:8] for i in sample}
+    order = list(sample)
+    random.Random(2026).shuffle(order)
     json.dump(
-        {"intents": labels, "sample": [{"i": i, "text": test[i][0]} for i in sample]},
+        {"intents": labels, "sample": [{"id": opaque[i], "text": test[i][0]} for i in order]},
         open(HERE / "results" / "sample.json", "w"),
         indent=1,
     )
-    json.dump({"labels": sample_truth}, open(HERE / "results" / "sample_labels.json", "w"), indent=1)
+    json.dump(
+        {"labels": {opaque[i]: truth[i] for i in order}, "rows": {opaque[i]: i for i in order}},
+        open(HERE / "results" / "sample_labels.json", "w"),
+        indent=1,
+    )
 
     guesses, build, per, sure = ada(train, test)
     score(
