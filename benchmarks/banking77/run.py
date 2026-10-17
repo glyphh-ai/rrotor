@@ -226,8 +226,9 @@ def main() -> None:
     low = sorted(table.items(), key=lambda kv: kv[1])[:8]
     print(f"learned word weights in {time.time() - t0:.1f}s: {len(table)} words; heaviest {top}; lightest {low}")
     guesses, build, per, sure = ada(train, test, k, min_sim, spec)
+    first = guesses
     score(
-        "Ada, learned word weights",
+        "Ada, learned word weights (Spec.learned: no evidence to carry)",
         guesses,
         truth,
         build + per * len(test),
@@ -250,14 +251,29 @@ def main() -> None:
         live.record({"message": {"body": {"text": text}}}, label)
     live.learn()
     build = time.time() - t0
+    live.configure(word_evidence=0.0)  # the store's evidence is what Spec.learned above cannot carry: off, the same
     online = [live.query({"message": {"body": {"text": text}}}).top or "" for text, _ in test]
     score(
-        "Ada, learned from its own store (learn(), the store rewritten)",
+        "Ada, learned from its own store (learn(), the store rewritten), word evidence 0",
         online,
         truth,
         build,
-        f"build + learn {build:.1f}s; same guesses as above: {online == guesses}",
+        f"build + learn {build:.1f}s; same guesses as the learned spec: {online == first}",
     )
+    score("  the same, the 200 sample", [online[i] for i in sample], sample_truth, 0)
+    live.configure(word_evidence=2.0)  # the default: what each word says of each outcome weighs on the vote
+    t0 = time.time()
+    evidenced = [live.query({"message": {"body": {"text": text}}}).top or "" for text, _ in test]
+    per = (time.time() - t0) / len(test)
+    score(
+        "Ada, learned from its own store, word evidence 2 (kernel 3.9.0)",
+        evidenced,
+        truth,
+        per * len(test),
+        f"{per * 1000:.1f} ms per query",
+    )
+    score("  the same, the 200 sample", [evidenced[i] for i in sample], sample_truth, 0)
+    json.dump({"guesses": evidenced}, open(HERE / "results" / "ada_evidence.json", "w"))
     score("  the same, the 200 sample", [guesses[i] for i in sample], sample_truth, 0)
     json.dump({"guesses": guesses}, open(HERE / "results" / "ada.json", "w"))
 

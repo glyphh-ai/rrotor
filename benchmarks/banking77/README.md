@@ -4,9 +4,10 @@ The counterpart to [`../credit`](../credit/README.md). There the cases were type
 the case is nothing but free text, which is where a developer reaches for a language model today, and the question
 is the same: can a precedent store route a message as well as Claude, deterministically, for nothing per call?
 
-**The answer, honestly: closer than it was, not there.** On this data Claude routes 97% right, a classic text
-model 90%, and Ada 83% once it learned which words matter (77% before it could). This page is kept because a
-benchmark that only shows wins is not a benchmark; the second half of it is what the first half taught the kernel.
+**The answer, honestly: nearly there.** On this data Claude routes 97% right, a classic text model 90%, and Ada
+88% once it learned which words matter and what each says of each outcome (77% at the start of the page). This
+page is kept because a benchmark that only shows wins is not a benchmark; most of it is what each run taught the
+kernel.
 
 ## The test
 
@@ -34,10 +35,11 @@ Nothing was tuned on the 3,080 or on the 200.
 | Ada, one bag-of-words role, every word the same (kernel 3.5.0) | 77.2% | 77.0% |
 | the same, read through the seeded lexicon (kernel 3.8.0) | 77.7% | 78.5% |
 | Multinomial naive Bayes | 78.8% | 78.5% |
-| **Ada, learned word weights, the lexicon** (kernel 3.8.0) | **83.1%** | 88.0% |
-| the same, without the lexicon | 83.0% | 87.0% |
+| Ada, learned word weights, the lexicon (kernel 3.8.0) | 83.3% | 88.0% |
+| the same, without the lexicon | 83.1% | 87.5% |
 | the same, word pairs on | 83.1% | 88.0% |
-| Ada, the same, learned from its own store (`learn()`, the store rewritten) | 83.1% | 88.0% |
+| Ada, the same, learned from its own store, word evidence 0 | 83.3% | 88.0% |
+| **Ada, learned from its own store, word evidence 2** (kernel 3.9.0) | **88.2%** | 90.0% |
 | TF-IDF + softmax regression, tuned inside the training set | 90.3% | 92.0% |
 | Claude, run 1 (read ~8,100 of the 10,003) | — | 97.0% |
 | Claude, run 2 (read all 10,003) | — | 97.5% |
@@ -65,6 +67,14 @@ as the credit page, $5/M in and $25/M out to $15/M in and $75/M out). Ada's inge
   same, "card", "my" and "the" weighed as much as "stolen" and Ada sat at 77%. Learned word weights took it to
   83%, past naive Bayes; the classic model's remaining 7 points are a weight per word *per intent*, which a
   similarity has no place for.
+- **The third lesson was the one the classic model had all along: a weight per word per outcome.** Kernel
+  3.9.0's `learn` keeps what each word says of each outcome (counts, with the store), and at query time a
+  message's words weigh on the vote: each voter's weight scaled by exp(`word_evidence` × the mean pointwise
+  mutual information of the words with the voter's outcome), in `query`, `probabilities`, `decide` and the
+  calibration alike, the similarity bar and receipts untouched. Chosen inside the training set
+  (`tune_evidence.py`: 0 → 83.4%, 0.5 → 85.7%, 1 → 87.5%, 2 → 88.0%, 3 → 87.8%), run once on the hold-out:
+  83.3% to 88.2%, two points from the tuned classic model, still deterministic and with receipts. The evidence
+  lives with the store, so it is what `learn()` on the runtime gives and what a spec written by hand cannot.
 - **The seeds and the pairs are levers, not wins, here.** Kernel 3.8.0 ships Ada's two seeds (WordNet 3.0's
   77,817 words with their synonyms and near words, the Moby list's 192,960 forms with their parts of speech), and
   every text role reads its words through them, so "arrive" and "come" correlate. On this data that is worth half
@@ -89,14 +99,11 @@ as the credit page, $5/M in and $25/M out to $15/M in and $75/M out). Ada's inge
 
 ## What would move Ada
 
-1. **A weight per word per outcome.** What the classic model has and a similarity does not: the kernel's
-   probabilities could weigh a precedent's vote by how its words bear on *its* outcome. That is where the
-   remaining 7 points are.
-2. **Phrases, not pairs.** "top up" is one token to a person; a tokenizer that keeps the set's own phrases
+1. **Phrases, not pairs.** "top up" is one token to a person; a tokenizer that keeps the set's own phrases
    would do what word pairs were meant to.
 
 Done on this page: learned word weights (kernel 3.6.0), 77% to 83%; the seeded lexicon and word pairs as
-levers (3.8.0), measured and kept.
+levers (3.8.0), measured and kept; word evidence (3.9.0), 83% to 88%.
 
 ## Reproduce
 
@@ -105,7 +112,9 @@ benchmarks/banking77/fetch.sh                      # train.csv, test.csv
 uv run python benchmarks/banking77/run.py          # Ada, plain and with learned words, the classic models, the grids; ~6 minutes
 uv run python benchmarks/banking77/tune_words.py   # how a word's weight became its voice, inside the training set
 uv run python benchmarks/banking77/tune_reading.py # the lexicon and word pairs, on and off, inside the training set
+uv run python benchmarks/banking77/tune_evidence.py # word_evidence from 0 to 3, inside the training set
 uv run python benchmarks/banking77/score.py benchmarks/banking77/results/llm_run1.json   # a judge's answers
 ```
 
-`results/` holds the 200 sample and its labels, both judges' answers, and Ada's 3,080 guesses.
+`results/` holds the 200 sample and its labels, both judges' answers, and Ada's 3,080 guesses (learned words;
+with word evidence).

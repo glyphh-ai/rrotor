@@ -1033,12 +1033,19 @@ class Space:
         return hashlib.sha256(self._glyphs[i].tobytes()).hexdigest()[:16]
 
     def query(
-        self, situation: dict[str, Any], events: list[np.ndarray] | None = None, weights: dict[str, Any] | None = None
+        self,
+        situation: dict[str, Any],
+        events: list[np.ndarray] | None = None,
+        weights: dict[str, Any] | None = None,
+        bias: Callable[[str], float] | None = None,
     ) -> Answer:
         """weights: the query's weights tree (see encode()). Weighted,
         every similarity here is the exact weighted sim (a fact tree's
         score), so min_sim reads as 'the weighted share of attributes
-        that must agree'. Unweighted, it is the glyph sim, as always."""
+        that must agree'. Unweighted, it is the glyph sim, as always.
+        bias(outcome): a factor on each voter's weight by its outcome
+        (what the query's own words say about that outcome, for one);
+        the similarity bar, support and receipts are unbiased."""
         if self._n == 0:
             return Answer(False, 0.0, 0.0, 0, None, {}, [])
         top = self._top(situation, events, weights)
@@ -1047,14 +1054,15 @@ class Space:
         voters = [(i, s) for i, s in top if s >= self.min_sim and self._outcomes[i] is not None]
         if not voters:
             return Answer(False, 0.0, max(top[0][1], 0.0), 0, None, {}, receipts)
-        weights = np.array([s for _, s in voters])
+        sims = np.array([s for _, s in voters])
+        weights = sims if bias is None else np.array([s * bias(self._outcomes[i]) for i, s in voters])
         wsum = float(weights.sum()) or 1.0
         outcomes: dict[str, float] = {}
         for (i, _), w in zip(voters, weights):
             outcomes[self._outcomes[i]] = outcomes.get(self._outcomes[i], 0.0) + float(w)
         outcomes = {o: w / wsum for o, w in outcomes.items()}
         top_outcome = max(outcomes, key=outcomes.get)
-        return Answer(True, outcomes[top_outcome], float(weights.mean()), len(voters), top_outcome, outcomes, receipts)
+        return Answer(True, outcomes[top_outcome], float(sims.mean()), len(voters), top_outcome, outcomes, receipts)
 
     def _evidence(self, sims: np.ndarray, outcome: str, bar: float) -> Evidence:
         idx = [i for i in range(self._n) if self._outcomes[i] == outcome and sims[i] >= bar]
@@ -1163,7 +1171,11 @@ class Space:
         ]
 
     def probabilities(
-        self, situation: dict[str, Any], events: list[np.ndarray] | None = None, weights: dict[str, Any] | None = None
+        self,
+        situation: dict[str, Any],
+        events: list[np.ndarray] | None = None,
+        weights: dict[str, Any] | None = None,
+        bias: Callable[[str], float] | None = None,
     ) -> dict[str, float]:
         """P(outcome | situation) for every outcome among the POOL
         nearest precedents by exact weighted sim: a softmax of their
@@ -1171,9 +1183,11 @@ class Space:
         calibrate() has fit tau to this store's own graded record."""
         if self._n == 0:
             return {}
-        return self._probabilities(self._scores(situation, events, weights or {}), self.tau)
+        return self._probabilities(self._scores(situation, events, weights or {}), self.tau, bias=bias)
 
-    def _probabilities(self, scores: np.ndarray, tau: float, skip: int = -1) -> dict[str, float]:
+    def _probabilities(
+        self, scores: np.ndarray, tau: float, skip: int = -1, bias: Callable[[str], float] | None = None
+    ) -> dict[str, float]:
         order = [
             int(i) for i in np.argsort(scores, kind="stable")[::-1] if i != skip and self._outcomes[i] is not None
         ][:POOL]
@@ -1183,8 +1197,8 @@ class Space:
         mass: dict[str, float] = {}
         for i in order:
             o = self._outcomes[i]
-            mass[o] = mass.get(o, 0.0) + math.exp((float(scores[i]) - top) / tau)
-        z = sum(mass.values())
+            mass[o] = mass.get(o, 0.0) + math.exp((float(scores[i]) - top) / tau) * (1.0 if bias is None else bias(o))
+        z = sum(mass.values()) or 1.0
         return {o: m / z for o, m in mass.items()}
 
     def calibrate(
@@ -1193,6 +1207,7 @@ class Space:
         weights: dict[str, Any] | None = None,
         weights_for: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
         cost: Callable[[dict[str, float], str], float] | None = None,
+        bias_for: Callable[[dict[str, Any]], Callable[[str], float] | None] | None = None,
     ) -> float:
         """Fit tau so probabilities mean what they say: hold out each of
         the `sample` newest precedents in turn, score it against the
@@ -1210,14 +1225,18 @@ class Space:
             raise ValueError("calibrate needs at least 10 precedents with an outcome")
         held = graded[-sample:]
         scored = [
-            (h, self._scores(self._situations[h], None, weights_for(self._situations[h]) if weights_for else (weights or {})))
+            (
+                h,
+                self._scores(self._situations[h], None, weights_for(self._situations[h]) if weights_for else (weights or {})),
+                bias_for(self._situations[h]) if bias_for else None,
+            )
             for h in held
         ]
         best: tuple[float, float, float] = (float("inf"), float("inf"), TAU)
         for tau in TAUS:
             loss = paid = 0.0
-            for h, scores in scored:
-                p = self._probabilities(scores, tau, skip=h)
+            for h, scores, bias in scored:
+                p = self._probabilities(scores, tau, skip=h, bias=bias)
                 loss -= math.log(max(p.get(self._outcomes[h], 0.0), 1e-6))
                 if cost is not None:
                     paid += cost(p, self._outcomes[h])

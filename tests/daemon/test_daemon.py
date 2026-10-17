@@ -187,10 +187,10 @@ async def test_a_sign_in_is_asked_of_the_cloud_as_json(tmp_path, short_dir):
 async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged(tmp_path, short_dir, caplog):
     builtin = tmp_path / "builtin"
     builtin.mkdir()
-    data, sha, sig = part_archive(tmp_path / "p", name="ada", version="3.8.0", arch="any")
-    (builtin / "ada-3.8.0-any.tar.gz").write_bytes(data)
-    (builtin / "ada-3.8.0-any.sha256").write_text(sha + "\n")
-    (builtin / "ada-3.8.0-any.sig").write_text(sig + "\n")
+    data, sha, sig = part_archive(tmp_path / "p", name="ada", version="3.9.0", arch="any")
+    (builtin / "ada-3.9.0-any.tar.gz").write_bytes(data)
+    (builtin / "ada-3.9.0-any.sha256").write_text(sha + "\n")
+    (builtin / "ada-3.9.0-any.sig").write_text(sig + "\n")
     (builtin / "zeta-1.0.0-any.tar.gz").write_bytes(b"not a part")  # no .sha256 beside it
     c = Config(
         tmp_path / "data",
@@ -206,9 +206,9 @@ async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged
     )
     d = Daemon(c, ready(), launcher=LocalLauncher())
     with caplog.at_level("WARNING", logger="rrotor"):
-        assert d.install_builtin() == ["ada-3.8.0-any"]
+        assert d.install_builtin() == ["ada-3.9.0-any"]
     assert "a built-in part was not installed" in caplog.text
-    assert [i.info.version for i in d.parts.installed()] == ["3.8.0"]
+    assert [i.info.version for i in d.parts.installed()] == ["3.9.0"]
     assert d.install_builtin() == []  # already there at this version
     none = dataclasses.replace(c, builtin_parts=tmp_path / "nowhere")
     assert Daemon(none, ready(), launcher=LocalLauncher()).install_builtin() == []

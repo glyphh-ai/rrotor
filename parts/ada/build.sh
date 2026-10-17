@@ -35,7 +35,7 @@ done
 cp -R "$kernel/lexicon" "$stage/part/lib/lexicon"   # the two seeds: WordNet words, Moby parts of speech
 cp "$kernel/LICENSE" "$stage/part/LICENSE" 2>/dev/null || true
 version="$(python3 -c "import re,sys; print(re.search(r'^version = \"([^\"]+)\"', open('$kernel/pyproject.toml').read(), re.M).group(1))")"
-sed -e "s/\"ARCH\"/\"$arch\"/" -e "s/\"3.8.0\"/\"$version\"/" "$here/part.json" > "$stage/part/part.json"
+sed -e "s/\"ARCH\"/\"$arch\"/" -e "s/\"3.9.0\"/\"$version\"/" "$here/part.json" > "$stage/part/part.json"
 
 # numpy, as a wheel for the image's Python and this arch, unpacked into lib/ (no pip inside the sandbox).
 uv pip install --quiet --target "$stage/part/lib" --python-platform "$platform" --python-version 3.13 \

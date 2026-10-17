@@ -169,6 +169,8 @@ class Settings:
     word_pairs: bool = False  # learn pairs of words that tell more together than apart (off: on Banking77 it took
     # 0.1 to 0.4 points inside the training set; a lever for a model whose intents are phrases)
     max_word_pairs: int = 20  # at most this many pairs per text role
+    word_evidence: float = 2.0  # how much a query's words, by what each says of every outcome, weigh on the vote
+    # (0: not at all; 2 chosen on Banking77 inside its training set, 83.4% to 88.0%)
 
     RANGES = {  # name: (kind, low, high) or (kind, choices)
         "k": (int, 1, 1000),
@@ -184,6 +186,7 @@ class Settings:
         "lexicon": (bool,),
         "word_pairs": (bool,),
         "max_word_pairs": (int, 0, 200),
+        "word_evidence": (float, 0.0, 5.0),
     }
     LEARNING = ("word_weights", "word_floor", "interactions", "max_interactions", "rare", "word_pairs", "max_word_pairs")
 
@@ -351,12 +354,14 @@ class Spec:
         gains: dict[str, float] = {}
         moves: dict[str, dict[str, float]] = {}
         words_learned: dict[str, dict[str, float]] = {}
+        text_paths: list[str] = []
         base_rate = {o: n / sum(base.values()) for o, n in base.items()}
         for layer in self.layers:
             for seg in layer.segments:
                 for role in seg.roles:
                     path = f"{layer.name}.{seg.name}.{role.name}"
                     if role.text_encoding:
+                        text_paths.append(path)
                         if self.settings.word_weights:
                             learned_words = self._learn_words(layer.name, seg.name, role.name, situations, base_rate)
                             if learned_words:
@@ -393,7 +398,28 @@ class Spec:
             learned["~" + INTERACTIONS] = [p for p in pairs if p["similarity_weight"] > 0.1][: self.settings.max_interactions]
         for path, weights in words_learned.items():
             learned[path] = {**learned.get(path, {}), "value_weights": weights}
+        evidence = {path: self._learn_evidence(path, situations) for path in text_paths}
+        if evidence:
+            learned["~evidence"] = evidence
         return learned
+
+    def _learn_evidence(self, path: str, situations: Sequence[tuple[Mapping[str, Any], str]]) -> dict[str, Any]:
+        """What each word says of each outcome: the counts a model turns into pointwise mutual information at query
+        time (Model.bias), for words seen at least `rare` times. Not a weight in the spec: evidence the store holds."""
+        lname, sname, rname = path.split(".")
+        outcomes: Counter = Counter()
+        words: dict[str, Counter] = defaultdict(Counter)
+        total = 0
+        for situation, outcome in situations:
+            value = situation.get(lname, {}).get(sname, {}).get(rname)
+            if value is None:
+                continue
+            total += 1
+            outcomes[outcome] += 1
+            for word in set(_words_of(value)):
+                words[word][outcome] += 1
+        kept = {w: dict(c) for w, c in words.items() if sum(c.values()) >= self.settings.rare}
+        return {"total": total, "outcomes": dict(outcomes), "words": kept}
 
     def _learn_words(
         self,
@@ -1078,8 +1104,10 @@ class Model:
         self.settings = spec.settings.with_changes(self.overrides).with_changes(given)
         self.spec = spec.with_settings(self.settings)
         learned = self.space.meta("learned")
+        self.evidence: dict[str, Any] = {}
         if isinstance(learned, dict):
             self.spec = self.spec.with_weights(learned)
+            self.evidence = learned.get("~evidence", {})
         self._apply()
         if len(self.space):
             self.space.rewrite(self.spec.restate)  # a store recorded under other settings: its bags brought to these
@@ -1130,6 +1158,7 @@ class Model:
         learned = self.given.with_settings(self.settings).learn(graded)
         before = self.spec
         self.spec = self.given.with_settings(self.settings).with_weights(learned)
+        self.evidence = learned.get("~evidence", {})
         self.space.set_meta("learned", learned)
         if self.spec.interactions != before.interactions or _word_tables(self.spec) != _word_tables(before):
             self.space.rewrite(self.spec.restate)  # every precedent gets the words' weights and the pairs the spec now reads
@@ -1140,9 +1169,38 @@ class Model:
         learned = self.learn()
         return {"learned": learned, "tau": self.calibrate(sample, clearance, by)}
 
+    def bias(self, situation: Mapping[str, Any]) -> Callable[[str], float] | None:
+        """What the situation's words say of each outcome, as a factor on a vote: exp(word_evidence × the mean
+        pointwise mutual information of the words with the outcome), over the text roles the store has evidence
+        for; None when there is none or the lever is 0."""
+        strength = self.settings.word_evidence
+        if strength <= 0 or not self.evidence:
+            return None
+        totals: dict[str, float] = defaultdict(float)
+        seen = 0
+        for path, table in self.evidence.items():
+            lname, sname, rname = path.split(".")
+            value = situation.get(lname, {}).get(sname, {}).get(rname)
+            if value is None or not table.get("total"):
+                continue
+            n = table["total"]
+            for word in set(_words_of(value)):
+                counts = table["words"].get(word)
+                if counts is None:
+                    continue
+                seen += 1
+                p_word = sum(counts.values()) / n
+                for outcome, n_outcome in table["outcomes"].items():
+                    expected = n_outcome * p_word
+                    totals[outcome] += math.log((counts.get(outcome, 0) + 0.1) / (expected + 0.1))
+        if not seen:
+            return None
+        factor = {o: math.exp(strength * max(min(t / seen, 3.0), -3.0)) for o, t in totals.items()}
+        return lambda outcome: factor.get(outcome, 1.0)
+
     def query(self, data: Any, clearance: float = 1.0) -> kernel.Answer:
         situation = self.spec.situation(data)
-        return self.space.query(situation, weights=self.spec.weights(clearance, situation))
+        return self.space.query(situation, weights=self.spec.weights(clearance, situation), bias=self.bias(situation))
 
     def facts(
         self, data: Any, clearance: float = 1.0, top: int | None = None, min_score: float | None = None
@@ -1157,7 +1215,9 @@ class Model:
     def probabilities(self, data: Any, clearance: float = 1.0) -> dict[str, float]:
         """P(outcome | data) over the nearest precedents, at the store's temperature (calibrate() fits it)."""
         situation = self.spec.situation(data)
-        return self.space.probabilities(situation, weights=self.spec.weights(clearance, situation))
+        return self.space.probabilities(
+            situation, weights=self.spec.weights(clearance, situation), bias=self.bias(situation)
+        )
 
     def calibrate(self, sample: int | None = None, clearance: float = 1.0, by: str | None = None) -> float:
         """Fit the store's temperature on its own newest precedents, each held out in turn and scored with the
@@ -1172,6 +1232,7 @@ class Model:
             sample,
             weights_for=lambda s: self.spec.weights(clearance, s),
             cost=(lambda p, true: self.spec.output.cost(self._least(p), true)) if by == "cost" else None,
+            bias_for=self.bias,
         )
 
     def _least(self, probabilities: Mapping[str, float]) -> str:
