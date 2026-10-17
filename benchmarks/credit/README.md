@@ -71,45 +71,56 @@ Ada's ingest is paid once; every decision after is a query.
 ## After calibration, the same 200 once more
 
 `calibrate.py`, run after the table above and reported whatever it said. Nothing in it looks at the 200: the
-weights and the curve come from the 800 alone, the threshold from the cost matrix alone.
+weights and the temperature come from the 800 alone, the rule from the cost matrix alone. Since kernel 3.2.0 every
+step is the kernel's own, not the script's: the script only names the costs and calls it.
 
-1. **Role weights learned from the 800**: each field's information gain about the decision, scaled so the best
-   weighs 1 — `checking` 1.0, `duration_months` 0.51, `history` 0.39, `amount` 0.34, `savings` 0.30, `purpose`
-   0.21, `age` 0.16, … `job` 0.01, `dependants` 0.0. The hand-set segment weights are dropped.
-2. **Calibration by five-fold cross-validation inside the 800**: every learned case voted on by a model of the
-   other four fifths; an isotonic curve (61 steps) from the vote share for "bad" to P(bad).
-3. **The rule from the costs**: refuse when 5 × P(bad) > P(good), i.e. P(bad) > 1/6.
+1. **`Spec.learned(cases)`** on the 800: each role's weight is its information gain about the decision, scaled so
+   the best weighs 1 — `checking` 1.0, `duration_months` 0.51, `history` 0.39, `amount` 0.34, `savings` 0.30,
+   `purpose` 0.21, … `job` 0.01, `dependants` 0.0 — and each value of a role weighs how far it moves the decision
+   from the base rate (`checking`: `negative` 1.0, `no account` 0.98, `under 200` 0.40, `200 or more` 0.21). The
+   hand-set segment weights are dropped.
+2. **`Model.calibrate(sample=800)`**: the kernel holds out each of the 800 in turn against the rest and keeps the
+   temperature with the least log-loss (0.2).
+3. **`output.costs = {good: {bad: 5}, bad: {good: 1}}`** in the spec; `decide` returns the outcome with the least
+   expected cost under the calibrated probabilities.
+
+`k` and `min_sim` were put to five-fold cross-validation inside the 800 too, but `decide` reads the 25 nearest
+precedents whatever `k` is, so all five grid points cost the same (422 over the 800) and the first, k 15 and
+min_sim 0.35, stood; only the plain `query` line below depends on it.
 
 | | Accuracy | Bad approved (×5) | Good refused | Bank's cost |
 |---|---|---|---|---|
-| Ada, learned weights | 76.5% | 38 | 9 | 199 |
-| **Ada, learned weights, calibrated, cost rule** | 67.0% | 11 | 55 | **110** |
+| Ada, learned spec, plain `query` | 78.5% | 32 | 11 | 171 |
+| **Ada, learned spec, calibrated, `decide`** | 66.0% | 10 | 58 | **108** |
+| the same, abstaining on P(bad) in [0.1, 0.3] | 74.5% of 137 answered | 6 | 29 | 59, asked 63 |
+| earlier, by hand in the script (isotonic curve, 1/6 rule) | 67.0% | 11 | 55 | 110 |
 | for reference: LLM runs 1 and 2 | 77.0% / 79.0% | 16 / 18 | 30 / 24 | 110 / 114 |
 | for reference: logistic regression, cost-aware | 68.5% | 10 | 53 | 103 |
 
 Cross-validated accuracy inside the 800 was 71.8%, so this hold-out runs a little easy for every contestant; the
 ranking is what to read, not the third digit.
 
-So: on the bank's cost, calibration took Ada from 121 to 110 — level with the LLM, 7 behind the thresholded classic
-model — with every choice made before the hold-out was opened. The one-off calibration cost 627 s of CPU (the
-cross-validation's 800 queries at ~0.8 s each), which the vectorised query below makes seconds.
+So: with the learned spec Ada's plain answer is the best accuracy on the table (78.5%, cost 171, from 210 with
+the hand-set weights), and on the bank's cost `decide` lands at 108 — a hair ahead of both LLM runs, 5 behind the
+thresholded classic model — with every choice made before the hold-out was opened. Abstaining where either answer
+is costly cuts the cost of what it does answer to 59 for 137 of the 200, with 63 sent to a person. The whole
+calibration now costs 4 s (the vectorised query: 0.002 s per query at 800 precedents, was 0.97 s).
 
 ## What would move Ada
 
-1. **Learned role weights and calibration in the kernel**, as `calibrate.py` does them here by hand: `learn` writes
-   the information-gain weights into the spec, `calibrate` keeps the cross-validated curve with the store, and
-   `output.costs` in the spec makes the threshold fall out of the costs.
-2. **Cheaper calibration**: leave-one-out without rebuilding the model (drop one precedent, query, put it back), so the
-   curve refreshes as cases are recorded.
-3. **Abstain by expected cost**: `ask` in the band where either answer is costly; the person's answer is recorded.
-4. **A vectorised query**: 0.97 s per query at 800 precedents is the Python loop; one matmul makes it milliseconds.
+1. **Abstain as a product control**: `ask` in the band where either answer is costly, the person's answer recorded;
+   the numbers above say it is the biggest lever left.
+2. **Leave-one-out that refreshes as cases arrive**, so the temperature and the learned weights follow the store
+   without a rebuild (the pieces are now cheap enough).
+3. **Interactions between roles** (a bad `checking` with a long `duration_months`): the per-value weights are
+   one-dimensional, which is where the logistic model's last 5 come from.
 
 ## Reproduce
 
 ```sh
 benchmarks/credit/fetch.sh                         # german.data (CC BY 4.0, UCI)
 uv run python benchmarks/credit/run.py             # the split, Ada and the baseline; ~4 minutes
-uv run python benchmarks/credit/calibrate.py       # learned weights, calibration, the cost rule; ~14 minutes
+uv run python benchmarks/credit/calibrate.py       # learned spec, calibration, the cost rule; ~2 minutes
 uv run python benchmarks/credit/score.py benchmarks/credit/results/llm_run1.json   # any answers file
 ```
 

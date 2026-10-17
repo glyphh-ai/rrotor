@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from collections.abc import Callable
 
 DIM = 4096  # default dimensionality; ~1e-3 cross-talk between random symbols
 TAU = 0.12  # default softmax temperature (fit on Kubernetes issues; calibrate())
@@ -720,8 +721,110 @@ class Space:
         self._matrix = np.empty((0, dim), dtype=np.float32)  # grown 2x
         self._n = 0
         self._db = None
+        # the exact weighted score, fast: per leaf path, every distinct value's glyph once (a table and a
+        # matrix), and per precedent the index of its value there (-1: the precedent has no such leaf)
+        self._leaf_index: dict[str, dict[str, int]] = {}
+        self._leaf_vectors: dict[str, list[np.ndarray]] = {}
+        self._leaf_matrix: dict[str, np.ndarray | None] = {}
+        self._leaf_of: dict[str, list[int]] = {}
         if path:
             self._open(path)
+
+    # leaves: the fast path's tables
+
+    @staticmethod
+    def _leaves(situation: Any, at: str = "") -> list[tuple[str, Any]]:
+        """Every leaf of a situation as (path, value): an object's keys nest, anything else is a leaf."""
+        if isinstance(situation, dict):
+            out: list[tuple[str, Any]] = []
+            for key in sorted(situation):
+                out += Space._leaves(situation[key], f"{at}/{key}")
+            return out
+        return [(at, situation)]
+
+    def _leaf_add(self, situation: Any) -> None:
+        """One more precedent's leaves, in every table (a leaf it lacks: -1)."""
+        n = self._n  # its row, once appended
+        present: dict[str, Any] = dict(self._leaves(situation))
+        for path in set(self._leaf_of) | set(present):
+            rows = self._leaf_of.setdefault(path, [])
+            rows += [-1] * (n - len(rows))
+            if path in present:
+                key = json.dumps(present[path], sort_keys=True, ensure_ascii=False)
+                index = self._leaf_index.setdefault(path, {})
+                if key not in index:
+                    index[key] = len(index)
+                    self._leaf_vectors.setdefault(path, []).append(
+                        _encode(present[path], None, self.seed, self.dim).astype(np.float32)
+                    )
+                    self._leaf_matrix[path] = None  # rebuilt on the next read
+                rows.append(index[key])
+            else:
+                rows.append(-1)
+
+    def _leaf_drop(self, i: int) -> None:
+        for rows in self._leaf_of.values():
+            if i < len(rows):
+                del rows[i]
+
+    def _leaf_sims(self, path: str, query_vector: np.ndarray) -> np.ndarray | None:
+        """Every precedent's leaf sim with the query's leaf at this path; None when no precedent has the leaf."""
+        vectors = self._leaf_vectors.get(path)
+        if not vectors:
+            return None
+        matrix = self._leaf_matrix.get(path)
+        if matrix is None or len(matrix) != len(vectors):
+            matrix = np.stack(vectors)
+            self._leaf_matrix[path] = matrix
+        by_value = (matrix @ query_vector.astype(np.float32)) / self.dim
+        rows = self._leaf_of[path]
+        rows = rows + [-1] * (self._n - len(rows))
+        index = np.array(rows[: self._n], dtype=np.int64)
+        sims = np.where(index >= 0, by_value[np.maximum(index, 0)], 0.0)
+        return sims.astype(np.float64)
+
+    def _present(self, prefix: str) -> np.ndarray:
+        """Which precedents carry a leaf at this path or under it."""
+        found = np.zeros(self._n, dtype=bool)
+        for path, rows in self._leaf_of.items():
+            if path == prefix or path.startswith(prefix + "/"):
+                index = np.array((rows + [-1] * (self._n - len(rows)))[: self._n], dtype=np.int64)
+                found |= index >= 0
+        return found
+
+    def _keys_under(self, prefix: str) -> set[str]:
+        """The keys the precedents have directly under this path."""
+        cut = len(prefix) + 1
+        return {path[cut:].split("/", 1)[0] for path in self._leaf_of if path.startswith(prefix + "/")}
+
+    def _fast_scores(self, situation: dict[str, Any], weights: dict[str, Any] | None) -> np.ndarray:
+        """The exact weighted sim of the situation against every precedent, as _exact scores it, by leaf and in
+        one pass: a node's score is the weighted mean of its children's (a key on one side only scores 0 at its
+        weight), a leaf's the glyph sim of the two values. The query's side fixes the weights; the only thing that
+        varies by precedent is which keys it has, so each node is a numerator and a denominator over n precedents,
+        and each leaf one matrix product."""
+        n = self._n
+
+        def node(q: Any, w: dict[str, Any] | None, at: str) -> np.ndarray:
+            if not isinstance(q, dict):
+                sims = self._leaf_sims(at, _encode(q, None, self.seed, self.dim))
+                return np.zeros(n) if sims is None else sims
+            owns = {k: _weight(w.get(k) if w else None) for k in q}
+            numerator = np.zeros(n)
+            total = 0.0
+            for k, (own, inner) in owns.items():
+                if own > 0:
+                    total += own
+                    numerator += own * node(q[k], inner, f"{at}/{k}")
+            denominator = np.full(n, total)
+            for k in self._keys_under(at) - set(q):
+                own, _ = _weight(w.get(k) if w else None)
+                if own > 0:
+                    denominator += own * self._present(f"{at}/{k}")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                return np.where(denominator > 0, numerator / denominator, 0.0)
+
+        return node(situation, weights, "")
 
     # encoding: a situation is an object (values may nest — see
     # encode()); optional events fold in as a strand so order-carrying
@@ -764,11 +867,13 @@ class Space:
             grown[: self._n] = self._matrix[: self._n]
             self._matrix = grown
         self._matrix[self._n] = glyph.astype(np.float32)
+        self._leaf_add(situation)
         self._n += 1
 
     def _drop(self, i: int) -> None:
         for column in (self._ids, self._situations, self._trajs, self._outcomes, self._authors, self._ts, self._glyphs):
             del column[i]
+        self._leaf_drop(i)
         self._matrix[i : self._n - 1] = self._matrix[i + 1 : self._n]
         self._n -= 1
 
@@ -856,6 +961,8 @@ class Space:
             return self._sims(situation, events)
         self.encode(situation, events, weights)  # same errors either way
         traj = self._traj(events)
+        if traj is None and not any(t is not None for t in self._trajs[: self._n]):
+            return self._fast_scores(situation, weights)
         return np.array([self._exact(i, situation, traj, weights).score for i in range(self._n)], dtype=np.float64)
 
     def _top(
@@ -1029,17 +1136,27 @@ class Space:
         z = sum(mass.values())
         return {o: m / z for o, m in mass.items()}
 
-    def calibrate(self, sample: int = 100, weights: dict[str, Any] | None = None) -> float:
+    def calibrate(
+        self,
+        sample: int = 100,
+        weights: dict[str, Any] | None = None,
+        weights_for: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    ) -> float:
         """Fit tau so probabilities mean what they say: hold out each of
         the `sample` newest precedents in turn, score it against the
         rest, and keep the temperature (from TAUS) with the least
         log-loss on the held-out outcomes. Saved in the file, so every
-        later open uses it. Events are left out. Returns tau."""
+        later open uses it. Events are left out. Returns tau.
+        `weights_for` gives each held-out situation its own weights
+        (a spec's, which depend on what the situation carries)."""
         graded = [i for i in range(self._n) if self._outcomes[i] is not None]
         if len(graded) < 10:
             raise ValueError("calibrate needs at least 10 precedents with an outcome")
         held = graded[-sample:]
-        scored = [(h, self._scores(self._situations[h], None, weights or {})) for h in held]
+        scored = [
+            (h, self._scores(self._situations[h], None, weights_for(self._situations[h]) if weights_for else (weights or {})))
+            for h in held
+        ]
         best = (float("inf"), TAU)
         for tau in TAUS:
             loss = 0.0

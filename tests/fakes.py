@@ -183,7 +183,7 @@ def ready() -> Layers:
 KERNEL = Path(__file__).parent / "kernel"
 
 
-def ada_part(tmp: Path, version: str = "3.1.0") -> tuple[bytes, str, str]:
+def ada_part(tmp: Path, version: str = "3.2.0") -> tuple[bytes, str, str]:
     """The Ada part as the tests build it: the vendored kernel under lib/ (numpy comes from the test's own Python)."""
     files = {
         f"lib/{name}": (KERNEL / name).read_text() for name in ("glyphh_kernel.py", "glyphh_spec.py", "glyphh_nsm.py")
@@ -240,8 +240,8 @@ class LocalLauncher:
 class FakeLink:
     """What the handler owes the Cloud, as the link client would keep it."""
 
-    def __init__(self) -> None:
-        self.seq = 0
+    def __init__(self, configured: bool = True) -> None:
+        self.seq, self.configured = 0, configured
         self.sent: list[dict[str, Any]] = []
 
     async def owe(self, make: Any, numbered: bool = True) -> None:

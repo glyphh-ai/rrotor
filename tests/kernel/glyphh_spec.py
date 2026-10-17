@@ -51,6 +51,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter, defaultdict
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -98,6 +99,19 @@ class Role:
     numeric_config: NumericConfig | None = None
     text_encoding: str | None = None
     lexicons: tuple[str, ...] = ()
+    # how much each value of this role weighs, 0 to 1, on top of similarity_weight: learned from the store
+    # (learn()), keyed by the value's text, for a number by its bin's lower edge. A value not named weighs 1.
+    value_weights: tuple[tuple[str, float], ...] = ()
+
+    def value_weight(self, value: Any) -> float:
+        if not self.value_weights or value is None:
+            return 1.0
+        key = kernel._text(value[-1]) if self.numeric_config is not None and isinstance(value, list) else None
+        if key is None:
+            if isinstance(value, list):
+                return 1.0  # a set or a bag of words: the role's weight alone
+            key = kernel._text(value)
+        return dict(self.value_weights).get(key, 1.0)
 
 
 @dataclass(frozen=True)
@@ -119,6 +133,15 @@ class Layer:
 @dataclass(frozen=True)
 class Output:
     report: tuple[str, ...] = ()
+    # the cost of deciding one outcome when another is true: costs[decided][true]; a pair not named costs 0
+    # when they are the same outcome and 1 otherwise. decide() picks the outcome with the least expected cost.
+    costs: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = ()
+
+    def cost(self, decided: str, true: str) -> float:
+        table = dict((d, dict(t)) for d, t in self.costs)
+        if decided in table and true in table[decided]:
+            return table[decided][true]
+        return 0.0 if decided == true else 1.0
 
 
 @dataclass(frozen=True)
@@ -155,6 +178,8 @@ class Spec:
                 out["text_encoding"] = r.text_encoding
             if r.lexicons:
                 out["lexicons"] = list(r.lexicons)
+            if r.value_weights:
+                out["value_weights"] = dict(r.value_weights)
             return out
 
         return {
@@ -165,7 +190,10 @@ class Spec:
             "similarity_weight": self.similarity_weight,
             "security_weight": self.security_weight,
             "temporal_source": self.temporal_source,
-            "output": {"report": list(self.output.report)},
+            "output": {
+                "report": list(self.output.report),
+                **({"costs": {d: dict(t) for d, t in self.output.costs}} if self.output.costs else {}),
+            },
             "layers": [
                 {
                     "name": l.name,
@@ -184,6 +212,52 @@ class Spec:
                 for l in self.layers
             ],
         }
+
+    def learned(self, cases: Sequence[tuple[Any, str]]) -> Spec:
+        """This spec with its weights learned from graded cases: each role's similarity_weight is how much knowing
+        its value tells about the outcome (information gain, scaled so the most telling role weighs 1), and each
+        value's weight how far that value moves the outcome from the base rate (scaled so the most telling value
+        of a role weighs 1). Layers' and segments' weights are left as they are; so are security weights."""
+        base = Counter(outcome for _, outcome in cases)
+        if len(base) < 2:
+            raise SpecError("", "learn needs cases with at least two outcomes")
+        h_base = _entropy(base)
+        gains: dict[str, float] = {}
+        moves: dict[str, dict[str, float]] = {}
+        situations = [(self.situation(data), outcome) for data, outcome in cases]
+        base_rate = {o: n / sum(base.values()) for o, n in base.items()}
+        for layer in self.layers:
+            for seg in layer.segments:
+                for role in seg.roles:
+                    path = f"{layer.name}.{seg.name}.{role.name}"
+                    groups: dict[str, Counter] = defaultdict(Counter)
+                    for situation, outcome in situations:
+                        value = situation.get(layer.name, {}).get(seg.name, {}).get(role.name)
+                        if value is None or role.key_part or role.text_encoding:
+                            continue
+                        key = kernel._text(value[-1]) if role.numeric_config is not None else kernel._text(value)
+                        groups[key][outcome] += 1
+                    total = sum(sum(g.values()) for g in groups.values())
+                    if not total:
+                        continue
+                    after = sum(sum(g.values()) / total * _entropy(g) for g in groups.values())
+                    gains[path] = max(h_base - after, 0.0)
+                    moves[path] = {
+                        key: max(abs(g[o] / sum(g.values()) - base_rate.get(o, 0.0)) for o in base)
+                        for key, g in groups.items()
+                    }
+        top = max(gains.values(), default=0.0)
+        obj = self.to_json()
+        for layer in obj["layers"]:
+            for seg in layer["segments"]:
+                for role in seg["roles"]:
+                    path = f"{layer['name']}.{seg['name']}.{role['name']}"
+                    if path in gains and top > 0:
+                        role["similarity_weight"] = round(gains[path] / top, 4)
+                        best = max(moves[path].values(), default=0.0)
+                        if best > 0:
+                            role["value_weights"] = {k: round(m / best, 4) for k, m in moves[path].items()}
+        return Spec.from_json(obj)
 
     @property
     def spec_id(self) -> str:
@@ -247,7 +321,11 @@ class Spec:
                 roles: dict[str, Any] = {"*": sw}
                 for r in s.roles:
                     gone = present is not None and not (isinstance(sp, dict) and r.name in sp)
-                    roles[r.name] = 0.0 if r.security_weight > clearance or gone else r.similarity_weight
+                    if r.security_weight > clearance or gone:
+                        roles[r.name] = 0.0
+                    else:
+                        value = sp.get(r.name) if isinstance(sp, dict) else None
+                        roles[r.name] = r.similarity_weight * r.value_weight(value)
                 segs[s.name] = roles
             tree[l.name] = segs
         return tree
@@ -339,6 +417,11 @@ class Spec:
         raise SpecError(f"{at}.{name}", "no such role")
 
 
+def _entropy(counts: Counter) -> float:
+    n = sum(counts.values())
+    return -sum(c / n * math.log2(c / n) for c in counts.values() if c) if n else 0.0
+
+
 def _kept(keep: Sequence[str], path: str) -> bool:
     return not keep or any(path == k or path.startswith(k + ".") for k in keep)
 
@@ -413,7 +496,7 @@ def _parse_role(obj: Any, path: str) -> Role:
         obj,
         path,
         ["name"],
-        ["similarity_weight", "security_weight", "key_part", "numeric_config", "text_encoding", "lexicons"],
+        ["similarity_weight", "security_weight", "key_part", "numeric_config", "text_encoding", "lexicons", "value_weights"],
     )
     name = _name(o["name"], f"{path}.name")
     at = f"{path}({name})"
@@ -440,6 +523,10 @@ def _parse_role(obj: Any, path: str) -> Role:
     key_part = o.get("key_part", False)
     if not isinstance(key_part, bool):
         raise SpecError(f"{at}.key_part", "must be true or false")
+    vw = o.get("value_weights", {})
+    if not isinstance(vw, dict) or not all(isinstance(k, str) for k in vw):
+        raise SpecError(f"{at}.value_weights", "must be an object of value: weight")
+    value_weights = tuple((k, _unit(v, f"{at}.value_weights.{k}")) for k, v in sorted(vw.items()))
     return Role(
         name,
         _unit(o.get("similarity_weight", 1.0), f"{at}.similarity_weight"),
@@ -448,6 +535,7 @@ def _parse_role(obj: Any, path: str) -> Role:
         numeric,
         text,
         tuple(_name(x, f"{at}.lexicons") for x in lex),
+        value_weights,
     )
 
 
@@ -500,10 +588,17 @@ def _parse_spec(obj: Any) -> Spec:
             )
         )
     _unique([l.name for l in layers], "layers")
-    out = _fields(o.get("output", {}), "output", [], ["report"])
+    out = _fields(o.get("output", {}), "output", [], ["report", "costs"])
     report = out.get("report", [])
     if not isinstance(report, list) or not all(isinstance(x, str) for x in report):
         raise SpecError("output.report", "must be a list of paths")
+    costs_in = out.get("costs", {})
+    if not isinstance(costs_in, dict) or not all(isinstance(t, dict) for t in costs_in.values()):
+        raise SpecError("output.costs", "must be an object: decided outcome -> {true outcome: cost}")
+    costs = tuple(
+        (str(d), tuple((str(t), _number(c, f"output.costs.{d}.{t}")) for t, c in sorted(table.items())))
+        for d, table in sorted(costs_in.items())
+    )
     spec = Spec(
         _name(o["name"], "name"),
         tuple(layers),
@@ -512,7 +607,7 @@ def _parse_spec(obj: Any) -> Spec:
         _unit(o.get("similarity_weight", 1.0), "similarity_weight"),
         _unit(o.get("security_weight", 0.0), "security_weight"),
         str(o.get("temporal_source", "auto")),
-        Output(tuple(report)),
+        Output(tuple(report), costs),
     )
     for path in report:
         _resolve(spec, path, "output.report")
@@ -574,6 +669,33 @@ class Model:
             situation, weights=self.spec.weights(clearance, situation), top=top, min_score=min_score
         )
         return [{**t.to_json(), "tree": self.spec.report(t.to_json()["tree"], clearance)} for t in trees]
+
+    def probabilities(self, data: Any, clearance: float = 1.0) -> dict[str, float]:
+        """P(outcome | data) over the nearest precedents, at the store's temperature (calibrate() fits it)."""
+        situation = self.spec.situation(data)
+        return self.space.probabilities(situation, weights=self.spec.weights(clearance, situation))
+
+    def calibrate(self, sample: int = 100, clearance: float = 1.0) -> float:
+        """Fit the store's temperature on its own newest precedents, each held out in turn and scored with the
+        weights the spec gives its situation. Kept in the store. Returns tau."""
+        return self.space.calibrate(sample, weights_for=lambda s: self.spec.weights(clearance, s))
+
+    def decide(self, data: Any, clearance: float = 1.0) -> dict[str, Any]:
+        """The outcome with the least expected cost under the spec's output.costs (every mistake costs 1 when the
+        spec names none), from the calibrated probabilities; with none, nothing is decided."""
+        probabilities = self.probabilities(data, clearance)
+        if not probabilities:
+            return {"outcome": None, "expected_cost": None, "probabilities": {}}
+        expected = {
+            decided: sum(p * self.spec.output.cost(decided, true) for true, p in probabilities.items())
+            for decided in probabilities
+        }
+        best = min(expected, key=lambda o: (expected[o], o))
+        return {
+            "outcome": best,
+            "expected_cost": round(expected[best], 4),
+            "probabilities": {o: round(p, 4) for o, p in probabilities.items()},
+        }
 
     def __len__(self) -> int:
         return len(self.space)
