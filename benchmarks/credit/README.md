@@ -78,9 +78,14 @@ step is the kernel's own, not the script's: the script only names the costs and 
    the best weighs 1 — `checking` 1.0, `duration_months` 0.51, `history` 0.39, `amount` 0.34, `savings` 0.30,
    `purpose` 0.21, … `job` 0.01, `dependants` 0.0 — and each value of a role weighs how far it moves the decision
    from the base rate (`checking`: `negative` 1.0, `no account` 0.98, `under 200` 0.40, `200 or more` 0.21). The
-   hand-set segment weights are dropped.
+   hand-set segment weights are dropped. Since kernel 3.5.0 it also finds **interactions**, pairs of roles that
+   tell more together than the better of them alone: here `duration_months × savings` 0.57,
+   `duration_months × checking` 0.57, `purpose × duration_months` 0.47, `savings × history` 0.44,
+   `amount × employed_since` 0.43, read as one more layer. The same spec with the pairs taken out is scored beside
+   it.
 2. **`Model.calibrate(sample=800)`**: the kernel holds out each of the 800 in turn against the rest and keeps the
-   temperature with the least log-loss (0.2).
+   temperature with the least log-loss (0.12 with the pairs, 0.2 without); once more with `by="cost"`, the
+   temperature whose decisions would have cost the bank least over the 800 (0.2).
 3. **`output.costs = {good: {bad: 5}, bad: {good: 1}}`** in the spec; `decide` returns the outcome with the least
    expected cost under the calibrated probabilities. **`output.ask = 0.5`** prices asking a person at half a refused
    good loan (chosen before any run); `decide` answers `ask: true` where every outcome's expected cost is above it.
@@ -93,10 +98,13 @@ min_sim 0.35, stood; only the plain `query` line below depends on it.
 
 | | Accuracy | Bad approved (×5) | Good refused | Bank's cost |
 |---|---|---|---|---|
-| Ada, learned spec, plain `query` | 78.5% | 32 | 11 | 171 |
-| **Ada, learned spec, calibrated, `decide`** | 66.0% | 10 | 58 | **108** |
-| the same, asking where every answer costs over 0.5 | 82.2% of 107 answered | 6 | 13 | 43, asked 93 |
-| Ada, learned from its own store as it filled, `decide` | 67.5% | 9 | 56 | 101 |
+| Ada, learned spec without the pairs, plain `query` | 78.5% | 32 | 11 | 171 |
+| the same, calibrated, `decide` | 66.0% | 10 | 58 | 108 |
+| Ada, learned spec with interactions, plain `query` | 77.5% | 33 | 12 | 177 |
+| **Ada, learned spec with interactions, calibrated, `decide`** | 70.0% | 10 | 50 | **100** |
+| the same, asking where every answer costs over 0.5 | 81.1% of 111 answered | 6 | 15 | 45, asked 89 |
+| the same, temperature fitted on the cost | 69.0% | 10 | 52 | 102 |
+| Ada, learned from its own store as it filled, `decide` | 69.5% | 10 | 51 | 101 |
 | earlier, by hand in the script (isotonic curve, 1/6 rule) | 67.0% | 11 | 55 | 110 |
 | for reference: LLM runs 1 and 2 | 77.0% / 79.0% | 16 / 18 | 30 / 24 | 110 / 114 |
 | for reference: logistic regression, cost-aware | 68.5% | 10 | 53 | 103 |
@@ -104,36 +112,39 @@ min_sim 0.35, stood; only the plain `query` line below depends on it.
 Cross-validated accuracy inside the 800 was 71.8%, so this hold-out runs a little easy for every contestant; the
 ranking is what to read, not the third digit.
 
-So: with the learned spec Ada's plain answer is the best accuracy on the table (78.5%, cost 171, from 210 with
-the hand-set weights), and on the bank's cost `decide` lands at 108 — a hair ahead of both LLM runs, 5 behind the
-thresholded classic model — with every choice made before the hold-out was opened. The whole calibration now costs
-4 s (the vectorised query: 0.002 s per query at 800 precedents, was 0.97 s).
+So: with the learned spec Ada's plain answer is the best accuracy on the table (78.5% without the pairs, cost 171,
+from 210 with the hand-set weights; the pairs cost the plain answer a point), and on the bank's cost `decide` with
+interactions lands at **100** — ahead of both LLM runs (110, 114) and of the thresholded classic model (103) —
+with every choice made before the hold-out was opened. The pairs are what moved it: the same spec without them
+decides at 108. The whole calibration costs 6 s (the vectorised query: 0.005 s per query at 800 precedents with
+the pairs, was 0.97 s).
 
-The priced ask sends 93 of the 200 to a person and decides the other 107 at cost 43 (82.2% right): asking at 0.5 is
-dear, and what it buys is a clean half. A cheaper ask asks less; the band is the user's price, not a tuning knob.
+The priced ask sends 89 of the 200 to a person and decides the other 111 at cost 45 (81.1% right): asking at 0.5
+is dear, and what it buys is a clean half. A cheaper ask asks less; the band is the user's price, not a tuning
+knob.
 
-The model that learned from its own store as it filled decided at cost 101, below the batch model's 108 and the
-classic model's 103, from the same weights (learned at 800 both ways) and a different temperature: calibrating on
-its newest 200 chose tau 1.0, on all 800 tau 0.2, and the decisions moved by seven. Read that as the fit of the
-temperature being loose on this data (the log-loss is nearly flat between those), not as one path being better;
-both were set before the hold-out was opened, and both are reported.
+The temperature is steadier than it was: fitted by log-loss on all 800 (0.12), by the bank's cost (0.2), or by
+log-loss on the newest 200 as the store filled (0.3), the decisions cost 100, 102 and 101. Before the pairs, the
+same three fits spread from 0.2 to 1.0 and the cost from 101 to 108. Fitting on the cost did not beat fitting on
+the loss here; both are reported.
 
 ## What would move Ada
 
-1. **Interactions between roles** (a bad `checking` with a long `duration_months`): the per-value weights are
-   one-dimensional, which is where the logistic model's last few come from.
-2. **A steadier temperature**: the fit between tau 0.2 and 1.0 is loose here; a finer grid, or fitting on the
-   bank's cost rather than log-loss, would settle it (and would have to be chosen before the next hold-out).
+1. **The plain answer with interactions**: the pairs help the calibrated decision and cost the unweighted vote a
+   point; the pairs' weights are scaled against the roles' and may deserve a scale of their own.
+2. **Three-way interactions**, and pairs with a text role (a bag of words cannot be paired today).
+3. **The ask as a product control** in the platform: who answers, and what their answer records.
 
-Done since the first run: learned role and value weights, costs and `decide` in the kernel; the priced `ask`;
-a model that learns from its own store and refreshes as cases arrive (`refresh_every`); the vectorised query.
+Done since the first run: learned role and value weights, costs and `decide` in the kernel; the priced `ask`; a
+model that learns from its own store and refreshes as cases arrive (`refresh_every`); the vectorised query;
+interactions between roles; a finer temperature grid and the fit by cost.
 
 ## Reproduce
 
 ```sh
 benchmarks/credit/fetch.sh                         # german.data (CC BY 4.0, UCI)
 uv run python benchmarks/credit/run.py             # the split, Ada and the baseline; ~4 minutes
-uv run python benchmarks/credit/calibrate.py       # learned spec, calibration, the cost rule; ~2 minutes
+uv run python benchmarks/credit/calibrate.py       # learned spec, interactions, calibration, the cost rule; ~3 minutes
 uv run python benchmarks/credit/score.py benchmarks/credit/results/llm_run1.json   # any answers file
 ```
 

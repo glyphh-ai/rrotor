@@ -3,11 +3,13 @@ out are queried once at the end, with the one rule those fits produce.
 
 Four steps, each decided before the hold-out is touched:
 1. `Spec.learned(cases)`: every role's weight is its information gain about the outcome over the 800, and every
-   value's weight how far it moves the outcome from the base rate (both scaled to 0..1). The hand-set segment
-   weights are dropped.
+   value's weight how far it moves the outcome from the base rate (both scaled to 0..1), plus the pairs of roles
+   that tell more together than apart (interactions, read as one more layer). The hand-set segment weights are
+   dropped. The same spec with the pairs taken out is scored beside it.
 2. `k` and `min_sim` chosen by five-fold cross-validation inside the 800, by the bank's cost of `decide`.
 3. `Model.calibrate()`: the kernel fits its temperature on held-out precedents of the store itself.
-4. The rule from the costs alone, in the spec: `output.costs = {good: {bad: 5}, bad: {good: 1}}`; `decide` picks
+4. The temperature by log-loss, and once more by the bank's cost (`calibrate(by="cost")`), both reported.
+5. The rule from the costs alone, in the spec: `output.costs = {good: {bad: 5}, bad: {good: 1}}`; `decide` picks
    the outcome with the least expected cost, and asks a person instead when `output.ask` (the price of asking,
    set here to 0.5, half a refused good loan, before any run) is below every outcome's expected cost.
 
@@ -68,6 +70,8 @@ def main() -> None:
     print("learned role weights:", dict(sorted(roles.items(), key=lambda kv: -kv[1])))
     checking = next(r for l in spec.to_json()["layers"] for s in l["segments"] for r in s["roles"] if r["name"] == "checking")
     print("learned value weights, checking:", checking.get("value_weights"))
+    print("learned interactions:", [(i.name, i.similarity_weight) for i in spec.interactions])
+    alone = spec.with_weights({"~interactions": []})  # the same weights, the pairs taken out
     print(f"learned in {time.time() - t0:.1f}s")
 
     # k and min_sim by cross-validated cost inside the 800
@@ -92,6 +96,10 @@ def main() -> None:
     m = model_of(spec, train, k, min_sim)
     tau = m.calibrate(sample=800)
     build = time.time() - t0
+    single = model_of(alone, train, k, min_sim)
+    single.calibrate(sample=800)
+    base.score("Ada, learned spec, no interactions", [single.query(base.situation(c)).top or "good" for c in test], truth, 0)
+    base.score("  the same, calibrated, decide", [single.decide(base.situation(c))["outcome"] or "good" for c in test], truth, 0, "decide(): least expected cost")
     t0 = time.time()
     plain, decided, abstain = [], [], []
     for c in test:
@@ -107,6 +115,9 @@ def main() -> None:
     asked = abstain.count("ask")
     sure = [(d, t) for d, t in zip(abstain, truth) if d != "ask"]
     base.score(f"  the same, asking when every answer costs over {ASK}", [d for d, _ in sure], [t for _, t in sure], 0, f"answered {len(sure)} of {len(test)}, asked {asked}")
+    tau_cost = m.calibrate(sample=800, by="cost")
+    base.score("  the same, tau fitted on the cost", [m.decide(base.situation(c))["outcome"] or "good" for c in test], truth, 0, f"tau {tau_cost} (by loss: {tau})")
+    m.calibrate(sample=800)
 
     # the runtime's way: nothing learned up front, the store teaches the model as it fills
     t0 = time.time()

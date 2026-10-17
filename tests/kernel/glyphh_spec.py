@@ -49,6 +49,7 @@ fact trees that come back ("layer", "layer.segment" or
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 from collections import Counter, defaultdict
@@ -131,6 +132,28 @@ class Layer:
 
 
 @dataclass(frozen=True)
+class Interaction:
+    """Two roles read together: a case's value is the pair of theirs, in a layer the spec adds itself
+    (`interactions.pairs.<name>`). What one role means can depend on another (a bad checking account with a long
+    loan); learn() finds the pairs that tell more together than apart. Secured as the stricter of its two roles."""
+
+    name: str
+    roles: tuple[str, str]
+    similarity_weight: float = 1.0
+    value_weights: tuple[tuple[str, float], ...] = ()
+
+    def value_weight(self, value: Any) -> float:
+        if not self.value_weights or value is None:
+            return 1.0
+        return dict(self.value_weights).get(kernel._text(value), 1.0)
+
+
+INTERACTIONS = "interactions"  # the layer the spec adds; "pairs" its one segment
+MAX_INTERACTIONS = 5
+RARE = 5  # a pair's value seen fewer times than this is pooled when learning: no weight rides on it
+
+
+@dataclass(frozen=True)
 class Output:
     report: tuple[str, ...] = ()
     # the cost of deciding one outcome when another is true: costs[decided][true]; a pair not named costs 0
@@ -157,6 +180,7 @@ class Spec:
     security_weight: float = 0.0
     temporal_source: str = "auto"
     output: Output = field(default_factory=Output)
+    interactions: tuple[Interaction, ...] = ()
 
     # -- JSON in and out --------------------------------------------
 
@@ -198,6 +222,21 @@ class Spec:
                 **({"costs": {d: dict(t) for d, t in self.output.costs}} if self.output.costs else {}),
                 **({"ask": self.output.ask} if self.output.ask is not None else {}),
             },
+            **(
+                {
+                    INTERACTIONS: [
+                        {
+                            "name": i.name,
+                            "roles": list(i.roles),
+                            "similarity_weight": i.similarity_weight,
+                            **({"value_weights": dict(i.value_weights)} if i.value_weights else {}),
+                        }
+                        for i in self.interactions
+                    ]
+                }
+                if self.interactions
+                else {}
+            ),
             "layers": [
                 {
                     "name": l.name,
@@ -254,19 +293,75 @@ class Spec:
                         key: max(abs(g[o] / sum(g.values()) - base_rate.get(o, 0.0)) for o in base)
                         for key, g in groups.items()
                     }
-        top = max(gains.values(), default=0.0)
-        learned: dict[str, dict[str, Any]] = {}
+        pairs = self._learn_pairs(situations, gains, base, base_rate, h_base)
+        top = max([*gains.values(), *(p["similarity_weight"] for p in pairs)], default=0.0)  # the strongest weighs 1
+        learned: dict[str, Any] = {}
         for path, gain in gains.items():
             if top > 0:
                 learned[path] = {"similarity_weight": round(gain / top, 4)}
                 best = max(moves[path].values(), default=0.0)
                 if best > 0:
                     learned[path]["value_weights"] = {k: round(m / best, 4) for k, m in moves[path].items()}
+        if top > 0:
+            for pair in pairs:
+                pair["similarity_weight"] = round(pair["similarity_weight"] / top, 4)
+            learned["~" + INTERACTIONS] = [p for p in pairs if p["similarity_weight"] > 0.1][:MAX_INTERACTIONS]
         return learned
 
-    def with_weights(self, learned: Mapping[str, Mapping[str, Any]]) -> Spec:
-        """This spec with learned role weights (learn()'s table) put in; a path the spec lacks is ignored."""
+    def _learn_pairs(
+        self,
+        situations: Sequence[tuple[Mapping[str, Any], str]],
+        gains: Mapping[str, float],
+        base: Counter,
+        base_rate: Mapping[str, float],
+        h_base: float,
+    ) -> list[dict[str, Any]]:
+        """The pairs of roles that tell more together than the better of them alone: each pair's extra information
+        gain over its best role (unscaled here; learn() scales it like a role's and keeps the MAX_INTERACTIONS best
+        over a tenth of the strongest signal), values seen under RARE times pooled so the gain is not sparsity's."""
+        paths = list(gains)
+        found = []
+        for a, b in itertools.combinations(paths, 2):
+            groups: dict[str, Counter] = defaultdict(Counter)
+            for situation, outcome in situations:
+                pair = self._pair_value(situation, a, b)
+                if pair is not None:
+                    groups[pair][outcome] += 1
+            if not groups:
+                continue
+            counted = Counter({k: sum(g.values()) for k, g in groups.items()})
+            pooled: dict[str, Counter] = defaultdict(Counter)
+            for k, g in groups.items():
+                pooled[k if counted[k] >= RARE else "~"].update(g)
+            total = sum(counted.values())
+            after = sum(sum(g.values()) / total * _entropy(g) for g in pooled.values())
+            extra = max(h_base - after, 0.0) - max(gains[a], gains[b])
+            if extra > 0:
+                moves = {
+                    k: max(abs(g[o] / sum(g.values()) - base_rate.get(o, 0.0)) for o in base)
+                    for k, g in groups.items()
+                    if counted[k] >= RARE
+                }
+                best = max(moves.values(), default=0.0)
+                found.append(
+                    {
+                        "name": f"{a.rsplit('.', 1)[1]}_x_{b.rsplit('.', 1)[1]}",
+                        "roles": [a, b],
+                        "similarity_weight": extra,
+                        **({"value_weights": {k: round(m / best, 4) for k, m in moves.items()}} if best > 0 else {}),
+                    }
+                )
+        found.sort(key=lambda f: (-f["similarity_weight"], f["name"]))
+        return found
+
+    def with_weights(self, learned: Mapping[str, Any]) -> Spec:
+        """This spec with learned role weights (learn()'s table) put in, and its interactions replaced by the
+        learned ones when the table names them; a path the spec lacks is ignored."""
         obj = self.to_json()
+        if "~" + INTERACTIONS in learned:
+            obj.pop(INTERACTIONS, None)
+            if learned["~" + INTERACTIONS]:
+                obj[INTERACTIONS] = [dict(i) for i in learned["~" + INTERACTIONS]]
         for layer in obj["layers"]:
             for seg in layer["segments"]:
                 for role in seg["roles"]:
@@ -317,6 +412,37 @@ class Spec:
                 out[layer.name] = segs
         if not out:
             raise SpecError("", "no role carries a value")
+        return self._crossed(out)
+
+    def _crossed(self, situation: dict[str, Any]) -> dict[str, Any]:
+        """The situation with the spec's interactions layer (from its roles' values), replacing any it had."""
+        out = {k: v for k, v in situation.items() if k != INTERACTIONS}
+        pairs = {}
+        for i in self.interactions:
+            value = self._pair_value(out, *i.roles)
+            if value is not None:
+                pairs[i.name] = value
+        if pairs:
+            out[INTERACTIONS] = {"pairs": pairs}
+        return out
+
+    def _pair_value(self, situation: Mapping[str, Any], a: str, b: str) -> str | None:
+        """The two roles' values as one (a number by its bin), or None when either is missing, a set or a text."""
+        texts = []
+        for path in (a, b):
+            lname, sname, rname = path.split(".")
+            layer = self._find(self.layers, lname)
+            seg = self._find(layer.segments, sname) if layer else None
+            role = self._find(seg.roles, rname) if seg else None
+            v = situation.get(lname, {}).get(sname, {}).get(rname)
+            if role is None or v is None or role.text_encoding or (isinstance(v, list) and role.numeric_config is None):
+                return None
+            texts.append(kernel._text(v[-1]) if isinstance(v, list) else kernel._text(v))
+        return "|".join(texts)
+
+    def recross(self, situation: Mapping[str, Any]) -> dict[str, Any]:
+        """A stored situation brought to this spec's interactions (for Space.rewrite when they change)."""
+        return self._crossed(dict(situation))
         return out
 
     def weights(self, clearance: float = 1.0, present: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -347,7 +473,26 @@ class Spec:
                         roles[r.name] = r.similarity_weight * r.value_weight(value)
                 segs[s.name] = roles
             tree[l.name] = segs
+        if self.interactions:
+            ip = (present or {}).get(INTERACTIONS) if present is not None else None
+            pairs: dict[str, Any] = {}
+            for i in self.interactions:
+                value = ip["pairs"].get(i.name) if isinstance(ip, dict) else None
+                gone = present is not None and value is None
+                if gone or self._security_of(i.roles[0]) > clearance or self._security_of(i.roles[1]) > clearance:
+                    pairs[i.name] = 0.0
+                else:
+                    pairs[i.name] = i.similarity_weight * i.value_weight(value)
+            own = max(pairs.values(), default=0.0)
+            tree[INTERACTIONS] = {"*": 0.0 if (present is not None and ip is None) else own, "pairs": {"*": 1.0, **pairs}}
         return tree
+
+    def _security_of(self, path: str) -> float:
+        lname, sname, rname = path.split(".")
+        layer = self._find(self.layers, lname)
+        seg = self._find(layer.segments, sname) if layer else None
+        role = self._find(seg.roles, rname) if seg else None
+        return max(layer.security_weight if layer else 0.0, seg.security_weight if seg else 0.0, role.security_weight if role else 0.0)
 
     def key(self, situation: Mapping[str, Any]) -> str | None:
         """The record id from its key_part roles, or None if it has none."""
@@ -558,12 +703,37 @@ def _parse_role(obj: Any, path: str) -> Role:
     )
 
 
+def _parse_interactions(obj: Any) -> tuple[Interaction, ...]:
+    if not isinstance(obj, list):
+        raise SpecError(INTERACTIONS, "must be a list")
+    out = []
+    for n, io in enumerate(obj):
+        at = f"{INTERACTIONS}[{n}]"
+        i = _fields(io, at, ["name", "roles"], ["similarity_weight", "value_weights"])
+        roles = i["roles"]
+        if not isinstance(roles, list) or len(roles) != 2 or not all(isinstance(r, str) for r in roles) or roles[0] == roles[1]:
+            raise SpecError(f"{at}.roles", "two different layer.segment.role paths")
+        vw = i.get("value_weights", {})
+        if not isinstance(vw, dict) or not all(isinstance(k, str) for k in vw):
+            raise SpecError(f"{at}.value_weights", "must be an object of value: weight")
+        out.append(
+            Interaction(
+                _name(i["name"], f"{at}.name"),
+                (roles[0], roles[1]),
+                _unit(i.get("similarity_weight", 1.0), f"{at}.similarity_weight"),
+                tuple((k, _unit(v, f"{at}.value_weights.{k}")) for k, v in sorted(vw.items())),
+            )
+        )
+    _unique([i.name for i in out], INTERACTIONS)
+    return tuple(out)
+
+
 def _parse_spec(obj: Any) -> Spec:
     o = _fields(
         obj,
         "",
         ["name", "layers"],
-        ["version", "dimension", "seed", "similarity_weight", "security_weight", "temporal_source", "output"],
+        ["version", "dimension", "seed", "similarity_weight", "security_weight", "temporal_source", "output", INTERACTIONS],
     )
     if o.get("version", SPEC_VERSION) != SPEC_VERSION:
         raise SpecError("version", f"this kernel reads spec version {SPEC_VERSION}")
@@ -607,6 +777,8 @@ def _parse_spec(obj: Any) -> Spec:
             )
         )
     _unique([l.name for l in layers], "layers")
+    if any(l.name == INTERACTIONS for l in layers):
+        raise SpecError("layers", f'"{INTERACTIONS}" is the layer the spec adds for its interactions')
     out = _fields(o.get("output", {}), "output", [], ["report", "costs", "ask"])
     report = out.get("report", [])
     if not isinstance(report, list) or not all(isinstance(x, str) for x in report):
@@ -630,9 +802,13 @@ def _parse_spec(obj: Any) -> Spec:
         _unit(o.get("security_weight", 0.0), "security_weight"),
         str(o.get("temporal_source", "auto")),
         Output(tuple(report), costs, ask),
+        _parse_interactions(o.get(INTERACTIONS, [])),
     )
     for path in report:
         _resolve(spec, path, "output.report")
+    for i in spec.interactions:
+        for path in i.roles:
+            _resolve(spec, path, f"{INTERACTIONS}.{i.name}.roles")
     if spec.temporal_source != "auto":
         if len(spec.temporal_source.split(".")) != 3:
             raise SpecError("temporal_source", 'is "auto" or a layer.segment.role path')
@@ -700,14 +876,17 @@ class Model:
         if len(graded) < 10:
             raise SpecError("", "learn needs at least 10 precedents with an outcome")
         learned = self.given.learn(graded)
+        before = self.spec
         self.spec = self.given.with_weights(learned)
         self.space.set_meta("learned", learned)
+        if self.spec.interactions != before.interactions:
+            self.space.rewrite(self.spec.recross)  # every precedent gets the pairs the spec now reads
         return learned
 
-    def refresh(self, sample: int = 200, clearance: float = 1.0) -> dict[str, Any]:
+    def refresh(self, sample: int = 200, clearance: float = 1.0, by: str = "loss") -> dict[str, Any]:
         """learn() then calibrate(): the weights and the temperature follow the store. Returns both."""
         learned = self.learn()
-        return {"learned": learned, "tau": self.calibrate(sample, clearance)}
+        return {"learned": learned, "tau": self.calibrate(sample, clearance, by)}
 
     def query(self, data: Any, clearance: float = 1.0) -> kernel.Answer:
         situation = self.spec.situation(data)
@@ -728,10 +907,25 @@ class Model:
         situation = self.spec.situation(data)
         return self.space.probabilities(situation, weights=self.spec.weights(clearance, situation))
 
-    def calibrate(self, sample: int = 100, clearance: float = 1.0) -> float:
+    def calibrate(self, sample: int = 100, clearance: float = 1.0, by: str = "loss") -> float:
         """Fit the store's temperature on its own newest precedents, each held out in turn and scored with the
-        weights the spec gives its situation. Kept in the store. Returns tau."""
-        return self.space.calibrate(sample, weights_for=lambda s: self.spec.weights(clearance, s))
+        weights the spec gives its situation. `by` is "loss" (the least log-loss: probabilities that mean what
+        they say) or "cost" (the least cost of deciding by output.costs, log-loss breaking ties: probabilities
+        that decide best). Kept in the store. Returns tau."""
+        if by not in ("loss", "cost"):
+            raise SpecError("", 'calibrate by "loss" or "cost"')
+        return self.space.calibrate(
+            sample,
+            weights_for=lambda s: self.spec.weights(clearance, s),
+            cost=(lambda p, true: self.spec.output.cost(self._least(p), true)) if by == "cost" else None,
+        )
+
+    def _least(self, probabilities: Mapping[str, float]) -> str:
+        expected = {
+            decided: sum(p * self.spec.output.cost(decided, true) for true, p in probabilities.items())
+            for decided in probabilities
+        }
+        return min(expected, key=lambda o: (expected[o], o))
 
     def decide(self, data: Any, clearance: float = 1.0) -> dict[str, Any]:
         """The outcome with the least expected cost under the spec's output.costs (every mistake costs 1 when the
@@ -745,7 +939,7 @@ class Model:
             decided: sum(p * self.spec.output.cost(decided, true) for true, p in probabilities.items())
             for decided in probabilities
         }
-        best = min(expected, key=lambda o: (expected[o], o))
+        best = self._least(probabilities)
         ask = self.spec.output.ask
         return {
             "outcome": best,

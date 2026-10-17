@@ -38,7 +38,7 @@
     },
     "learn": {
       "description": "Learn the roles' weights from the recorded incidents and calibrate the probabilities; kept with the store",
-      "inputs": { "type": "object", "properties": { "sample": { "type": "integer", "minimum": 10 } }, "additionalProperties": false }
+      "inputs": { "type": "object", "properties": { "sample": { "type": "integer", "minimum": 10 }, "by": { "type": "string", "enum": ["loss", "cost"] } }, "additionalProperties": false }
     },
     "start": {
       "description": "How many incidents the model holds",

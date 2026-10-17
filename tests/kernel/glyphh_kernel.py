@@ -26,7 +26,7 @@ from collections.abc import Callable
 DIM = 4096  # default dimensionality; ~1e-3 cross-talk between random symbols
 TAU = 0.12  # default softmax temperature (fit on Kubernetes issues; calibrate())
 POOL = 25  # nearest precedents a probability is spread over
-TAUS = (0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2, 0.3, 0.5, 1.0)
+TAUS = (0.01, 0.015, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2, 0.3, 0.5, 0.7, 1.0, 1.5)
 ENCODING = 3  # bump when encode() changes; stores re-encode on open
 
 SPEC = """\
@@ -1162,6 +1162,7 @@ class Space:
         sample: int = 100,
         weights: dict[str, Any] | None = None,
         weights_for: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+        cost: Callable[[dict[str, float], str], float] | None = None,
     ) -> float:
         """Fit tau so probabilities mean what they say: hold out each of
         the `sample` newest precedents in turn, score it against the
@@ -1169,7 +1170,11 @@ class Space:
         log-loss on the held-out outcomes. Saved in the file, so every
         later open uses it. Events are left out. Returns tau.
         `weights_for` gives each held-out situation its own weights
-        (a spec's, which depend on what the situation carries)."""
+        (a spec's, which depend on what the situation carries).
+        `cost(probabilities, true)` is what deciding from those
+        probabilities would cost when `true` is the outcome: given, the
+        temperature with the least total cost wins, log-loss breaking
+        ties, so the fit serves the decision rather than the curve."""
         graded = [i for i in range(self._n) if self._outcomes[i] is not None]
         if len(graded) < 10:
             raise ValueError("calibrate needs at least 10 precedents with an outcome")
@@ -1178,15 +1183,18 @@ class Space:
             (h, self._scores(self._situations[h], None, weights_for(self._situations[h]) if weights_for else (weights or {})))
             for h in held
         ]
-        best = (float("inf"), TAU)
+        best: tuple[float, float, float] = (float("inf"), float("inf"), TAU)
         for tau in TAUS:
-            loss = 0.0
+            loss = paid = 0.0
             for h, scores in scored:
                 p = self._probabilities(scores, tau, skip=h)
                 loss -= math.log(max(p.get(self._outcomes[h], 0.0), 1e-6))
-            if loss < best[0]:
-                best = (loss, tau)
-        self.tau, self._tau_given = best[1], False
+                if cost is not None:
+                    paid += cost(p, self._outcomes[h])
+            key = (round(paid, 9), loss) if cost is not None else (loss, 0.0)
+            if key < best[:2]:
+                best = (*key, tau)
+        self.tau, self._tau_given = best[2], False
         if self._db is not None:
             self._db.execute("INSERT OR REPLACE INTO meta VALUES ('tau', ?)", (repr(self.tau),))
             self._db.commit()
@@ -1194,6 +1202,42 @@ class Space:
 
     def __len__(self) -> int:
         return self._n
+
+    def rewrite(self, fn: Callable[[dict[str, Any]], dict[str, Any]]) -> int:
+        """Every precedent's situation passed through fn and stored again, glyph and leaf tables rebuilt (its
+        events kept). For a spec that has changed what a situation carries. Returns how many were rewritten."""
+        blobs: dict[str, bytes | None] = {}
+        if self._db is not None:
+            blobs = dict(self._db.execute("SELECT id, events FROM precedents").fetchall())
+        changed = 0
+        for i in range(self._n):
+            new = fn(self._situations[i])
+            if new == self._situations[i]:
+                continue
+            events = _events_from_blob(blobs.get(self._ids[i]), self.dim) if self._db is not None else None
+            parts, ws = _keyed(new, None, self.seed, self.dim)
+            traj = self._trajs[i]
+            if traj is not None:
+                parts.append(bind(symbol("trajectory", self.seed, self.dim), traj if events is None else Strand(events).state(self.decay)))
+                ws.append(1.0)
+            glyph = bundle(parts, ws)
+            self._situations[i], self._glyphs[i] = new, glyph
+            self._matrix[i] = glyph.astype(np.float32)
+            if self._db is not None:
+                self._db.execute(
+                    "UPDATE precedents SET situation = ?, glyph = ? WHERE id = ?",
+                    (json.dumps(new, ensure_ascii=False), glyph.tobytes(), self._ids[i]),
+                )
+            changed += 1
+        if changed:
+            self._leaf_index, self._leaf_vectors, self._leaf_matrix, self._leaf_of = {}, {}, {}, {}
+            n, self._n = self._n, 0
+            for i in range(n):
+                self._leaf_add(self._situations[i])
+                self._n += 1
+            if self._db is not None:
+                self._db.commit()
+        return changed
 
     def graded(self) -> list[tuple[dict[str, Any], str]]:
         """Every precedent with an outcome: (situation, outcome), oldest first."""
