@@ -90,8 +90,16 @@ def test_learn_weighs_the_roles_from_the_store_and_needs_ten_graded_tickets(mode
         auth = i % 2 == 0
         harness(model, tmp_path).call(
             "record",
-            {"data": ticket(i, "login fails" if auth else "typo in docs", "auth" if auth else "docs", 8 if auth else 1), "outcome": "page oncall" if auth else "backlog"},
+            {
+                "data": ticket(
+                    i, "login fails" if auth else "typo in docs", "auth" if auth else "docs", 8 if auth else 1
+                ),
+                "outcome": "page oncall" if auth else "backlog",
+            },
         )
     r = harness(model, tmp_path).call("learn")
     assert r.status == "done" and r.data["precedents"] == 12 and r.data["roles"]["issue.body.component"] == 1.0
-    assert harness(model, tmp_path).call("query", {"data": ticket(9, "login broken", "auth", 7)}).data["top"] == "page oncall"
+    assert (
+        harness(model, tmp_path).call("query", {"data": ticket(9, "login broken", "auth", 7)}).data["top"]
+        == "page oncall"
+    )

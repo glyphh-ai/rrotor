@@ -161,5 +161,6 @@ def test_learn_weighs_the_roles_from_the_store_and_needs_ten_graded_incidents(mo
     assert r.status == "done" and r.data["precedents"] == 12 and 0 < r.data["tau"] <= 1
     assert r.data["roles"]["error.where.service"] == 1.0 and r.data["roles"]["error.where.region"] == 0.0
     assert r.data["interactions"] == []  # nothing a pair tells that service alone does not
+    assert set(r.data["words"]) == {"error.what.message"} and r.data["words"]["error.what.message"] >= 9  # the message's words, weighed
     q = harness(model, tmp_path).call("query", {"data": incident(50, "gateway timed out", "api")})
     assert q.data["top"] == "raise circuit breaker"

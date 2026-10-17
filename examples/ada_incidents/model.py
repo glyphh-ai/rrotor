@@ -36,16 +36,31 @@ def facts(ctx: Any, inputs: dict[str, Any]) -> Result:
 
 def learn(ctx: Any, inputs: dict[str, Any]) -> Result:
     """The weights learned from the store's own graded precedents and the temperature calibrated, both kept with the
-    store: every role's weight is how much it tells about the outcome, and the pairs of roles that tell more together
-    (interactions). Needs ten graded precedents of two outcomes."""
+    store: every role's weight is how much it tells about the outcome, every word of a text role its weight (`words`:
+    how many were learned per role), and the pairs of roles that tell more together (interactions). Needs ten graded
+    precedents of two outcomes."""
     graded = ctx.ada.space.graded()
     if len(graded) < 10 or len({outcome for _, outcome in graded}) < 2:
-        return Result.failed("learn", f"learn needs ten precedents with an outcome, of two outcomes; {len(graded)} graded")
-    out = ctx.ada.refresh(sample=int(inputs.get("sample", 200)), clearance=ctx.clearance, by=str(inputs.get("by", "loss")))
+        return Result.failed(
+            "learn", f"learn needs ten precedents with an outcome, of two outcomes; {len(graded)} graded"
+        )
+    out = ctx.ada.refresh(
+        sample=int(inputs.get("sample", 200)), clearance=ctx.clearance, by=str(inputs.get("by", "loss"))
+    )
     learned = out["learned"]
-    roles = {path: found["similarity_weight"] for path, found in learned.items() if not path.startswith("~")}
-    pairs = [{"name": i["name"], "roles": i["roles"], "weight": i["similarity_weight"]} for i in learned.get("~interactions", [])]
-    return Result.done({"roles": roles, "interactions": pairs, "tau": out["tau"], "precedents": len(graded)})
+    roles = {path: f["similarity_weight"] for path, f in learned.items() if "similarity_weight" in f}
+    words = {
+        path: len(f["value_weights"])
+        for path, f in learned.items()
+        if not path.startswith("~") and "similarity_weight" not in f
+    }
+    pairs = [
+        {"name": i["name"], "roles": i["roles"], "weight": i["similarity_weight"]}
+        for i in learned.get("~interactions", [])
+    ]
+    return Result.done(
+        {"roles": roles, "words": words, "interactions": pairs, "tau": out["tau"], "precedents": len(graded)}
+    )
 
 
 def probabilities(ctx: Any, inputs: dict[str, Any]) -> Result:

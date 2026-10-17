@@ -388,6 +388,21 @@ def _keyed(
     return parts, ws
 
 
+def _weighted_set(data: Any) -> bool:
+    """A list of [scalar, weight] pairs: a set whose items weigh differently (a bag of words whose words were
+    learned, for one). A plain set is a list of scalars; a list of pairs of anything else is a set of pairs."""
+    return all(
+        isinstance(x, (list, tuple))
+        and len(x) == 2
+        and isinstance(x[0], (str, int, float))
+        and not isinstance(x[0], bool)
+        and isinstance(x[1], (int, float))
+        and not isinstance(x[1], bool)
+        and 0 <= x[1] <= 1
+        for x in data
+    )
+
+
 def _encode(data: Any, weights: dict[str, Any] | None, seed: int, dim: int) -> np.ndarray:
     if isinstance(data, dict):
         if not data:
@@ -399,6 +414,10 @@ def _encode(data: Any, weights: dict[str, Any] | None, seed: int, dim: int) -> n
     if isinstance(data, (list, tuple)):
         if not data:
             raise ValueError("cannot encode an empty array")
+        if _weighted_set(data):  # [[item, weight], ...]: each item's voice in the vote is its weight
+            parts = [symbol(f"val:{_text(item)}", seed, dim) for item, _ in data]
+            weights = [float(w) for _, w in data]
+            return bundle(parts, weights) if sum(weights) > 0 else bundle(parts)
         return bundle([_encode(x, None, seed, dim) for x in data])
     return symbol(f"val:{_text(data)}", seed, dim)
 

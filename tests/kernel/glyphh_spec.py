@@ -149,6 +149,9 @@ class Interaction:
 
 
 INTERACTIONS = "interactions"  # the layer the spec adds; "pairs" its one segment
+WORD_FLOOR = 0.35  # the least a learned word weighs: a bag's glyph is a majority vote, and a floor this high keeps
+# the many words that tell little from being drowned by the few that tell most (chosen on Banking77, inside its
+# training set: 0.02 lost 6 points to plain words, 0.35 gained 7; benchmarks/banking77 in glyphh-ai/rrotor)
 MAX_INTERACTIONS = 5
 RARE = 5  # a pair's value seen fewer times than this is pooled when learning: no weight rides on it
 
@@ -272,15 +275,21 @@ class Spec:
         h_base = _entropy(base)
         gains: dict[str, float] = {}
         moves: dict[str, dict[str, float]] = {}
+        words_learned: dict[str, dict[str, float]] = {}
         base_rate = {o: n / sum(base.values()) for o, n in base.items()}
         for layer in self.layers:
             for seg in layer.segments:
                 for role in seg.roles:
                     path = f"{layer.name}.{seg.name}.{role.name}"
+                    if role.text_encoding:
+                        learned_words = self._learn_words(layer.name, seg.name, role.name, situations, base_rate)
+                        if learned_words:
+                            words_learned[path] = learned_words
+                        continue
                     groups: dict[str, Counter] = defaultdict(Counter)
                     for situation, outcome in situations:
                         value = situation.get(layer.name, {}).get(seg.name, {}).get(role.name)
-                        if value is None or role.key_part or role.text_encoding:
+                        if value is None or role.key_part:
                             continue
                         key = kernel._text(value[-1]) if role.numeric_config is not None else kernel._text(value)
                         groups[key][outcome] += 1
@@ -306,7 +315,44 @@ class Spec:
             for pair in pairs:
                 pair["similarity_weight"] = round(pair["similarity_weight"] / top, 4)
             learned["~" + INTERACTIONS] = [p for p in pairs if p["similarity_weight"] > 0.1][:MAX_INTERACTIONS]
+        for path, weights in words_learned.items():
+            learned[path] = {**learned.get(path, {}), "value_weights": weights}
         return learned
+
+    def _learn_words(
+        self,
+        lname: str,
+        sname: str,
+        rname: str,
+        situations: Sequence[tuple[Mapping[str, Any], str]],
+        base_rate: Mapping[str, float],
+    ) -> dict[str, float]:
+        """What each word of a text role says about the outcome: how far the word's presence moves some outcome
+        from its base rate (the same measure a field's values get; not information gain, which with many outcomes
+        crowns the words that split them into big groups, "card", not the ones that name one, "stolen"), scaled
+        from WORD_FLOOR (tells nothing) to 1 (the most telling word). Words seen under RARE times are left out:
+        they get the floor."""
+        seen: dict[str, Counter] = defaultdict(Counter)
+        total = 0
+        for situation, outcome in situations:
+            value = situation.get(lname, {}).get(sname, {}).get(rname)
+            if value is None:
+                continue
+            total += 1
+            for word in _words_of(value):
+                seen[word][outcome] += 1
+        if total < RARE:
+            return {}
+        moves: dict[str, float] = {}
+        for word, present in seen.items():
+            n_present = sum(present.values())
+            if n_present < RARE:
+                continue
+            moves[word] = max(max(present[o] / n_present - base_rate.get(o, 0.0) for o in present), 0.0)
+        top = max(moves.values(), default=0.0)
+        if top <= 0:
+            return {}
+        return {word: round(WORD_FLOOR + (1 - WORD_FLOOR) * move / top, 4) for word, move in sorted(moves.items())}
 
     def _learn_pairs(
         self,
@@ -367,7 +413,8 @@ class Spec:
                 for role in seg["roles"]:
                     found = learned.get(f"{layer['name']}.{seg['name']}.{role['name']}")
                     if found:
-                        role["similarity_weight"] = found["similarity_weight"]
+                        if "similarity_weight" in found:
+                            role["similarity_weight"] = found["similarity_weight"]
                         role.pop("value_weights", None)
                         if found.get("value_weights"):
                             role["value_weights"] = dict(found["value_weights"])
@@ -412,7 +459,31 @@ class Spec:
                 out[layer.name] = segs
         if not out:
             raise SpecError("", "no role carries a value")
-        return self._crossed(out)
+        return self._crossed(self._weighed(out))
+
+    def _weighed(self, situation: dict[str, Any]) -> dict[str, Any]:
+        """The situation with every text role's bag carrying the role's learned word weights ([[word, weight],
+        ...]; a word not learned weighs WORD_FLOOR), or plain words where the role learned none."""
+        out: dict[str, Any] = {}
+        for lname, segs in situation.items():
+            layer = self._find(self.layers, lname)
+            if layer is None:
+                out[lname] = segs
+                continue
+            new_segs: dict[str, Any] = {}
+            for sname, roles in segs.items():
+                seg = self._find(layer.segments, sname)
+                new_roles: dict[str, Any] = {}
+                for rname, value in roles.items():
+                    role = self._find(seg.roles, rname) if seg else None
+                    if role is not None and role.text_encoding and isinstance(value, list):
+                        words = _words_of(value)
+                        table = dict(role.value_weights)
+                        value = [[w, table.get(w, WORD_FLOOR)] for w in words] if table else words
+                    new_roles[rname] = value
+                new_segs[sname] = new_roles
+            out[lname] = new_segs
+        return out
 
     def _crossed(self, situation: dict[str, Any]) -> dict[str, Any]:
         """The situation with the spec's interactions layer (from its roles' values), replacing any it had."""
@@ -440,10 +511,12 @@ class Spec:
             texts.append(kernel._text(v[-1]) if isinstance(v, list) else kernel._text(v))
         return "|".join(texts)
 
-    def recross(self, situation: Mapping[str, Any]) -> dict[str, Any]:
-        """A stored situation brought to this spec's interactions (for Space.rewrite when they change)."""
-        return self._crossed(dict(situation))
-        return out
+    def restate(self, situation: Mapping[str, Any]) -> dict[str, Any]:
+        """A stored situation brought to this spec's word weights and interactions (for Space.rewrite when they
+        change)."""
+        return self._crossed(self._weighed(dict(situation)))
+
+    recross = restate
 
     def weights(self, clearance: float = 1.0, present: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """The kernel weights tree: every level's similarity_weight, 0 for
@@ -579,6 +652,21 @@ class Spec:
             if r.name == name or name in r.lexicons:
                 return r
         raise SpecError(f"{at}.{name}", "no such role")
+
+
+def _words_of(value: Any) -> list[str]:
+    """The words of a stored bag, weighted or plain."""
+    return [x[0] if isinstance(x, list) else x for x in value]
+
+
+def _word_tables(spec: Spec) -> dict[str, tuple[tuple[str, float], ...]]:
+    return {
+        f"{l.name}.{s.name}.{r.name}": r.value_weights
+        for l in spec.layers
+        for s in l.segments
+        for r in s.roles
+        if r.text_encoding
+    }
 
 
 def _entropy(counts: Counter) -> float:
@@ -879,8 +967,8 @@ class Model:
         before = self.spec
         self.spec = self.given.with_weights(learned)
         self.space.set_meta("learned", learned)
-        if self.spec.interactions != before.interactions:
-            self.space.rewrite(self.spec.recross)  # every precedent gets the pairs the spec now reads
+        if self.spec.interactions != before.interactions or _word_tables(self.spec) != _word_tables(before):
+            self.space.rewrite(self.spec.restate)  # every precedent gets the words' weights and the pairs the spec now reads
         return learned
 
     def refresh(self, sample: int = 200, clearance: float = 1.0, by: str = "loss") -> dict[str, Any]:

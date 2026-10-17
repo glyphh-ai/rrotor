@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).parent
-KERNEL = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent.parent / "tests" / "kernel"  # the vendored kernel
+KERNEL = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent.parent / "tests" / "kernel"
 sys.path.insert(0, str(KERNEL))
 import glyphh_spec  # noqa: E402
 
@@ -55,8 +55,8 @@ def score(name: str, guesses: list[str], truth: list[str], seconds: float, note:
 # ── Ada ─────────────────────────────────────────────────────────────────
 
 
-def ada(train, test, k=15, min_sim=0.10):
-    spec = glyphh_spec.Spec.from_json(SPEC)
+def ada(train, test, k=15, min_sim=0.10, spec=None):
+    spec = spec or glyphh_spec.Spec.from_json(SPEC)
     model = glyphh_spec.Model(spec, k=k, min_sim=min_sim, author="eval")
     t0 = time.time()
     for i, (text, label) in enumerate(train):
@@ -213,6 +213,43 @@ def main() -> None:
         truth,
         build + per * len(test),
         f"sufficient on {sure}",
+    )
+    score("  the same, the 200 sample", [guesses[i] for i in sample], sample_truth, 0)
+
+    # learned word weights (kernel 3.6.0): Spec.learned over the 10,003 only
+    t0 = time.time()
+    spec = glyphh_spec.Spec.from_json(SPEC).learned(
+        [({"message": {"body": {"text": text}}}, label) for text, label in train]
+    )
+    table = dict(spec.layers[0].segments[0].roles[0].value_weights)
+    top = sorted(table.items(), key=lambda kv: -kv[1])[:8]
+    low = sorted(table.items(), key=lambda kv: kv[1])[:8]
+    print(f"learned word weights in {time.time() - t0:.1f}s: {len(table)} words; heaviest {top}; lightest {low}")
+    guesses, build, per, sure = ada(train, test, k, min_sim, spec)
+    score(
+        "Ada, learned word weights",
+        guesses,
+        truth,
+        build + per * len(test),
+        f"build {build:.1f}s, {per * 1000:.1f} ms per query, sufficient on {sure}",
+    )
+    score("  the same, the 200 sample", [guesses[i] for i in sample], sample_truth, 0)
+    json.dump({"guesses": guesses}, open(HERE / "results" / "ada_words.json", "w"))
+
+    # the runtime's way: the store teaches the model, then rewrites itself
+    t0 = time.time()
+    live = glyphh_spec.Model(glyphh_spec.Spec.from_json(SPEC), k=k, min_sim=min_sim, author="eval")
+    for text, label in train:
+        live.record({"message": {"body": {"text": text}}}, label)
+    live.learn()
+    build = time.time() - t0
+    online = [live.query({"message": {"body": {"text": text}}}).top or "" for text, _ in test]
+    score(
+        "Ada, learned from its own store (learn(), the store rewritten)",
+        online,
+        truth,
+        build,
+        f"build + learn {build:.1f}s; same guesses as above: {online == guesses}",
     )
     score("  the same, the 200 sample", [guesses[i] for i in sample], sample_truth, 0)
     json.dump({"guesses": guesses}, open(HERE / "results" / "ada.json", "w"))

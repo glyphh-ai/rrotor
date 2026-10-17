@@ -4,9 +4,9 @@ The counterpart to [`../credit`](../credit/README.md). There the cases were type
 the case is nothing but free text, which is where a developer reaches for a language model today, and the question
 is the same: can a precedent store route a message as well as Claude, deterministically, for nothing per call?
 
-**The answer, honestly: not yet.** On this data Claude routes 97% right, a classic text model 90%, and Ada 77%.
-This page is kept because a benchmark that only shows wins is not a benchmark. What would move Ada is named at the
-end, and it is one specific thing.
+**The answer, honestly: closer than it was, not there.** On this data Claude routes 97% right, a classic text
+model 90%, and Ada 83% once it learned which words matter (77% before it could). This page is kept because a
+benchmark that only shows wins is not a benchmark; the second half of it is what the first half taught the kernel.
 
 ## The test
 
@@ -18,7 +18,8 @@ end, and it is one specific thing.
   model is scored on that sample too.
 - **Ada:** one bag-of-words role (`text_encoding: "bag_of_words"`), the 10,003 recorded as precedents, each
   held-out message answered by the vote of its nearest precedents. `k` and `min_sim` were put to a grid on 1,000
-  messages held inside the 10,003; the defaults (15, 0.10) won.
+  messages held inside the 10,003; the defaults (15, 0.10) won. Then, since kernel 3.6.0, the same with **learned
+  word weights**: `Spec.learned` over the 10,003 gives every word a weight, and the bag is bundled by them.
 - **Classic models:** multinomial naive Bayes, and TF-IDF with softmax regression (numpy, no library), its
   epochs, learning rate and L2 chosen on the same 1,000 inside the 10,003.
 - **The LLM:** two fresh Claude Fable 5.1 agents (effort medium), each given the 10,003 as a file and the 77
@@ -30,8 +31,10 @@ Nothing was tuned on the 3,080 or on the 200.
 
 | | 3,080 held out | The 200 sample |
 |---|---|---|
-| Ada, one bag-of-words role, k 15, min_sim 0.10 | 77.2% | 77.0% |
+| Ada, one bag-of-words role, every word the same | 77.2% | 77.0% |
 | Multinomial naive Bayes | 78.8% | 78.5% |
+| **Ada, learned word weights** (kernel 3.6.0) | **83.1%** | 87.5% |
+| Ada, the same, learned from its own store (`learn()`, the store rewritten) | 83.1% | 87.5% |
 | TF-IDF + softmax regression, tuned inside the training set | 90.3% | 92.0% |
 | Claude, run 1 (read ~8,100 of the 10,003) | — | 97.0% |
 | Claude, run 2 (read all 10,003) | — | 97.5% |
@@ -44,7 +47,7 @@ reason every sample does, but the gap to everything else is real.
 
 | | Build | Per message | Cost per message |
 |---|---|---|---|
-| Ada | 4 s, once | 5.9 ms | ~$0.00000003 on a $0.019/h machine |
+| Ada | 4 s, once (7 s with `learn()`) | 5.9 ms | ~$0.00000003 on a $0.019/h machine |
 | Naive Bayes | instant | 0.1 ms | ~0 |
 | TF-IDF softmax | 12 s, once | 0.01 ms | ~0 |
 | Claude, batched as here (200 at once, examples read once) | — | ~1,800 tokens, 0.6 s | ≈ $0.01–$0.03 |
@@ -55,10 +58,17 @@ as the credit page, $5/M in and $25/M out to $15/M in and $75/M out). Ada's inge
 
 ## What it says
 
-- **Text is a different problem from fields.** Ada's similarity on a bag of words counts shared words, every word
-  the same: "card", "my" and "the" weigh as much as "stolen". The classic model's whole advantage is that it
-  learned which words matter (TF-IDF, then a weight per word per intent). Ada has no way to learn a word's
-  weight today: `learn` skips text roles.
+- **Text is a different problem from fields, and the first lesson was which words matter.** With every word the
+  same, "card", "my" and "the" weighed as much as "stolen" and Ada sat at 77%. Learned word weights took it to
+  83%, past naive Bayes; the classic model's remaining 7 points are a weight per word *per intent*, which a
+  similarity has no place for.
+- **The second lesson was how a weight becomes a voice.** The first weighting, information gain, made it worse
+  (48%): with 77 outcomes, gain crowns the words that split them into big groups ("card", "top", "up"), not the
+  ones that name one. Weighing a word by how far it moves some outcome from its base rate fixed the ranking and
+  still lost 10 points (67%), because a bag's glyph is a majority vote and two words at 1.0 drown twenty at 0.02.
+  A floor of 0.35 under every word, chosen on 1,000 messages held inside the training set (`tune_words.py`:
+  plain 76.3%, floors and powers from 70.8% to 83.4%), is what let the quiet words keep voting. Both wrong turns
+  are reported because each was measured on the hold-out once before the next was tried; the floor was not.
 - **The LLM is in its element.** Routing a short message to a named intent is reading comprehension, and the
   judges leaned on the training file for the near-neighbour pairs (card_arrival against card_delivery_estimate,
   the three top-up intents). They were also consistent with each other, which they were not on the loans.
@@ -67,19 +77,19 @@ as the credit page, $5/M in and $25/M out to $15/M in and $75/M out). Ada's inge
 
 ## What would move Ada
 
-1. **Learned word weights.** A bag-of-words role whose words carry weights the store learned: the kernel can
-   bundle with a weight per word already, so this is `learn` writing `value_weights` for text roles (how much each
-   word tells about the outcome, the same information gain the fields get) and the encoder honouring them. That
-   is TF-IDF's trick, inside Ada, with the receipts kept. The expected move is from 77% toward the classic model's
-   90%; the honest way to find out is to build it, choose nothing on the 3,080, and run this page again.
-2. **Word pairs.** The interactions the credit page added, for words ("top up" + "failed").
+1. **Word pairs.** The interactions the credit page added, for words ("top up" + "failed"; "card" + "arrive").
+2. **A weight per word per outcome.** What the classic model has and a similarity does not: the kernel's
+   probabilities could weigh a precedent's vote by how its words bear on *its* outcome.
 3. **The NSM layer.** The kernel's primes could stand in for a word's meaning, so "stolen" and "taken" meet.
+
+Done on this page: learned word weights (kernel 3.6.0), 77% to 83%.
 
 ## Reproduce
 
 ```sh
 benchmarks/banking77/fetch.sh                      # train.csv, test.csv
-uv run python benchmarks/banking77/run.py          # Ada, the two classic models, the tuning grids; ~5 minutes
+uv run python benchmarks/banking77/run.py          # Ada, plain and with learned words, the classic models, the grids; ~6 minutes
+uv run python benchmarks/banking77/tune_words.py   # how a word's weight became its voice, inside the training set
 uv run python benchmarks/banking77/score.py benchmarks/banking77/results/llm_run1.json   # a judge's answers
 ```
 
