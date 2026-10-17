@@ -57,6 +57,19 @@ This page reverses the design I had argued for before measuring it: the memory t
 data says keep a file ledger and the recent turns, and put the semantic store to work on decisions, which is a
 different and smaller store.
 
+## The ledger, deployed, and the measurement that follows
+
+Built from this page: the Ada plugin's file ledger (`glyphh-ai/mods`, `plugins/ada/hooks/ledger.py`), installed on
+this machine on 2026-10-17. Every change to a file is recorded with the request it served; when the file is read
+again the last changes come back as context; every prompt lists the files the session changed in its last turns.
+Local SQLite, nothing sent.
+
+`measure.py` is the test: per week, from the transcripts, calls, context per call, the tokens spent finding before
+the first edit per turn, and the share of reads that re-read a file already read in the session. The weeks before
+2026-W42 are the baseline (re-reads 6% to 72% of reads, median about 45%; finding 200 to 4,300 tokens a turn). If
+the ledger works, re-reads and finding fall and context per call does not rise by more than the ledger's few hundred
+tokens. If they do not move, this page says so.
+
 ## Reproduce
 
 ```sh
@@ -64,6 +77,7 @@ uv run python benchmarks/session/mine.py      # every turn of every session on t
 uv run python benchmarks/session/spend.py     # the bill by token kind; finding before the first edit
 uv run python benchmarks/session/spend2.py    # each find's result costed by size and life in context
 uv run python benchmarks/session/recall.py 5  # recall of the needed turns, k=5 (10 for k=10)
+uv run python benchmarks/session/measure.py   # your usage by week: the ledger's effect, over time
 ```
 
 The transcripts are the harness's own (`~/.claude/projects/*/*.jsonl`); the numbers above are this machine's and
