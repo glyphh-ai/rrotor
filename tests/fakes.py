@@ -278,3 +278,9 @@ class FakeProc:
 
     def terminate(self) -> None:
         self.terminated = True
+
+
+def outcome(run: Any) -> dict[str, Any]:
+    """A finished run's result: a test reads it only after the run has ended, so it is there."""
+    assert run.result is not None, run
+    return dict(run.result)

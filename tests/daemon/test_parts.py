@@ -17,7 +17,7 @@ from tests.fakes import keys, part_archive
 
 def test_the_arch_names_are_the_images(monkeypatch):
     for machine, name in (("x86_64", "amd64"), ("aarch64", "arm64"), ("arm64", "arm64"), ("riscv64", "riscv64")):
-        monkeypatch.setattr(partsmod.platform, "machine", lambda m=machine: m)
+        monkeypatch.setattr("platform.machine", lambda m=machine: m)
         assert partsmod.arch() == name
     assert Parts(__import__("pathlib").Path("/nowhere"), None).arch == partsmod.arch()
 
@@ -35,7 +35,8 @@ def test_a_signed_part_installs_becomes_current_and_the_next_version_replaces_it
     assert store.env(["ada", "zeta"], "/opt/parts") == ["/opt/parts/ada/lib"]
     data2, sha2, sig2 = part_archive(tmp_path, version="1.1.0", files={"lib/kernel.py": "VALUE = 8\n"})
     newer = store.install("ada", "1.1.0", data2, sha2, sig2)
-    assert store.get("ada").path == newer.path and not (tmp_path / "parts" / "ada" / "1.0.0").exists()
+    got = store.get("ada")
+    assert got is not None and got.path == newer.path and not (tmp_path / "parts" / "ada" / "1.0.0").exists()
     store.remove("ada")
     assert store.installed() == []
     with pytest.raises(RrotorError) as caught:

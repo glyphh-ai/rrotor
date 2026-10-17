@@ -5,18 +5,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from rrotor import ada
 from rrotord.licence import Licence
 from rrotord.models import Models
 from rrotord.parts import Parts
 from tests.daemon.runner.test_engine import Env
-from tests.fakes import LocalLauncher, ada_part, install, keys, manifest
+from tests.fakes import LocalLauncher, ada_part, install, keys, manifest, outcome
 
 HERE = Path(__file__).parent.parent.parent.parent / "examples" / "ada_tickets"
 
 
-def ticket(i, title, area, severity):
+def ticket(i: int, title: str, area: str, severity: int) -> dict[str, Any]:
     return {
         "issue": {"body": {"title": title, "area": area, "severity": severity, "id": i}},
         "meta": {"time": {"opened": "2026-10-01T12:00:00Z"}, "owner": {"team": "infra"}},
@@ -46,21 +47,21 @@ def tickets_version(models: Models, sha: str = "a" * 40, version: int = 1, seed:
 async def test_the_tickets_model_records_queries_and_keeps_its_store_with_clearance(tmp_path, short_dir):
     env, _ = ada_ready(tmp_path, short_dir)
     tickets_version(env.models)
-    for i, outcome in enumerate(["page oncall", "page oncall", "page oncall"]):
+    for i, said in enumerate(["page oncall", "page oncall", "page oncall"]):
         run = await env.runner.call(
-            model="tickets", function="record", inputs={"data": ticket(i, "login fails", "auth", 8), "outcome": outcome}
+            model="tickets", function="record", inputs={"data": ticket(i, "login fails", "auth", 8), "outcome": said}
         )
-        assert run.result["status"] == "done", run.result
+        assert outcome(run)["status"] == "done", run.result
     assert (env.models.data("tickets") / ada.STORE).is_file()
     run = await env.runner.call(model="tickets", function="query", inputs={"data": ticket(9, "login fails", "auth", 8)})
-    assert run.result["data"]["top"] == "page oncall" and run.result["data"]["count"] == 3
+    assert outcome(run)["data"]["top"] == "page oncall" and outcome(run)["data"]["count"] == 3
     full = await env.runner.call(
         model="tickets", function="facts", inputs={"data": ticket(9, "login fails", "auth", 8)}, clearance=1.0
     )
     low = await env.runner.call(
         model="tickets", function="facts", inputs={"data": ticket(9, "login fails", "auth", 8)}, clearance=0.5
     )
-    assert '"meta"' in json.dumps(full.result["data"]) and '"meta"' not in json.dumps(low.result["data"])
+    assert '"meta"' in json.dumps(outcome(full)["data"]) and '"meta"' not in json.dumps(outcome(low)["data"])
     assert low.clearance == 0.5 and env.runner.get(low.id).clearance == 0.5
     spec = env.launcher.specs[-1]
     assert spec.mounts.data == env.models.data("tickets") and spec.mounts.parts[0][0] == "ada"
@@ -78,7 +79,7 @@ async def test_maintain_reencodes_the_store_in_the_sandbox_and_says_when_it_cann
     done = await env.runner.maintain(v2, ada.REENCODE)
     assert done == {"status": "done", "data": {"reencoded": 1}, "step": None, "prompt": None}
     run = await env.runner.call(model="tickets", function="query", inputs={"data": ticket(2, "login fails", "auth", 8)})
-    assert run.result["data"]["top"] == "page oncall"
+    assert outcome(run)["data"]["top"] == "page oncall"
     (env.models.data("tickets") / ada.STORE).write_bytes(b"not a database")
     broken = await env.runner.maintain(v2, ada.REENCODE)
     assert broken["status"] == "failed" and broken["step"] == ada.REENCODE
@@ -119,7 +120,7 @@ async def test_the_internal_operation_is_never_a_models_function(tmp_path, short
         "from rrotor import Result\ndef start(ctx, inputs):\n    return Result.done(ctx.clearance)\n",
     )
     run = await plain.runner.call(model="sample", function="start", inputs={}, clearance=0.25)
-    assert run.result["data"] == 0.25
+    assert outcome(run)["data"] == 0.25
 
 
 async def test_the_licences_limits_reach_the_model(tmp_path, short_dir):
@@ -129,19 +130,22 @@ async def test_the_licences_limits_reach_the_model(tmp_path, short_dir):
     given = keys().licence(["ada"])
     given["payload"]["mods"]["ada"] = {"limits": {"models": 3, "precedents": 1}}
     given["signature"] = keys().sign(canonical(given["payload"]))
-    env.runner.licence.set(given["payload"], given["signature"])
+    lic = env.runner.licence
+    assert lic is not None
+    lic.set(given["payload"], given["signature"])
     tickets_version(env.models)
     one = {"data": ticket(1, "login fails", "auth", 8), "outcome": "page oncall"}
     two = {"data": ticket(2, "login slow", "auth", 5), "outcome": "page oncall"}
     first = await env.runner.call(model="tickets", function="record", inputs=one)
-    assert first.result["status"] == "done"
+    assert outcome(first)["status"] == "done"
     second = await env.runner.call(model="tickets", function="record", inputs=two)
-    assert second.result["status"] == "failed" and second.result["data"]["code"] == "E_LIMIT_PRECEDENTS"
+    assert outcome(second)["status"] == "failed" and outcome(second)["data"]["code"] == "E_LIMIT_PRECEDENTS"
     v1 = env.models.active("tickets")
+    assert v1 is not None
     assert env.runner._limits(v1) == {"models": 3, "precedents": 1}
-    env.runner.licence.payload = None
+    lic.payload = None
     assert env.runner._limits(v1) == {}
-    env.runner.licence.payload = {**given["payload"], "mods": {"ada": {"limits": "junk"}}}
+    lic.payload = {**given["payload"], "mods": {"ada": {"limits": "junk"}}}
     assert env.runner._limits(v1) == {}
     store.remove("ada")
     assert env.runner._limits(v1) == {}
