@@ -136,6 +136,9 @@ class Output:
     # the cost of deciding one outcome when another is true: costs[decided][true]; a pair not named costs 0
     # when they are the same outcome and 1 otherwise. decide() picks the outcome with the least expected cost.
     costs: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = ()
+    # the cost of asking a person instead of deciding; set, decide() asks whenever every outcome's expected cost
+    # is above it (the band where either answer is costly). Unset, decide() never asks.
+    ask: float | None = None
 
     def cost(self, decided: str, true: str) -> float:
         table = dict((d, dict(t)) for d, t in self.costs)
@@ -193,6 +196,7 @@ class Spec:
             "output": {
                 "report": list(self.output.report),
                 **({"costs": {d: dict(t) for d, t in self.output.costs}} if self.output.costs else {}),
+                **({"ask": self.output.ask} if self.output.ask is not None else {}),
             },
             "layers": [
                 {
@@ -218,13 +222,17 @@ class Spec:
         its value tells about the outcome (information gain, scaled so the most telling role weighs 1), and each
         value's weight how far that value moves the outcome from the base rate (scaled so the most telling value
         of a role weighs 1). Layers' and segments' weights are left as they are; so are security weights."""
-        base = Counter(outcome for _, outcome in cases)
+        return self.with_weights(self.learn([(self.situation(data), outcome) for data, outcome in cases]))
+
+    def learn(self, situations: Sequence[tuple[Mapping[str, Any], str]]) -> dict[str, dict[str, Any]]:
+        """What graded situations (already in the kernel's terms) teach: per role path, its similarity_weight and
+        value_weights, as learned() sets them. A model learns from its own store this way."""
+        base = Counter(outcome for _, outcome in situations)
         if len(base) < 2:
             raise SpecError("", "learn needs cases with at least two outcomes")
         h_base = _entropy(base)
         gains: dict[str, float] = {}
         moves: dict[str, dict[str, float]] = {}
-        situations = [(self.situation(data), outcome) for data, outcome in cases]
         base_rate = {o: n / sum(base.values()) for o, n in base.items()}
         for layer in self.layers:
             for seg in layer.segments:
@@ -247,16 +255,27 @@ class Spec:
                         for key, g in groups.items()
                     }
         top = max(gains.values(), default=0.0)
+        learned: dict[str, dict[str, Any]] = {}
+        for path, gain in gains.items():
+            if top > 0:
+                learned[path] = {"similarity_weight": round(gain / top, 4)}
+                best = max(moves[path].values(), default=0.0)
+                if best > 0:
+                    learned[path]["value_weights"] = {k: round(m / best, 4) for k, m in moves[path].items()}
+        return learned
+
+    def with_weights(self, learned: Mapping[str, Mapping[str, Any]]) -> Spec:
+        """This spec with learned role weights (learn()'s table) put in; a path the spec lacks is ignored."""
         obj = self.to_json()
         for layer in obj["layers"]:
             for seg in layer["segments"]:
                 for role in seg["roles"]:
-                    path = f"{layer['name']}.{seg['name']}.{role['name']}"
-                    if path in gains and top > 0:
-                        role["similarity_weight"] = round(gains[path] / top, 4)
-                        best = max(moves[path].values(), default=0.0)
-                        if best > 0:
-                            role["value_weights"] = {k: round(m / best, 4) for k, m in moves[path].items()}
+                    found = learned.get(f"{layer['name']}.{seg['name']}.{role['name']}")
+                    if found:
+                        role["similarity_weight"] = found["similarity_weight"]
+                        role.pop("value_weights", None)
+                        if found.get("value_weights"):
+                            role["value_weights"] = dict(found["value_weights"])
         return Spec.from_json(obj)
 
     @property
@@ -588,7 +607,7 @@ def _parse_spec(obj: Any) -> Spec:
             )
         )
     _unique([l.name for l in layers], "layers")
-    out = _fields(o.get("output", {}), "output", [], ["report", "costs"])
+    out = _fields(o.get("output", {}), "output", [], ["report", "costs", "ask"])
     report = out.get("report", [])
     if not isinstance(report, list) or not all(isinstance(x, str) for x in report):
         raise SpecError("output.report", "must be a list of paths")
@@ -599,6 +618,9 @@ def _parse_spec(obj: Any) -> Spec:
         (str(d), tuple((str(t), _number(c, f"output.costs.{d}.{t}")) for t, c in sorted(table.items())))
         for d, table in sorted(costs_in.items())
     )
+    ask = out.get("ask")
+    if ask is not None:
+        ask = _number(ask, "output.ask")
     spec = Spec(
         _name(o["name"], "name"),
         tuple(layers),
@@ -607,7 +629,7 @@ def _parse_spec(obj: Any) -> Spec:
         _unit(o.get("similarity_weight", 1.0), "similarity_weight"),
         _unit(o.get("security_weight", 0.0), "security_weight"),
         str(o.get("temporal_source", "auto")),
-        Output(tuple(report), costs),
+        Output(tuple(report), costs, ask),
     )
     for path in report:
         _resolve(spec, path, "output.report")
@@ -645,16 +667,47 @@ class Model:
         author: str = "anon",
         path: str | None = None,
         tau: float | None = None,
+        refresh_every: int | None = None,
     ):
+        """refresh_every: learn the weights and calibrate again every so many graded precedents recorded, so the
+        model follows its store as cases arrive (refresh() does the same on demand)."""
+        self.given = spec
         self.spec = spec
+        self.refresh_every = refresh_every
         self.space = kernel.Space(
             dim=spec.dimension, k=k, min_sim=min_sim, seed=spec.seed, author=author, path=path, tau=tau
         )
+        learned = self.space.meta("learned")
+        if isinstance(learned, dict):
+            self.spec = spec.with_weights(learned)
 
     def record(self, data: Any, outcome: str | None = None, ts: float | None = None) -> str:
         situation = self.spec.situation(data)
         stamp = ts if ts is not None else self.spec.timestamp(data)
-        return self.space.record(situation, outcome, rid=self.spec.key(situation), ts=stamp)
+        rid = self.space.record(situation, outcome, rid=self.spec.key(situation), ts=stamp)
+        if outcome is not None and self.refresh_every and len(self.space.graded()) % self.refresh_every == 0:
+            try:
+                self.refresh()
+            except SpecError:  # one outcome so far: nothing to learn yet
+                pass
+        return rid
+
+    def learn(self) -> dict[str, dict[str, Any]]:
+        """Learn the weights from the store's own graded precedents (every role's similarity_weight and
+        value_weights, as Spec.learned does) and keep them with the store, over the spec file's, until the next
+        learn. Needs at least ten graded precedents with two outcomes. Returns the learned table."""
+        graded = self.space.graded()
+        if len(graded) < 10:
+            raise SpecError("", "learn needs at least 10 precedents with an outcome")
+        learned = self.given.learn(graded)
+        self.spec = self.given.with_weights(learned)
+        self.space.set_meta("learned", learned)
+        return learned
+
+    def refresh(self, sample: int = 200, clearance: float = 1.0) -> dict[str, Any]:
+        """learn() then calibrate(): the weights and the temperature follow the store. Returns both."""
+        learned = self.learn()
+        return {"learned": learned, "tau": self.calibrate(sample, clearance)}
 
     def query(self, data: Any, clearance: float = 1.0) -> kernel.Answer:
         situation = self.spec.situation(data)
@@ -682,19 +735,23 @@ class Model:
 
     def decide(self, data: Any, clearance: float = 1.0) -> dict[str, Any]:
         """The outcome with the least expected cost under the spec's output.costs (every mistake costs 1 when the
-        spec names none), from the calibrated probabilities; with none, nothing is decided."""
+        spec names none), from the calibrated probabilities. `ask` is true when a person should answer instead:
+        nothing is known, or the spec prices asking (output.ask) below every outcome's expected cost; the outcome
+        is then still the best guess, for the person to see."""
         probabilities = self.probabilities(data, clearance)
         if not probabilities:
-            return {"outcome": None, "expected_cost": None, "probabilities": {}}
+            return {"outcome": None, "expected_cost": None, "probabilities": {}, "ask": True}
         expected = {
             decided: sum(p * self.spec.output.cost(decided, true) for true, p in probabilities.items())
             for decided in probabilities
         }
         best = min(expected, key=lambda o: (expected[o], o))
+        ask = self.spec.output.ask
         return {
             "outcome": best,
             "expected_cost": round(expected[best], 4),
             "probabilities": {o: round(p, 4) for o, p in probabilities.items()},
+            "ask": ask is not None and expected[best] > ask,
         }
 
     def __len__(self) -> int:

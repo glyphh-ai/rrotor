@@ -72,8 +72,18 @@ def _store(ctx: Ctx) -> Path:
     return ctx.data / STORE
 
 
-def open(ctx: Ctx, *, author: str | None = None, k: int = 15, min_sim: float = 0.10, tau: float | None = None) -> Any:
-    """The model: its spec read, its store opened (made on first use), kept on `ctx.ada` and returned."""
+def open(
+    ctx: Ctx,
+    *,
+    author: str | None = None,
+    k: int = 15,
+    min_sim: float = 0.10,
+    tau: float | None = None,
+    refresh_every: int | None = None,
+) -> Any:
+    """The model: its spec read, its store opened (made on first use), kept on `ctx.ada` and returned.
+    `refresh_every`: learn the weights and calibrate again every so many graded precedents recorded (kept with
+    the store, over the spec file's weights)."""
     _, glyphh_spec = _kernel()
     home = ctx.home if ctx.home is not None else Path.cwd()
     store = _store(ctx)
@@ -81,7 +91,9 @@ def open(ctx: Ctx, *, author: str | None = None, k: int = 15, min_sim: float = 0
         spec = glyphh_spec.Spec.from_json(read_spec(home))
     except glyphh_spec.SpecError as err:
         raise AdaError(f"{SPEC} is refused: {err}") from None
-    model = glyphh_spec.Model(spec, k=k, min_sim=min_sim, author=author or ctx.caller, path=str(store), tau=tau)
+    model = glyphh_spec.Model(
+        spec, k=k, min_sim=min_sim, author=author or ctx.caller, path=str(store), tau=tau, refresh_every=refresh_every
+    )
     _cap(model, ctx.limits.get("precedents"))
     ctx.ada = model
     return model

@@ -183,7 +183,7 @@ def ready() -> Layers:
 KERNEL = Path(__file__).parent / "kernel"
 
 
-def ada_part(tmp: Path, version: str = "3.2.0") -> tuple[bytes, str, str]:
+def ada_part(tmp: Path, version: str = "3.3.0") -> tuple[bytes, str, str]:
     """The Ada part as the tests build it: the vendored kernel under lib/ (numpy comes from the test's own Python)."""
     files = {
         f"lib/{name}": (KERNEL / name).read_text() for name in ("glyphh_kernel.py", "glyphh_spec.py", "glyphh_nsm.py")

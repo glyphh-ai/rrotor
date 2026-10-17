@@ -82,7 +82,10 @@ step is the kernel's own, not the script's: the script only names the costs and 
 2. **`Model.calibrate(sample=800)`**: the kernel holds out each of the 800 in turn against the rest and keeps the
    temperature with the least log-loss (0.2).
 3. **`output.costs = {good: {bad: 5}, bad: {good: 1}}`** in the spec; `decide` returns the outcome with the least
-   expected cost under the calibrated probabilities.
+   expected cost under the calibrated probabilities. **`output.ask = 0.5`** prices asking a person at half a refused
+   good loan (chosen before any run); `decide` answers `ask: true` where every outcome's expected cost is above it.
+4. **The runtime's way, as a check**: the same spec unlearned, the 800 recorded in order with `refresh_every=100`,
+   so the model learns its weights from its own store and calibrates (on its newest 200) eight times as it fills.
 
 `k` and `min_sim` were put to five-fold cross-validation inside the 800 too, but `decide` reads the 25 nearest
 precedents whatever `k` is, so all five grid points cost the same (422 over the 800) and the first, k 15 and
@@ -92,7 +95,8 @@ min_sim 0.35, stood; only the plain `query` line below depends on it.
 |---|---|---|---|---|
 | Ada, learned spec, plain `query` | 78.5% | 32 | 11 | 171 |
 | **Ada, learned spec, calibrated, `decide`** | 66.0% | 10 | 58 | **108** |
-| the same, abstaining on P(bad) in [0.1, 0.3] | 74.5% of 137 answered | 6 | 29 | 59, asked 63 |
+| the same, asking where every answer costs over 0.5 | 82.2% of 107 answered | 6 | 13 | 43, asked 93 |
+| Ada, learned from its own store as it filled, `decide` | 67.5% | 9 | 56 | 101 |
 | earlier, by hand in the script (isotonic curve, 1/6 rule) | 67.0% | 11 | 55 | 110 |
 | for reference: LLM runs 1 and 2 | 77.0% / 79.0% | 16 / 18 | 30 / 24 | 110 / 114 |
 | for reference: logistic regression, cost-aware | 68.5% | 10 | 53 | 103 |
@@ -102,18 +106,27 @@ ranking is what to read, not the third digit.
 
 So: with the learned spec Ada's plain answer is the best accuracy on the table (78.5%, cost 171, from 210 with
 the hand-set weights), and on the bank's cost `decide` lands at 108 — a hair ahead of both LLM runs, 5 behind the
-thresholded classic model — with every choice made before the hold-out was opened. Abstaining where either answer
-is costly cuts the cost of what it does answer to 59 for 137 of the 200, with 63 sent to a person. The whole
-calibration now costs 4 s (the vectorised query: 0.002 s per query at 800 precedents, was 0.97 s).
+thresholded classic model — with every choice made before the hold-out was opened. The whole calibration now costs
+4 s (the vectorised query: 0.002 s per query at 800 precedents, was 0.97 s).
+
+The priced ask sends 93 of the 200 to a person and decides the other 107 at cost 43 (82.2% right): asking at 0.5 is
+dear, and what it buys is a clean half. A cheaper ask asks less; the band is the user's price, not a tuning knob.
+
+The model that learned from its own store as it filled decided at cost 101, below the batch model's 108 and the
+classic model's 103, from the same weights (learned at 800 both ways) and a different temperature: calibrating on
+its newest 200 chose tau 1.0, on all 800 tau 0.2, and the decisions moved by seven. Read that as the fit of the
+temperature being loose on this data (the log-loss is nearly flat between those), not as one path being better;
+both were set before the hold-out was opened, and both are reported.
 
 ## What would move Ada
 
-1. **Abstain as a product control**: `ask` in the band where either answer is costly, the person's answer recorded;
-   the numbers above say it is the biggest lever left.
-2. **Leave-one-out that refreshes as cases arrive**, so the temperature and the learned weights follow the store
-   without a rebuild (the pieces are now cheap enough).
-3. **Interactions between roles** (a bad `checking` with a long `duration_months`): the per-value weights are
-   one-dimensional, which is where the logistic model's last 5 come from.
+1. **Interactions between roles** (a bad `checking` with a long `duration_months`): the per-value weights are
+   one-dimensional, which is where the logistic model's last few come from.
+2. **A steadier temperature**: the fit between tau 0.2 and 1.0 is loose here; a finer grid, or fitting on the
+   bank's cost rather than log-loss, would settle it (and would have to be chosen before the next hold-out).
+
+Done since the first run: learned role and value weights, costs and `decide` in the kernel; the priced `ask`;
+a model that learns from its own store and refreshes as cases arrive (`refresh_every`); the vectorised query.
 
 ## Reproduce
 

@@ -98,8 +98,9 @@ def test_open_records_and_reencode_rebuilds_the_store(tmp_path, kernel):
     assert ada.reencode(c) == 1
     (tmp_path / "spec.json").write_text(json.dumps({**SPEC, "seed": 8}))
     assert ada.reencode(c) == 1
-    again = ada.open(ctx(tmp_path, data))
+    again = ada.open(ctx(tmp_path, data), refresh_every=50)
     assert len(again) == 1 and again.query({"a": {"b": {"x": "one"}}}).top == "yes"
+    assert again.refresh_every == 50 and again.given is again.spec
     assert ada.reencode(ctx(tmp_path, tmp_path / "empty")) == 0
 
 

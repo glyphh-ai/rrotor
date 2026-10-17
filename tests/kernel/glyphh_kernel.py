@@ -716,6 +716,7 @@ class Space:
         self._authors: list[str] = []
         self._ts: list[float] = []
         self._situations: list[Any] = []
+        self._meta: dict[str, Any] = {}
         self._trajs: list[np.ndarray | None] = []
         self._glyphs: list[np.ndarray] = []
         self._matrix = np.empty((0, dim), dtype=np.float32)  # grown 2x
@@ -1173,6 +1174,24 @@ class Space:
 
     def __len__(self) -> int:
         return self._n
+
+    def graded(self) -> list[tuple[dict[str, Any], str]]:
+        """Every precedent with an outcome: (situation, outcome), oldest first."""
+        return [(self._situations[i], self._outcomes[i]) for i in range(self._n) if self._outcomes[i] is not None]
+
+    def meta(self, key: str) -> Any:
+        """A value kept with the store (JSON), or None: what a model learned from it, for one."""
+        if self._db is None:
+            return self._meta.get(key)
+        row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_meta(self, key: str, value: Any) -> None:
+        if self._db is None:
+            self._meta[key] = value
+            return
+        self._db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, json.dumps(value, sort_keys=True)))
+        self._db.commit()
 
     # persistence: one portable file; WAL so several agents can share it
     def _open(self, path: str) -> None:

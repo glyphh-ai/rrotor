@@ -8,9 +8,12 @@ Four steps, each decided before the hold-out is touched:
 2. `k` and `min_sim` chosen by five-fold cross-validation inside the 800, by the bank's cost of `decide`.
 3. `Model.calibrate()`: the kernel fits its temperature on held-out precedents of the store itself.
 4. The rule from the costs alone, in the spec: `output.costs = {good: {bad: 5}, bad: {good: 1}}`; `decide` picks
-   the outcome with the least expected cost.
+   the outcome with the least expected cost, and asks a person instead when `output.ask` (the price of asking,
+   set here to 0.5, half a refused good loan, before any run) is below every outcome's expected cost.
 
-Then the 200: record all 800 with the learned spec, calibrate, `decide` each held-out case."""
+Then the 200: record all 800 with the learned spec, calibrate, `decide` each held-out case. Last, the same model
+built the way a runtime would: an unlearned spec, the 800 recorded in order with `refresh_every=100`, so the weights
+and the temperature are learned from the store as it fills; the 200 decided once more."""
 
 from __future__ import annotations
 
@@ -27,20 +30,21 @@ import run as base  # noqa: E402  (the data, the spec and the scorer; the same s
 glyphh_spec = base.glyphh_spec
 
 COSTS = {"good": {"bad": 5.0}, "bad": {"good": 1.0}}  # deciding good when bad costs 5; bad when good costs 1
+ASK = 0.5  # the price of asking a person, in the same units: half a refused good loan
 GRID = [(15, 0.35), (25, 0.25), (25, 0.15), (40, 0.15), (9, 0.45)]
 
 
 def spec_with_costs() -> glyphh_spec.Spec:
     obj = json.loads(json.dumps(base.SPEC))
-    obj["output"] = {"report": [], "costs": COSTS}
+    obj["output"] = {"report": [], "costs": COSTS, "ask": ASK}
     for layer in obj["layers"]:
         for segment in layer["segments"]:
             segment.pop("similarity_weight", None)
     return glyphh_spec.Spec.from_json(obj)
 
 
-def model_of(spec: glyphh_spec.Spec, cases: list[dict], k: int, min_sim: float) -> glyphh_spec.Model:
-    m = glyphh_spec.Model(spec, k=k, min_sim=min_sim, author="eval", path=None)
+def model_of(spec: glyphh_spec.Spec, cases: list[dict], k: int, min_sim: float, **kw) -> glyphh_spec.Model:
+    m = glyphh_spec.Model(spec, k=k, min_sim=min_sim, author="eval", path=None, **kw)
     for c in cases:
         m.record(base.situation(c), c["decision"])
     return m
@@ -95,15 +99,22 @@ def main() -> None:
         plain.append(a.top if a.top else "good")
         d = m.decide(base.situation(c))
         decided.append(d["outcome"] or "good")
-        p_bad = d["probabilities"].get("bad", 0.0)
-        abstain.append("ask" if 0.1 <= p_bad <= 0.3 else decided[-1])
+        abstain.append("ask" if d["ask"] else decided[-1])
     per = (time.time() - t0) / len(test) / 2
     print(f"build + calibrate {build:.1f}s (tau {tau}), {per:.3f}s per query")
     base.score("Ada, learned spec", plain, truth, build + per * len(test))
     base.score("Ada, learned, calibrated, costs in spec", decided, truth, build + per * len(test), "decide(): least expected cost")
     asked = abstain.count("ask")
     sure = [(d, t) for d, t in zip(abstain, truth) if d != "ask"]
-    base.score("  the same, abstaining on P(bad) in [0.1, 0.3]", [d for d, _ in sure], [t for _, t in sure], 0, f"answered {len(sure)} of {len(test)}, asked {asked}")
+    base.score(f"  the same, asking when every answer costs over {ASK}", [d for d, _ in sure], [t for _, t in sure], 0, f"answered {len(sure)} of {len(test)}, asked {asked}")
+
+    # the runtime's way: nothing learned up front, the store teaches the model as it fills
+    t0 = time.time()
+    live = model_of(spec_with_costs(), train, k, min_sim, refresh_every=100)
+    build = time.time() - t0
+    online = [live.decide(base.situation(c))["outcome"] or "good" for c in test]
+    print(f"learned from the store as it filled: 8 refreshes in {build:.1f}s, tau {live.space.tau}; same decisions as above: {online == decided}")
+    base.score("Ada, learned from its own store (refresh_every=100)", online, truth, build, "decide()")
 
 
 if __name__ == "__main__":
