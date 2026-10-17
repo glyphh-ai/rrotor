@@ -19,6 +19,19 @@ bad. The dataset's own cost matrix: approving a bad loan costs 5, refusing a goo
 
 Run on 2026-10-16.
 
+## The table
+
+Deciding 200 real loan applications, approve or refuse, from 20 fields each; every system learned the same 800;
+the bank's cost counts a bad loan approved as five good ones refused. Dollars for the 200 at list prices.
+
+| | Accuracy | Bank's cost | Cost for the 200 |
+|---|---|---|---|
+| Always approve | 67.5% | 325 | $0 |
+| Claude Fable 5.1, two runs (disagreed on 12 of 200) | 77.0% / 79.0% | 110 / 114 | $4.20 batched, ~$300 one by one |
+| Logistic regression, cost-aware | 68.5% | 103 | ~$0 |
+| **Ada, learned fields and interactions, calibrated, `decide`** | 70.0% | **100** | $0.00001 |
+| Ada, asking a person where every answer is dear (111 of 200 decided) | 81.1% | 45 on those | $0.00001 |
+
 ## Results, 200 held out
 
 | | Accuracy | Bad loans approved (×5) | Good refused (×1) | Bank's cost | Same answer every time |

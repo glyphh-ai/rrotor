@@ -10,6 +10,28 @@ at the start of the page). Ada deciding where it is sure and handing the rest to
 seeing a fifth of the traffic. This page is kept because a benchmark that only shows wins is not a benchmark;
 most of it is what each run taught the kernel, including the sample that leaked and had to be reissued.
 
+## The table
+
+Routing 200 real bank messages to one of 77 intents, each message its own call as a chatbot makes them, every
+system given the same 10,003 past cases, scored on the same 200 (opaque ids, nothing tuned on them). Dollars at the
+models' list prices.
+
+| | Accuracy | Cost for the 200 | Cost per 1,000 messages | Same answer twice? |
+|---|---|---|---|---|
+| Claude Fable 5.1 alone | 96.5% | $300 | $1,500 | 199 of 200 |
+| Claude Opus 5.5 alone | 96.0% | $120 | $600 | |
+| Claude Sonnet 5.5 alone | 86.0% | $60 | $300 | |
+| Claude Haiku 4.5 alone | 81.0% | $30 | $150 | |
+| Ada alone | 90.0% | $0.000006 | $0.00003 | always |
+| **Ada, then Fable for the 22% it is unsure of** | **97.5%** | **$0.22** | **$1.10** | Ada's share always |
+| Ada, then Opus | 97.0% | $0.09 | $0.44 | |
+| Ada, then Sonnet | 94.0% | $0.04 | $0.22 | |
+| Ada, then Haiku | 91.5% | $0.02 | $0.11 | |
+
+Ada in front of the model: more accurate than the best model alone, a thousand times cheaper, deterministic and
+with receipts for everything it decides itself, and every hand-off recorded so the model's share falls over time.
+The rest of this page is how it got there and what it does not prove.
+
 ## The test
 
 - **Data:** [Banking77](https://github.com/PolyAI-LDN/task-specific-datasets) (PolyAI, CC BY 4.0): 13,083 real
