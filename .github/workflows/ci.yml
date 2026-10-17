@@ -123,10 +123,16 @@ jobs:
           username: x
           password: ${{ secrets.FLY_API_TOKEN }}
       - name: Push the hosted image to Fly's registry (amd64)
+        env:
+          # The keys a hosted rrotor checks signatures with, baked in: nothing else hands them to the machine.
+          RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
+          LICENCE_PUBLIC_KEY: ${{ vars.LICENCE_PUBLIC_KEY }}
         run: |
+          [ -n "$RELEASE_PUBLIC_KEY" ] && [ -n "$LICENCE_PUBLIC_KEY" ] || { echo "::error::Set the variables RELEASE_PUBLIC_KEY and LICENCE_PUBLIC_KEY."; exit 1; }
           repo=registry.fly.io/$APP; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
           docker buildx build -f image/Dockerfile --target hosted --platform linux/amd64 \
-            --build-arg VERSION="$v" -t "$repo:$v" -t "$repo:$s" --push .
+            --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" \
+            --build-arg LICENCE_PUBLIC_KEY="$LICENCE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:$s" --push .
           echo "hosted: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
 
   # The Ada part, for both architectures: the kernel from glyphh-ai/ada-private-archive (branch kernel-spec, read
