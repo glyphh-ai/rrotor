@@ -146,6 +146,42 @@ def test_a_hosted_daemon_takes_its_credentials_from_its_config_once(tmp_path, sh
     assert Daemon(keyed, ready()).access.keys == ["a" * 64]
     again = Daemon(hosted, ready())  # the same credentials: nothing rewritten, the link not restarted
     assert again.link.credentials.token == "tok_" + "a" * 20 and not again.link.credentials.changed.is_set()
+    checks = d.services().introspect
+    assert checks is not None and checks.url == "http://127.0.0.1:1/v1/runtime/introspect"
+    assert (
+        checks.credentials is d.link.credentials
+        and Daemon(config(tmp_path, short_dir), ready()).services().introspect is None
+    )
+
+
+async def test_a_sign_in_is_asked_of_the_cloud_as_json(tmp_path, short_dir):
+    seen = []
+
+    async def introspect(request: web.Request) -> web.Response:
+        seen.append((request.headers.get("Authorization"), await request.json()))
+        return web.json_response({"active": True})
+
+    async def broken(_: web.Request) -> web.Response:
+        return web.Response(status=502, text="bad gateway")
+
+    app = web.Application()
+    app.router.add_post("/v1/runtime/introspect", introspect)
+    app.router.add_post("/broken", broken)
+    server = TestServer(app)
+    await server.start_server()
+    d = Daemon(config(tmp_path, short_dir), ready())
+    try:
+        url = f"http://127.0.0.1:{server.port}"
+        assert await d._post(f"{url}/v1/runtime/introspect", {"Authorization": "Bearer r"}, {"token": "t"}) == (
+            200,
+            {"active": True},
+        )
+        assert seen == [("Bearer r", {"token": "t"})]
+        assert await d._post(f"{url}/broken", {}, {}) == (502, None)
+    finally:
+        if d.session is not None:
+            await d.session.close()
+        await server.close()
 
 
 async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged(tmp_path, short_dir, caplog):

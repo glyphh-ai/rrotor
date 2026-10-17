@@ -18,7 +18,7 @@ async def errors(request: web.Request, handler: Handler) -> web.StreamResponse:
     try:
         return await handler(request)
     except RrotorError as err:
-        return web.json_response(err.to_json(), status=err.status)
+        return web.json_response(err.to_json(), status=err.status, headers=err.headers or None)
     except web.HTTPException as err:
         if err.status < 400:
             raise

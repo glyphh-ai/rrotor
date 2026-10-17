@@ -14,9 +14,11 @@ from aiohttp import web
 from rrotord import VERSION
 from rrotord.access import Access
 from rrotord.api import mcp, ops
+from rrotord.api.gate import METADATA, SCOPE, public_url
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.errors import BadRequest
+from rrotord.introspect import Introspector
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
 from rrotord.models import Models
@@ -48,6 +50,7 @@ class Services:
     licence: Licence
     fetch: Fetch | None = None  # downloads a part by URL; none in tests
     access: Access | None = None  # hosted: the runtime keys and the pause
+    introspect: Introspector | None = None  # hosted: a Glyphh sign-in checked with the Cloud
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -153,7 +156,21 @@ def setup(app: web.Application, s: Services) -> None:
         s.licence.set(data.get("payload"), data.get("signature"))
         return web.json_response({"licence": s.licence.view()})
 
+    async def resource_metadata(request: web.Request) -> web.Response:
+        """RFC 9728: this runtime as an OAuth protected resource, and Glyphh as the server that signs a client in."""
+        return web.json_response(
+            {
+                "resource": f"{public_url(request)}/mcp",
+                "authorization_servers": [s.config.server.rstrip("/")],
+                "scopes_supported": [SCOPE],
+                "bearer_methods_supported": ["header"],
+                "resource_name": "Glyphh runtime",
+            }
+        )
+
     app.router.add_get("/healthz", healthz)
+    app.router.add_get(METADATA, resource_metadata)
+    app.router.add_get(METADATA + "/mcp", resource_metadata)
     app.router.add_get("/v1/health", health)
     app.router.add_put("/v1/runtime/token", runtime_token)
     app.router.add_get("/v1/models", models)

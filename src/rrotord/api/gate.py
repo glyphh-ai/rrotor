@@ -4,10 +4,12 @@ Locally: the mod that holds the local token, from this machine. Host must be thi
 rebinding), an Origin other than its own is refused (no web page may call it), and the bearer token is compared by
 its SHA-256, in constant time.
 
-Hosted: anyone with a runtime key, at this machine's own address, `<machine>.<domain>`. A request for another
-machine's address is answered with `fly-replay: instance=<machine>`, and Fly's proxy carries it there (the doorman
-machine answers every request this way); any other Host is 421. A paused rrotor (the plan's hours spent) answers 402
-to everything but its health."""
+Hosted: anyone with a runtime key, or signed in to Glyphh for this runtime (a connector's token the Cloud vouches
+for, rrotord/introspect.py), at this machine's own address, `<machine>.<domain>`. A request for another machine's
+address is answered with `fly-replay: instance=<machine>`, and Fly's proxy carries it there (the doorman machine
+answers every request this way); any other Host is 421. A refusal names where to sign in (`WWW-Authenticate`, RFC
+9728), and the resource metadata it points at is open. A paused rrotor (the plan's hours spent) answers 402 to
+everything but its health."""
 
 from __future__ import annotations
 
@@ -22,8 +24,12 @@ from aiohttp.typedefs import Middleware
 from rrotord.access import Access
 from rrotord.config import Config
 from rrotord.errors import Forbidden, RrotorError, Unauthorized
+from rrotord.introspect import Introspector
 
 OPEN = frozenset({"/healthz"})
+METADATA = "/.well-known/oauth-protected-resource"
+SIGN_IN = frozenset({METADATA, METADATA + "/mcp"})  # open on a hosted rrotor: where a client finds how to sign in
+SCOPE = "account"
 MACHINE = re.compile(r"^[0-9a-z]{6,32}$")
 REPLAY = "fly-replay"
 
@@ -55,6 +61,23 @@ def replay(machine: str) -> web.Response:
     return web.Response(status=200, headers={REPLAY: f"instance={machine}"})
 
 
+def public_url(request: web.Request) -> str:
+    """This runtime's address as the client sees it: https, the Host without a default port."""
+    host = request.host.lower().rstrip(".")
+    return "https://" + (host[:-4] if host.endswith(":443") else host)
+
+
+def challenge(request: web.Request, token_sent: bool) -> Unauthorized:
+    """401, naming the resource metadata so the client can find where to sign in (RFC 9728 section 5.1)."""
+    value = f'Bearer resource_metadata="{public_url(request)}{METADATA}/mcp", scope="{SCOPE}"'
+    if token_sent:
+        value += ', error="invalid_token"'
+    return Unauthorized(
+        "Send a runtime key (Authorization: Bearer <key>), or sign in to Glyphh for this runtime.",
+        headers={"WWW-Authenticate": value},
+    )
+
+
 def misdirected(host: str) -> RrotorError:
     return RrotorError(f"This address is not served here: {host}.", code="E_HOST", status=421)
 
@@ -74,8 +97,9 @@ def route_by_host(request: web.Request, domain: str, own: str | None, exact: str
     return replay(machine)
 
 
-def gate(config: Config, access: Access) -> Middleware:
-    """The local gate (the local token on loopback) or the hosted one (a runtime key at this machine's address)."""
+def gate(config: Config, access: Access, introspect: Introspector | None = None) -> Middleware:
+    """The local gate (the local token on loopback) or the hosted one (a runtime key, or a sign-in the Cloud vouches
+    for, at this machine's address)."""
     hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost") for port in (config.host_port, config.local_port)}
     origins = {f"http://{h}" for h in hosts}
 
@@ -101,9 +125,13 @@ def gate(config: Config, access: Access) -> Middleware:
         elsewhere = route_by_host(request, config.public_domain, config.machine_id, config.public_host)
         if elsewhere is not None:
             return elsewhere
+        if request.path in SIGN_IN:
+            return await handler(request)
         token = presented(request)
-        if not token or not access.allows(token):
-            raise Unauthorized("Send a runtime key: Authorization: Bearer <key>.")
+        if not token:
+            raise challenge(request, token_sent=False)
+        if not access.allows(token) and not (introspect is not None and await introspect.active(token)):
+            raise challenge(request, token_sent=True)
         if access.paused is not None:
             raise RrotorError(
                 "This runtime is paused: its plan's hosted hours for the month are spent.",

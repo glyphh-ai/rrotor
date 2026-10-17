@@ -9,13 +9,22 @@ class RrotorError(Exception):
     code: str = "E_INTERNAL"
     status: int = 500
 
-    def __init__(self, message: str, *, code: str | None = None, status: int | None = None, **detail: Any) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        status: int | None = None,
+        headers: dict[str, str] | None = None,
+        **detail: Any,
+    ) -> None:
         super().__init__(message)
         self.message = message
         if code:
             self.code = code
         if status:
             self.status = status
+        self.headers = headers or {}
         self.detail = detail
 
     def to_json(self) -> dict[str, Any]:

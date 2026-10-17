@@ -81,3 +81,58 @@ async def test_in_development_one_exact_host_stands_in_for_the_machines_address(
             assert res.status == 421 and "fly-replay" not in res.headers, host
     finally:
         await client.close()
+
+
+class Vouches:
+    """A fake of the Cloud's introspection: which tokens are signed in."""
+
+    def __init__(self, *good: str) -> None:
+        self.good, self.asked = set(good), []
+
+    async def active(self, token: str) -> bool:
+        self.asked.append(token)
+        return token in self.good
+
+
+async def test_a_glyphh_sign_in_the_cloud_vouches_for_lets_a_call_in_and_a_refusal_says_where_to_sign_in(hosted):
+    signed_in = token()
+    hosted.services.introspect = Vouches(signed_in)
+    client: TestClient[web.Request, web.Application] = TestClient(
+        TestServer(make(hosted.services)), headers={"Host": HOST}
+    )
+    await client.start_server()
+    try:
+        res = await client.get("/v1/models", headers={"Authorization": f"Bearer {signed_in}"})
+        assert res.status == 200
+        res = await client.get("/v1/models", headers=hosted.auth())  # a runtime key never asks the Cloud
+        assert res.status == 200 and hosted.services.introspect.asked == [signed_in]
+        res = await client.get("/v1/models", headers={"Authorization": f"Bearer {token()}"})
+        assert res.status == 401 and (await res.json())["error"]["code"] == "E_AUTH"
+        assert res.headers["WWW-Authenticate"] == (
+            f'Bearer resource_metadata="https://{HOST}/.well-known/oauth-protected-resource/mcp", scope="account", error="invalid_token"'
+        )
+        res = await client.get("/v1/models", headers={"Host": f"{HOST}:443"})
+        assert res.status == 401 and res.headers["WWW-Authenticate"] == (
+            f'Bearer resource_metadata="https://{HOST}/.well-known/oauth-protected-resource/mcp", scope="account"'
+        )
+        for path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"):
+            res = await client.get(path)  # open: where a client finds how to sign in
+            assert res.status == 200 and await res.json() == {
+                "resource": f"https://{HOST}/mcp",
+                "authorization_servers": ["https://glyphh.example.com"],
+                "scopes_supported": ["account"],
+                "bearer_methods_supported": ["header"],
+                "resource_name": "Glyphh runtime",
+            }
+        res = await client.get(
+            "/.well-known/oauth-protected-resource/mcp", headers={"Host": "a1b2c3d4e5f6a7.glyphh.app"}
+        )
+        assert res.headers["fly-replay"] == "instance=a1b2c3d4e5f6a7"  # another machine's metadata is its own
+    finally:
+        await client.close()
+
+
+async def test_without_the_cloud_only_a_runtime_key_gets_in(hosted):
+    assert hosted.services.introspect is None
+    res = await hosted.client.get("/v1/models", headers={"Authorization": f"Bearer {token()}"})
+    assert res.status == 401 and 'error="invalid_token"' in res.headers["WWW-Authenticate"]

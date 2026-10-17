@@ -7,6 +7,7 @@ import contextlib
 import logging
 import signal
 from dataclasses import dataclass, field
+from typing import Any
 
 import aiohttp
 from aiohttp import web
@@ -18,6 +19,7 @@ from rrotord.api.routes import Services
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.errors import RrotorError
+from rrotord.introspect import Introspector
 from rrotord.keys import public_key
 from rrotord.licence import Licence
 from rrotord.link.client import LinkClient
@@ -98,6 +100,16 @@ class Daemon:
                 )
             return await res.content.read(256 * 1024 * 1024 + 1)
 
+    async def _post(self, url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, Any]:
+        """A JSON POST to the Cloud, answered as (status, body): the introspection of a sign-in."""
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+        async with self.session.post(url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=10)) as res:
+            try:
+                return res.status, await res.json()
+            except (aiohttp.ContentTypeError, ValueError):
+                return res.status, None
+
     async def _connect(self, url: str, headers: dict[str, str]) -> aiohttp.ClientWebSocketResponse:
         if self.session is None:
             self.session = aiohttp.ClientSession()
@@ -118,6 +130,9 @@ class Daemon:
             self.licence,
             self._fetch,
             self.access,
+            Introspector(self.config.server, self.link.credentials, self._post)
+            if self.config.mode == "hosted"
+            else None,
         )
 
     def install_builtin(self) -> list[str]:
