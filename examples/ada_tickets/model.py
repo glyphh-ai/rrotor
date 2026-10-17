@@ -12,7 +12,7 @@ CONFIDENT = 0.6  # below this, decide() asks rather than guesses
 
 
 def load(ctx: Any) -> None:
-    ada.open(ctx, min_sim=0.35)  # three of a ticket's attributes must agree before a precedent counts
+    ada.open(ctx)  # its levers are the spec's settings (min_sim 0.35: three of a ticket's attributes must agree)
 
 
 def start(ctx: Any, inputs: dict[str, Any]) -> Result:
@@ -59,6 +59,13 @@ def learn(ctx: Any, inputs: dict[str, Any]) -> Result:
     return Result.done(
         {"roles": roles, "words": words, "interactions": pairs, "tau": out["tau"], "precedents": len(graded)}
     )
+
+
+def settings(ctx: Any, inputs: dict[str, Any]) -> Result:
+    """The model's levers: every setting as it stands, after putting in `changes` (checked by name and range; kept
+    with the store over the spec's `settings`; a learning lever moved relearns there and then)."""
+    changes = inputs.get("changes") or {}
+    return Result.done({"settings": ctx.ada.configure(**changes) if changes else ctx.ada.settings.to_json(all=True)})
 
 
 def probabilities(ctx: Any, inputs: dict[str, Any]) -> Result:

@@ -108,9 +108,10 @@ async def test_a_glyphh_sign_in_the_cloud_vouches_for_lets_a_call_in_and_a_refus
         assert res.status == 200 and hosted.services.introspect.asked == [signed_in]
         res = await client.get("/v1/models", headers={"Authorization": f"Bearer {token()}"})
         assert res.status == 401 and (await res.json())["error"]["code"] == "E_AUTH"
-        assert res.headers["WWW-Authenticate"] == (
-            f'Bearer resource_metadata="https://{HOST}/.well-known/oauth-protected-resource/mcp", scope="account", error="invalid_token"'
+        metadata = (
+            f'Bearer resource_metadata="https://{HOST}/.well-known/oauth-protected-resource/mcp", scope="account"'
         )
+        assert res.headers["WWW-Authenticate"] == metadata + ', error="invalid_token"'
         res = await client.get("/v1/models", headers={"Host": f"{HOST}:443"})
         assert res.status == 401 and res.headers["WWW-Authenticate"] == (
             f'Bearer resource_metadata="https://{HOST}/.well-known/oauth-protected-resource/mcp", scope="account"'

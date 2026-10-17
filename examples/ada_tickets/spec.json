@@ -1,6 +1,7 @@
 {
   "name": "tickets",
   "seed": 42,
+  "settings": { "min_sim": 0.35 },
   "dimension": 4096,
   "temporal_source": "meta.time.opened",
   "layers": [

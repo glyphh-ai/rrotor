@@ -76,14 +76,14 @@ def open(
     ctx: Ctx,
     *,
     author: str | None = None,
-    k: int = 15,
-    min_sim: float = 0.10,
+    k: int | None = None,
+    min_sim: float | None = None,
     tau: float | None = None,
     refresh_every: int | None = None,
 ) -> Any:
-    """The model: its spec read, its store opened (made on first use), kept on `ctx.ada` and returned.
-    `refresh_every`: learn the weights and calibrate again every so many graded precedents recorded (kept with
-    the store, over the spec file's weights)."""
+    """The model: its spec read, its store opened (made on first use), kept on `ctx.ada` and returned. Its levers
+    (k, min_sim, refresh_every and the learning and calibration settings) come from the spec's `settings`, then
+    from what `ctx.ada.configure()` kept with the store, then from the arguments given here."""
     _, glyphh_spec = _kernel()
     home = ctx.home if ctx.home is not None else Path.cwd()
     store = _store(ctx)

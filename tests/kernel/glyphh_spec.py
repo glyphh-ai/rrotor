@@ -48,6 +48,7 @@ fact trees that come back ("layer", "layer.segment" or
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import itertools
 import json
@@ -148,12 +149,73 @@ class Interaction:
         return dict(self.value_weights).get(kernel._text(value), 1.0)
 
 
+@dataclass(frozen=True)
+class Settings:
+    """The model's levers, in the spec (`settings`) and changeable live (Model.configure): how a query votes, how
+    learning weighs words and pairs, how calibration fits, and whether the model refreshes itself. Each is checked
+    by name and range; a change to a learning lever relearns."""
+
+    k: int = 15  # nearest precedents a query votes over
+    min_sim: float = 0.10  # the weighted similarity a precedent needs to vote
+    word_weights: bool = True  # learn a weight per word of a text role
+    word_floor: float = 0.35  # the least a learned word weighs (a bag's glyph is a majority vote: keep the quiet words heard)
+    interactions: bool = True  # learn pairs of roles that tell more together
+    max_interactions: int = 5  # at most this many pairs
+    rare: int = 5  # a value, word or pair seen fewer times than this is not learned from
+    calibrate_by: str = "loss"  # "loss" (probabilities that mean what they say) or "cost" (that decide best)
+    calibrate_sample: int = 200  # the newest precedents a calibration holds out
+    refresh_every: int | None = None  # learn and calibrate again every so many graded records; None: on demand
+
+    RANGES = {  # name: (kind, low, high) or (kind, choices)
+        "k": (int, 1, 1000),
+        "min_sim": (float, 0.0, 1.0),
+        "word_weights": (bool,),
+        "word_floor": (float, 0.0, 1.0),
+        "interactions": (bool,),
+        "max_interactions": (int, 0, 50),
+        "rare": (int, 1, 100000),
+        "calibrate_by": (str, ("loss", "cost")),
+        "calibrate_sample": (int, 10, 1000000),
+        "refresh_every": (int, 10, 1000000),
+    }
+    LEARNING = ("word_weights", "word_floor", "interactions", "max_interactions", "rare")
+
+    def with_changes(self, changes: Mapping[str, Any], at: str = "settings") -> Settings:
+        """These settings with the changes put in, each checked; a bad name, kind or value raises SpecError."""
+        values = {k: getattr(self, k) for k in self.RANGES}
+        for name, value in changes.items():
+            if name not in self.RANGES:
+                raise SpecError(f"{at}.{name}", f"no such setting; the settings are {', '.join(self.RANGES)}")
+            kind = self.RANGES[name][0]
+            if name == "refresh_every" and value is None:
+                values[name] = None
+                continue
+            if kind is bool:
+                if not isinstance(value, bool):
+                    raise SpecError(f"{at}.{name}", "true or false")
+            elif kind is str:
+                if value not in self.RANGES[name][1]:
+                    raise SpecError(f"{at}.{name}", f"one of {', '.join(self.RANGES[name][1])}")
+            elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise SpecError(f"{at}.{name}", "a number")
+            else:
+                low, high = self.RANGES[name][1], self.RANGES[name][2]
+                if kind is int and int(value) != value:
+                    raise SpecError(f"{at}.{name}", "a whole number")
+                if not low <= value <= high:
+                    raise SpecError(f"{at}.{name}", f"from {low} to {high}")
+                value = kind(value)
+            values[name] = value
+        return Settings(**values)
+
+    def to_json(self, all: bool = False) -> dict[str, Any]:
+        """The settings as an object; only those that differ from the defaults unless `all`."""
+        defaults = Settings()
+        return {k: getattr(self, k) for k in self.RANGES if all or getattr(self, k) != getattr(defaults, k)}
+
+
 INTERACTIONS = "interactions"  # the layer the spec adds; "pairs" its one segment
-WORD_FLOOR = 0.35  # the least a learned word weighs: a bag's glyph is a majority vote, and a floor this high keeps
-# the many words that tell little from being drowned by the few that tell most (chosen on Banking77, inside its
-# training set: 0.02 lost 6 points to plain words, 0.35 gained 7; benchmarks/banking77 in glyphh-ai/rrotor)
-MAX_INTERACTIONS = 5
-RARE = 5  # a pair's value seen fewer times than this is pooled when learning: no weight rides on it
+
 
 
 @dataclass(frozen=True)
@@ -184,6 +246,10 @@ class Spec:
     temporal_source: str = "auto"
     output: Output = field(default_factory=Output)
     interactions: tuple[Interaction, ...] = ()
+    settings: Settings = field(default_factory=Settings)
+
+    def with_settings(self, settings: Settings) -> Spec:
+        return dataclasses.replace(self, settings=settings)
 
     # -- JSON in and out --------------------------------------------
 
@@ -225,6 +291,7 @@ class Spec:
                 **({"costs": {d: dict(t) for d, t in self.output.costs}} if self.output.costs else {}),
                 **({"ask": self.output.ask} if self.output.ask is not None else {}),
             },
+            **({"settings": self.settings.to_json()} if self.settings.to_json() else {}),
             **(
                 {
                     INTERACTIONS: [
@@ -282,9 +349,10 @@ class Spec:
                 for role in seg.roles:
                     path = f"{layer.name}.{seg.name}.{role.name}"
                     if role.text_encoding:
-                        learned_words = self._learn_words(layer.name, seg.name, role.name, situations, base_rate)
-                        if learned_words:
-                            words_learned[path] = learned_words
+                        if self.settings.word_weights:
+                            learned_words = self._learn_words(layer.name, seg.name, role.name, situations, base_rate)
+                            if learned_words:
+                                words_learned[path] = learned_words
                         continue
                     groups: dict[str, Counter] = defaultdict(Counter)
                     for situation, outcome in situations:
@@ -302,7 +370,7 @@ class Spec:
                         key: max(abs(g[o] / sum(g.values()) - base_rate.get(o, 0.0)) for o in base)
                         for key, g in groups.items()
                     }
-        pairs = self._learn_pairs(situations, gains, base, base_rate, h_base)
+        pairs = self._learn_pairs(situations, gains, base, base_rate, h_base) if self.settings.interactions else []
         top = max([*gains.values(), *(p["similarity_weight"] for p in pairs)], default=0.0)  # the strongest weighs 1
         learned: dict[str, Any] = {}
         for path, gain in gains.items():
@@ -314,7 +382,7 @@ class Spec:
         if top > 0:
             for pair in pairs:
                 pair["similarity_weight"] = round(pair["similarity_weight"] / top, 4)
-            learned["~" + INTERACTIONS] = [p for p in pairs if p["similarity_weight"] > 0.1][:MAX_INTERACTIONS]
+            learned["~" + INTERACTIONS] = [p for p in pairs if p["similarity_weight"] > 0.1][: self.settings.max_interactions]
         for path, weights in words_learned.items():
             learned[path] = {**learned.get(path, {}), "value_weights": weights}
         return learned
@@ -330,8 +398,9 @@ class Spec:
         """What each word of a text role says about the outcome: how far the word's presence moves some outcome
         from its base rate (the same measure a field's values get; not information gain, which with many outcomes
         crowns the words that split them into big groups, "card", not the ones that name one, "stolen"), scaled
-        from WORD_FLOOR (tells nothing) to 1 (the most telling word). Words seen under RARE times are left out:
-        they get the floor."""
+        from the settings' word_floor (tells nothing; 0.35 by default, chosen on Banking77 inside its training set:
+        a bag's glyph is a majority vote, and a low floor let the few loud words drown the many quiet ones) to 1
+        (the most telling word). Words seen fewer than `rare` times are left out: they get the floor."""
         seen: dict[str, Counter] = defaultdict(Counter)
         total = 0
         for situation, outcome in situations:
@@ -341,18 +410,19 @@ class Spec:
             total += 1
             for word in _words_of(value):
                 seen[word][outcome] += 1
-        if total < RARE:
+        if total < self.settings.rare:
             return {}
         moves: dict[str, float] = {}
         for word, present in seen.items():
             n_present = sum(present.values())
-            if n_present < RARE:
+            if n_present < self.settings.rare:
                 continue
             moves[word] = max(max(present[o] / n_present - base_rate.get(o, 0.0) for o in present), 0.0)
         top = max(moves.values(), default=0.0)
         if top <= 0:
             return {}
-        return {word: round(WORD_FLOOR + (1 - WORD_FLOOR) * move / top, 4) for word, move in sorted(moves.items())}
+        floor = self.settings.word_floor
+        return {word: round(floor + (1 - floor) * move / top, 4) for word, move in sorted(moves.items())}
 
     def _learn_pairs(
         self,
@@ -363,8 +433,9 @@ class Spec:
         h_base: float,
     ) -> list[dict[str, Any]]:
         """The pairs of roles that tell more together than the better of them alone: each pair's extra information
-        gain over its best role (unscaled here; learn() scales it like a role's and keeps the MAX_INTERACTIONS best
-        over a tenth of the strongest signal), values seen under RARE times pooled so the gain is not sparsity's."""
+        gain over its best role (unscaled here; learn() scales it like a role's and keeps the settings'
+        max_interactions best over a tenth of the strongest signal), values seen fewer than `rare` times pooled so
+        the gain is not sparsity's."""
         paths = list(gains)
         found = []
         for a, b in itertools.combinations(paths, 2):
@@ -378,7 +449,7 @@ class Spec:
             counted = Counter({k: sum(g.values()) for k, g in groups.items()})
             pooled: dict[str, Counter] = defaultdict(Counter)
             for k, g in groups.items():
-                pooled[k if counted[k] >= RARE else "~"].update(g)
+                pooled[k if counted[k] >= self.settings.rare else "~"].update(g)
             total = sum(counted.values())
             after = sum(sum(g.values()) / total * _entropy(g) for g in pooled.values())
             extra = max(h_base - after, 0.0) - max(gains[a], gains[b])
@@ -386,7 +457,7 @@ class Spec:
                 moves = {
                     k: max(abs(g[o] / sum(g.values()) - base_rate.get(o, 0.0)) for o in base)
                     for k, g in groups.items()
-                    if counted[k] >= RARE
+                    if counted[k] >= self.settings.rare
                 }
                 best = max(moves.values(), default=0.0)
                 found.append(
@@ -422,8 +493,9 @@ class Spec:
 
     @property
     def spec_id(self) -> str:
-        """Content address: the same spec gives the same id anywhere."""
-        text = json.dumps(self.to_json(), sort_keys=True, separators=(",", ":"))
+        """Content address: the same spec gives the same id anywhere. The settings are not part of it: they are the
+        model's levers, not what a case is."""
+        text = json.dumps({k: v for k, v in self.to_json().items() if k != "settings"}, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode()).hexdigest()[:16]
 
     # -- data in the spec's shape -----------------------------------
@@ -463,7 +535,7 @@ class Spec:
 
     def _weighed(self, situation: dict[str, Any]) -> dict[str, Any]:
         """The situation with every text role's bag carrying the role's learned word weights ([[word, weight],
-        ...]; a word not learned weighs WORD_FLOOR), or plain words where the role learned none."""
+        ...]; a word not learned weighs the settings' word_floor), or plain words where the role learned none."""
         out: dict[str, Any] = {}
         for lname, segs in situation.items():
             layer = self._find(self.layers, lname)
@@ -479,7 +551,7 @@ class Spec:
                     if role is not None and role.text_encoding and isinstance(value, list):
                         words = _words_of(value)
                         table = dict(role.value_weights)
-                        value = [[w, table.get(w, WORD_FLOOR)] for w in words] if table else words
+                        value = [[w, table.get(w, self.settings.word_floor)] for w in words] if table else words
                     new_roles[rname] = value
                 new_segs[sname] = new_roles
             out[lname] = new_segs
@@ -821,7 +893,7 @@ def _parse_spec(obj: Any) -> Spec:
         obj,
         "",
         ["name", "layers"],
-        ["version", "dimension", "seed", "similarity_weight", "security_weight", "temporal_source", "output", INTERACTIONS],
+        ["version", "dimension", "seed", "similarity_weight", "security_weight", "temporal_source", "output", INTERACTIONS, "settings"],
     )
     if o.get("version", SPEC_VERSION) != SPEC_VERSION:
         raise SpecError("version", f"this kernel reads spec version {SPEC_VERSION}")
@@ -891,6 +963,7 @@ def _parse_spec(obj: Any) -> Spec:
         str(o.get("temporal_source", "auto")),
         Output(tuple(report), costs, ask),
         _parse_interactions(o.get(INTERACTIONS, [])),
+        Settings().with_changes(_fields(o.get("settings", {}), "settings", [], list(Settings.RANGES))),
     )
     for path in report:
         _resolve(spec, path, "output.report")
@@ -926,24 +999,47 @@ class Model:
         self,
         spec: Spec,
         *,
-        k: int = 15,
-        min_sim: float = 0.10,
         author: str = "anon",
         path: str | None = None,
         tau: float | None = None,
+        k: int | None = None,
+        min_sim: float | None = None,
         refresh_every: int | None = None,
     ):
-        """refresh_every: learn the weights and calibrate again every so many graded precedents recorded, so the
-        model follows its store as cases arrive (refresh() does the same on demand)."""
+        """The levers come from the spec's `settings`, then from what configure() kept with the store, then from
+        the arguments given here (k, min_sim, refresh_every), each over the last."""
         self.given = spec
-        self.spec = spec
-        self.refresh_every = refresh_every
         self.space = kernel.Space(
-            dim=spec.dimension, k=k, min_sim=min_sim, seed=spec.seed, author=author, path=path, tau=tau
+            dim=spec.dimension, k=spec.settings.k, min_sim=spec.settings.min_sim, seed=spec.seed, author=author, path=path, tau=tau
         )
+        kept = self.space.meta("settings")
+        self.overrides: dict[str, Any] = dict(kept) if isinstance(kept, dict) else {}
+        given = {k_: v for k_, v in (("k", k), ("min_sim", min_sim), ("refresh_every", refresh_every)) if v is not None}
+        self.settings = spec.settings.with_changes(self.overrides).with_changes(given)
+        self.spec = spec.with_settings(self.settings)
         learned = self.space.meta("learned")
         if isinstance(learned, dict):
-            self.spec = spec.with_weights(learned)
+            self.spec = self.spec.with_weights(learned)
+        self._apply()
+
+    def _apply(self) -> None:
+        self.space.k, self.space.min_sim = self.settings.k, self.settings.min_sim
+        self.refresh_every = self.settings.refresh_every
+
+    def configure(self, **changes: Any) -> dict[str, Any]:
+        """Change the levers live: checked, kept with the store (over the spec's `settings`, until changed again),
+        and a learning lever moved relearns the store there and then (when it has learned). Returns every
+        setting as it now stands."""
+        new = self.settings.with_changes(changes)
+        moved = [name for name in Settings.LEARNING if getattr(new, name) != getattr(self.settings, name)]
+        self.settings = new
+        self.overrides.update(changes)
+        self.space.set_meta("settings", self.overrides)
+        self.spec = self.spec.with_settings(new)
+        self._apply()
+        if moved and self.space.meta("learned") is not None:
+            self.learn()
+        return self.settings.to_json(all=True)
 
     def record(self, data: Any, outcome: str | None = None, ts: float | None = None) -> str:
         situation = self.spec.situation(data)
@@ -963,15 +1059,15 @@ class Model:
         graded = self.space.graded()
         if len(graded) < 10:
             raise SpecError("", "learn needs at least 10 precedents with an outcome")
-        learned = self.given.learn(graded)
+        learned = self.given.with_settings(self.settings).learn(graded)
         before = self.spec
-        self.spec = self.given.with_weights(learned)
+        self.spec = self.given.with_settings(self.settings).with_weights(learned)
         self.space.set_meta("learned", learned)
         if self.spec.interactions != before.interactions or _word_tables(self.spec) != _word_tables(before):
             self.space.rewrite(self.spec.restate)  # every precedent gets the words' weights and the pairs the spec now reads
         return learned
 
-    def refresh(self, sample: int = 200, clearance: float = 1.0, by: str = "loss") -> dict[str, Any]:
+    def refresh(self, sample: int | None = None, clearance: float = 1.0, by: str | None = None) -> dict[str, Any]:
         """learn() then calibrate(): the weights and the temperature follow the store. Returns both."""
         learned = self.learn()
         return {"learned": learned, "tau": self.calibrate(sample, clearance, by)}
@@ -995,11 +1091,13 @@ class Model:
         situation = self.spec.situation(data)
         return self.space.probabilities(situation, weights=self.spec.weights(clearance, situation))
 
-    def calibrate(self, sample: int = 100, clearance: float = 1.0, by: str = "loss") -> float:
+    def calibrate(self, sample: int | None = None, clearance: float = 1.0, by: str | None = None) -> float:
         """Fit the store's temperature on its own newest precedents, each held out in turn and scored with the
         weights the spec gives its situation. `by` is "loss" (the least log-loss: probabilities that mean what
         they say) or "cost" (the least cost of deciding by output.costs, log-loss breaking ties: probabilities
         that decide best). Kept in the store. Returns tau."""
+        by = by or self.settings.calibrate_by
+        sample = sample or self.settings.calibrate_sample
         if by not in ("loss", "cost"):
             raise SpecError("", 'calibrate by "loss" or "cost"')
         return self.space.calibrate(

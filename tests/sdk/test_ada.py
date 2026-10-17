@@ -100,7 +100,9 @@ def test_open_records_and_reencode_rebuilds_the_store(tmp_path, kernel):
     assert ada.reencode(c) == 1
     again = ada.open(ctx(tmp_path, data), refresh_every=50)
     assert len(again) == 1 and again.query({"a": {"b": {"x": "one"}}}).top == "yes"
-    assert again.refresh_every == 50 and again.given is again.spec
+    assert again.refresh_every == 50 and again.given.spec_id == again.spec.spec_id
+    assert (again.space.k, again.space.min_sim) == (15, 0.1)  # the kernel's defaults, no argument given
+    assert ada.open(ctx(tmp_path, data), k=3).space.k == 3
     assert ada.reencode(ctx(tmp_path, tmp_path / "empty")) == 0
 
 

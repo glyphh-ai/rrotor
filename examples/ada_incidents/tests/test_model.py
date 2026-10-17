@@ -161,6 +161,18 @@ def test_learn_weighs_the_roles_from_the_store_and_needs_ten_graded_incidents(mo
     assert r.status == "done" and r.data["precedents"] == 12 and 0 < r.data["tau"] <= 1
     assert r.data["roles"]["error.where.service"] == 1.0 and r.data["roles"]["error.where.region"] == 0.0
     assert r.data["interactions"] == []  # nothing a pair tells that service alone does not
-    assert set(r.data["words"]) == {"error.what.message"} and r.data["words"]["error.what.message"] >= 9  # the message's words, weighed
+    assert (
+        set(r.data["words"]) == {"error.what.message"} and r.data["words"]["error.what.message"] >= 9
+    )  # the message's words, weighed
     q = harness(model, tmp_path).call("query", {"data": incident(50, "gateway timed out", "api")})
     assert q.data["top"] == "raise circuit breaker"
+
+
+def test_settings_are_read_and_changed_live(model, tmp_path):
+    now = harness(model, tmp_path).call("settings").data["settings"]
+    assert now["min_sim"] == 0.35 and now["k"] == 15 and now["refresh_every"] is None
+    changed = harness(model, tmp_path).call("settings", {"changes": {"k": 7, "refresh_every": 100}}).data["settings"]
+    assert changed["k"] == 7 and changed["refresh_every"] == 100 and changed["min_sim"] == 0.35
+    assert harness(model, tmp_path).call("settings").data["settings"]["k"] == 7  # kept with the store
+    bad = harness(model, tmp_path).call("settings", {"changes": {"k": 0}})
+    assert bad.status == "failed" and "from 1 to 1000" in bad.data["reason"]

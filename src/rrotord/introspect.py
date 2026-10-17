@@ -58,7 +58,7 @@ class Introspector:
             return False
         try:
             status, body = await self.post(self.url, {"Authorization": f"Bearer {own}"}, {"token": token})
-        except Exception as err:  # the Cloud unreachable: not signed in, for now
+        except Exception as err:  # noqa: BLE001  (whatever the Cloud or the network did: not signed in, for now)
             log.warning("introspection failed", extra={"error": type(err).__name__})
             return False
         return status == 200 and isinstance(body, dict) and body.get("active") is True

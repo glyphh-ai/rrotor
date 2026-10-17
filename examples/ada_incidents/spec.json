@@ -1,6 +1,7 @@
 {
   "name": "incidents",
   "seed": 7,
+  "settings": { "min_sim": 0.35 },
   "dimension": 4096,
   "temporal_source": "error.when.opened",
   "layers": [

@@ -103,3 +103,12 @@ def test_learn_weighs_the_roles_from_the_store_and_needs_ten_graded_tickets(mode
         harness(model, tmp_path).call("query", {"data": ticket(9, "login broken", "auth", 7)}).data["top"]
         == "page oncall"
     )
+
+
+def test_settings_are_read_and_changed_live(model, tmp_path):
+    assert harness(model, tmp_path).call("settings").data["settings"]["min_sim"] == 0.35
+    assert (
+        harness(model, tmp_path).call("settings", {"changes": {"word_floor": 0.5}}).data["settings"]["word_floor"]
+        == 0.5
+    )
+    assert harness(model, tmp_path).call("settings").data["settings"]["word_floor"] == 0.5
