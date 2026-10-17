@@ -33,7 +33,7 @@ jobs:
       - name: Tests (100% line and branch coverage of rrotor and rrotord)
         run: uv run pytest
       - name: The sample models' tests
-        run: uv run pytest examples/daily_sales/tests examples/ada_tickets examples/ada_incidents -o addopts="" -p no:cacheprovider
+        run: uv run pytest examples/daily_sales/tests examples/ada_tickets examples/ada_incidents -o addopts="" -p no:cacheprovider --import-mode=importlib
 
   image:
     runs-on: ubuntu-24.04
