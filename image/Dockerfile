@@ -56,6 +56,7 @@ USER root
 COPY pyproject.toml uv.lock /src/
 COPY tests /src/tests
 COPY examples /src/examples
+COPY scripts /src/scripts
 RUN uv pip install -q --no-cache --python /opt/rrotord/bin/python pytest pytest-asyncio \
  && mkdir -p /src/.data && chown -R rrotor:rrotor /src
 USER rrotor
