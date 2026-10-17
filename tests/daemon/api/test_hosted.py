@@ -88,7 +88,8 @@ class Vouches:
     """A fake of the Cloud's introspection: which tokens are signed in."""
 
     def __init__(self, *good: str) -> None:
-        self.good, self.asked = set(good), []
+        self.good = set(good)
+        self.asked: list[str] = []
 
     async def active(self, token: str) -> bool:
         self.asked.append(token)
