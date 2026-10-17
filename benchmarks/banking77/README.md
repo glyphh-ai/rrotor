@@ -48,6 +48,35 @@ The two Claude runs agreed with each other on 199 of the 200. The published stat
 BERT-class models, is around 93% on the 3,080; Claude's 97% is on a 200 sample and reads a little high for the same
 reason every sample does, but the gap to everything else is real.
 
+## Ada and the LLM together
+
+The question a developer actually has is not Ada or the LLM. It is how to route a thousand messages a day without
+paying the LLM to re-read ten thousand examples a thousand times. The answer is a dial: Ada decides where it is
+sure, and hands the rest to the LLM with its three nearest precedents in the prompt instead of the file. Every
+answer the LLM gives is recorded, so next time that case is Ada's.
+
+On the 200 sample, with Ada's calibrated probability as the bar and Claude's second run as the hand-off (both
+already on disk; `hybrid.py`, nothing tuned on the sample):
+
+| Confidence bar | Ada takes | Ada right on those | Claude takes | Together | LLM share |
+|---|---|---|---|---|---|
+| none (Ada alone) | 200 | 90.0% | 0 | 90.0% | 0% |
+| 0.5 | 180 | 95.6% | 20 | 95.0% | 10% |
+| 0.6 | 172 | 97.1% | 28 | 96.5% | 14% |
+| 0.7 | 156 | 98.7% | 44 | **98.0%** | 22% |
+| 0.8 | 143 | 98.6% | 57 | 98.0% | 28% |
+| 0.9 | 122 | 100% | 78 | 97.5% | 39% |
+| Claude alone | 0 | | 200 | 97.5% | 100% |
+
+At a bar of 0.7 the pair is more accurate than Claude alone: Ada is right on 98.7% of what it keeps and hands over
+the ones it should. The LLM sees a fifth of the traffic, and that fifth is cheap: a call carries the message and
+three precedents with their paths, a few hundred tokens, not the 150,000 of re-sending the examples. Per thousand
+messages that is about 220 calls of a few hundred tokens against a thousand of 150,000, three orders of magnitude
+off the bill, with accuracy up and the store improving on every hand-off.
+
+The bar is the user's: higher for a dearer misroute, lower for a cheaper LLM. The same dial is `output.ask` in the
+spec, priced in the bank's own units, as the credit page uses it.
+
 ## Cost and time
 
 | | Build | Per message | Cost per message |
@@ -113,6 +142,7 @@ uv run python benchmarks/banking77/run.py          # Ada, plain and with learned
 uv run python benchmarks/banking77/tune_words.py   # how a word's weight became its voice, inside the training set
 uv run python benchmarks/banking77/tune_reading.py # the lexicon and word pairs, on and off, inside the training set
 uv run python benchmarks/banking77/tune_evidence.py # word_evidence from 0 to 3, inside the training set
+uv run python benchmarks/banking77/hybrid.py        # Ada and Claude together, at each confidence bar, on the 200
 uv run python benchmarks/banking77/score.py benchmarks/banking77/results/llm_run1.json   # a judge's answers
 ```
 
