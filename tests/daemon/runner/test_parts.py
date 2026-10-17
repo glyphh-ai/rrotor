@@ -7,7 +7,7 @@ from rrotord.licence import Licence
 from rrotord.parts import Parts
 from rrotord.sandbox import bwrap
 from tests.daemon.runner.test_engine import Env
-from tests.fakes import keys, part_archive
+from tests.fakes import keys, outcome, part_archive
 
 USES_PART = """
 from rrotor import Result
@@ -33,8 +33,8 @@ async def test_a_missing_part_names_itself_and_the_mod_that_brings_it(tmp_path, 
     env, _, _ = _ready(tmp_path, short_dir, ["ada"])
     env.deploy(USES_PART, needs=["ada"], databases=["postgres"])
     run = await env.runner.call(model="sample", function="start", inputs={})
-    assert run.result["data"]["code"] == "E_PART_MISSING"
-    assert "needs the parts postgres, ada, not installed (from the ada, rrotor mods)" in run.result["data"]["reason"]
+    assert outcome(run)["data"]["code"] == "E_PART_MISSING"
+    assert "needs the parts postgres, ada, not installed (from the ada, rrotor mods)" in outcome(run)["data"]["reason"]
 
 
 async def test_a_part_not_in_the_plan_refuses_the_run(tmp_path, short_dir):
@@ -44,8 +44,8 @@ async def test_a_part_not_in_the_plan_refuses_the_run(tmp_path, short_dir):
     env.deploy(USES_PART, needs=["ada"])
     run = await env.runner.call(model="sample", function="start", inputs={})
     assert (
-        run.result["data"]["code"] == "E_NOT_IN_PLAN"
-        and "ada is not in this machine's plan" in run.result["data"]["reason"]
+        outcome(run)["data"]["code"] == "E_NOT_IN_PLAN"
+        and "ada is not in this machine's plan" in outcome(run)["data"]["reason"]
     )
 
 
@@ -61,14 +61,15 @@ async def test_an_installed_licensed_part_is_mounted_and_importable(tmp_path, sh
     argv = bwrap.command(spec.mounts, spec.limits, 9, 3, exists=lambda p: False)
     assert argv[argv.index("--ro-bind", argv.index(str(made.path)) - 1) + 2] == "/opt/parts/ada"
     assert "PYTHONPATH" in argv and argv[argv.index("PYTHONPATH") + 1] == "/opt/rrotor:/opt/parts/ada/lib"
-    assert "/opt/parts/ada" in bwrap.landlock_rules(spec.mounts)["read"]
+    read = bwrap.landlock_rules(spec.mounts)["read"]
+    assert isinstance(read, list) and "/opt/parts/ada" in read
 
 
 async def test_without_a_parts_store_every_part_is_missing(tmp_path, short_dir):
     env = Env(tmp_path, short_dir)
     env.deploy(USES_PART, needs=["ada"])
     run = await env.runner.call(model="sample", function="start", inputs={})
-    assert run.result["data"]["code"] == "E_PART_MISSING"
+    assert outcome(run)["data"]["code"] == "E_PART_MISSING"
 
 
 async def test_a_base_part_needs_no_plan(tmp_path, short_dir):
@@ -77,4 +78,4 @@ async def test_a_base_part_needs_no_plan(tmp_path, short_dir):
     store.install("postgres", "1.0.0", data, sha, sig)
     env.deploy(USES_PART, databases=["postgres"])
     run = await env.runner.call(model="sample", function="start", inputs={})
-    assert run.result["status"] == "done"
+    assert outcome(run)["status"] == "done"

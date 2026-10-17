@@ -22,6 +22,7 @@ from rrotord.errors import RrotorError
 from rrotord.introspect import Introspector
 from rrotord.keys import public_key
 from rrotord.licence import Licence
+from rrotord.link import protocol as p
 from rrotord.link.client import LinkClient
 from rrotord.link.credentials import Credentials
 from rrotord.link.handler import LinkHandler
@@ -36,6 +37,7 @@ from rrotord.sandbox.probe import Layers, probe
 
 log = logging.getLogger("rrotor")
 EXPIRE_EVERY = 30.0
+USAGE_EVERY = 60.0
 
 
 @dataclass(slots=True)
@@ -49,6 +51,7 @@ class Daemon:
     access: Access = field(init=False)
     runner: Runner = field(init=False)
     link: LinkClient = field(init=False)
+    handler: LinkHandler = field(init=False)
     session: aiohttp.ClientSession | None = None
 
     def __post_init__(self) -> None:
@@ -58,7 +61,7 @@ class Daemon:
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
         self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None)
         self.access = Access(c.data, c.keys_sha256)
-        handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
+        self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
         self.runner = Runner(
             models=models,
             records=Records(c.data),
@@ -133,6 +136,7 @@ class Daemon:
             Introspector(self.config.server, self.link.credentials, self._post)
             if self.config.mode == "hosted"
             else None,
+            self.handler.report,
         )
 
     def install_builtin(self) -> list[str]:
@@ -167,6 +171,21 @@ class Daemon:
             except Exception:
                 log.exception("expiring waiting runs failed")
 
+    async def report_usage(self) -> None:
+        """The runtime keys' calls since the last report, owed up the link as one numbered `usage`; nothing when
+        there were none, or when there is no runtime token to owe them under."""
+        keys = self.access.usage.take()
+        if keys and self.link.configured:
+            await self.link.owe(lambda seq: p.usage(seq, keys))
+
+    async def _usage(self) -> None:
+        while True:
+            await asyncio.sleep(USAGE_EVERY)
+            try:
+                await self.report_usage()
+            except Exception:
+                log.exception("reporting usage failed")
+
     async def serve(self, stop: asyncio.Event) -> None:
         for stem in self.install_builtin():
             log.info("built-in part installed", extra={"part": stem})
@@ -175,8 +194,16 @@ class Daemon:
         await api.setup()
         await web.TCPSite(api, "0.0.0.0", self.config.local_port).start()  # noqa: S104  (published to loopback only)
         log.info("rrotor up", extra={"version": VERSION, "mode": self.config.mode, "sandbox": self.layers.ready})
-        tasks = [asyncio.create_task(self.link.run()), asyncio.create_task(self._expire())]
+        tasks = [
+            asyncio.create_task(self.link.run()),
+            asyncio.create_task(self._expire()),
+            asyncio.create_task(self._usage()),
+        ]
         await stop.wait()
+        try:
+            await self.report_usage()  # the last minute's calls, while the link may still carry them
+        except Exception:
+            log.exception("reporting usage failed")
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

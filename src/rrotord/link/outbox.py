@@ -1,5 +1,6 @@
-"""What rrotor owes the Cloud: results, events and `deployed`, kept on /data until acknowledged, then dropped.
-Results and events take the next number of one rising counter per runtime; a new runtime token starts it again."""
+"""What rrotor owes the Cloud: results, events, `usage` and `deployed`, kept on /data until acknowledged, then
+dropped. Results, events and `usage` take the next number of one rising counter per runtime; a new runtime token
+starts it again."""
 
 from __future__ import annotations
 

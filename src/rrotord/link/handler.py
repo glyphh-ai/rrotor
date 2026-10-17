@@ -1,6 +1,7 @@
 """What the Cloud's messages do here: a welcome's licence is kept, a call opens a run, continue and cancel go to it,
 deploy, activate and remove change the versions. Every run the Cloud called answers its Results up the link; a
-deploy answers `deployed`, or an event `deploy_failed` (protocol 1 has no refusal of its own)."""
+deploy answers `deployed`, or an event `deploy_failed` (protocol 1 has no refusal of its own). Every other deploy
+(the API's and its MCP's) reports `deployed` through here too."""
 
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from rrotord.errors import RrotorError
 from rrotord.licence import Licence
 from rrotord.link import protocol as p
 from rrotord.link.client import LinkClient
-from rrotord.models import Models
+from rrotord.models import Models, Version
 from rrotord.runner.engine import Runner, failed
 from rrotord.runner.record import Run
 
@@ -58,6 +59,17 @@ class LinkHandler:
         else:
             self.access.resume()
             log.info("resumed by the Cloud")
+
+    async def report(self, version: Version, repo: str | None) -> None:
+        """`deployed` up the link after every deploy, however it was asked for (not numbered, kept until
+        acknowledged); nothing while this rrotor has no runtime token."""
+        if self.link is None or not self.link.configured:
+            return
+        manifest = version.manifest.model_dump(mode="json")
+        await self.link.owe(
+            lambda _seq: p.deployed(version.model, version.version, version.commit_sha, repo, manifest),
+            numbered=False,
+        )
 
     async def notify(self, run: Run) -> None:
         """A Result of a run the Cloud called goes up the link, numbered, until acknowledged."""
@@ -111,10 +123,9 @@ class LinkHandler:
                 if found is not None:
                     self.models.remove(found)
                 return
-            if message.type == "deploy" and message.repo:
-                version = await self.deployer.from_repo(
-                    message.repo, message.commit_sha, message.token, message.version
-                )
+            repo = message.repo if message.type == "deploy" and message.repo else None
+            if repo is not None:
+                version = await self.deployer.from_repo(repo, message.commit_sha, message.token, message.version)
                 if version.model != message.model:
                     self.models.remove(version)
                     raise RrotorError(
@@ -133,7 +144,4 @@ class LinkHandler:
                 }
                 await self.link.owe(lambda seq: p.event(seq, message.model, "deploy_failed", data))
             return
-        if self.link is not None:
-            await self.link.owe(
-                lambda _seq: p.deployed(version.model, version.version, version.commit_sha), numbered=False
-            )
+        await self.report(version, repo)

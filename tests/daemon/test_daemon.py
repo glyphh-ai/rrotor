@@ -19,6 +19,7 @@ from rrotord import daemon
 from rrotord.config import Config
 from rrotord.daemon import Daemon
 from rrotord.errors import RrotorError
+from rrotord.link.credentials import digest
 from rrotord.runner.launch import SandboxLauncher
 from rrotord.runner.record import Run
 from tests.fakes import LocalLauncher, keys, part_archive, ready
@@ -41,6 +42,7 @@ def test_the_daemon_wires_its_parts(tmp_path, short_dir):
         d.licence,
     )
     assert s.fetch is not None and d.parts.key is None and d.licence.key is None
+    assert s.report == d.handler.report and d.handler.link is d.link
     assert d.deployer.scratch == short_dir / "deploy"
 
 
@@ -217,3 +219,100 @@ async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged
     with caplog.at_level("INFO", logger="rrotor"):
         await Daemon(dataclasses.replace(c, data=tmp_path / "data2"), ready(), launcher=LocalLauncher()).serve(stop)
     assert "built-in part installed" in caplog.text
+
+
+TOKEN = "tok_" + "b" * 20
+
+
+def hosted_daemon(tmp_path: Path, short_dir: Path, runtime_token: str | None = TOKEN) -> Daemon:
+    c = Config(
+        tmp_path / "data",
+        "hosted",
+        "http://127.0.0.1:1",
+        0,
+        0,
+        None,
+        Path(rrotor.__file__).parent,
+        short_dir,
+        runtime_id=str(uuid.uuid4()) if runtime_token else None,
+        runtime_token=runtime_token,
+        machine_id="3d8f1a2b3c4d5e",
+    )
+    d = Daemon(c, ready(), launcher=LocalLauncher())
+    if runtime_token:
+        d.link.outbox.restart(digest(runtime_token))  # as the link does when it first runs
+    return d
+
+
+async def test_usage_is_owed_as_one_numbered_message_and_the_counts_start_again(tmp_path, short_dir):
+    d = hosted_daemon(tmp_path, short_dir)
+    await d.report_usage()
+    assert d.link.outbox.pending == [] and d.link.outbox.seq == 0  # idle: nothing owed
+    d.access.usage.count("a" * 64)
+    d.access.usage.count("b" * 64)
+    d.access.usage.count("a" * 64)
+    await d.report_usage()
+    [owed] = d.link.outbox.pending
+    assert owed == {
+        "type": "usage",
+        "id": owed["id"],
+        "seq": 1,
+        "keys": [
+            {"key_sha256": "a" * 64, "calls": 2, "last_used_at": owed["keys"][0]["last_used_at"]},
+            {"key_sha256": "b" * 64, "calls": 1, "last_used_at": owed["keys"][1]["last_used_at"]},
+        ],
+    }
+    assert d.access.usage.counts == {}
+    await d.report_usage()
+    assert len(d.link.outbox.pending) == 1 and d.link.outbox.seq == 1
+
+
+async def test_no_usage_is_owed_without_a_runtime_token(tmp_path, short_dir):
+    d = hosted_daemon(tmp_path, short_dir, runtime_token=None)
+    d.access.usage.count("a" * 64)
+    await d.report_usage()
+    assert d.link.outbox.pending == [] and d.access.usage.counts == {}
+
+
+async def test_usage_is_reported_every_minute_and_survives_a_failure(tmp_path, short_dir, monkeypatch, caplog):
+    monkeypatch.setattr(daemon, "USAGE_EVERY", 0.01)
+    d = hosted_daemon(tmp_path, short_dir)
+    calls = []
+
+    def take() -> list[dict[str, Any]]:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("disk full")
+        return []
+
+    monkeypatch.setattr(d.access.usage, "take", take)
+    task = asyncio.create_task(d._usage())
+    for _ in range(200):
+        if len(calls) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert len(calls) >= 2 and "reporting usage failed" in caplog.text
+
+
+async def test_usage_is_flushed_once_more_on_shutdown(tmp_path, short_dir):
+    d = hosted_daemon(tmp_path, short_dir)
+    d.access.usage.count("a" * 64)
+    stop = asyncio.Event()
+    stop.set()
+    await d.serve(stop)
+    assert [(m["type"], m["seq"], m["keys"][0]["calls"]) for m in d.link.outbox.pending] == [("usage", 1, 1)]
+
+
+async def test_a_failed_flush_on_shutdown_is_logged_and_it_still_stops(tmp_path, short_dir, monkeypatch, caplog):
+    d = hosted_daemon(tmp_path, short_dir)
+
+    def take() -> list[dict[str, Any]]:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(d.access.usage, "take", take)
+    stop = asyncio.Event()
+    stop.set()
+    await d.serve(stop)
+    assert "reporting usage failed" in caplog.text

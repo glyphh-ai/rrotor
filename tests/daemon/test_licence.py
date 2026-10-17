@@ -61,7 +61,8 @@ def test_require_says_why_no_licence_expired_or_not_in_the_plan(tmp_path):
     assert (caught.value.code, caught.value.status) == ("E_NOT_IN_PLAN", 403)
     old = keys().licence(["ada"], expires="2000-01-01T00:00:00Z")
     lic.set(old["payload"], old["signature"])
-    assert lic.expired and lic.mods() == [] and lic.view()["expired"] is True
+    view = lic.view()
+    assert lic.expired and lic.mods() == [] and view is not None and view["expired"] is True
     with pytest.raises(RrotorError, match="expired"):
         lic.require("ada")
     now = keys().licence(["zeta"])

@@ -4,6 +4,7 @@ rrotor answering 402; health open."""
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -87,7 +88,8 @@ class Vouches:
     """A fake of the Cloud's introspection: which tokens are signed in."""
 
     def __init__(self, *good: str) -> None:
-        self.good, self.asked = set(good), []
+        self.good = set(good)
+        self.asked: list[str] = []
 
     async def active(self, token: str) -> bool:
         self.asked.append(token)
@@ -137,3 +139,25 @@ async def test_without_the_cloud_only_a_runtime_key_gets_in(hosted):
     assert hosted.services.introspect is None
     res = await hosted.client.get("/v1/models", headers={"Authorization": f"Bearer {token()}"})
     assert res.status == 401 and 'error="invalid_token"' in res.headers["WWW-Authenticate"]
+
+
+async def test_only_the_requests_served_are_counted_for_the_key_that_let_them_in(hosted):
+    access = hosted.services.access
+    other = token()
+    access.set_keys([digest(hosted.token), digest(other)])
+    for _ in range(2):
+        assert (await code_of(hosted, **hosted.auth()))[0] == 200
+    assert (await code_of(hosted, "/v1/models", Authorization=f"Bearer {other}"))[0] == 200
+    assert await code_of(hosted) == (401, "E_AUTH")
+    assert await code_of(hosted, Authorization=f"Bearer {token()}") == (401, "E_AUTH")
+    assert (await code_of(hosted, "/healthz"))[0] == 200  # open: no key, no call
+    res = await hosted.client.get("/v1/health", headers=hosted.auth(Host="a1b2c3d4e5f6a7.glyphh.app"))
+    assert res.headers["fly-replay"] == "instance=a1b2c3d4e5f6a7"  # served by that machine, counted there
+    access.pause("runtime_hours")
+    assert await code_of(hosted, **hosted.auth()) == (402, "E_LIMIT")
+    access.resume()
+    taken = access.usage.take()
+    assert [(k["key_sha256"], k["calls"]) for k in taken] == [(digest(hosted.token), 2), (digest(other), 1)]
+    for k in taken:
+        assert dt.datetime.fromisoformat(k["last_used_at"]).utcoffset() == dt.timedelta(0)
+    assert access.usage.take() == []

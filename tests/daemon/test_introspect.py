@@ -12,8 +12,9 @@ from rrotord.link.credentials import Credentials
 
 
 class Cloud:
-    def __init__(self, answers: list[tuple[int, Any]]) -> None:
-        self.answers, self.calls = list(answers), []
+    def __init__(self, answers: list[tuple[int, Any] | OSError]) -> None:
+        self.answers: list[tuple[int, Any] | OSError] = list(answers)
+        self.calls: list[tuple[str, dict[str, str], dict[str, Any]]] = []
 
     async def post(self, url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, Any]:
         self.calls.append((url, headers, body))

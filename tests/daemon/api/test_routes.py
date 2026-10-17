@@ -8,7 +8,7 @@ import pytest
 
 from rrotord.api import ops
 from rrotord.sandbox.probe import Layers
-from tests.daemon.api.conftest import Api
+from tests.daemon.api.conftest import Api, linked
 from tests.fakes import GitRepo, install, manifest, token
 
 WAITS = """
@@ -71,9 +71,19 @@ async def test_deploy_a_bundle(api, tmp_path):
     repo = GitRepo(tmp_path / "src")
     sha = repo.model(manifest("sample"))
     bundle = base64.b64encode(repo.bundle(tmp_path / "b.bundle").read_bytes()).decode()
+    link = linked(api)
     status, body = await send(api, "POST", "/v1/models/deploy", json={"bundle": bundle, "commit": sha})
     assert (status, body["model"], body["version"], body["commit_sha"]) == (201, "sample", 1, sha)
     assert list((api.root / "run" / "bundles").iterdir()) == []
+    [sent] = link.sent
+    assert (sent["type"], sent["model"], sent["version"], sent["commit_sha"], sent["repo"]) == (
+        "deployed",
+        "sample",
+        1,
+        sha,
+        None,
+    )
+    assert sent["manifest"] == api.services.models.active("sample").manifest.model_dump(mode="json")
 
 
 async def test_deploy_a_bundle_that_is_not_base64(api):
@@ -97,10 +107,24 @@ async def test_deploy_from_a_repo(api, tmp_path):
     repo = GitRepo(tmp_path / "src")
     sha = repo.model(manifest("sample"))
     repo.bare(tmp_path / "github", "owner/sample")
+    link = linked(api)
     status, body = await send(
         api, "POST", "/v1/models/deploy", json={"repo": "owner/sample", "commit": sha, "token": token()}
     )
     assert (status, body["commit_sha"]) == (201, sha)
+    [sent] = link.sent
+    assert (sent["type"], sent["commit_sha"], sent["repo"], sent["manifest"]["name"]) == (
+        "deployed",
+        sha,
+        "owner/sample",
+        "sample",
+    )
+
+
+async def test_a_refused_deploy_reports_nothing(api):
+    link = linked(api)
+    status, _ = await send(api, "POST", "/v1/models/deploy", json={"bundle": "AAAA", "commit": "a" * 40})
+    assert status == 422 and link.sent == []
 
 
 @pytest.mark.parametrize(

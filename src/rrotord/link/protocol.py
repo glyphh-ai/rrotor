@@ -150,5 +150,21 @@ def event(seq: int, model: str, kind: str, data: Any) -> dict[str, Any]:
     return {"type": "event", "id": new_id(), "seq": seq, "model": model, "kind": kind, "data": data}
 
 
-def deployed(model: str, version: int, commit_sha: str) -> dict[str, Any]:
-    return {"type": "deployed", "id": new_id(), "model": model, "version": version, "commit_sha": commit_sha}
+def deployed(
+    model: str, version: int, commit_sha: str, repo: str | None = None, manifest: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """After every deploy, however it was asked for: `repo` only for a deploy from a repo."""
+    return {
+        "type": "deployed",
+        "id": new_id(),
+        "model": model,
+        "version": version,
+        "commit_sha": commit_sha,
+        "repo": repo,
+        "manifest": manifest,
+    }
+
+
+def usage(seq: int, keys: list[dict[str, Any]]) -> dict[str, Any]:
+    """Each runtime key's calls since the last report: `{key_sha256, calls, last_used_at}`, never the key."""
+    return {"type": "usage", "id": new_id(), "seq": seq, "keys": keys}

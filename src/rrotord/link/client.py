@@ -76,6 +76,12 @@ class LinkClient:
             "seq": self.outbox.seq,
         }
 
+    @property
+    def configured(self) -> bool:
+        """Whether this rrotor has a runtime token: without one there is no Cloud to owe anything (and a first token
+        drops whatever was kept)."""
+        return self.credentials.token is not None
+
     async def owe(self, make: Callable[[int], dict[str, Any]], numbered: bool = True) -> None:
         """Keep a message until the Cloud acknowledges it, and send it now if the link is up."""
         message = self.outbox.add(make, numbered)

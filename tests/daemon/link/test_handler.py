@@ -143,8 +143,17 @@ async def test_deploy_from_the_repo_answers_deployed(env, tmp_path):
     repo.bare(tmp_path / "github", "owner/sample")
     await env.handler.on_deploy(deploy("deploy", sha, repo="owner/sample"))
     assert env.link.sent == [
-        {"type": "deployed", "id": env.link.sent[0]["id"], "model": "sample", "version": 4, "commit_sha": sha}
+        {
+            "type": "deployed",
+            "id": env.link.sent[0]["id"],
+            "model": "sample",
+            "version": 4,
+            "commit_sha": sha,
+            "repo": "owner/sample",
+            "manifest": env.models.active("sample").manifest.model_dump(mode="json"),
+        }
     ]
+    assert env.link.sent[0]["manifest"]["name"] == "sample"
     assert env.models.active("sample").version == 4
 
 
@@ -161,7 +170,23 @@ async def test_deploy_of_a_commit_naming_another_model_is_refused(env, tmp_path)
 async def test_activate_a_held_commit(env):
     install(env.models, manifest("sample"), DONE_MODEL, sha="c" * 40)
     await env.handler.on_deploy(deploy("activate", "c" * 40))
-    assert env.link.sent[0]["type"] == "deployed" and env.link.sent[0]["version"] == 4
+    sent = env.link.sent[0]
+    assert sent["type"] == "deployed" and sent["version"] == 4 and sent["repo"] is None
+    assert sent["manifest"]["name"] == "sample"
+
+
+async def test_a_deploy_is_reported_only_with_a_link_that_has_a_runtime_token(env):
+    version = install(env.models, manifest("sample"), DONE_MODEL, sha="c" * 40)
+    off = FakeLink(configured=False)
+    env.handler.link = cast(Any, off)
+    await env.handler.report(version, None)
+    assert off.sent == []
+    env.handler.link = None
+    await env.handler.report(version, "owner/sample")
+    env.handler.link = cast(Any, env.link)
+    await env.handler.report(version, "owner/sample")
+    assert [(m["type"], m["repo"], m["commit_sha"]) for m in env.link.sent] == [("deployed", "owner/sample", "c" * 40)]
+    assert env.link.seq == 0  # not numbered
 
 
 async def test_activate_a_commit_not_held_answers_deploy_failed(env):

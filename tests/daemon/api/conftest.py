@@ -8,7 +8,7 @@ import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from aiohttp import web
@@ -21,12 +21,13 @@ from rrotord.config import Config
 from rrotord.deploy import Deployer, Tools
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
+from rrotord.link.handler import LinkHandler
 from rrotord.models import Models
 from rrotord.parts import Parts
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
-from tests.fakes import LocalLauncher, keys, ready, token
+from tests.fakes import FakeLink, LocalLauncher, keys, ready, token
 
 PORT = 7777
 
@@ -81,6 +82,16 @@ def services(root: Path, sock: Path, local_token: str, fetch: Any = None) -> Ser
     return Services(
         config, models, deployer, runner, Credentials(config.data), LinkView(), layers, parts, licence, fetch
     )
+
+
+def linked(api: Api) -> FakeLink:
+    """The API's deploys reported through a real link handler to a fake link, as the daemon wires them."""
+    s = api.services
+    handler = LinkHandler(s.models, s.runner, s.deployer)
+    link = FakeLink()
+    handler.link = cast(Any, link)
+    s.report = handler.report
+    return link
 
 
 async def open_api(root: Path, sock: Path, fetch: Any = None) -> Api:

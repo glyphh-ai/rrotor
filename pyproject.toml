@@ -57,6 +57,10 @@ module = ["tests.*"]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
+[[tool.mypy.overrides]]
+module = ["tests.kernel.*"]  # the Ada kernel, a pinned copy for the tests: not ours to type
+ignore_errors = true
+
 [tool.ruff]
 extend-exclude = ["tests/kernel"]  # the Ada kernel, a pinned copy for the tests
 line-length = 120
