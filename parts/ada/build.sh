@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds the Ada part for one architecture: the Ada kernel (glyphh_kernel.py, glyphh_spec.py, glyphh_nsm.py from
-# glyphh-ai/ada-private-archive, branch kernel-spec) and numpy, under lib/, with part.json at the top; then
+# Builds the Ada part for one architecture: the Ada kernel (glyphh_kernel.py, glyphh_spec.py, glyphh_nsm.py,
+# glyphh_lexicon.py and lexicon/, the two seeds every text role reads, from glyphh-ai/ada-private-archive, branch
+# kernel-spec) and numpy, under lib/, with part.json at the top; then
 # scripts/part.py signs it with Glyphh's release key (RROTOR_RELEASE_KEY) into --out.
 #
 #   parts/ada/build.sh --arch amd64|arm64 --kernel <checkout of ada-private-archive> --out <dir>
@@ -28,12 +29,13 @@ here="$(cd "$(dirname "$0")" && pwd)"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/part/lib"
-for f in glyphh_kernel.py glyphh_spec.py glyphh_nsm.py; do
+for f in glyphh_kernel.py glyphh_spec.py glyphh_nsm.py glyphh_lexicon.py; do
   cp "$kernel/$f" "$stage/part/lib/$f"
 done
+cp -R "$kernel/lexicon" "$stage/part/lib/lexicon"   # the two seeds: WordNet words, Moby parts of speech
 cp "$kernel/LICENSE" "$stage/part/LICENSE" 2>/dev/null || true
 version="$(python3 -c "import re,sys; print(re.search(r'^version = \"([^\"]+)\"', open('$kernel/pyproject.toml').read(), re.M).group(1))")"
-sed -e "s/\"ARCH\"/\"$arch\"/" -e "s/\"3.7.0\"/\"$version\"/" "$here/part.json" > "$stage/part/part.json"
+sed -e "s/\"ARCH\"/\"$arch\"/" -e "s/\"3.8.0\"/\"$version\"/" "$here/part.json" > "$stage/part/part.json"
 
 # numpy, as a wheel for the image's Python and this arch, unpacked into lib/ (no pip inside the sandbox).
 uv pip install --quiet --target "$stage/part/lib" --python-platform "$platform" --python-version 3.13 \

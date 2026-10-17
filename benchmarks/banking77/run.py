@@ -235,6 +235,13 @@ def main() -> None:
     )
     score("  the same, the 200 sample", [guesses[i] for i in sample], sample_truth, 0)
     json.dump({"guesses": guesses}, open(HERE / "results" / "ada_words.json", "w"))
+    for name, changes in (("no lexicon", {"lexicon": False}), ("word pairs on", {"word_pairs": True})):
+        other = glyphh_spec.Spec.from_json({**SPEC, "settings": changes}).learned(
+            [({"message": {"body": {"text": text}}}, label) for text, label in train]
+        )
+        guesses, build, per, sure = ada(train, test, k, min_sim, other)
+        score(f"  the same, {name}", guesses, truth, build + per * len(test), f"{per * 1000:.1f} ms per query")
+        score("  the same, the 200 sample", [guesses[i] for i in sample], sample_truth, 0)
 
     # the runtime's way: the store teaches the model, then rewrites itself
     t0 = time.time()

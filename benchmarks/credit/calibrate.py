@@ -66,9 +66,13 @@ def main() -> None:
 
     t0 = time.time()
     spec = spec_with_costs().learned([(base.situation(c), c["decision"]) for c in train])
-    roles = {r["name"]: r["similarity_weight"] for l in spec.to_json()["layers"] for s in l["segments"] for r in s["roles"]}
+    roles = {
+        r["name"]: r["similarity_weight"] for l in spec.to_json()["layers"] for s in l["segments"] for r in s["roles"]
+    }
     print("learned role weights:", dict(sorted(roles.items(), key=lambda kv: -kv[1])))
-    checking = next(r for l in spec.to_json()["layers"] for s in l["segments"] for r in s["roles"] if r["name"] == "checking")
+    checking = next(
+        r for l in spec.to_json()["layers"] for s in l["segments"] for r in s["roles"] if r["name"] == "checking"
+    )
     print("learned value weights, checking:", checking.get("value_weights"))
     print("learned interactions:", [(i.name, i.similarity_weight) for i in spec.interactions])
     alone = spec.with_weights({"~interactions": []})  # the same weights, the pairs taken out
@@ -84,7 +88,9 @@ def main() -> None:
             others = [c for j, f in enumerate(folds) if j != i for c in f]
             m = model_of(spec, others, k, min_sim)
             m.calibrate(sample=len(others))
-            cost += cost_of([m.decide(base.situation(c))["outcome"] or "good" for c in fold], [c["decision"] for c in fold])
+            cost += cost_of(
+                [m.decide(base.situation(c))["outcome"] or "good" for c in fold], [c["decision"] for c in fold]
+            )
         print(f"  k {k:2d} min_sim {min_sim}: cross-validated cost {cost} over the 800")
         if best is None or cost < best[0]:
             best = (cost, k, min_sim)
@@ -98,8 +104,16 @@ def main() -> None:
     build = time.time() - t0
     single = model_of(alone, train, k, min_sim)
     single.calibrate(sample=800)
-    base.score("Ada, learned spec, no interactions", [single.query(base.situation(c)).top or "good" for c in test], truth, 0)
-    base.score("  the same, calibrated, decide", [single.decide(base.situation(c))["outcome"] or "good" for c in test], truth, 0, "decide(): least expected cost")
+    base.score(
+        "Ada, learned spec, no interactions", [single.query(base.situation(c)).top or "good" for c in test], truth, 0
+    )
+    base.score(
+        "  the same, calibrated, decide",
+        [single.decide(base.situation(c))["outcome"] or "good" for c in test],
+        truth,
+        0,
+        "decide(): least expected cost",
+    )
     t0 = time.time()
     plain, decided, abstain = [], [], []
     for c in test:
@@ -111,12 +125,30 @@ def main() -> None:
     per = (time.time() - t0) / len(test) / 2
     print(f"build + calibrate {build:.1f}s (tau {tau}), {per:.3f}s per query")
     base.score("Ada, learned spec", plain, truth, build + per * len(test))
-    base.score("Ada, learned, calibrated, costs in spec", decided, truth, build + per * len(test), "decide(): least expected cost")
+    base.score(
+        "Ada, learned, calibrated, costs in spec",
+        decided,
+        truth,
+        build + per * len(test),
+        "decide(): least expected cost",
+    )
     asked = abstain.count("ask")
     sure = [(d, t) for d, t in zip(abstain, truth) if d != "ask"]
-    base.score(f"  the same, asking when every answer costs over {ASK}", [d for d, _ in sure], [t for _, t in sure], 0, f"answered {len(sure)} of {len(test)}, asked {asked}")
+    base.score(
+        f"  the same, asking when every answer costs over {ASK}",
+        [d for d, _ in sure],
+        [t for _, t in sure],
+        0,
+        f"answered {len(sure)} of {len(test)}, asked {asked}",
+    )
     tau_cost = m.calibrate(sample=800, by="cost")
-    base.score("  the same, tau fitted on the cost", [m.decide(base.situation(c))["outcome"] or "good" for c in test], truth, 0, f"tau {tau_cost} (by loss: {tau})")
+    base.score(
+        "  the same, tau fitted on the cost",
+        [m.decide(base.situation(c))["outcome"] or "good" for c in test],
+        truth,
+        0,
+        f"tau {tau_cost} (by loss: {tau})",
+    )
     m.calibrate(sample=800)
 
     # the runtime's way: nothing learned up front, the store teaches the model as it fills
@@ -124,7 +156,9 @@ def main() -> None:
     live = model_of(spec_with_costs(), train, k, min_sim, refresh_every=100)
     build = time.time() - t0
     online = [live.decide(base.situation(c))["outcome"] or "good" for c in test]
-    print(f"learned from the store as it filled: 8 refreshes in {build:.1f}s, tau {live.space.tau}; same decisions as above: {online == decided}")
+    print(
+        f"learned from the store as it filled: 8 refreshes in {build:.1f}s, tau {live.space.tau}; same decisions as above: {online == decided}"
+    )
     base.score("Ada, learned from its own store (refresh_every=100)", online, truth, build, "decide()")
 
 

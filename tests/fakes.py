@@ -98,7 +98,7 @@ def part_archive(
     version: str = "1.0.0",
     mod: str = "ada",
     arch: str = "arm64",
-    files: dict[str, str] | None = None,
+    files: dict[str, str | bytes] | None = None,
     **info: Any,
 ) -> tuple[bytes, str, str]:
     """A part's tarball as the build script makes it, with its SHA-256 and its signature by the test key."""
@@ -106,9 +106,12 @@ def part_archive(
     folder.mkdir(parents=True)
     manifest = {"name": name, "version": version, "mod": mod, "arch": arch, "env": {"PYTHONPATH": ["lib"]}, **info}
     (folder / "part.json").write_text(json.dumps(manifest))
-    for path, text in (files or {"lib/kernel.py": "VALUE = 7\n"}).items():
+    for path, content in (files or {"lib/kernel.py": "VALUE = 7\n"}).items():
         (folder / path).parent.mkdir(parents=True, exist_ok=True)
-        (folder / path).write_text(text)
+        if isinstance(content, bytes):
+            (folder / path).write_bytes(content)
+        else:
+            (folder / path).write_text(content)
     data = part.tarball(folder)
     return data, hashlib.sha256(data).hexdigest(), keys().sign(data)
 
@@ -183,11 +186,15 @@ def ready() -> Layers:
 KERNEL = Path(__file__).parent / "kernel"
 
 
-def ada_part(tmp: Path, version: str = "3.7.0") -> tuple[bytes, str, str]:
-    """The Ada part as the tests build it: the vendored kernel under lib/ (numpy comes from the test's own Python)."""
-    files = {
-        f"lib/{name}": (KERNEL / name).read_text() for name in ("glyphh_kernel.py", "glyphh_spec.py", "glyphh_nsm.py")
+def ada_part(tmp: Path, version: str = "3.8.0") -> tuple[bytes, str, str]:
+    """The Ada part as the tests build it: the vendored kernel and its lexicon (the two seeds) under lib/ (numpy
+    comes from the test's own Python)."""
+    files: dict[str, str | bytes] = {
+        f"lib/{name}": (KERNEL / name).read_text()
+        for name in ("glyphh_kernel.py", "glyphh_spec.py", "glyphh_nsm.py", "glyphh_lexicon.py")
     }
+    for seed in (KERNEL / "lexicon").iterdir():
+        files[f"lib/lexicon/{seed.name}"] = seed.read_bytes()
     return part_archive(tmp / "ada-part", name="ada", version=version, mod="ada", files=files)
 
 

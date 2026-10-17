@@ -165,6 +165,10 @@ class Settings:
     calibrate_by: str = "loss"  # "loss" (probabilities that mean what they say) or "cost" (that decide best)
     calibrate_sample: int = 200  # the newest precedents a calibration holds out
     refresh_every: int | None = None  # learn and calibrate again every so many graded records; None: on demand
+    lexicon: bool = True  # read a text role's words through the kernel's seeds (synonyms, near words, classes)
+    word_pairs: bool = False  # learn pairs of words that tell more together than apart (off: on Banking77 it took
+    # 0.1 to 0.4 points inside the training set; a lever for a model whose intents are phrases)
+    max_word_pairs: int = 20  # at most this many pairs per text role
 
     RANGES = {  # name: (kind, low, high) or (kind, choices)
         "k": (int, 1, 1000),
@@ -177,8 +181,11 @@ class Settings:
         "calibrate_by": (str, ("loss", "cost")),
         "calibrate_sample": (int, 10, 1000000),
         "refresh_every": (int, 10, 1000000),
+        "lexicon": (bool,),
+        "word_pairs": (bool,),
+        "max_word_pairs": (int, 0, 200),
     }
-    LEARNING = ("word_weights", "word_floor", "interactions", "max_interactions", "rare")
+    LEARNING = ("word_weights", "word_floor", "interactions", "max_interactions", "rare", "word_pairs", "max_word_pairs")
 
     def with_changes(self, changes: Mapping[str, Any], at: str = "settings") -> Settings:
         """These settings with the changes put in, each checked; a bad name, kind or value raises SpecError."""
@@ -215,6 +222,7 @@ class Settings:
 
 
 INTERACTIONS = "interactions"  # the layer the spec adds; "pairs" its one segment
+PAIR_CANDIDATES = 120  # the most common words of a text role among which word pairs are looked for
 
 
 
@@ -422,7 +430,49 @@ class Spec:
         if top <= 0:
             return {}
         floor = self.settings.word_floor
-        return {word: round(floor + (1 - floor) * move / top, 4) for word, move in sorted(moves.items())}
+        table = {word: round(floor + (1 - floor) * move / top, 4) for word, move in sorted(moves.items())}
+        if self.settings.word_pairs and self.settings.max_word_pairs:
+            common = {w: sum(seen[w].values()) for w in moves}
+            table.update(self._learn_word_pairs(lname, sname, rname, situations, base_rate, moves, common, top, floor))
+        return table
+
+    def _learn_word_pairs(
+        self,
+        lname: str,
+        sname: str,
+        rname: str,
+        situations: Sequence[tuple[Mapping[str, Any], str]],
+        base_rate: Mapping[str, float],
+        moves: Mapping[str, float],
+        common: Mapping[str, int],
+        top: float,
+        floor: float,
+    ) -> dict[str, float]:
+        """Pairs of words that move the outcome further together than the better of them alone ("top" + "up",
+        "card" + "arrive"), among the PAIR_CANDIDATES most common words (the rare ones are telling on their own;
+        it is the common, ambiguous ones a partner settles), seen together at least `rare` times: the pair's
+        extra move scaled like a word's, the max_word_pairs best kept, keyed "a+b"."""
+        candidates = sorted(sorted(common, key=lambda w: -common[w])[:PAIR_CANDIDATES])
+        wanted = set(candidates)
+        together: dict[tuple[str, str], Counter] = defaultdict(Counter)
+        for situation, outcome in situations:
+            value = situation.get(lname, {}).get(sname, {}).get(rname)
+            if value is None:
+                continue
+            present = sorted(wanted.intersection(_words_of(value)))
+            for pair in itertools.combinations(present, 2):
+                together[pair][outcome] += 1
+        extras = {}
+        for (a, b), counts in together.items():
+            n = sum(counts.values())
+            if n < self.settings.rare:
+                continue
+            move = max(counts[o] / n - base_rate.get(o, 0.0) for o in counts)
+            extra = move - max(moves[a], moves[b])
+            if extra > 0:
+                extras[f"{a}+{b}"] = extra
+        best = sorted(extras.items(), key=lambda kv: (-kv[1], kv[0]))[: self.settings.max_word_pairs]
+        return {pair: round(floor + (1 - floor) * min(extra / top, 1.0), 4) for pair, extra in sorted(best)}
 
     def _learn_pairs(
         self,
@@ -551,7 +601,16 @@ class Spec:
                     if role is not None and role.text_encoding and isinstance(value, list):
                         words = _words_of(value)
                         table = dict(role.value_weights)
-                        value = [[w, table.get(w, self.settings.word_floor)] for w in words] if table else words
+                        if table:
+                            value = [[w, table.get(w, self.settings.word_floor)] for w in words]
+                            have = set(words)
+                            for pair, weight in table.items():
+                                if "+" in pair and all(part in have for part in pair.split("+", 1)):
+                                    value.append([pair, weight])
+                        elif self.settings.lexicon:
+                            value = [[w, 1.0] for w in words]  # a weighted set: read through the lexicon
+                        else:
+                            value = words
                     new_roles[rname] = value
                 new_segs[sname] = new_roles
             out[lname] = new_segs
@@ -727,8 +786,9 @@ class Spec:
 
 
 def _words_of(value: Any) -> list[str]:
-    """The words of a stored bag, weighted or plain."""
-    return [x[0] if isinstance(x, list) else x for x in value]
+    """The words of a stored bag, weighted or plain; its pairs ("a+b") are not words."""
+    items = [x[0] if isinstance(x, list) else x for x in value]
+    return [w for w in items if "+" not in w]
 
 
 def _word_tables(spec: Spec) -> dict[str, tuple[tuple[str, float], ...]]:
@@ -1021,10 +1081,18 @@ class Model:
         if isinstance(learned, dict):
             self.spec = self.spec.with_weights(learned)
         self._apply()
+        if len(self.space):
+            self.space.rewrite(self.spec.restate)  # a store recorded under other settings: its bags brought to these
 
     def _apply(self) -> None:
         self.space.k, self.space.min_sim = self.settings.k, self.settings.min_sim
         self.refresh_every = self.settings.refresh_every
+        try:
+            from glyphh_lexicon import LEXICON
+
+            LEXICON.enabled = self.settings.lexicon
+        except ImportError:  # no lexicon module shipped: words are symbols either way
+            pass
 
     def configure(self, **changes: Any) -> dict[str, Any]:
         """Change the levers live: checked, kept with the store (over the spec's `settings`, until changed again),

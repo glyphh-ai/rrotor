@@ -388,6 +388,17 @@ def _keyed(
     return parts, ws
 
 
+def _word_glyph(item: Any, seed: int, dim: int) -> np.ndarray:
+    """A weighted set's item: a word, read through the lexicon when the kernel ships one; else its symbol."""
+    if isinstance(item, str):
+        try:
+            from glyphh_lexicon import LEXICON
+        except ImportError:  # the kernel without its lexicon module: words are symbols
+            return symbol(f"val:{item}", seed, dim)
+        return LEXICON.glyph(item, seed, dim)
+    return symbol(f"val:{_text(item)}", seed, dim)
+
+
 def _weighted_set(data: Any) -> bool:
     """A list of [scalar, weight] pairs: a set whose items weigh differently (a bag of words whose words were
     learned, for one). A plain set is a list of scalars; a list of pairs of anything else is a set of pairs."""
@@ -414,8 +425,8 @@ def _encode(data: Any, weights: dict[str, Any] | None, seed: int, dim: int) -> n
     if isinstance(data, (list, tuple)):
         if not data:
             raise ValueError("cannot encode an empty array")
-        if _weighted_set(data):  # [[item, weight], ...]: each item's voice in the vote is its weight
-            parts = [symbol(f"val:{_text(item)}", seed, dim) for item, _ in data]
+        if _weighted_set(data):  # [[item, weight], ...]: each item's voice in the vote is its weight; a word read
+            parts = [_word_glyph(item, seed, dim) for item, _ in data]  # through the lexicon (glyphh_lexicon.py)
             weights = [float(w) for _, w in data]
             return bundle(parts, weights) if sum(weights) > 0 else bundle(parts)
         return bundle([_encode(x, None, seed, dim) for x in data])
