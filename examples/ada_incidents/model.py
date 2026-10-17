@@ -34,6 +34,17 @@ def facts(ctx: Any, inputs: dict[str, Any]) -> Result:
     return Result.done(ctx.ada.facts(inputs["data"], clearance=ctx.clearance, top=inputs.get("top")))
 
 
+def learn(ctx: Any, inputs: dict[str, Any]) -> Result:
+    """The weights learned from the store's own graded precedents and the temperature calibrated, both kept with the
+    store: every role's weight is how much it tells about the outcome. Needs ten graded precedents of two outcomes."""
+    graded = ctx.ada.space.graded()
+    if len(graded) < 10 or len({outcome for _, outcome in graded}) < 2:
+        return Result.failed("learn", f"learn needs ten precedents with an outcome, of two outcomes; {len(graded)} graded")
+    out = ctx.ada.refresh(sample=int(inputs.get("sample", 200)), clearance=ctx.clearance)
+    roles = {path: found["similarity_weight"] for path, found in out["learned"].items()}
+    return Result.done({"roles": roles, "tau": out["tau"], "precedents": len(graded)})
+
+
 def probabilities(ctx: Any, inputs: dict[str, Any]) -> Result:
     spec, space = ctx.ada.spec, ctx.ada.space
     situation = spec.situation(inputs["data"])

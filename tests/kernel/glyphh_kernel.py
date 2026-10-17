@@ -512,7 +512,11 @@ def _explain(
     the same, only the side-by-side sim is left 0 (scoring every row
     of a store needs the score alone)."""
     if q is _ABSENT or r is _ABSENT:
-        return Fact(key, weight, 0.0, 0.0, 0.0, "record_only" if q is _ABSENT else "query_only", q, r, [])
+        side = r if q is _ABSENT else q
+        own = 0.0 if _weighs_nothing(side, weights) else weight  # nothing weighed under it: nothing missing
+        return Fact(key, own, 0.0, 0.0, 0.0, "record_only" if q is _ABSENT else "query_only", q, r, [])
+    if _weighs_nothing(q, weights) or _weighs_nothing(r, weights):
+        return Fact(key, 0.0, 0.0, 0.0, 0.0, "both", q, r, [])  # nothing to compare on one side: out of the mean
     if not (isinstance(q, dict) and isinstance(r, dict)):
         leaf = _side_by_side(q, r, weights, seed, dim)
         return Fact(key, weight, leaf, 0.0, leaf, "both", q, r, [])
@@ -784,13 +788,27 @@ class Space:
         sims = np.where(index >= 0, by_value[np.maximum(index, 0)], 0.0)
         return sims.astype(np.float64)
 
-    def _present(self, prefix: str) -> np.ndarray:
-        """Which precedents carry a leaf at this path or under it."""
-        found = np.zeros(self._n, dtype=bool)
-        for path, rows in self._leaf_of.items():
-            if path == prefix or path.startswith(prefix + "/"):
-                index = np.array((rows + [-1] * (self._n - len(rows)))[: self._n], dtype=np.int64)
-                found |= index >= 0
+    def _has(self, path: str) -> np.ndarray:
+        rows = self._leaf_of.get(path)
+        if rows is None:
+            return np.zeros(self._n, dtype=bool)
+        return np.array((rows + [-1] * (self._n - len(rows)))[: self._n], dtype=np.int64) >= 0
+
+    def _present(self, prefix: str, weights: dict[str, Any] | None) -> np.ndarray:
+        """Which precedents weigh something at this path: a leaf there, or a leaf with weight under it."""
+        found = self._has(prefix)
+        for k in self._keys_under(prefix):
+            own, inner = _weight(weights.get(k) if weights else None)
+            if own > 0:
+                found |= self._present(f"{prefix}/{k}", inner)
+        return found
+
+    def _has_any(self, prefix: str) -> np.ndarray:
+        """Which precedents carry anything at this path or under it, weighed or not."""
+        found = self._has(prefix)
+        for path in self._leaf_of:
+            if path.startswith(prefix + "/"):
+                found |= self._has(path)
         return found
 
     def _keys_under(self, prefix: str) -> set[str]:
@@ -812,16 +830,18 @@ class Space:
                 return np.zeros(n) if sims is None else sims
             owns = {k: _weight(w.get(k) if w else None) for k in q}
             numerator = np.zeros(n)
-            total = 0.0
+            denominator = np.zeros(n)
             for k, (own, inner) in owns.items():
-                if own > 0:
-                    total += own
+                if own > 0 and not _weighs_nothing(q[k], inner):
+                    # the key counts for a precedent that weighs something there (present, or missing something
+                    # weighed); for one that weighs nothing there it is out of the mean, as _explain has it
+                    there = self._present(f"{at}/{k}", inner)
+                    denominator += own * (there | ~self._has_any(f"{at}/{k}"))
                     numerator += own * node(q[k], inner, f"{at}/{k}")
-            denominator = np.full(n, total)
             for k in self._keys_under(at) - set(q):
-                own, _ = _weight(w.get(k) if w else None)
+                own, inner = _weight(w.get(k) if w else None)
                 if own > 0:
-                    denominator += own * self._present(f"{at}/{k}")
+                    denominator += own * self._present(f"{at}/{k}", inner)
             with np.errstate(divide="ignore", invalid="ignore"):
                 return np.where(denominator > 0, numerator / denominator, 0.0)
 

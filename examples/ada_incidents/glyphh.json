@@ -36,6 +36,10 @@
       "description": "The fix for an incident from precedent, with the nearest precedent's cause, owner and runbook when the caller may see them; with no precedent close enough, asks how it was fixed and records it",
       "inputs": { "type": "object", "properties": { "data": { "type": "object" } }, "required": ["data"], "additionalProperties": false }
     },
+    "learn": {
+      "description": "Learn the roles' weights from the recorded incidents and calibrate the probabilities; kept with the store",
+      "inputs": { "type": "object", "properties": { "sample": { "type": "integer", "minimum": 10 } }, "additionalProperties": false }
+    },
     "start": {
       "description": "How many incidents the model holds",
       "inputs": { "type": "object", "additionalProperties": false }

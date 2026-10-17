@@ -36,6 +36,10 @@
       "description": "Decide a ticket's handling from precedent; with no precedent close enough, asks for the outcome and records it",
       "inputs": { "type": "object", "properties": { "data": { "type": "object" } }, "required": ["data"], "additionalProperties": false }
     },
+    "learn": {
+      "description": "Learn the roles' weights from the recorded tickets and calibrate the probabilities; kept with the store",
+      "inputs": { "type": "object", "properties": { "sample": { "type": "integer", "minimum": 10 } }, "additionalProperties": false }
+    },
     "start": {
       "description": "How many precedents the model holds",
       "inputs": { "type": "object", "additionalProperties": false }

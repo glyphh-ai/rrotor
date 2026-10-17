@@ -121,7 +121,7 @@ async def test_an_ada_model_deploys_and_a_changed_encoding_that_cannot_be_reenco
     await _licensed(api, ["ada"])
     ask = {
         "name": "ada",
-        "version": "3.3.0",
+        "version": "3.4.0",
         "sha256": sha,
         "signature": sig,
         "archive": base64.b64encode(data).decode(),

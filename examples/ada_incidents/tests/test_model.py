@@ -136,3 +136,29 @@ def test_a_low_clearance_gets_the_fix_but_never_the_cause_owner_or_runbook(model
     assert '"resolution"' in json.dumps(full[0]["tree"]) and '"resolution"' not in json.dumps(low[0]["tree"])
     bot = harness(model, tmp_path, clearance=0.5).call("decide", {"data": new})
     assert bot.status == "done" and bot.data["fix"] == "raise circuit breaker" and bot.data["last_time"] == {}
+
+
+def test_learn_weighs_the_roles_from_the_store_and_needs_ten_graded_incidents(model, tmp_path):
+    too_few = harness(model, tmp_path).call("learn")
+    assert too_few.status == "failed" and "ten precedents" in too_few.data["reason"]
+    for i in range(12):
+        disk = i % 2 == 0
+        harness(model, tmp_path).call(
+            "record",
+            {
+                "data": incident(
+                    i,
+                    "cannot open file /var/lib/export/report.csv" if disk else "payment gateway timed out",
+                    "worker" if disk else "api",
+                    "/jobs/export" if disk else "/v1/checkout",
+                    "OSError" if disk else "TimeoutError",
+                    500 if disk else 504,
+                ),
+                "outcome": "free disk" if disk else "raise circuit breaker",
+            },
+        )
+    r = harness(model, tmp_path).call("learn", {"sample": 12})
+    assert r.status == "done" and r.data["precedents"] == 12 and 0 < r.data["tau"] <= 1
+    assert r.data["roles"]["error.where.service"] == 1.0 and r.data["roles"]["error.where.region"] == 0.0
+    q = harness(model, tmp_path).call("query", {"data": incident(50, "gateway timed out", "api")})
+    assert q.data["top"] == "raise circuit breaker"
