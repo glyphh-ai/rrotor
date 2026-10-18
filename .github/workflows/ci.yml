@@ -195,7 +195,7 @@ jobs:
             --build-arg LICENCE_PUBLIC_KEY="$LICENCE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:latest" -t "$repo:$s" --push .
           echo "ghcr: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
 
-  # The Ada part, for both architectures: the kernel from glyphh-ai/ada-private-archive (branch kernel-spec, read
+  # The Ada part, for both architectures: the kernel from glyphh-ai/ada-private (branch main, read
   # with ADA_KERNEL_TOKEN) and numpy, signed with RROTOR_RELEASE_KEY when it is set (else built unsigned-checked:
   # the signature step needs the key). The tarballs are kept as artifacts, and published as the release
   # `part-ada-<kernel version>` (made the first time, its assets replaced after) that the Ada mod's release.json names
@@ -217,7 +217,7 @@ jobs:
           TOKEN: ${{ secrets.ADA_KERNEL_TOKEN }}
         run: |
           [ -n "$TOKEN" ] || { echo "::notice::ADA_KERNEL_TOKEN is not set; the Ada part is not built."; exit 0; }
-          git clone -q --depth 1 --branch kernel-spec "https://x-access-token:${TOKEN}@github.com/glyphh-ai/ada-private-archive.git" kernel
+          git clone -q --depth 1 --branch main "https://x-access-token:${TOKEN}@github.com/glyphh-ai/ada-private.git" kernel
       - name: Build and sign, amd64 and arm64
         if: hashFiles('kernel/glyphh_kernel.py') != ''
         env:
