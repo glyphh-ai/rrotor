@@ -16,6 +16,7 @@ the store from its recorded situations when such a version is deployed (`reencod
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,19 @@ def _cap(model: Any, precedents: Any) -> None:
         return record(*args, **kwargs)
 
     model.record = capped
+
+
+def count(store: Path) -> int:
+    """The precedents a store holds, the rows the cap counts as the model's length, read without the kernel and
+    without writing: what rrotord reports up the link. A store not made yet holds none; one that does not read
+    raises sqlite3.Error."""
+    if not store.is_file():
+        return 0
+    db = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+    try:
+        return int(db.execute("SELECT COUNT(*) FROM precedents").fetchone()[0])
+    finally:
+        db.close()
 
 
 def reencode(ctx: Ctx) -> int:
