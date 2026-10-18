@@ -30,6 +30,7 @@ from rrotord.link.handler import LinkHandler
 from rrotord.link.outbox import Outbox
 from rrotord.models import Models
 from rrotord.parts import Parts
+from rrotord.precedents import Precedents
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
@@ -50,6 +51,7 @@ class Daemon:
     parts: Parts = field(init=False)
     licence: Licence = field(init=False)
     access: Access = field(init=False)
+    precedents: Precedents = field(init=False)
     runner: Runner = field(init=False)
     link: LinkClient = field(init=False)
     handler: LinkHandler = field(init=False)
@@ -67,6 +69,7 @@ class Daemon:
         self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None, c.runtime_id)
         self.licence.load(c.licence_token)
         self.access = Access(c.data, c.keys_sha256)
+        self.precedents = Precedents(models)
         self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
         self.runner = Runner(
             models=models,
@@ -193,11 +196,17 @@ class Daemon:
                 log.exception("expiring waiting runs failed")
 
     async def report_usage(self) -> None:
-        """The runtime keys' calls since the last report, owed up the link as one numbered `usage`; nothing when
-        there were none, or when there is no runtime token to owe them under."""
+        """The runtime keys' calls since the last report and the runtime's precedents, owed up the link as one
+        numbered `usage`: when there were calls, or when the precedents' total is due (`rrotord/precedents.py`);
+        nothing otherwise, or when there is no runtime token to owe them under."""
         keys = self.access.usage.take()
-        if keys and self.link.configured:
-            await self.link.owe(lambda seq: p.usage(seq, keys))
+        if not self.link.configured:
+            return
+        due = self.precedents.due()
+        if keys or due:
+            total = self.precedents.total
+            await self.link.owe(lambda seq: p.usage(seq, keys, total))
+            self.precedents.reported = total
 
     async def _usage(self) -> None:
         while True:

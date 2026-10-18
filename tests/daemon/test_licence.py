@@ -38,6 +38,7 @@ def test_a_signed_licence_is_kept_read_back_and_names_its_mods(tmp_path):
     assert view == {
         "plan": "Pro",
         "mods": ["ada", "zeta"],
+        "features": {},
         "kind": None,
         "licence_id": None,
         "expires_at": "2999-01-01T00:00:00Z",
@@ -97,6 +98,21 @@ def test_require_says_why_no_licence_expired_or_not_in_the_plan(tmp_path):
     noneish = {"plan": "Pro", "mods": ["ada"], "expires_at": "2999-01-01T00:00:00Z"}
     assert lic.set(noneish, keys().sign(canonical(noneish)))
     assert lic.mods() == []
+
+
+def test_the_plans_signed_features_are_shown_as_flags_and_none_once_expired(tmp_path):
+    lic = licence(tmp_path)
+    assert lic.features() == {}
+    features = {"sync": True, "ha": False, "offline": False, "sso": False, "seats": 3}
+    given = keys().licence(["ada"], expires=at(1), features=features)
+    assert lic.set(given["payload"], given["signature"])
+    flags = {"ha": False, "offline": False, "sso": False, "sync": True}
+    assert lic.features() == flags and lic.view()["features"] == flags  # type: ignore[index]
+    lic.clock = lambda: NOW + timedelta(days=2)
+    assert lic.expired and lic.features() == {}
+    unread = licence(tmp_path / "unread")
+    odd = keys().licence(["ada"], features=["sync"])
+    assert unread.set(odd["payload"], odd["signature"]) and unread.features() == {}
 
 
 def test_a_licence_runs_on_through_its_grace_and_then_refuses_only_the_licensed_mods(tmp_path):

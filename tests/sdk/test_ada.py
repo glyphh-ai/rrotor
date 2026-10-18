@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -136,3 +137,31 @@ def test_the_plans_precedents_limit_caps_record(tmp_path, kernel):
     free = ctx(tmp_path, tmp_path / "data2")
     free.limits = {"precedents": None}
     assert ada.open(free).record({"a": {"b": {"x": "one"}}}, "yes")
+
+
+def test_the_cap_is_on_the_runtimes_total_with_the_other_models_precedents_counted(tmp_path, kernel):
+    (tmp_path / "spec.json").write_text(json.dumps(SPEC))
+    c = ctx(tmp_path, tmp_path / "data")
+    c.limits = {"precedents": 3, "precedents_elsewhere": 2}
+    model = ada.open(c)
+    model.record({"a": {"b": {"x": "one"}}}, "yes")
+    with pytest.raises(ModelError, match="allows 3 precedents across the runtime's Ada models; they hold 3") as caught:
+        model.record({"a": {"b": {"x": "two"}}}, "yes")
+    assert caught.value.code == "E_LIMIT_PRECEDENTS" and len(model) == 1
+    odd = ctx(tmp_path, tmp_path / "data2")
+    odd.limits = {"precedents": 1, "precedents_elsewhere": True}  # not a count: none elsewhere
+    assert ada.open(odd).record({"a": {"b": {"x": "one"}}}, "yes")
+
+
+def test_count_reads_the_stores_precedents_as_the_cap_counts_them_without_the_kernel(tmp_path, kernel):
+    (tmp_path / "spec.json").write_text(json.dumps(SPEC))
+    store = tmp_path / "data" / ada.STORE
+    assert ada.count(store) == 0  # not made yet
+    model = ada.open(ctx(tmp_path, tmp_path / "data"))
+    model.record({"a": {"b": {"x": "one"}}}, "yes")
+    model.record({"a": {"b": {"x": "two"}}}, "no")
+    assert ada.count(store) == len(model) == 2  # read while the model holds it open
+    model.space.close()
+    (tmp_path / "other.sqlite").write_bytes(b"")
+    with pytest.raises(sqlite3.Error):
+        ada.count(tmp_path / "other.sqlite")  # no precedents table: not a store

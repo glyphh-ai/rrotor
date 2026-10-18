@@ -152,6 +152,14 @@ class Licence:
         mods = self.payload.get("mods")
         return sorted(mods) if isinstance(mods, dict) else []
 
+    def features(self) -> dict[str, bool]:
+        """The plan's features as the licence signed them (`sync`, `ha`, `offline`, `sso`), each a flag; none when
+        there is no licence or it has expired. Shown only: nothing here acts on them yet."""
+        if self.payload is None or self.expired:
+            return {}
+        found = self.payload.get("features")
+        return {k: v for k, v in sorted(found.items()) if isinstance(v, bool)} if isinstance(found, dict) else {}
+
     def require(self, mod: str) -> None:
         """Refused with E_NOT_IN_PLAN unless the licence includes `mod` now."""
         if mod not in self.mods():
@@ -163,7 +171,7 @@ class Licence:
             raise Forbidden(f"{mod} is not in this machine's plan: {why}.", code="E_NOT_IN_PLAN", mod=mod)
 
     def view(self) -> dict[str, Any] | None:
-        """The licence held: its plan and mods, and its state (in grace, the days left)."""
+        """The licence held: its plan, mods and features, and its state (in grace, the days left)."""
         if self.payload is None:
             return None
         until = live_until(self.payload)
@@ -171,6 +179,7 @@ class Licence:
         return {
             "plan": self.payload.get("plan"),
             "mods": self.mods(),
+            "features": self.features(),
             "kind": self.payload.get("kind"),
             "licence_id": self.licence_id,
             "expires_at": self.payload.get("expires_at"),
