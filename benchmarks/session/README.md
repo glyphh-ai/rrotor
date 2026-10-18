@@ -59,10 +59,10 @@ different and smaller store.
 
 ## The ledger, deployed, and the measurement that follows
 
-Built from this page: the Ada plugin's file ledger (`glyphh-ai/mods`, `plugins/ada/hooks/ledger.py`), installed on
-this machine on 2026-10-17. Every change to a file is recorded with the request it served; when the file is read
-again the last changes come back as context; every prompt lists the files the session changed in its last turns.
-Local SQLite, nothing sent.
+Built from this page: the file ledger, now in the Glyphh plugin (`glyphh-ai/glyphh`,
+`plugins/glyphh/hooks/ledger.py`), installed on this machine on 2026-10-17. Every change to a file is recorded with
+the request it served; when the file is read again the last changes come back as context; every prompt lists the files
+the session changed in its last turns. Local SQLite, nothing sent.
 
 `measure.py` is the test: per week, from the transcripts, calls, context per call, the tokens spent finding before
 the first edit per turn, and the share of reads that re-read a file already read in the session. The weeks before
