@@ -339,9 +339,11 @@ def self_daemon(tmp_path: Path, short_dir: Path, link: bool = True) -> Daemon:
 async def test_a_self_hosted_daemon_links_and_introspects_unless_its_link_is_off(tmp_path, short_dir):
     on = self_daemon(tmp_path / "on", short_dir)
     assert on.link.configured and on.link.state == "no_token" and on.services().introspect is not None
+    assert on.heartbeat is not None and on.services().heartbeat is on.heartbeat
     off = self_daemon(tmp_path / "off", short_dir, link=False)
     assert off.link.credentials.token == TOKEN and not off.link.configured
     assert off.link.view()["state"] == "off" and off.services().introspect is None
+    assert off.heartbeat is None and hosted_daemon(tmp_path / "hosted", short_dir).heartbeat is None
     await off.link.run()  # returns at once: nothing to connect
     off.access.usage.count("a" * 64)
     stop = asyncio.Event()
@@ -360,3 +362,17 @@ def test_an_offline_licence_in_the_environment_is_read_at_boot(tmp_path, short_d
     assert booted.licence.view()["kind"] == "offline"  # type: ignore[index]
     again = Daemon(dataclasses.replace(c, licence_token=keys().token(own)), ready(), launcher=LocalLauncher())
     assert again.licence.licence_id == "own" and again.licence.runtime_id == runtime_id
+
+
+async def test_a_self_hosted_daemon_starts_its_heartbeat_with_the_link(tmp_path, short_dir):
+    d = self_daemon(tmp_path, short_dir)
+    started = []
+    stop = asyncio.Event()
+
+    async def run() -> None:
+        started.append(1)
+        stop.set()
+
+    d.heartbeat.run = run  # type: ignore[method-assign,union-attr]
+    await d.serve(stop)
+    assert started == [1]

@@ -42,6 +42,10 @@ class LinkView(Protocol):
     def view(self) -> dict[str, Any]: ...
 
 
+class HeartbeatView(Protocol):
+    def view(self) -> dict[str, Any] | None: ...
+
+
 @dataclass(slots=True)
 class Services:
     config: Config
@@ -57,6 +61,7 @@ class Services:
     access: Access | None = None  # hosted: the runtime keys and the pause
     introspect: Introspector | None = None  # hosted: a Glyphh sign-in checked with the Cloud
     report: Report | None = None  # after every deploy, `deployed` up the link; none in tests without a link
+    heartbeat: HeartbeatView | None = None  # self, the link on: the last heartbeat
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -83,6 +88,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "sandbox": s.layers.to_json(),
                 "parts": Parts.view(s.parts.installed()),
                 "licence": s.licence.view(),
+                "heartbeat": s.heartbeat.view() if s.heartbeat is not None else None,
                 "access": s.access.view() if s.access is not None else None,
                 "approvals": len(s.runner.approvals()),
                 "models": len(s.models.names()),

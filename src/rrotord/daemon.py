@@ -19,6 +19,7 @@ from rrotord.api.routes import Services
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.errors import RrotorError
+from rrotord.heartbeat import Heartbeat
 from rrotord.introspect import Introspector
 from rrotord.keys import public_key
 from rrotord.licence import Licence
@@ -52,6 +53,7 @@ class Daemon:
     runner: Runner = field(init=False)
     link: LinkClient = field(init=False)
     handler: LinkHandler = field(init=False)
+    heartbeat: Heartbeat | None = field(init=False)
     session: aiohttp.ClientSession | None = None
 
     def __post_init__(self) -> None:
@@ -93,6 +95,19 @@ class Daemon:
             enabled=c.link,
         )
         handler.link = self.link
+        self.heartbeat = (
+            Heartbeat(
+                server=c.server,
+                credentials=credentials,
+                licence=self.licence,
+                post=self._post,
+                active_runs=lambda: len(self.runner.workers),
+                data=c.data,
+                version=VERSION,
+            )
+            if c.mode == "self" and c.link
+            else None
+        )
 
     async def _fetch(self, url: str) -> bytes:
         """A part's tarball by URL (its release asset), at most 256 MB."""
@@ -106,7 +121,7 @@ class Daemon:
             return await res.content.read(256 * 1024 * 1024 + 1)
 
     async def _post(self, url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, Any]:
-        """A JSON POST to the Cloud, answered as (status, body): the introspection of a sign-in."""
+        """A JSON POST to the Cloud, answered as (status, body): the introspection of a sign-in, the heartbeat."""
         if self.session is None:
             self.session = aiohttp.ClientSession()
         async with self.session.post(url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=10)) as res:
@@ -139,6 +154,7 @@ class Daemon:
             if self.config.public and self.config.link
             else None,
             self.handler.report,
+            self.heartbeat,
         )
 
     def install_builtin(self) -> list[str]:
@@ -201,6 +217,8 @@ class Daemon:
             asyncio.create_task(self._expire()),
             asyncio.create_task(self._usage()),
         ]
+        if self.heartbeat is not None:
+            tasks.append(asyncio.create_task(self.heartbeat.run()))
         await stop.wait()
         try:
             await self.report_usage()  # the last minute's calls, while the link may still carry them
