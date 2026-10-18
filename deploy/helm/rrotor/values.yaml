@@ -1,0 +1,116 @@
+# rrotor on Kubernetes: one rrotor per release, a StatefulSet of one replica with its own volume for /data. It is
+# one box: there is no high availability and no autoscaling (docs/self-hosting/helm.md).
+
+image:
+  repository: ghcr.io/glyphh-ai/rrotor
+  # Defaults to the chart's appVersion. Pin a release in production.
+  tag: ""
+  pullPolicy: IfNotPresent
+pullSecrets: []
+
+# The exact public host rrotor answers at (required), e.g. rrotor.acme.com. The Ingress serves it; rrotor's gate
+# refuses any other Host.
+publicHost: ""
+
+# The Glyphh server.
+server: https://api.glyphh.ai
+
+# "off" for an air-gapped rrotor: no link, no heartbeat, it runs on the offline licence alone.
+link: "on"
+
+# The runtime, from registering it on the platform (the token is shown once). Either fill these in and the chart
+# makes the Secret, or name a Secret you made yourself in existingSecret, with the keys RROTOR_RUNTIME_ID,
+# RROTOR_RUNTIME_TOKEN and, optionally, RROTOR_LICENCE.
+runtime:
+  id: ""
+  token: ""
+  # An offline licence token (air-gapped). Optional.
+  licence: ""
+existingSecret: ""
+
+# small: shared 1 CPU, 1 GiB, 3 GiB disk; medium: 2 CPU, 4 GiB, 10 GiB; large: 2 CPU, 8 GiB, 20 GiB.
+size: small
+# Set to override the preset's requests and limits.
+resources: {}
+
+persistence:
+  # Empty uses the cluster's default storage class.
+  storageClass: ""
+  # Empty uses the preset's size.
+  size: ""
+  accessModes:
+    - ReadWriteOnce
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  # Set to a cert-manager ClusterIssuer (e.g. letsencrypt) to have cert-manager issue the TLS certificate.
+  certManagerClusterIssuer: ""
+  tls:
+    enabled: true
+    # Defaults to <release>-rrotor-tls. With cert-manager it is made for you; without, make it yourself.
+    secretName: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Off by default: with one replica, a budget of minAvailable 1 stops node drains until you move rrotor yourself.
+# Turn it on to keep a drain from stopping rrotor mid-run.
+podDisruptionBudget:
+  enabled: false
+
+# The model sandbox (bubblewrap) makes namespaces and mounts /proc. That needs seccomp and AppArmor unconfined and
+# /proc unmasked, and an unmasked /proc needs the pod in its own user namespace (hostUsers: false). rrotor's own
+# seccomp filter and Landlock hold each run. See docs/self-hosting/helm.md for what the cluster must allow.
+hostUsers: false
+podSecurityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  runAsNonRoot: true
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+securityContext:
+  seccompProfile:
+    type: Unconfined
+  appArmorProfile:
+    type: Unconfined
+  procMount: Unmasked
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 5
+  failureThreshold: 60
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 30
+  timeoutSeconds: 3
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 3
+
+# More environment for rrotor, e.g. RROTOR_LOG_LEVEL.
+extraEnv: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

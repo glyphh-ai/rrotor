@@ -1,0 +1,39 @@
+{{- if .Values.ingress.enabled }}
+{{- $host := include "rrotor.publicHost" . }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "rrotor.fullname" . }}
+  labels:
+    {{- include "rrotor.labels" . | nindent 4 }}
+  {{- if or .Values.ingress.annotations .Values.ingress.certManagerClusterIssuer }}
+  annotations:
+    {{- with .Values.ingress.certManagerClusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | default (printf "%s-tls" (include "rrotor.fullname" .)) }}
+  {{- end }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "rrotor.fullname" . }}
+                port:
+                  name: http
+{{- end }}

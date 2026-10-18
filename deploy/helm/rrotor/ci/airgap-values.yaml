@@ -1,0 +1,10 @@
+# Air-gapped, with a Secret made outside the chart, cert-manager and the largest size.
+publicHost: rrotor.example.com
+existingSecret: rrotor-runtime
+link: "off"
+size: large
+ingress:
+  className: nginx
+  certManagerClusterIssuer: letsencrypt
+podDisruptionBudget:
+  enabled: true

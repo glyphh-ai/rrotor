@@ -1,0 +1,16 @@
+rrotor {{ .Values.image.tag | default .Chart.AppVersion }} is starting: one replica, its data on the volume data-{{ include "rrotor.fullname" . }}-0.
+
+The Glyphh connector:
+
+  https://{{ .Values.publicHost }}/mcp
+
+Add it in Claude (Settings, Connectors) or give it to any MCP client. Point {{ .Values.publicHost }}'s DNS at the
+Ingress's address{{ if not .Values.ingress.enabled }} (the Ingress is off: put your own load balancer in front of the Service {{ include "rrotor.fullname" . }}, port {{ .Values.service.port }}, terminating TLS and passing the Host header through){{ end }}.
+
+Check it:
+
+  kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "rrotor.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs {{ include "rrotor.fullname" . }}-0
+
+If the pod is refused at admission, or its health says the sandbox cannot start, the cluster does not allow what the
+sandbox needs: docs/self-hosting/helm.md, "What the cluster must allow".
