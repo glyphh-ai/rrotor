@@ -1,5 +1,5 @@
-# rrotor: the base image (docs/architecture.md, section 4).
-#   docker buildx build -f image/Dockerfile --target base -t ghcr.io/glyphh-ai/rrotor:<version> .
+# rrotor's image (docs/architecture.md, section 4): the base, and on it the published image with the Ada part built in.
+#   docker buildx build -f image/Dockerfile --target hosted -t ghcr.io/glyphh-ai/rrotor:<version> .
 
 FROM debian:trixie-slim AS os
 RUN apt-get update \
@@ -42,13 +42,17 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["rrotord"]
 
-# The hosted rrotor: the base with the Ada part built in (dist/parts, from parts/ada/build.sh for this
-# architecture), installed at boot. Its runtime id and token, and Glyphh's address, come from its machine's secrets
-# (RROTOR_RUNTIME_ID, RROTOR_RUNTIME_TOKEN, RROTOR_SERVER). Private: it carries the kernel.
+# The published image, ghcr.io/glyphh-ai/rrotor (and Fly's registry for the hosted machines): the base with the Ada
+# part built in (dist/parts, from parts/ada/build.sh; this architecture's kept), installed at boot. One image for
+# every rrotor: the environment decides which it is (RROTOR_MODE: local, the default, as the mod starts it; hosted,
+# as the server provisions it; self, as the deploy packages run it), and the licence decides whether Ada runs.
 FROM base AS hosted
+ARG TARGETARCH
 COPY --chown=rrotor:rrotor dist/parts/ /opt/parts-builtin/
-ENV RROTOR_MODE=hosted
-LABEL org.opencontainers.image.description="rrotor: Glyphh's per-person runtime (hosted, with the Ada part)"
+USER root
+RUN [ -z "$TARGETARCH" ] || find /opt/parts-builtin -type f ! -name "*-${TARGETARCH}.*" ! -name "*-any.*" -delete
+USER rrotor
+LABEL org.opencontainers.image.description="rrotor: Glyphh's per-person runtime, with the Ada part"
 
 # The sandbox's own tests, run inside the base image (they need bwrap, Landlock and libseccomp): CI only.
 FROM base AS sandbox-test
