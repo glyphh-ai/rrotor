@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,11 @@ def load(env: Mapping[str, str] | None = None) -> Config:
             "platform).",
             code="E_CONFIG",
         )
+    if mode == "self":
+        try:
+            runtime_id = str(uuid.UUID(runtime_id))
+        except ValueError:
+            raise RrotorError("RROTOR_RUNTIME_ID is the runtime's UUID.", code="E_CONFIG") from None
     machine_id = env.get("RROTOR_MACHINE_ID") or env.get("FLY_MACHINE_ID") or None
     public_host = (env.get("RROTOR_PUBLIC_HOST") or "").strip().lower().rstrip(".") or None
     if mode == "self" and (public_host is None or not re.match(r"^[0-9a-z.-]+$", public_host)):
