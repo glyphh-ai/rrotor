@@ -1,0 +1,59 @@
+# rrotor, self-hosted on one machine: rrotor and Caddy in front of it for HTTPS (docs/self-hosting/compose.md).
+#   cp .env.example .env   # fill in the runtime id, token and public host from the platform
+#   docker compose up -d
+name: rrotor
+
+services:
+  rrotor:
+    image: ghcr.io/glyphh-ai/rrotor:${RROTOR_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RROTOR_MODE: self
+      RROTOR_DATA: /data
+    # The model sandbox (bubblewrap) makes namespaces and mounts /proc, which Docker's default seccomp profile,
+    # AppArmor profile and masked paths refuse. rrotor's own seccomp filter and Landlock hold each run instead.
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+      - systempaths=unconfined
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777
+    volumes:
+      - rrotor-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "${RROTOR_CPUS:-1}"
+          memory: ${RROTOR_MEMORY:-1g}
+    healthcheck:
+      test: ["CMD", "/opt/rrotord/bin/python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:7777/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+    # Not published: only Caddy reaches it, on the compose network.
+    expose:
+      - "7777"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - rrotor
+    environment:
+      RROTOR_PUBLIC_HOST: ${RROTOR_PUBLIC_HOST:?set RROTOR_PUBLIC_HOST in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  rrotor-data:
+  caddy-data:
+  caddy-config:

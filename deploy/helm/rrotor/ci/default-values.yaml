@@ -1,0 +1,5 @@
+# The values CI lints and renders the chart with (helm lint, helm template).
+publicHost: rrotor.example.com
+runtime:
+  id: rt_example
+  token: example-token

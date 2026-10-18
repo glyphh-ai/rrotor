@@ -1,0 +1,63 @@
+#cloud-config
+# rrotor on one VM (deploy/terraform): Docker, the sandbox's kernel setting, the data disk at /mnt/rrotor, and the
+# Docker Compose package from deploy/compose with its .env, started once. Runs on the first boot of each instance.
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+
+write_files:
+  # Ubuntu 23.10 and later stop unprivileged user namespaces through AppArmor; bwrap needs them for each run.
+  - path: /etc/sysctl.d/60-rrotor-userns.conf
+    permissions: "0644"
+    content: |
+      kernel.apparmor_restrict_unprivileged_userns = 0
+  - path: /opt/rrotor/docker-compose.yml
+    permissions: "0644"
+    encoding: b64
+    content: ${compose}
+  - path: /opt/rrotor/Caddyfile
+    permissions: "0644"
+    encoding: b64
+    content: ${caddyfile}
+  # rrotor's data and Caddy's certificates on the data disk, so they outlive the instance.
+  - path: /opt/rrotor/docker-compose.override.yml
+    permissions: "0644"
+    content: |
+      services:
+        caddy:
+          volumes:
+            - /mnt/rrotor/caddy:/data
+      volumes:
+        rrotor-data:
+          driver: local
+          driver_opts:
+            type: none
+            o: bind
+            device: /mnt/rrotor/data
+  - path: /opt/rrotor/.env
+    permissions: "0600"
+    encoding: b64
+    content: ${env}
+  - path: /opt/rrotor/mount-data.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # Wait for the data disk, format it the first time only, and mount it at /mnt/rrotor.
+      set -eu
+      dev=${data_device}
+      for i in $(seq 1 120); do [ -e "$dev" ] && break; sleep 5; done
+      [ -e "$dev" ] || { echo "rrotor: the data disk $dev never appeared" >&2; exit 1; }
+      blkid "$dev" >/dev/null 2>&1 || mkfs.ext4 -q -L rrotor-data "$dev"
+      mkdir -p /mnt/rrotor
+      uuid=$(blkid -s UUID -o value "$dev")
+      grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /mnt/rrotor ext4 defaults,nofail 0 2" >> /etc/fstab
+      mountpoint -q /mnt/rrotor || mount /mnt/rrotor
+      mkdir -p /mnt/rrotor/data /mnt/rrotor/caddy
+      chown 10001:10001 /mnt/rrotor/data
+
+runcmd:
+  - sysctl --system
+  - /opt/rrotor/mount-data.sh
+  - systemctl enable --now docker
+  - cd /opt/rrotor && docker compose up -d

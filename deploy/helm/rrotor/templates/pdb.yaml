@@ -1,0 +1,14 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# One replica: this budget makes a node drain wait until rrotor is moved by hand (kubectl delete pod).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rrotor.fullname" . }}
+  labels:
+    {{- include "rrotor.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "rrotor.selectorLabels" . | nindent 6 }}
+{{- end }}

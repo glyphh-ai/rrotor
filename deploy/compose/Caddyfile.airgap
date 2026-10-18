@@ -1,0 +1,10 @@
+# Air-gapped: no certificate authority to reach, so Caddy serves the certificate you supply (certs/, mounted at
+# /certs): the full chain in tls.crt and its key in tls.key. HTTP on port 80 redirects to HTTPS.
+{
+	auto_https disable_certs
+}
+
+{$RROTOR_PUBLIC_HOST} {
+	tls /certs/tls.crt /certs/tls.key
+	reverse_proxy rrotor:7777
+}
