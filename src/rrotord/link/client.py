@@ -1,7 +1,7 @@
 """The link client: connects out, says hello, keeps the link (pings both ways, answers the Cloud's messages), replays
 what is not acknowledged after each reconnect, and reconnects with backoff, 1 s to 30 s with jitter. A close that
 says not to retry (4401 refused, 4409 replaced, 4426 upgrade, 4400 bad hello) stops it until a new token is handed
-in (docs/architecture.md, section 6)."""
+in (docs/architecture.md, section 6). An air-gapped rrotor's link is off: it never connects and owes nothing."""
 
 from __future__ import annotations
 
@@ -51,11 +51,12 @@ class LinkClient:
         handler: Handler,
         connect: Connect,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        enabled: bool = True,
     ) -> None:
-        self.url, self.version, self.mode = url, version, mode
+        self.url, self.version, self.mode, self.enabled = url, version, mode, enabled
         self.credentials, self.outbox, self.handler = credentials, outbox, handler
         self.connect, self.sleep = connect, sleep
-        self.state, self.since = "no_token", time.time()
+        self.state, self.since = ("no_token" if enabled else "off"), time.time()
         self.last_close: dict[str, Any] | None = None
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self.attempt = 0
@@ -79,8 +80,8 @@ class LinkClient:
     @property
     def configured(self) -> bool:
         """Whether this rrotor has a runtime token: without one there is no Cloud to owe anything (and a first token
-        drops whatever was kept)."""
-        return self.credentials.token is not None
+        drops whatever was kept). A link that is off has none either."""
+        return self.enabled and self.credentials.token is not None
 
     async def owe(self, make: Callable[[int], dict[str, Any]], numbered: bool = True) -> None:
         """Keep a message until the Cloud acknowledges it, and send it now if the link is up."""
@@ -98,6 +99,8 @@ class LinkClient:
         return True
 
     async def run(self) -> None:
+        if not self.enabled:
+            return
         while True:
             token, runtime_id = self.credentials.token, self.credentials.runtime_id
             if token is None or runtime_id is None or self.state in p.STOPS.values():

@@ -29,6 +29,22 @@ async def test_a_licence_is_handed_in_and_shown(api):
     assert (status, body["error"]["code"]) == (400, "E_LICENCE")
 
 
+async def test_an_offline_licence_is_handed_in_as_its_token_and_the_health_says_its_state(api):
+    offline = keys().licence(["ada"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline")
+    status, body = await send(api, "PUT", "/v1/licence", data=keys().token(offline) + "\n")
+    assert (status, body["kept"], body["licence"]["kind"], body["licence"]["state"]) == (200, True, "offline", "live")
+    status, body = await send(api, "PUT", "/v1/licence", json={"token": keys().token(offline)})
+    assert (status, body["kept"]) == (200, True)
+    status, body = await send(api, "PUT", "/v1/licence", json=keys().licence(["zeta"], expires="2997-01-01T00:00:00Z"))
+    assert (status, body["kept"], body["licence"]["mods"]) == (200, False, ["ada"])  # the longer one stays
+    status, body = await send(api, "GET", "/v1/health")
+    assert (body["licence"]["state"], body["licence"]["grace_days"]) == ("live", 14)
+    status, body = await send(api, "PUT", "/v1/licence", data="not a token")
+    assert (status, body["error"]["code"]) == (400, "E_LICENCE")
+    status, body = await send(api, "PUT", "/v1/licence", json=[1])
+    assert (status, body["error"]["code"]) == (400, "E_LICENCE")
+
+
 async def test_a_part_installs_by_archive_only_while_its_mod_is_in_the_plan(api, tmp_path):
     data, sha, sig = part_archive(tmp_path)
     ask: dict[str, Any] = {

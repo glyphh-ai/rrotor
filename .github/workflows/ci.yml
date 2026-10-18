@@ -1,8 +1,10 @@
 # rrotor's checks on every push and pull request: lint, types, the tests with the 100% coverage gate, the sample
-# model's tests, the image with the sandbox tests inside it, and the WSL root filesystem.
-# On main, with the repository variable PUBLISH_IMAGES set to true, the image is pushed to ghcr.io/glyphh-ai/rrotor
-# (multi-arch) and their digests reported. It is off until the GHCR package lets this repository write to it (an org
-# admin: the package's settings, Manage Actions access, glyphh-ai/rrotor with the Write role).
+# model's tests, the image with the sandbox tests inside it, the WSL root filesystem, and the self-hosting packages.
+# On main, with the repository variable PUBLISH_IMAGES set to true, the one published image (the base with the Ada
+# part built in, the Dockerfile's `hosted` target) is pushed to Fly's registry for the hosted machines and to
+# ghcr.io/glyphh-ai/rrotor (multi-arch, :<version> and :latest) for everyone else, and its digests reported. The GHCR
+# push needs the package to let this repository write to it (an org admin: the package's settings, Manage Actions
+# access, glyphh-ai/rrotor with the Write role).
 name: ci
 
 on:
@@ -35,12 +37,50 @@ jobs:
       - name: The sample models' tests
         run: uv run pytest examples/daily_sales/tests examples/ada_tickets examples/ada_incidents -o addopts="" -p no:cacheprovider --import-mode=importlib
 
+  # The self-hosting packages (deploy/, docs/self-hosting/): each is checked as written, nothing is started.
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker Compose, and the air-gapped overlay, from .env.example
+        working-directory: deploy/compose
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          echo RROTOR_LICENCE=example >> .env
+          docker compose -f docker-compose.yml -f docker-compose.airgap.yml config -q
+      - name: The Caddyfiles parse
+        working-directory: deploy/compose
+        run: |
+          for f in Caddyfile Caddyfile.airgap; do
+            docker run --rm -e RROTOR_PUBLIC_HOST=rrotor.example.com -v "$PWD/$f:/etc/caddy/Caddyfile:ro" \
+              caddy:2 caddy adapt --config /etc/caddy/Caddyfile >/dev/null
+          done
+      - uses: azure/setup-helm@v4
+      - name: The Helm chart lints and renders, with each set of CI values
+        working-directory: deploy/helm/rrotor
+        run: |
+          for f in ci/*.yaml; do
+            helm lint . --strict -f "$f"
+            helm template rrotor . -f "$f" >/dev/null
+          done
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: The Terraform modules and their examples are formatted and valid
+        working-directory: deploy/terraform
+        run: |
+          terraform fmt -recursive -check
+          for d in aws aws/examples/basic gcp gcp/examples/basic; do
+            terraform -chdir="$d" init -backend=false -input=false >/dev/null
+            terraform -chdir="$d" validate
+          done
+
   image:
     runs-on: ubuntu-24.04
     needs: checks
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -69,6 +109,21 @@ jobs:
           curl -sf -H "Authorization: Bearer $token" http://127.0.0.1:7777/v1/health | tee health.json
           python3 -c "import json; h=json.load(open('health.json')); assert h['sandbox']['ready'], h['sandbox']"
           docker rm -f smoke
+      - name: Self-hosted and air-gapped, it answers at its one public host, its link off
+        run: |
+          key=$(openssl rand -hex 32); sha=$(printf %s "$key" | sha256sum | cut -d' ' -f1)
+          docker run -d --name smoke-self --read-only --tmpfs /tmp:exec,mode=1777 -v smoke-self:/data \
+            -p 127.0.0.1:7778:7777 \
+            --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined \
+            -e RROTOR_MODE=self -e RROTOR_LINK=off -e RROTOR_PUBLIC_HOST=rrotor.example.com \
+            -e RROTOR_RUNTIME_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')" \
+            -e RROTOR_RUNTIME_TOKEN="tok_$(openssl rand -hex 16)" -e RROTOR_KEYS_SHA256="$sha" rrotor:ci
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:7778/healthz && break; sleep 1; done
+          curl -sf -H "Host: rrotor.example.com" -H "Authorization: Bearer $key" http://127.0.0.1:7778/v1/health \
+            | tee health-self.json
+          python3 -c "import json; h=json.load(open('health-self.json')); assert (h['mode'], h['link']['state'], h['sandbox']['ready']) == ('self', 'off', True), h"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: elsewhere.example.com' http://127.0.0.1:7778/v1/health)" = 421
+          docker rm -f smoke-self
       - name: "The WSL root filesystem (Windows, designed): exported from the base image"
         run: |
           id=$(docker create rrotor:ci)
@@ -79,32 +134,20 @@ jobs:
           name: rrotor-wsl-${{ steps.v.outputs.version }}-amd64
           path: rrotor-wsl-*.tar.gz
           retention-days: 14
-      - name: Sign in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push the image (amd64 and arm64)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
-        run: |
-          repo=ghcr.io/glyphh-ai/rrotor; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
-          docker buildx build -f image/Dockerfile --target base --platform linux/amd64,linux/arm64 \
-            --build-arg VERSION="$v" -t "$repo:$v" -t "$repo:$s" --push .
-          echo "base: $(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}')" >> "$GITHUB_STEP_SUMMARY"
 
-  # The hosted image: the base with the Ada part built in, for the machines the Glyphh server provisions on Fly. Pushed
-  # to Fly's own registry for the runtimes app (vars.FLY_RUNTIME_APP, glyphh-ai-runtime), the one private registry
-  # Fly machines pull from; amd64, which is what Fly runs. The server's GLYPHH_FLY_IMAGE names
-  # registry.fly.io/<app>:<version>. Built only when the part was (both secrets set), images are published and
-  # FLY_API_TOKEN is set.
+  # The published image: the base with the Ada part built in, one image for hosted, self-hosted and local rrotors
+  # (RROTOR_MODE decides; the licence decides whether Ada runs). Pushed first to Fly's own registry for the runtimes app
+  # (vars.FLY_RUNTIME_APP, glyphh-ai-runtime), the one private registry Fly machines pull from, amd64, which is what
+  # Fly runs (the server's GLYPHH_FLY_IMAGE names registry.fly.io/<app>:<version>); then to
+  # ghcr.io/glyphh-ai/rrotor:<version> and :latest, amd64 and arm64, for the deploy packages and the mod. Built only
+  # when the part was (both secrets set), images are published and FLY_API_TOKEN is set.
   image-hosted:
     runs-on: ubuntu-24.04
     needs: [image, part-ada]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
     permissions:
       contents: read
+      packages: write
     env:
       APP: ${{ vars.FLY_RUNTIME_APP || 'glyphh-ai-runtime' }}
     steps:
@@ -113,6 +156,7 @@ jobs:
         with:
           name: rrotor-part-ada
           path: dist/parts
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Version
         id: v
@@ -134,6 +178,22 @@ jobs:
             --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" \
             --build-arg LICENCE_PUBLIC_KEY="$LICENCE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:$s" --push .
           echo "hosted: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
+      - name: Sign in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the same image to GHCR (amd64 and arm64), :<version> and :latest
+        env:
+          RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
+          LICENCE_PUBLIC_KEY: ${{ vars.LICENCE_PUBLIC_KEY }}
+        run: |
+          repo=ghcr.io/glyphh-ai/rrotor; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
+          docker buildx build -f image/Dockerfile --target hosted --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" \
+            --build-arg LICENCE_PUBLIC_KEY="$LICENCE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:latest" -t "$repo:$s" --push .
+          echo "ghcr: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
 
   # The Ada part, for both architectures: the kernel from glyphh-ai/ada-private-archive (branch kernel-spec, read
   # with ADA_KERNEL_TOKEN) and numpy, signed with RROTOR_RELEASE_KEY when it is set (else built unsigned-checked:

@@ -57,6 +57,30 @@ def test_a_hosted_rrotor_takes_its_runtime_credentials_and_built_in_parts_from_t
     assert (doorman.mode, doorman.server, doorman.public_domain) == ("doorman", "http://doorman.invalid", "glyphh.app")
 
 
+RUNTIME = "6F1C2A9E-0000-4000-8000-000000000001"
+SELF = {"RROTOR_MODE": "self", "RROTOR_RUNTIME_ID": RUNTIME, "RROTOR_RUNTIME_TOKEN": "t"} | {
+    "RROTOR_PUBLIC_HOST": "Rr.Acme.com."
+}
+
+
+def test_a_self_hosted_rrotor_answers_at_its_public_host_with_glyphhs_server_as_the_default():
+    c = config.load(SELF)
+    assert (c.mode, c.server, c.public_host, c.runtime_id, c.runtime_token) == (
+        "self",
+        "https://api.glyphh.ai",
+        "rr.acme.com",
+        RUNTIME.lower(),
+        "t",
+    )
+    assert c.public and c.link and c.licence_token is None and c.link_url == "wss://api.glyphh.ai/v1/runtime/link"
+    off = config.load(
+        SELF | {"RROTOR_SERVER": "https://glyphh.acme.com", "RROTOR_LINK": "OFF", "RROTOR_LICENCE": " t "}
+    )
+    assert (off.server, off.link, off.licence_token) == ("https://glyphh.acme.com", False, "t")
+    assert config.load({**SELF, "RROTOR_SERVER": ""}).server == "https://api.glyphh.ai"
+    assert not config.load({"RROTOR_SERVER": "http://s", "RROTOR_LOCAL_TOKEN_SHA256": DIGEST}).public
+
+
 def test_load_from_the_process_environment(monkeypatch):
     monkeypatch.setenv("RROTOR_SERVER", "http://s")
     monkeypatch.setenv("RROTOR_MODE", "hosted")
@@ -75,6 +99,12 @@ def test_load_from_the_process_environment(monkeypatch):
         {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "RROTOR_RUNTIME_TOKEN": "t", "FLY_MACHINE_ID": "a"},
         {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted"},
         {"RROTOR_SERVER": "http://s", "RROTOR_MODE": "hosted", "FLY_MACHINE_ID": "a", "RROTOR_KEYS_SHA256": "zz"},
+        {**SELF, "RROTOR_RUNTIME_TOKEN": ""},
+        {**SELF, "RROTOR_RUNTIME_ID": ""},
+        {**SELF, "RROTOR_PUBLIC_HOST": ""},
+        {**SELF, "RROTOR_PUBLIC_HOST": "https://rr.acme.com/"},
+        {**SELF, "RROTOR_LINK": "maybe"},
+        {**SELF, "RROTOR_RUNTIME_ID": "r"},
     ],
 )
 def test_load_refuses_bad_settings(env):

@@ -19,6 +19,7 @@ from rrotord.api.routes import Services
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.errors import RrotorError
+from rrotord.heartbeat import Heartbeat
 from rrotord.introspect import Introspector
 from rrotord.keys import public_key
 from rrotord.licence import Licence
@@ -33,7 +34,7 @@ from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
 from rrotord.runner.record import Records
-from rrotord.sandbox.probe import Layers, probe
+from rrotord.sandbox.probe import Layers, container_needs, probe
 
 log = logging.getLogger("rrotor")
 EXPIRE_EVERY = 30.0
@@ -52,14 +53,19 @@ class Daemon:
     runner: Runner = field(init=False)
     link: LinkClient = field(init=False)
     handler: LinkHandler = field(init=False)
+    heartbeat: Heartbeat | None = field(init=False)
     session: aiohttp.ClientSession | None = None
 
     def __post_init__(self) -> None:
         c = self.config
+        if c.mode == "self" and self.layers.checks.get("bubblewrap", {}).get("ok") is False:
+            self.layers.needs = container_needs()  # its owner runs the container: say what it lacks
+            log.warning("bwrap cannot start: the container lacks", extra={"needs": self.layers.needs})
         models = Models(c.data)
         self.deployer = Deployer(models, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
-        self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None)
+        self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None, c.runtime_id)
+        self.licence.load(c.licence_token)
         self.access = Access(c.data, c.keys_sha256)
         self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
         self.runner = Runner(
@@ -80,7 +86,7 @@ class Daemon:
             and c.runtime_token
             and (credentials.runtime_id, credentials.token) != (c.runtime_id, c.runtime_token)
         ):
-            credentials.set(c.runtime_id, c.runtime_token)  # hosted: handed in by the machine's secrets, not a mod
+            credentials.set(c.runtime_id, c.runtime_token)  # hosted and self: from the environment, not a mod
         self.link = LinkClient(
             url=c.link_url,
             version=VERSION,
@@ -89,8 +95,22 @@ class Daemon:
             outbox=Outbox(c.data / "link"),
             handler=handler,
             connect=self._connect,
+            enabled=c.link,
         )
         handler.link = self.link
+        self.heartbeat = (
+            Heartbeat(
+                server=c.server,
+                credentials=credentials,
+                licence=self.licence,
+                post=self._post,
+                active_runs=lambda: len(self.runner.workers),
+                data=c.data,
+                version=VERSION,
+            )
+            if c.mode == "self" and c.link
+            else None
+        )
 
     async def _fetch(self, url: str) -> bytes:
         """A part's tarball by URL (its release asset), at most 256 MB."""
@@ -104,7 +124,7 @@ class Daemon:
             return await res.content.read(256 * 1024 * 1024 + 1)
 
     async def _post(self, url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, Any]:
-        """A JSON POST to the Cloud, answered as (status, body): the introspection of a sign-in."""
+        """A JSON POST to the Cloud, answered as (status, body): the introspection of a sign-in, the heartbeat."""
         if self.session is None:
             self.session = aiohttp.ClientSession()
         async with self.session.post(url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=10)) as res:
@@ -134,14 +154,15 @@ class Daemon:
             self._fetch,
             self.access,
             Introspector(self.config.server, self.link.credentials, self._post)
-            if self.config.mode == "hosted"
+            if self.config.public and self.config.link
             else None,
             self.handler.report,
+            self.heartbeat,
         )
 
     def install_builtin(self) -> list[str]:
         """The parts the image carries (<name>-<version>-<arch>.tar.gz with its .sha256 and .sig beside it), each
-        installed once; a hosted rrotor has no mod to install any. Answers what was installed now."""
+        installed once; a hosted or self-hosted rrotor has no mod to install any. Answers what was installed now."""
         done: list[str] = []
         folder = self.config.builtin_parts
         if not folder.is_dir():
@@ -199,6 +220,8 @@ class Daemon:
             asyncio.create_task(self._expire()),
             asyncio.create_task(self._usage()),
         ]
+        if self.heartbeat is not None:
+            tasks.append(asyncio.create_task(self.heartbeat.run()))
         await stop.wait()
         try:
             await self.report_usage()  # the last minute's calls, while the link may still carry them

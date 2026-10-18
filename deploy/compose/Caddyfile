@@ -1,0 +1,5 @@
+# HTTPS for rrotor at its one public host: Caddy obtains and renews the certificate itself (Let's Encrypt, over
+# port 80 or 443), and passes the Host header through unchanged, which rrotor's gate checks exactly.
+{$RROTOR_PUBLIC_HOST} {
+	reverse_proxy rrotor:7777
+}

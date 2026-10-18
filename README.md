@@ -4,6 +4,10 @@ The isolated runtime Ada installs into. It runs models: deterministic Python job
 
 The design is in `glyphh-ai/server`, `docs/architecture.md` ("`ada`: models and rrotor", and "rrotor"); how the parts call each other is in this repo's `docs/architecture.md`.
 
+## Self-hosting
+
+The same image, run on your own machine, cluster or cloud account and reached at your own address: Docker Compose (`deploy/compose/`), a Helm chart (`deploy/helm/rrotor/`) or Terraform for AWS and Google Cloud (`deploy/terraform/`), one rrotor each. `docs/self-hosting/` has the guides, the container's privileges and why, and the licence's heartbeat, exactly.
+
 ## Ada
 
 An Ada model is a program rrotor runs: `rrotor.ada` opens its spec and precedent store on the Ada part; a changed encoding re-encodes the store on deploy or refuses it (`docs/architecture.md`, section 9). `examples/ada_tickets/` is one, with its tests.

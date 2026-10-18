@@ -10,7 +10,10 @@ address is answered with `fly-replay: instance=<machine>`, and Fly's proxy carri
 answers every request this way); any other Host is 421. A refusal names where to sign in (`WWW-Authenticate`, RFC
 9728), and the resource metadata it points at is open. A paused rrotor (the plan's hours spent) answers 402 to
 everything but its health. Each request served with a runtime key is counted for that key (access.Usage); a Glyphh
-sign-in is no key and is not counted."""
+sign-in is no key and is not counted.
+
+Self-hosted: the hosted gate at the one exact host it was given (RROTOR_PUBLIC_HOST), with nothing replayed and
+never paused (its owner's machine has no hosted hours)."""
 
 from __future__ import annotations
 
@@ -62,15 +65,18 @@ def replay(machine: str) -> web.Response:
     return web.Response(status=200, headers={REPLAY: f"instance={machine}"})
 
 
-def public_url(request: web.Request) -> str:
-    """This runtime's address as the client sees it: https, the Host without a default port."""
+def public_url(request: web.Request, exact: str | None = None) -> str:
+    """This runtime's address as the client sees it: https, the one exact host it was given, else the Host without
+    a default port."""
+    if exact is not None:
+        return f"https://{exact}"
     host = request.host.lower().rstrip(".")
     return "https://" + (host[:-4] if host.endswith(":443") else host)
 
 
-def challenge(request: web.Request, token_sent: bool) -> Unauthorized:
+def challenge(request: web.Request, token_sent: bool, exact: str | None = None) -> Unauthorized:
     """401, naming the resource metadata so the client can find where to sign in (RFC 9728 section 5.1)."""
-    value = f'Bearer resource_metadata="{public_url(request)}{METADATA}/mcp", scope="{SCOPE}"'
+    value = f'Bearer resource_metadata="{public_url(request, exact)}{METADATA}/mcp", scope="{SCOPE}"'
     if token_sent:
         value += ', error="invalid_token"'
     return Unauthorized(
@@ -100,7 +106,7 @@ def route_by_host(request: web.Request, domain: str, own: str | None, exact: str
 
 def gate(config: Config, access: Access, introspect: Introspector | None = None) -> Middleware:
     """The local gate (the local token on loopback) or the hosted one (a runtime key, or a sign-in the Cloud vouches
-    for, at this machine's address)."""
+    for, at this machine's address), which a self-hosted rrotor uses too."""
     hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost") for port in (config.host_port, config.local_port)}
     origins = {f"http://{h}" for h in hosts}
 
@@ -130,11 +136,11 @@ def gate(config: Config, access: Access, introspect: Introspector | None = None)
             return await handler(request)
         token = presented(request)
         if not token:
-            raise challenge(request, token_sent=False)
+            raise challenge(request, False, config.public_host)
         key = access.match(token)
         if key is None and not (introspect is not None and await introspect.active(token)):
-            raise challenge(request, token_sent=True)
-        if access.paused is not None:
+            raise challenge(request, True, config.public_host)
+        if access.paused is not None and config.mode == "hosted":
             raise RrotorError(
                 "This runtime is paused: its plan's hosted hours for the month are spent.",
                 code="E_LIMIT",
@@ -146,4 +152,4 @@ def gate(config: Config, access: Access, introspect: Introspector | None = None)
             access.usage.count(key)
         return await handler(request)
 
-    return hosted if config.mode == "hosted" else local
+    return hosted if config.public else local

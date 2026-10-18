@@ -75,9 +75,16 @@ class Keys:
     def sign(self, message: bytes) -> str:
         return base64.b64encode(self.private.sign(message)).decode()
 
-    def licence(self, mods: list[str], expires: str = "2999-01-01T00:00:00Z", plan: str = "Pro") -> dict[str, Any]:
+    def licence(
+        self, mods: list[str], expires: str = "2999-01-01T00:00:00Z", plan: str = "Pro", **fields: Any
+    ) -> dict[str, Any]:
         payload = {"plan": plan, "mods": {m: {"limits": {}} for m in mods}, "expires_at": expires, "install_id": "i-1"}
+        payload |= fields
         return {"payload": payload, "signature": self.sign(canonical(payload))}
+
+    def token(self, signed: dict[str, Any]) -> str:
+        """An offline licence as the platform hands it out: base64url of {payload, signature}, unpadded."""
+        return base64.urlsafe_b64encode(json.dumps(signed).encode()).decode().rstrip("=")
 
 
 _KEYS: Keys | None = None

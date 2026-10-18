@@ -1,5 +1,6 @@
 """The API's routes (docs/architecture.md, 7): on loopback for a local rrotor's mod, at `<machine>.<domain>` for a
-hosted one's callers. The operations themselves are in ops.py, shared with the MCP server (mcp.py)."""
+hosted one's callers, at its one public host for a self-hosted one's. The operations themselves are in ops.py, shared
+with the MCP server (mcp.py)."""
 
 from __future__ import annotations
 
@@ -41,6 +42,10 @@ class LinkView(Protocol):
     def view(self) -> dict[str, Any]: ...
 
 
+class HeartbeatView(Protocol):
+    def view(self) -> dict[str, Any] | None: ...
+
+
 @dataclass(slots=True)
 class Services:
     config: Config
@@ -56,6 +61,7 @@ class Services:
     access: Access | None = None  # hosted: the runtime keys and the pause
     introspect: Introspector | None = None  # hosted: a Glyphh sign-in checked with the Cloud
     report: Report | None = None  # after every deploy, `deployed` up the link; none in tests without a link
+    heartbeat: HeartbeatView | None = None  # self, the link on: the last heartbeat
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -82,6 +88,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "sandbox": s.layers.to_json(),
                 "parts": Parts.view(s.parts.installed()),
                 "licence": s.licence.view(),
+                "heartbeat": s.heartbeat.view() if s.heartbeat is not None else None,
                 "access": s.access.view() if s.access is not None else None,
                 "approvals": len(s.runner.approvals()),
                 "models": len(s.models.names()),
@@ -157,15 +164,20 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response({"licence": s.licence.view()})
 
     async def licence_put(request: web.Request) -> web.Response:
-        data = await body(request)
-        s.licence.set(data.get("payload"), data.get("signature"))
-        return web.json_response({"licence": s.licence.view()})
+        """{payload, signature} as the server answered it, {token}, or the offline token itself as the body."""
+        text = (await request.text()).strip()
+        try:
+            sent = json.loads(text)
+        except json.JSONDecodeError:
+            sent = text
+        kept = s.licence.take(sent)
+        return web.json_response({"licence": s.licence.view(), "kept": kept})
 
     async def resource_metadata(request: web.Request) -> web.Response:
         """RFC 9728: this runtime as an OAuth protected resource, and Glyphh as the server that signs a client in."""
         return web.json_response(
             {
-                "resource": f"{public_url(request)}/mcp",
+                "resource": f"{public_url(request, s.config.public_host)}/mcp",
                 "authorization_servers": [s.config.server.rstrip("/")],
                 "scopes_supported": [SCOPE],
                 "bearer_methods_supported": ["header"],

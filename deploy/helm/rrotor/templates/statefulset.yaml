@@ -1,0 +1,135 @@
+# One rrotor: one replica, one writer of /data. Not scaled: a second replica would be a second runtime.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "rrotor.fullname" . }}
+  labels:
+    {{- include "rrotor.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "rrotor.fullname" . }}-headless
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      {{- include "rrotor.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rrotor.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if not .Values.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "rrotor.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      hostUsers: {{ .Values.hostUsers }}
+      terminationGracePeriodSeconds: 60
+      {{- with .Values.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: rrotor
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 7777
+              protocol: TCP
+          env:
+            - name: RROTOR_MODE
+              value: self
+            - name: RROTOR_SERVER
+              value: {{ .Values.server | quote }}
+            - name: RROTOR_PUBLIC_HOST
+              value: {{ include "rrotor.publicHost" . | quote }}
+            - name: RROTOR_LINK
+              value: {{ .Values.link | quote }}
+            - name: RROTOR_DATA
+              value: /data
+            - name: RROTOR_RUNTIME_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rrotor.secretName" . }}
+                  key: RROTOR_RUNTIME_ID
+            - name: RROTOR_RUNTIME_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rrotor.secretName" . }}
+                  key: RROTOR_RUNTIME_TOKEN
+            - name: RROTOR_LICENCE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rrotor.secretName" . }}
+                  key: RROTOR_LICENCE
+                  optional: true
+            {{- with .Values.runtime.keysSha256 }}
+            - name: RROTOR_KEYS_SHA256
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- include "rrotor.resources" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # The runs' scratch space: the root filesystem is read-only.
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "rrotor.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ include "rrotor.diskSize" . }}
