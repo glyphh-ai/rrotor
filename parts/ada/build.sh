@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Builds the Ada part for one architecture: the Ada kernel (glyphh_kernel.py, glyphh_spec.py, glyphh_nsm.py,
-# glyphh_lexicon.py and lexicon/, the two seeds every text role reads, from glyphh-ai/ada-private-archive, branch
+# glyphh_lexicon.py and lexicon/, the two seeds every text role reads, from glyphh-ai/ada-private, branch
 # kernel-spec) and numpy, under lib/, with part.json at the top; then
 # scripts/part.py signs it with Glyphh's release key (RROTOR_RELEASE_KEY) into --out.
 #
-#   parts/ada/build.sh --arch amd64|arm64 --kernel <checkout of ada-private-archive> --out <dir>
+#   parts/ada/build.sh --arch amd64|arm64 --kernel <checkout of ada-private> --out <dir>
 #
 # Python 3.13 and numpy's manylinux wheels: the part runs inside the base image (Debian 13, Python 3.13).
 set -euo pipefail
