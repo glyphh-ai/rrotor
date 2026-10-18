@@ -80,7 +80,7 @@ class Daemon:
             and c.runtime_token
             and (credentials.runtime_id, credentials.token) != (c.runtime_id, c.runtime_token)
         ):
-            credentials.set(c.runtime_id, c.runtime_token)  # hosted: handed in by the machine's secrets, not a mod
+            credentials.set(c.runtime_id, c.runtime_token)  # hosted and self: from the environment, not a mod
         self.link = LinkClient(
             url=c.link_url,
             version=VERSION,
@@ -89,6 +89,7 @@ class Daemon:
             outbox=Outbox(c.data / "link"),
             handler=handler,
             connect=self._connect,
+            enabled=c.link,
         )
         handler.link = self.link
 
@@ -134,14 +135,14 @@ class Daemon:
             self._fetch,
             self.access,
             Introspector(self.config.server, self.link.credentials, self._post)
-            if self.config.mode == "hosted"
+            if self.config.public and self.config.link
             else None,
             self.handler.report,
         )
 
     def install_builtin(self) -> list[str]:
         """The parts the image carries (<name>-<version>-<arch>.tar.gz with its .sha256 and .sig beside it), each
-        installed once; a hosted rrotor has no mod to install any. Answers what was installed now."""
+        installed once; a hosted or self-hosted rrotor has no mod to install any. Answers what was installed now."""
         done: list[str] = []
         folder = self.config.builtin_parts
         if not folder.is_dir():

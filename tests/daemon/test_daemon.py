@@ -316,3 +316,35 @@ async def test_a_failed_flush_on_shutdown_is_logged_and_it_still_stops(tmp_path,
     stop.set()
     await d.serve(stop)
     assert "reporting usage failed" in caplog.text
+
+
+def self_daemon(tmp_path: Path, short_dir: Path, link: bool = True) -> Daemon:
+    c = Config(
+        tmp_path / "data",
+        "self",
+        "http://127.0.0.1:1",
+        0,
+        0,
+        None,
+        Path(rrotor.__file__).parent,
+        short_dir,
+        runtime_id=str(uuid.uuid4()),
+        runtime_token=TOKEN,
+        public_host="rrotor.acme.com",
+        link=link,
+    )
+    return Daemon(c, ready(), launcher=LocalLauncher())
+
+
+async def test_a_self_hosted_daemon_links_and_introspects_unless_its_link_is_off(tmp_path, short_dir):
+    on = self_daemon(tmp_path / "on", short_dir)
+    assert on.link.configured and on.link.state == "no_token" and on.services().introspect is not None
+    off = self_daemon(tmp_path / "off", short_dir, link=False)
+    assert off.link.credentials.token == TOKEN and not off.link.configured
+    assert off.link.view()["state"] == "off" and off.services().introspect is None
+    await off.link.run()  # returns at once: nothing to connect
+    off.access.usage.count("a" * 64)
+    stop = asyncio.Event()
+    stop.set()
+    await off.serve(stop)
+    assert off.link.outbox.pending == []  # nothing owed to a Cloud it never reaches

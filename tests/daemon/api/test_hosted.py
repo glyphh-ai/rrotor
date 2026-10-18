@@ -161,3 +161,52 @@ async def test_only_the_requests_served_are_counted_for_the_key_that_let_them_in
     for k in taken:
         assert dt.datetime.fromisoformat(k["last_used_at"]).utcoffset() == dt.timedelta(0)
     assert access.usage.take() == []
+
+
+SELF_HOST = "rrotor.acme.com"
+
+
+@pytest.fixture
+async def self_hosted(tmp_path: Path, short_dir: Path) -> AsyncIterator[Api]:
+    key = token()
+    s = services(tmp_path, short_dir, token())
+    s.config = dataclasses.replace(s.config, mode="self", public_host=SELF_HOST, local_token_sha256=None)
+    s.access = Access(s.config.data, (digest(key),))
+    client: TestClient[web.Request, web.Application] = TestClient(TestServer(make(s)), headers={"Host": SELF_HOST})
+    await client.start_server()
+    yield Api(client, s, key, tmp_path)
+    await s.runner.shutdown()
+    await client.close()
+
+
+async def test_a_self_hosted_rrotor_answers_at_its_one_exact_host_and_replays_nothing(self_hosted):
+    assert (await code_of(self_hosted, **self_hosted.auth()))[0] == 200
+    assert (await code_of(self_hosted, **self_hosted.auth(Host="RROTOR.acme.com:443")))[0] == 200
+    res = await self_hosted.client.get("/v1/health", headers=self_hosted.auth())
+    assert (await res.json())["mode"] == "self"
+    for host in ("a1b2c3d4e5f6a7.glyphh.app", "other.acme.com", f"127.0.0.1:{7777}"):
+        res = await self_hosted.client.get("/v1/health", headers=self_hosted.auth(Host=host))
+        assert res.status == 421 and "fly-replay" not in res.headers, host
+    assert await code_of(self_hosted) == (401, "E_AUTH")
+    assert (await code_of(self_hosted, "/healthz", Host="anything"))[0] == 200
+
+
+async def test_a_self_hosted_rrotor_names_its_public_host_as_the_resource_and_is_never_paused(self_hosted):
+    signed_in = token()
+    self_hosted.services.introspect = Vouches(signed_in)
+    client: TestClient[web.Request, web.Application] = TestClient(
+        TestServer(make(self_hosted.services)), headers={"Host": f"{SELF_HOST}:443"}
+    )
+    await client.start_server()
+    try:
+        res = await client.get("/.well-known/oauth-protected-resource/mcp")
+        assert res.status == 200 and (await res.json())["resource"] == f"https://{SELF_HOST}/mcp"
+        res = await client.get("/v1/models")
+        assert res.headers["WWW-Authenticate"] == (
+            f'Bearer resource_metadata="https://{SELF_HOST}/.well-known/oauth-protected-resource/mcp", scope="account"'
+        )
+        assert (await client.get("/v1/models", headers={"Authorization": f"Bearer {signed_in}"})).status == 200
+        self_hosted.services.access.pause("runtime_hours")  # the server never sends it; were it sent, ignored
+        assert (await client.get("/v1/models", headers=self_hosted.auth())).status == 200
+    finally:
+        await client.close()

@@ -1,5 +1,6 @@
 """The API's routes (docs/architecture.md, 7): on loopback for a local rrotor's mod, at `<machine>.<domain>` for a
-hosted one's callers. The operations themselves are in ops.py, shared with the MCP server (mcp.py)."""
+hosted one's callers, at its one public host for a self-hosted one's. The operations themselves are in ops.py, shared
+with the MCP server (mcp.py)."""
 
 from __future__ import annotations
 
@@ -165,7 +166,7 @@ def setup(app: web.Application, s: Services) -> None:
         """RFC 9728: this runtime as an OAuth protected resource, and Glyphh as the server that signs a client in."""
         return web.json_response(
             {
-                "resource": f"{public_url(request)}/mcp",
+                "resource": f"{public_url(request, s.config.public_host)}/mcp",
                 "authorization_servers": [s.config.server.rstrip("/")],
                 "scopes_supported": [SCOPE],
                 "bearer_methods_supported": ["header"],

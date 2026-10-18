@@ -18,7 +18,7 @@ def keep_logging(fn: Callable[[], int]) -> int:
 def test_bad_settings_exit_2_saying_why(monkeypatch, capsys):
     monkeypatch.setenv("RROTOR_MODE", "nope")
     assert keep_logging(entry.main) == 2
-    assert "rrotord: E_CONFIG: RROTOR_MODE must be local, hosted or doorman." in capsys.readouterr().err
+    assert "rrotord: E_CONFIG: RROTOR_MODE must be local, hosted, self or doorman." in capsys.readouterr().err
 
 
 def test_good_settings_start_the_daemon(monkeypatch):

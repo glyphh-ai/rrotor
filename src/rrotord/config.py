@@ -1,7 +1,9 @@
 """rrotord's settings, from its environment (set by whoever starts the container: the mod, or the hosted
 provisioning). Locally no secret comes through here: the runtime token is handed in over the local API, and the
 local token arrives only as its SHA-256. A hosted rrotor has no mod to hand anything in: its runtime id and token
-are in its machine's secrets, and the parts it ships with are installed from the image at boot."""
+are in its machine's secrets, and the parts it ships with are installed from the image at boot. A self-hosted one
+(`self`) is a hosted one its owner runs: the same, at the one exact host it is given, with Glyphh's server as the
+default and, air-gapped, no link at all."""
 
 from __future__ import annotations
 
@@ -14,6 +16,8 @@ from pathlib import Path
 from rrotord.errors import RrotorError
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+MODES = ("local", "hosted", "self", "doorman")
+SERVER = "https://api.glyphh.ai"  # Glyphh's server: a self-hosted rrotor's default
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +38,14 @@ class Config:
     public_domain: str = "glyphh.app"  # hosted and doorman: the runtimes' addresses are <machine>.<domain>
     machine_id: str | None = None  # hosted: this machine's id (Fly's FLY_MACHINE_ID), its own address
     keys_sha256: tuple[str, ...] = ()  # hosted: the runtime keys' SHA-256s at first; the Cloud's list after
-    public_host: str | None = None  # hosted, development: this exact Host instead of <machine>.<domain> (an ngrok name)
+    public_host: str | None = None  # self (and hosted in development): the one exact Host it answers at
+    link: bool = True  # off: no link and no heartbeat (air-gapped, self), the offline licence alone
+    licence_token: str | None = None  # self: an offline licence, base64url of {payload, signature}
+
+    @property
+    def public(self) -> bool:
+        """Reached by anyone with a key or a Glyphh sign-in, not by a mod on loopback: hosted and self."""
+        return self.mode in ("hosted", "self")
 
     @property
     def link_url(self) -> str:
@@ -44,9 +55,10 @@ class Config:
 def load(env: Mapping[str, str] | None = None) -> Config:
     env = os.environ if env is None else env
     mode = env.get("RROTOR_MODE", "local")
-    if mode not in ("local", "hosted", "doorman"):
-        raise RrotorError("RROTOR_MODE must be local, hosted or doorman.", code="E_CONFIG")
-    server = env.get("RROTOR_SERVER", "http://doorman.invalid" if mode == "doorman" else "")
+    if mode not in MODES:
+        raise RrotorError("RROTOR_MODE must be local, hosted, self or doorman.", code="E_CONFIG")
+    default = {"doorman": "http://doorman.invalid", "self": SERVER}.get(mode, "")
+    server = env.get("RROTOR_SERVER") or default
     if not re.match(r"^https?://[^/\s]+$", server.rstrip("/")):
         raise RrotorError("RROTOR_SERVER must be the Glyphh server's address, http(s)://host[:port].", code="E_CONFIG")
     digest = env.get("RROTOR_LOCAL_TOKEN_SHA256") or None
@@ -57,8 +69,22 @@ def load(env: Mapping[str, str] | None = None) -> Config:
     runtime_id, runtime_token = env.get("RROTOR_RUNTIME_ID") or None, env.get("RROTOR_RUNTIME_TOKEN") or None
     if mode == "hosted" and (runtime_id is None) != (runtime_token is None):
         raise RrotorError("A hosted rrotor takes RROTOR_RUNTIME_ID and RROTOR_RUNTIME_TOKEN together.", code="E_CONFIG")
+    if mode == "self" and (runtime_id is None or runtime_token is None):
+        raise RrotorError(
+            "A self-hosted rrotor needs RROTOR_RUNTIME_ID and RROTOR_RUNTIME_TOKEN (from registering it on the "
+            "platform).",
+            code="E_CONFIG",
+        )
     machine_id = env.get("RROTOR_MACHINE_ID") or env.get("FLY_MACHINE_ID") or None
     public_host = (env.get("RROTOR_PUBLIC_HOST") or "").strip().lower().rstrip(".") or None
+    if mode == "self" and (public_host is None or not re.match(r"^[0-9a-z.-]+$", public_host)):
+        raise RrotorError(
+            "A self-hosted rrotor needs RROTOR_PUBLIC_HOST: the exact host it answers at (rrotor.example.com).",
+            code="E_CONFIG",
+        )
+    link = env.get("RROTOR_LINK", "on").strip().lower()
+    if link not in ("on", "off"):
+        raise RrotorError("RROTOR_LINK is on or off.", code="E_CONFIG")
     if mode == "hosted" and machine_id is None and public_host is None:
         raise RrotorError(
             "A hosted rrotor needs its machine id (FLY_MACHINE_ID), or RROTOR_PUBLIC_HOST in development.",
@@ -88,4 +114,6 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         machine_id=machine_id.lower() if machine_id else None,
         keys_sha256=keys,
         public_host=public_host,
+        link=link == "on",
+        licence_token=(env.get("RROTOR_LICENCE") or "").strip() or None,
     )
