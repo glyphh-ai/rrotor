@@ -37,6 +37,7 @@ What rrotor reads in `self` mode. Each package sets these for you.
 | `RROTOR_SERVER` | no, default `https://api.glyphh.ai` | The Glyphh server |
 | `RROTOR_LICENCE` | no | An offline licence token, for air-gapped use. Also read from `/data/licence.token`, or handed in with `PUT /v1/licence` |
 | `RROTOR_LINK` | no, default `on` | `off` for air-gapped: no link and no heartbeat; rrotor runs on the offline licence alone |
+| `RROTOR_KEYS_SHA256` | air-gapped | The SHA-256 of each runtime key that may call it, comma-separated (`printf %s "$KEY" \| sha256sum`). With the link on, the keys come down the link and this is not needed. With the link off there is no Glyphh sign-in either: runtime keys are the only way in |
 | `RROTOR_DATA` | no, default `/data` | The persistent volume. One rrotor writes it, never two |
 
 rrotor listens on port **7777**, plain HTTP: TLS is ended in front of it (Caddy, an Ingress, a load balancer), which

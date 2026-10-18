@@ -26,6 +26,9 @@ runtime:
   token: ""
   # An offline licence token (air-gapped). Optional.
   licence: ""
+  # Air-gapped: the SHA-256 of each runtime key that may call it (printf %s "$KEY" | sha256sum). With the link on, the
+  # keys come down the link instead. Not secret: hashes only.
+  keysSha256: []
 existingSecret: ""
 
 # small: shared 1 CPU, 1 GiB, 3 GiB disk; medium: 2 CPU, 4 GiB, 10 GiB; large: 2 CPU, 8 GiB, 20 GiB.

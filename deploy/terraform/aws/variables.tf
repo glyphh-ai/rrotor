@@ -27,6 +27,17 @@ variable "offline_licence" {
   sensitive   = true
 }
 
+variable "runtime_keys_sha256" {
+  description = "Air-gapped: the SHA-256 of each runtime key that may call it. With the link on, the keys come down the link."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for k in var.runtime_keys_sha256 : can(regex("^[0-9a-f]{64}$", k))])
+    error_message = "Each runtime_keys_sha256 entry is 64 lowercase hex digits."
+  }
+}
+
 variable "rrotor_version" {
   description = "The image version, ghcr.io/glyphh-ai/rrotor:<version>. Pin a release in production."
   type        = string

@@ -26,6 +26,7 @@ locals {
       cpus          = local.size.cpus
       memory        = local.size.memory
       licence       = var.offline_licence
+      keys          = join(",", var.runtime_keys_sha256)
     }))
     data_device = "/dev/disk/by-id/google-rrotor-data"
   })

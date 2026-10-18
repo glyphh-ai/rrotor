@@ -74,6 +74,10 @@ spec:
                   name: {{ include "rrotor.secretName" . }}
                   key: RROTOR_LICENCE
                   optional: true
+            {{- with .Values.runtime.keysSha256 }}
+            - name: RROTOR_KEYS_SHA256
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
