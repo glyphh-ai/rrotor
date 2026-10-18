@@ -29,6 +29,16 @@ async def test_a_licence_is_handed_in_and_shown(api):
     assert (status, body["error"]["code"]) == (400, "E_LICENCE")
 
 
+async def test_the_licences_features_are_shown_in_the_licence_and_the_health(api):
+    features = {"sync": True, "ha": False, "offline": False, "sso": False}
+    status, body = await send(api, "PUT", "/v1/licence", json=keys().licence(["ada"], features=features))
+    assert (status, body["licence"]["features"]) == (200, features)
+    status, body = await send(api, "GET", "/v1/licence")
+    assert body["licence"]["features"] == features
+    status, body = await send(api, "GET", "/v1/health")
+    assert body["licence"]["features"] == features
+
+
 async def test_an_offline_licence_is_handed_in_as_its_token_and_the_health_says_its_state(api):
     offline = keys().licence(["ada"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline")
     status, body = await send(api, "PUT", "/v1/licence", data=keys().token(offline) + "\n")
