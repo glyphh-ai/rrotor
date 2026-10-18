@@ -8,12 +8,14 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from rrotor.ctx import RunState
+from rrotord import precedents
 from rrotord.errors import Conflict, NotFound, RrotorError, Unavailable
 from rrotord.licence import Licence
 from rrotord.manifest import check_inputs
@@ -180,7 +182,8 @@ class Runner:
         return bwrap.Mounts(found.src, found.venv, self.sdk, files, socket, data, tuple(part_mounts), tuple(pythonpath))
 
     def _limits(self, found: Version) -> dict[str, Any]:
-        """The plan's limits for the mods whose parts this version uses (the licence's mods.<mod>.limits), merged."""
+        """The plan's limits for the mods whose parts this version uses (the licence's mods.<mod>.limits), merged;
+        with a `precedents` cap, an Ada version also gets `precedents_elsewhere`, the other models' total now."""
         out: dict[str, Any] = {}
         if self.parts is None or self.licence is None or self.licence.payload is None:
             return out
@@ -190,7 +193,19 @@ class Runner:
             entry = mods.get(installed.info.mod) if installed else None
             if isinstance(entry, dict) and isinstance(entry.get("limits"), dict):
                 out.update(entry["limits"])
+        cap = out.get("precedents")
+        if "ada" in found.manifest.needs and isinstance(cap, int) and not isinstance(cap, bool):
+            out["precedents_elsewhere"] = self._elsewhere(found.model)
         return out
+
+    def _elsewhere(self, model: str) -> int:
+        """The precedents the runtime's other Ada models hold now: the plan's cap is on the total, and the model
+        counts its own. A store that does not read counts none (logged)."""
+        try:
+            return precedents.total(self.models, skip=model)
+        except sqlite3.Error as err:
+            log.warning("a precedent store did not read", extra={"model": model, "reason": str(err)})
+            return 0
 
     async def maintain(self, found: Version, op: str) -> dict[str, Any]:
         """rrotor's own work in a version's sandbox (a re-encode on deploy): one call of `op`, its Result."""

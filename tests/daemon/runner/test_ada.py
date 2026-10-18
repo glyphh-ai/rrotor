@@ -142,10 +142,42 @@ async def test_the_licences_limits_reach_the_model(tmp_path, short_dir):
     assert outcome(second)["status"] == "failed" and outcome(second)["data"]["code"] == "E_LIMIT_PRECEDENTS"
     v1 = env.models.active("tickets")
     assert v1 is not None
-    assert env.runner._limits(v1) == {"models": 3, "precedents": 1}
+    assert env.runner._limits(v1) == {"models": 3, "precedents": 1, "precedents_elsewhere": 0}
     lic.payload = None
     assert env.runner._limits(v1) == {}
     lic.payload = {**given["payload"], "mods": {"ada": {"limits": "junk"}}}
     assert env.runner._limits(v1) == {}
     store.remove("ada")
     assert env.runner._limits(v1) == {}
+
+
+async def test_the_cap_is_on_the_runtimes_total_across_its_ada_models(tmp_path, short_dir, caplog):
+    from rrotord.keys import canonical
+
+    env, _ = ada_ready(tmp_path, short_dir)
+    lic = env.runner.licence
+    assert lic is not None
+    given = keys().licence(["ada"])
+    given["payload"]["mods"]["ada"] = {"limits": {"precedents": 2}}
+    given["signature"] = keys().sign(canonical(given["payload"]))
+    lic.set(given["payload"], given["signature"])
+    tickets_version(env.models)
+    data = json.loads((HERE / "glyphh.json").read_text())
+    other = install(env.models, {**data, "name": "triage"}, (HERE / "model.py").read_text(), sha="b" * 40)
+    (other.src / "spec.json").write_text((HERE / "spec.json").read_text())
+    one = {"data": ticket(1, "login fails", "auth", 8), "outcome": "page oncall"}
+    two = {"data": ticket(2, "login slow", "auth", 5), "outcome": "page oncall"}
+    three = {"data": ticket(3, "disk full", "infra", 9), "outcome": "page oncall"}
+    assert outcome(await env.runner.call(model="tickets", function="record", inputs=one))["status"] == "done"
+    assert outcome(await env.runner.call(model="triage", function="record", inputs=two))["status"] == "done"
+    refused = outcome(await env.runner.call(model="tickets", function="record", inputs=three))
+    assert refused["status"] == "failed" and refused["data"]["code"] == "E_LIMIT_PRECEDENTS"
+    assert "across the runtime's Ada models; they hold 2" in refused["data"]["reason"]
+    v1 = env.models.active("tickets")
+    assert v1 is not None and env.runner._limits(v1)["precedents_elsewhere"] == 1
+    (env.models.data("triage") / ada.STORE).write_bytes(b"not a database")
+    assert env.runner._limits(v1)["precedents_elsewhere"] == 0 and "a precedent store did not read" in caplog.text
+    plain = install(env.models, manifest("sample"), "def start(ctx, inputs):\n    return None\n", sha="c" * 40)
+    assert "precedents_elsewhere" not in env.runner._limits(plain)  # not an Ada model
+    lic.payload = {**given["payload"], "mods": {"ada": {"limits": {"precedents": None}}}}
+    assert env.runner._limits(v1) == {"precedents": None}  # unlimited: nothing to count

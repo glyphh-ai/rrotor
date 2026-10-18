@@ -95,21 +95,25 @@ def open(
     model = glyphh_spec.Model(
         spec, k=k, min_sim=min_sim, author=author or ctx.caller, path=str(store), tau=tau, refresh_every=refresh_every
     )
-    _cap(model, ctx.limits.get("precedents"))
+    _cap(model, ctx.limits.get("precedents"), ctx.limits.get("precedents_elsewhere"))
     ctx.ada = model
     return model
 
 
-def _cap(model: Any, precedents: Any) -> None:
-    """The plan's `precedents` limit: a record past it is refused (E_LIMIT_PRECEDENTS); null or absent is unlimited."""
+def _cap(model: Any, precedents: Any, elsewhere: Any) -> None:
+    """The plan's `precedents` limit, on the runtime's total across its Ada models: this model's own, counted live,
+    and the others' (`elsewhere`), as rrotord counted them when the run started. A record that would take the total
+    past it is refused (E_LIMIT_PRECEDENTS); null or absent is unlimited."""
     if not isinstance(precedents, int) or isinstance(precedents, bool):
         return
+    others = elsewhere if isinstance(elsewhere, int) and not isinstance(elsewhere, bool) else 0
     record = model.record
 
     def capped(*args: Any, **kwargs: Any) -> Any:
-        if len(model) >= precedents:
+        held = others + len(model)
+        if held >= precedents:
             raise AdaError(
-                f"This plan allows {precedents} precedents in a model; this one holds {len(model)}.",
+                f"This plan allows {precedents} precedents across the runtime's Ada models; they hold {held}.",
                 code="E_LIMIT_PRECEDENTS",
             )
         return record(*args, **kwargs)
