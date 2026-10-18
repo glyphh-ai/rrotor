@@ -2,7 +2,7 @@
 
 What the Ada mod installs into rrotor: the Ada kernel (`glyphh_kernel.py`,
 `glyphh_spec.py`, `glyphh_nsm.py`, from `glyphh-ai/ada-private`,
-branch `kernel-spec`) and numpy, under `lib/`, mounted read-only at
+branch `main`) and numpy, under `lib/`, mounted read-only at
 `/opt/parts/ada` in a model's sandbox with `lib/` on its `PYTHONPATH`. A model
 whose manifest says `"needs": ["ada"]` imports them as `glyphh_spec` and
 `glyphh_kernel`.

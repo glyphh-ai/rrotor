@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the Ada part for one architecture: the Ada kernel (glyphh_kernel.py, glyphh_spec.py, glyphh_nsm.py,
 # glyphh_lexicon.py and lexicon/, the two seeds every text role reads, from glyphh-ai/ada-private, branch
-# kernel-spec) and numpy, under lib/, with part.json at the top; then
+# main) and numpy, under lib/, with part.json at the top; then
 # scripts/part.py signs it with Glyphh's release key (RROTOR_RELEASE_KEY) into --out.
 #
 #   parts/ada/build.sh --arch amd64|arm64 --kernel <checkout of ada-private> --out <dir>
