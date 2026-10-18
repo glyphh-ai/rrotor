@@ -1,5 +1,5 @@
 # rrotor's checks on every push and pull request: lint, types, the tests with the 100% coverage gate, the sample
-# model's tests, the image with the sandbox tests inside it, and the WSL root filesystem.
+# model's tests, the image with the sandbox tests inside it, the WSL root filesystem, and the self-hosting packages.
 # On main, with the repository variable PUBLISH_IMAGES set to true, the image is pushed to ghcr.io/glyphh-ai/rrotor
 # (multi-arch) and their digests reported. It is off until the GHCR package lets this repository write to it (an org
 # admin: the package's settings, Manage Actions access, glyphh-ai/rrotor with the Write role).
@@ -34,6 +34,45 @@ jobs:
         run: uv run pytest
       - name: The sample models' tests
         run: uv run pytest examples/daily_sales/tests examples/ada_tickets examples/ada_incidents -o addopts="" -p no:cacheprovider --import-mode=importlib
+
+  # The self-hosting packages (deploy/, docs/self-hosting/): each is checked as written, nothing is started.
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker Compose, and the air-gapped overlay, from .env.example
+        working-directory: deploy/compose
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          echo RROTOR_LICENCE=example >> .env
+          docker compose -f docker-compose.yml -f docker-compose.airgap.yml config -q
+      - name: The Caddyfiles parse
+        working-directory: deploy/compose
+        run: |
+          for f in Caddyfile Caddyfile.airgap; do
+            docker run --rm -e RROTOR_PUBLIC_HOST=rrotor.example.com -v "$PWD/$f:/etc/caddy/Caddyfile:ro" \
+              caddy:2 caddy adapt --config /etc/caddy/Caddyfile >/dev/null
+          done
+      - uses: azure/setup-helm@v4
+      - name: The Helm chart lints and renders, with each set of CI values
+        working-directory: deploy/helm/rrotor
+        run: |
+          for f in ci/*.yaml; do
+            helm lint . --strict -f "$f"
+            helm template rrotor . -f "$f" >/dev/null
+          done
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: The Terraform modules and their examples are formatted and valid
+        working-directory: deploy/terraform
+        run: |
+          terraform fmt -recursive -check
+          for d in aws aws/examples/basic gcp gcp/examples/basic; do
+            terraform -chdir="$d" init -backend=false -input=false >/dev/null
+            terraform -chdir="$d" validate
+          done
 
   image:
     runs-on: ubuntu-24.04
