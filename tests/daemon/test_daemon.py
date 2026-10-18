@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
@@ -15,11 +16,13 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 import rrotor
-from rrotord import daemon
+from rrotor import ada
+from rrotord import daemon, precedents
 from rrotord.config import Config
 from rrotord.daemon import Daemon
 from rrotord.errors import RrotorError
 from rrotord.link.credentials import digest
+from rrotord.manifest import Manifest
 from rrotord.runner.launch import SandboxLauncher
 from rrotord.runner.record import Run
 from rrotord.sandbox.probe import Layers
@@ -225,6 +228,19 @@ async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged
 TOKEN = "tok_" + "b" * 20
 
 
+def model(d: Daemon, name: str, rows: int) -> None:
+    """An Ada model's version recorded, its store holding `rows` precedents."""
+    found = {"name": name, "functions": {"start": {}}, "needs": ["ada"], "data": True}
+    d.runner.models.record(name, 1, "a" * 40, Manifest.model_validate(found))
+    path = d.runner.models.data(name) / ada.STORE
+    path.parent.mkdir(parents=True)
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE precedents (id TEXT PRIMARY KEY)")
+    db.executemany("INSERT INTO precedents VALUES (?)", [(f"p{i}",) for i in range(rows)])
+    db.commit()
+    db.close()
+
+
 def hosted_daemon(tmp_path: Path, short_dir: Path, runtime_token: str | None = TOKEN) -> Daemon:
     c = Config(
         tmp_path / "data",
@@ -247,6 +263,7 @@ def hosted_daemon(tmp_path: Path, short_dir: Path, runtime_token: str | None = T
 
 async def test_usage_is_owed_as_one_numbered_message_and_the_counts_start_again(tmp_path, short_dir):
     d = hosted_daemon(tmp_path, short_dir)
+    d.precedents.reported = 0  # the start's total already gone up
     await d.report_usage()
     assert d.link.outbox.pending == [] and d.link.outbox.seq == 0  # idle: nothing owed
     d.access.usage.count("a" * 64)
@@ -262,10 +279,36 @@ async def test_usage_is_owed_as_one_numbered_message_and_the_counts_start_again(
             {"key_sha256": "a" * 64, "calls": 2, "last_used_at": owed["keys"][0]["last_used_at"]},
             {"key_sha256": "b" * 64, "calls": 1, "last_used_at": owed["keys"][1]["last_used_at"]},
         ],
+        "precedents": 0,
     }
     assert d.access.usage.counts == {}
     await d.report_usage()
     assert len(d.link.outbox.pending) == 1 and d.link.outbox.seq == 1
+
+
+async def test_the_precedents_go_up_once_after_a_start_then_when_they_change(tmp_path, short_dir, monkeypatch):
+    d = hosted_daemon(tmp_path, short_dir)
+    model(d, "tickets", 2)
+    await d.report_usage()
+    [first] = d.link.outbox.pending
+    assert (first["seq"], first["keys"], first["precedents"]) == (1, [], 2)
+    await d.report_usage()
+    assert len(d.link.outbox.pending) == 1  # unchanged: nothing more owed
+    model(d, "incidents", 3)
+    monkeypatch.setattr(d.precedents, "read_at", -precedents.READ_EVERY)  # nine minutes on
+    await d.report_usage()
+    assert [(m["seq"], m["precedents"]) for m in d.link.outbox.pending] == [(1, 2), (2, 5)]
+    d.link.outbox.ack(first["id"])
+    assert [m["seq"] for m in d.link.outbox.pending] == [2]  # kept until acknowledged, like any usage
+
+
+async def test_calls_go_up_without_the_precedents_while_no_store_has_read(tmp_path, short_dir, monkeypatch):
+    d = hosted_daemon(tmp_path, short_dir)
+    monkeypatch.setattr(d.precedents, "count", lambda: None)
+    d.access.usage.count("a" * 64)
+    await d.report_usage()
+    [owed] = d.link.outbox.pending
+    assert owed["keys"][0]["calls"] == 1 and "precedents" not in owed
 
 
 async def test_no_usage_is_owed_without_a_runtime_token(tmp_path, short_dir):
