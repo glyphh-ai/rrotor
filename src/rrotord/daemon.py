@@ -34,7 +34,7 @@ from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
 from rrotord.runner.record import Records
-from rrotord.sandbox.probe import Layers, probe
+from rrotord.sandbox.probe import Layers, container_needs, probe
 
 log = logging.getLogger("rrotor")
 EXPIRE_EVERY = 30.0
@@ -58,6 +58,9 @@ class Daemon:
 
     def __post_init__(self) -> None:
         c = self.config
+        if c.mode == "self" and self.layers.checks.get("bubblewrap", {}).get("ok") is False:
+            self.layers.needs = container_needs()  # its owner runs the container: say what it lacks
+            log.warning("bwrap cannot start: the container lacks", extra={"needs": self.layers.needs})
         models = Models(c.data)
         self.deployer = Deployer(models, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)

@@ -22,6 +22,7 @@ from rrotord.errors import RrotorError
 from rrotord.link.credentials import digest
 from rrotord.runner.launch import SandboxLauncher
 from rrotord.runner.record import Run
+from rrotord.sandbox.probe import Layers
 from tests.fakes import LocalLauncher, keys, part_archive, ready
 
 
@@ -376,3 +377,16 @@ async def test_a_self_hosted_daemon_starts_its_heartbeat_with_the_link(tmp_path,
     d.heartbeat.run = run  # type: ignore[method-assign,union-attr]
     await d.serve(stop)
     assert started == [1]
+
+
+def test_a_self_hosted_daemon_whose_bwrap_cannot_start_says_what_the_container_lacks(tmp_path, short_dir, caplog):
+    failed = Layers({"bubblewrap": {"ok": False, "detail": "bwrap cannot make its namespaces here"}})
+    c = self_daemon(tmp_path, short_dir).config
+    with caplog.at_level("WARNING", logger="rrotor"):
+        d = Daemon(c, failed, launcher=LocalLauncher())
+    assert d.layers.needs and d.services().layers.to_json()["container_needs"] == d.layers.needs
+    assert "the container lacks" in caplog.text
+    hosted = Layers({"bubblewrap": {"ok": False, "detail": "x"}})
+    Daemon(dataclasses.replace(c, mode="hosted", data=tmp_path / "h"), hosted, launcher=LocalLauncher())
+    assert hosted.needs == [] and "container_needs" not in hosted.to_json()
+    assert Daemon(dataclasses.replace(c, data=tmp_path / "ok"), ready(), launcher=LocalLauncher()).layers.needs == []

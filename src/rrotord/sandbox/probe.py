@@ -1,5 +1,6 @@
 """Every sandbox layer checked at start; a layer that cannot work makes rrotor refuse runs, saying which and why.
-Nothing is skipped silently (docs/architecture.md, section 4)."""
+Nothing is skipped silently (docs/architecture.md, section 4). When bwrap cannot start, what the container lacks is
+read from /proc and said plainly (a self-hosted rrotor's health carries it)."""
 
 from __future__ import annotations
 
@@ -17,10 +18,45 @@ from rrotord.sandbox.seccomp import Filter
 
 Runner = Callable[..., Awaitable[Done]]
 
+# What bwrap needs of the container, and how to give it.
+NEEDS = {
+    "seccomp": "seccomp unconfined: the container runs under a seccomp profile, which stops bwrap making its "
+    "namespaces (Docker: --security-opt seccomp=unconfined; Kubernetes: seccompProfile type Unconfined)",
+    "apparmor": "AppArmor unconfined: the container runs under an AppArmor profile, which stops bwrap mounting "
+    "(Docker: --security-opt apparmor=unconfined; Kubernetes: appArmorProfile type Unconfined)",
+    "proc": "/proc unmasked: parts of /proc are masked or read-only, so bwrap cannot mount a /proc of its own "
+    "(Docker: --security-opt systempaths=unconfined; Kubernetes: procMount Unmasked)",
+    "userns": "unprivileged user namespaces: the host restricts them through AppArmor (Ubuntu 23.10 and later), so "
+    "bwrap cannot bring up its network; on the host: sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
+}
+
+
+def read(path: Path) -> str:
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def container_needs(reader: Callable[[Path], str] = read) -> list[str]:
+    """What this container lacks for bwrap, as /proc shows it; every need when none of them shows."""
+    status = reader(Path("/proc/self/status"))
+    profile = reader(Path("/proc/self/attr/current")).strip().rstrip("\x00").strip()
+    mounts = [line.split()[1] for line in reader(Path("/proc/self/mounts")).splitlines() if len(line.split()) > 1]
+    lacks = {
+        "seccomp": any(line.split() == ["Seccomp:", "2"] for line in status.splitlines()),
+        "apparmor": profile not in ("", "unconfined"),
+        "proc": any(m.startswith("/proc/") for m in mounts),
+        "userns": reader(Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")).strip() == "1",
+    }
+    found = [NEEDS[k] for k, lacking in lacks.items() if lacking]
+    return found or list(NEEDS.values())
+
 
 @dataclass(slots=True)
 class Layers:
     checks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    needs: list[str] = field(default_factory=list)  # what the container lacks for bwrap, when it cannot start
 
     @property
     def ready(self) -> bool:
@@ -30,6 +66,8 @@ class Layers:
         return "; ".join(f"{k}: {c['detail']}" for k, c in self.checks.items() if not c["ok"])
 
     def to_json(self) -> dict[str, Any]:
+        if self.needs:
+            return {"ready": self.ready, "layers": self.checks, "container_needs": self.needs}
         return {"ready": self.ready, "layers": self.checks}
 
 
@@ -71,7 +109,8 @@ async def probe(
             else {
                 "ok": False,
                 "detail": f"bwrap cannot make its namespaces here ({done.why(300)}); a container needs "
-                "--security-opt seccomp=unconfined --security-opt systempaths=unconfined",
+                "--security-opt seccomp=unconfined --security-opt systempaths=unconfined "
+                "--security-opt apparmor=unconfined",
             }
         )
 
