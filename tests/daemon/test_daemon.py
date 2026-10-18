@@ -348,3 +348,15 @@ async def test_a_self_hosted_daemon_links_and_introspects_unless_its_link_is_off
     stop.set()
     await off.serve(stop)
     assert off.link.outbox.pending == []  # nothing owed to a Cloud it never reaches
+
+
+def test_an_offline_licence_in_the_environment_is_read_at_boot(tmp_path, short_dir):
+    d = self_daemon(tmp_path, short_dir, link=False)
+    runtime_id = d.config.runtime_id
+    offline = keys().licence(["ada"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline")
+    own = keys().licence(["ada"], runtime_id=runtime_id, kind="offline", licence_id="own")
+    c = dataclasses.replace(d.config, data=tmp_path / "booted", licence_key=keys().public_text)
+    booted = Daemon(dataclasses.replace(c, licence_token=keys().token(offline)), ready(), launcher=LocalLauncher())
+    assert booted.licence.view()["kind"] == "offline"  # type: ignore[index]
+    again = Daemon(dataclasses.replace(c, licence_token=keys().token(own)), ready(), launcher=LocalLauncher())
+    assert again.licence.licence_id == "own" and again.licence.runtime_id == runtime_id

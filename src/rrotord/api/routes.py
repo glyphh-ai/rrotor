@@ -158,9 +158,14 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response({"licence": s.licence.view()})
 
     async def licence_put(request: web.Request) -> web.Response:
-        data = await body(request)
-        s.licence.set(data.get("payload"), data.get("signature"))
-        return web.json_response({"licence": s.licence.view()})
+        """{payload, signature} as the server answered it, {token}, or the offline token itself as the body."""
+        text = (await request.text()).strip()
+        try:
+            sent = json.loads(text)
+        except json.JSONDecodeError:
+            sent = text
+        kept = s.licence.take(sent)
+        return web.json_response({"licence": s.licence.view(), "kept": kept})
 
     async def resource_metadata(request: web.Request) -> web.Response:
         """RFC 9728: this runtime as an OAuth protected resource, and Glyphh as the server that signs a client in."""

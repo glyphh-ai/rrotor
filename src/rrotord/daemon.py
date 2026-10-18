@@ -59,7 +59,8 @@ class Daemon:
         models = Models(c.data)
         self.deployer = Deployer(models, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
-        self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None)
+        self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None, c.runtime_id)
+        self.licence.load(c.licence_token)
         self.access = Access(c.data, c.keys_sha256)
         self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
         self.runner = Runner(
