@@ -1,8 +1,8 @@
 # rrotor
 
 The runtime a person's Ada models run in: one locked-down, headless Linux image that deploys a model by commit, runs
-each call in a sandbox, and answers over REST and MCP at its own address. Hosted by Glyphh at
-`https://<machine>.glyphh.app/mcp`, or self-hosted at `https://<host>/mcp`; either is added to Claude as a
+each call in a sandbox, and answers over REST and MCP at its own address. Customers run it themselves, at `https://<host>/mcp`
+([self-hosting](docs/self-hosting/README.md)); Glyphh-run hosting is off. It is added to Claude as a
 connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh` SDKs (`glyphh-ai/glyphh`). Image:
 `ghcr.io/glyphh-ai/rrotor`.
 

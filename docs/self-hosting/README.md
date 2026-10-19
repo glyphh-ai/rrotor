@@ -1,13 +1,28 @@
 # Self-hosting rrotor
 
-rrotor is the runtime your Ada models run in ([architecture](../architecture.md)). Glyphh hosts it on Pro, Team
-and Enterprise; you can also run it yourself, on your own machine, cluster or cloud account, at your own address,
-on every plan, free and with no limit on runtimes or precedents. It is the same image either way,
+rrotor is the runtime your Ada models run in ([architecture](../architecture.md)). You run it yourself, on your own
+machine, cluster or cloud account, at your own address; Glyphh does not host it. It is one image,
 `ghcr.io/glyphh-ai/rrotor:<version>` (and `:latest`), with the Ada part built in; the licence, not the image, says
 whether Ada runs.
 
 A self-hosted rrotor is **one box**: one container, one `/data`, one public host. There is no high availability and
 no autoscaling; a second copy of the same runtime is not a replica, it takes the link over from the first.
+
+## The plans
+
+| | Free | Pro, $99/month | Team, $299/month | Enterprise, by contract |
+|---|---|---|---|---|
+| Nodes in one cluster | 1 | 3 | 10 | unlimited |
+| Precedents per node, across its models | 5,000 | 50,000 | 500,000 (TBD) | unlimited |
+| Sync between nodes | no | yes | yes | yes, with high availability |
+| Air-gapped | no | optional | optional | yes |
+| Audit log | no | no | no | yes |
+
+**Not built yet:** the signed licence key that carries these limits, the node and precedent caps on a self-hosted
+rrotor, and clusters (several nodes as one runtime, sync, a head, high availability, audit logs, log drains). Today
+a self-hosted rrotor is one box, licensed as [Licensing](#licensing) says, with no precedent cap. The decided design
+is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
+server's (`glyphh-ai/server`, `docs/architecture.md`).
 
 ## The three ways
 
@@ -84,10 +99,11 @@ and what the heartbeat carries, is in [licensing.md](licensing.md).
 
 ## Licensing
 
-One signed licence, by one of three paths: the **link** (a 24 hour licence on each connect), the **heartbeat** (a
+What is built today: one signed licence, by one of three paths: the **link** (a 24 hour licence on each connect), the **heartbeat** (a
 small HTTPS call every 24 hours, for networks that block WebSockets), or **offline** (a licence of up to a year,
 for air-gapped networks). Each holds for 14 days past its expiry. The exact heartbeat, and what is never sent, are
-in [licensing.md](licensing.md).
+in [licensing.md](licensing.md). The licence key that replaces it is not built yet
+([`specs/licensing.md`](../specs/licensing.md)).
 
 ## Upgrades
 

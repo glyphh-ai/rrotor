@@ -4,8 +4,8 @@ rrotor is the runtime a person's Ada models run in: one headless Linux image tha
 each call in a sandbox with no network but the hosts it declares, and answers over REST and MCP at its own address.
 This document is how its parts work and call each other. The system around it (accounts, plans, the data model,
 provisioning) is in `glyphh-ai/server`, `docs/architecture.md`; running your own is in
-[`self-hosting/`](self-hosting/README.md). What is decided but not built is in [Not built yet](#not-built-yet) and
-nowhere else.
+[`self-hosting/`](self-hosting/README.md). What is decided but not built is in [Not built yet](#not-built-yet), with its build specs in
+[`specs/`](specs/), and nowhere else.
 
 ## 1. The parts
 
@@ -18,7 +18,7 @@ nowhere else.
 | **The platform** | `https://platform.glyphh.ai`: where a person makes and starts machines, makes runtime keys, registers a self-hosted runtime and issues an offline licence |
 | **Fly** | Hosts the hosted machines: one app, `*.glyphh.app`, a machine and a volume per runtime, and the doorman |
 
-One image, five modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
+One image, four modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
 
 | Mode | Where | Reached at | Callers authenticate with |
 |---|---|---|---|
@@ -30,6 +30,11 @@ One image, five modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
 rrotor has no sign-in of its own and nothing to log into. It connects out to the server (the link, [6](#6-the-link-protocol-1));
 the server never connects in. A call goes from the caller to the runtime and back: nothing of Glyphh's sees its
 inputs or its answer.
+
+**Glyphh-run hosting is off.** The server's `GLYPHH_HOSTING` flag (default off) decides whether it makes hosted
+machines; `hosted` and `doorman` stay in the code, used only if Glyphh turns it on ([3](#3-hosted-machines)).
+Customers run rrotor themselves, in `self` mode at their own address ([12](#12-self-hosting),
+[`self-hosting/`](self-hosting/README.md)).
 
 ## 2. A model, end to end
 
@@ -118,6 +123,8 @@ sequenceDiagram
   ledger.
 
 ## 3. Hosted machines
+
+Built, and off while the server's `GLYPHH_HOSTING` is off ([1](#1-the-parts)).
 
 A person's hosted runtimes are machines on Fly, made and run from the platform (or the Glyphh connector's
 `create_runtime` and `start_runtime`), each named and of a size (small, medium, large). The server makes them; the
@@ -498,6 +505,7 @@ def query(ctx, inputs):
   would pass the cap. Nothing is counted on the hot path, so runs of different models at the same time can
   overshoot by what they record meanwhile; the next run of each is refused. A store that does not read counts none
   (logged).
+  The key's per-node cap and its `limit_exceeded` answer replace this: [Not built yet](#not-built-yet).
 - **Size:** about 16 KB of RAM per precedent.
 - **The examples,** each with its tests on `rrotor.testing.Harness` and the kernel in `tests/kernel/`:
   `examples/ada_incidents/` (an app's incidents: the fix for a new error, and the nearest precedent's cause, owner
@@ -528,6 +536,8 @@ payload: `user_id`, `org_id`, `install_id` (null), `plan`, `limits` (`machines`)
   `E_NOT_IN_PLAN` ("the licence has expired"); everything else is served, and the link and the heartbeat keep
   trying to renew. With no licence, the same refusal says so; a mod the licence does not name is "not in the plan".
 - **Features** are shown in `GET /v1/licence` and the health; nothing acts on them yet.
+- **Decided to replace it:** the signed licence key with Community by default
+  ([`specs/licensing.md`](specs/licensing.md), [Not built yet](#not-built-yet)).
 
 ## 10. Parts
 
@@ -583,6 +593,8 @@ container's privileges, the outbound connections, backups and upgrades are in
   health as `sandbox.container_needs`, one sentence each with the fix. Runs are refused until it is fixed; the API
   is served.
 - **Never paused:** a `pause` is ignored in `self` mode.
+- **One box:** several nodes as one runtime, with a head, are decided and specified in
+  [`specs/cluster.md`](specs/cluster.md) ([Not built yet](#not-built-yet)).
 
 ## Not built yet
 
@@ -590,9 +602,29 @@ container's privileges, the outbound connections, backups and upgrades are in
   logged and skipped).
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a model's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
-- **Precedent-store sync across instances, and high availability:** a self-hosted rrotor is one box; a second copy
-  of the same runtime takes the link over from the first. The licence's `sync` and `ha` features gate them when
-  they are built.
-- **SSO and SAML, roles (RBAC) and audit logs** (the licence's `sso` feature).
-- **Programs:** coding-agent CLIs run on the runtime.
-- **The gateway.**
+- **The licence key** ([`specs/licensing.md`](specs/licensing.md)): `<base64url payload>.<base64url signature>`,
+  Ed25519, the public key in the code, payload `{license_id, tier, max_nodes, max_precedents,
+  cluster_sync_enabled, issued_at, expires_at, customer_id}`, read from `GLYPHH_LICENSE_KEY` or
+  `/etc/rrotor/license.key` (`RROTOR_LICENCE` and `/data/licence.token` as aliases), the heartbeat and the link. No
+  key, or a bad one: **Community** (1 node, 5,000 precedents, no sync), logged, never a fatal start; expired: 14
+  days' grace, then Community. Keys expire at the end of the paid month and the next arrives at the heartbeat. The
+  plans: Free $0 (1 node, 5,000), Pro $99/month (3, 50,000), Team $299/month (10, 500,000), Enterprise by contract
+  (unlimited, HA, the audit log). It replaces [9](#9-the-licence)'s licence; Ada runs with no key.
+- **The precedent cap per node** ([`specs/licensing.md`](specs/licensing.md#2-the-precedent-cap)): `max_precedents`
+  across a node's Ada models; over it a record answers `{"status": "limit_exceeded", "message": …, "indexed":
+  false}`, never a failure; nothing is deleted after a downgrade.
+- **Clusters: sync, a head and HA** ([`specs/cluster.md`](specs/cluster.md)): N nodes of one runtime behind the
+  customer's load balancer. With the key's sync on, one node is the **head**: the single writer of the precedent
+  stores, deployed models, runtime keys and the licence, replicated to followers by an ordered log; it holds the
+  link and the cluster's drain. Reads are local on every node. `max_nodes` is enforced at join. Pro and Team fail
+  over by restart or by hand; Enterprise elects a new head (HA). Today a self-hosted rrotor is one box, and a
+  second copy of the same runtime takes the link over from the first.
+- **Audit logs** (Enterprise) **and log drains** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains)):
+  logs, metrics, traces and audit events stay on the rrotor by default; a drain streams them by OTLP to the
+  customer's own collector, never via Glyphh; opt-in server-side logging sends them to Glyphh, with a plain warning.
+  Inputs and outputs are never sent unless the customer turns that on, and then only to their own drain.
+- **SSO and SAML, roles (RBAC)** (the licence's `sso` feature).
+- **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
+  ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
+- **The gateway:** models behind OpenAI- and Anthropic-compatible endpoints, configured at the head
+  ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
