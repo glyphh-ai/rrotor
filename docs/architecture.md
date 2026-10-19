@@ -406,7 +406,9 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 ## 7. The API
 
 One API, REST and MCP, behind one gate (`api/gate.py`). Refusals are `{"error": {"code", "message"}}` with a
-stable code.
+stable code. What changes the runtime itself (`PUT /v1/runtime/token`, `POST /v1/parts`, `DELETE /v1/parts/{name}`,
+`PUT /v1/licence`) answers only on a local rrotor; hosted and self-hosted it is 403 `E_LOCAL_ONLY`, whoever calls:
+those take their token, parts and licence from their environment, their image and Glyphh.
 
 **The gate, by mode:**
 
@@ -437,9 +439,9 @@ stable code.
 | `GET /v1/runs/{id}` | Status, function, times, seconds, the last `Result` |
 | `GET /v1/runs/{id}/log` | The run's log lines |
 | `GET /v1/approvals` | Runs waiting for approval: run, model, step, prompt, when |
-| `GET /v1/parts`, `POST /v1/parts`, `DELETE /v1/parts/{name}` | The parts installed; install one (`{name, version, sha256, signature, archive \| url}`); remove one ([10](#10-parts)) |
-| `GET /v1/licence`, `PUT /v1/licence` | The licence held; hand one in as `{payload, signature}`, `{token}` or the offline token as the body; `kept: false` when the one held lives longer ([9](#9-the-licence)) |
-| `PUT /v1/runtime/token` | `{runtime_id, token}`: a runtime token handed in (a local runtime's way to get one); kept in `/data/runtime.json`, and the link reconnects with it |
+| `GET /v1/parts`, `POST /v1/parts`, `DELETE /v1/parts/{name}` | The parts installed; install one (`{name, version, sha256, signature, archive \| url}`); remove one ([10](#10-parts)); installing and removing are local only |
+| `GET /v1/licence`, `PUT /v1/licence` | The licence held; hand one in as `{payload, signature}`, `{token}` or the offline token as the body; `kept: false` when the one held lives longer ([9](#9-the-licence)); handing one in is local only |
+| `PUT /v1/runtime/token` | `{runtime_id, token}`: a runtime token handed in (a local runtime's way to get one); kept in `/data/runtime.json`, and the link reconnects with it; local only |
 
 **MCP:** `POST /mcp`, Streamable HTTP, stateless, one JSON-RPC message per POST; MCP 2026-07-28 (`server/discover`,
 each request's `_meta` naming the version) and the `initialize` revisions 2025-11-25, 2025-06-18 and 2025-03-26
@@ -517,7 +519,7 @@ payload: `user_id`, `org_id`, `install_id` (null), `plan`, `limits` (`machines`)
 | `welcome`, on each link connect | `link` | 24 hours; 14 days' grace for a self-hosted runtime |
 | The heartbeat, self-hosted with the link on ([12](#12-self-hosting)) | `heartbeat` | 24 hours, 14 days' grace |
 | An offline token, Enterprise ([12](#12-self-hosting)) | `offline` | Up to 365 days, 14 days' grace |
-| `PUT /v1/licence` | as signed | as signed |
+| `PUT /v1/licence`, local only | as signed | as signed |
 
 - **Refused** if it does not check, or its `runtime_id` names another runtime. Of the valid licences handed in,
   rrotor keeps the one live longest.
@@ -539,7 +541,7 @@ A **part** is what a model needs beside the base. One is built: **ada**, the Ada
 - **Where it comes from:** CI builds the Ada part for both architectures and publishes it as the release
   `part-ada-<kernel version>` (`<name>-<version>-<arch>.tar.gz`, `.sha256`, `.sig`); the published image carries it
   in `/opt/parts-builtin` and installs it at boot, this architecture's only.
-- **Install, upgrade, remove:** `POST /v1/parts` (the archive in base64, or a URL fetched up to 256 MB), `GET
+- **Install, upgrade, remove** (a local rrotor; hosted and self-hosted take the image's): `POST /v1/parts` (the archive in base64, or a URL fetched up to 256 MB), `GET
   /v1/parts`, `DELETE /v1/parts/{name}`. The licence must allow the part's mod. rrotor checks the hash and the
   signature with `RROTOR_RELEASE_PUBLIC_KEY` before it unpacks anything, then `part.json` (the part asked for, this
   architecture, this rrotor); it unpacks to `/data/parts/<name>/<version>/` and switches `current` in one rename, and the older

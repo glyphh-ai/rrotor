@@ -110,10 +110,13 @@ keeps everything running for 15 days on a daily licence (24 hours plus 14 days),
 
 1. On the platform, open the runtime and issue an offline licence for up to 365 days (the API:
    `POST /v1/runtimes/{id}/offline-licence {"days": 365}` answers `{token, expires_at}`).
-2. Carry the token across, and give it to rrotor in one of three ways: the environment `RROTOR_LICENCE`, the file
-   `/data/licence.token`, or `PUT /v1/licence` (the token as the body, `{token}`, or the decoded `{payload, signature}`).
+2. Carry the token across, and give it to rrotor in the environment `RROTOR_LICENCE` or the file
+   `/data/licence.token`, both read when rrotor starts. `PUT /v1/licence` is refused on a self-hosted rrotor
+   (403 `E_LOCAL_ONLY`): anyone with a runtime key could otherwise hand it an older or smaller plan's licence that
+   runs longer, and rrotor would keep it over the daily ones.
 3. Set `RROTOR_LINK=off`. rrotor makes no network request for its licence, or for anything else of Glyphh's.
-4. Before it expires, issue the next one and hand it in the same way; rrotor keeps the one that expires last.
+4. Before it expires, issue the next one, put it in the same place and restart rrotor; it keeps the one that
+   expires last.
 
 An offline licence cannot be called back once issued: it holds until its `expires_at` plus 14 days. Issue shorter
 ones if that matters to you. Rotating the runtime's token on the platform stops the link and the heartbeat for the
