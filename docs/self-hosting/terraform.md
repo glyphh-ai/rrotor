@@ -1,8 +1,9 @@
 # rrotor with Terraform
 
 One VM on AWS or Google Cloud, set up on its first boot to run the Docker Compose package
-([compose.md](compose.md)) with `/data` on a disk of its own. The modules are `deploy/terraform/aws/` and
-`deploy/terraform/gcp/`, each with a usage example in `examples/basic/`.
+([compose.md](compose.md)) with `/data` on a disk of its own; or, with `node_count`, a [cluster](#a-cluster) of
+them behind the cloud's load balancer. The modules are `deploy/terraform/aws/` and `deploy/terraform/gcp/`, each with
+usage examples in `examples/basic/` and `examples/cluster/`.
 
 ## What each makes
 
@@ -72,14 +73,38 @@ Both modules: `public_host`, `runtime_id`, `runtime_token` (required); `license_
 (default `latest`; pin one), `server`, `size`, `data_disk_gb`, `ingress_cidrs` (default anywhere: port 80 must stay
 reachable by Let's Encrypt), and `name` for the resources. AWS adds `vpc_id`, `subnet_id`, `vpc_cidr`,
 `instance_type`, `route53_zone_id` and `tags`; Google Cloud adds `project`, `region`, `zone`, `network`,
-`subnetwork`, `subnetwork_cidr`, `machine_type`, `dns_managed_zone`, `allow_iap_ssh` and `labels`. Each variable's
-description is in the module's `variables.tf`.
+`subnetwork`, `subnetwork_cidr`, `machine_type`, `dns_managed_zone`, `allow_iap_ssh` and `labels`. A cluster
+([below](#a-cluster)): `node_count` (default 1) and `cluster_secret` in both; AWS adds `subnet_ids` and
+`certificate_arn`, Google Cloud `zones`. Each variable's description is in the module's `variables.tf`.
 
 Logs, audit and drains ([README](README.md#logs-audit-and-drains)), in both modules: `otel_endpoint` (your
 OpenTelemetry collector, `OTEL_EXPORTER_OTLP_ENDPOINT`; empty, no drain), `otel_headers` (sensitive,
 `OTEL_EXPORTER_OTLP_HEADERS`), `otel_resource_attributes`, `server_logs` (default `false`: `RROTOR_SERVER_LOGS`),
-`log_payloads` (default `false`) and `audit_retention_days` (default `90`). Each is written to the VM's `.env`; any
-other setting can be added there.
+`log_payloads` (default `false`), `audit_retention_days` (default `90`) and, for a cluster, `drain_at` (default
+`head`: `RROTOR_DRAIN_AT`, the followers' signals exported by the head, so only it needs the egress; `node`, each VM
+exports itself). Each is written to the VM's `.env`; any other setting can be added there.
+
+## A cluster
+
+`node_count` above 1 makes a cluster ([README, A cluster](README.md#a-cluster); a licence key with cluster sync,
+`node_count` at most its `max_nodes`). See `examples/cluster/`.
+
+| | AWS | Google Cloud |
+|---|---|---|
+| The nodes | `node_count` instances, `rrotor-0` the head, spread over up to three zones (a subnet in each, or your `subnet_ids`), each at a fixed private address (`.10`, `.11`, … of its subnet: keep them free in a subnet of yours), each with its own `/data` volume | The same, over `zones` (default the region's first three), each at a reserved internal address |
+| On each | `docker-compose.node.yml` (rrotor alone, no Caddy) with its node id, its address and every peer in `.env` | The same |
+| The secret | `cluster_secret` (sensitive; empty: made), in Secrets Manager; each node reads it at first boot with its role (the AWS CLI from snap), so it is not in the user data | In Secret Manager (the project needs its API on), read with the node's service account |
+| Port 7778 | From the nodes' own security group only | From the nodes' network tag only |
+| In front | A Network Load Balancer: TLS on 443 with an ACM certificate (`certificate_arn`, or made and validated in `route53_zone_id`), to 7777 on each node, health-checking `/readyz`; the nodes take 7777 from it only | Google's external HTTPS load balancer with a managed certificate, to 7777, health-checking `/readyz`; the nodes take 7777 from Google's ranges only. `ingress_cidrs` does not apply: use Cloud Armor |
+| DNS | An alias to the load balancer in `route53_zone_id` | An A record to its address in `dns_managed_zone` |
+| Outbound | Each node has a public address for going out, nothing in | The same, an ephemeral one |
+
+Outputs added: `load_balancer_dns` (AWS), `instance_ids` or `instance_names`, `data_volume_ids` or `data_disks`, and
+`cluster_secret_arn` or `cluster_secret_id`; `public_ip` is the load balancer's on Google Cloud and null on AWS.
+`node_count` 1 is the single VM as before (state from an earlier version moves in place). Any change to the
+first-boot configuration replaces every node at once; to roll it, apply one node at a time
+(`-target='module.rrotor.aws_instance.rrotor[2]'`, the head, `[0]`, last). Growing `node_count` adds nodes but
+changes every node's peers, so it replaces them too: grow a cluster when nothing is running.
 
 ## Where the token lives
 
@@ -87,7 +112,8 @@ The runtime token reaches the VM in its first-boot configuration, so it is in th
 (marked sensitive; keep the state in an encrypted backend with access as tight as the token's), the instance's
 user data or metadata (readable by anyone in the account or project allowed to read the instance's attributes, and
 from inside the VM), and `/opt/rrotor/.env` on the VM (root only). Rotate the token on the platform if any of
-these is exposed, then apply with the new one.
+these is exposed, then apply with the new one. A cluster's secret is in the state too, and in the cloud's secret
+store, not in the user data.
 
 ## Upgrade, back up, remove
 

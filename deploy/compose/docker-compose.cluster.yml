@@ -1,0 +1,74 @@
+# A three-node rrotor cluster on one machine, for trying a cluster, not for high availability: one machine is still
+# one failure (docs/self-hosting/compose.md, "A cluster"). Each node is the rrotor of docker-compose.yml with its
+# own volume and node id; Caddy balances over the ready ones. Needs a licence key with cluster sync, and
+# RROTOR_CLUSTER_SECRET in .env (openssl rand -base64 32).
+#   docker compose -f docker-compose.cluster.yml up -d
+name: rrotor-cluster
+
+x-node: &node
+  extends:
+    file: docker-compose.yml
+    service: rrotor
+x-cluster: &cluster
+  RROTOR_CLUSTER: "on"
+  RROTOR_CLUSTER_PEERS: rrotor-0:7778,rrotor-1:7778,rrotor-2:7778
+  RROTOR_CLUSTER_HEAD: rrotor-0
+  RROTOR_CLUSTER_SECRET: ${RROTOR_CLUSTER_SECRET:?set RROTOR_CLUSTER_SECRET in .env (openssl rand -base64 32)}
+
+services:
+  rrotor-0:
+    <<: *node
+    hostname: rrotor-0
+    environment:
+      <<: *cluster
+      RROTOR_NODE_ID: rrotor-0
+    volumes:
+      - rrotor-0-data:/data
+
+  rrotor-1:
+    <<: *node
+    hostname: rrotor-1
+    environment:
+      <<: *cluster
+      RROTOR_NODE_ID: rrotor-1
+    volumes:
+      - rrotor-1-data:/data
+
+  rrotor-2:
+    <<: *node
+    hostname: rrotor-2
+    environment:
+      <<: *cluster
+      RROTOR_NODE_ID: rrotor-2
+    volumes:
+      - rrotor-2-data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    depends_on:
+      - rrotor-0
+      - rrotor-1
+      - rrotor-2
+    environment:
+      RROTOR_PUBLIC_HOST: ${RROTOR_PUBLIC_HOST:?set RROTOR_PUBLIC_HOST in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile.cluster:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  rrotor-0-data:
+  rrotor-1-data:
+  rrotor-2-data:
+  caddy-data:
+  caddy-config:

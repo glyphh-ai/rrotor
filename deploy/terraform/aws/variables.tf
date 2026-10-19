@@ -87,6 +87,17 @@ variable "server_logs" {
   default     = false
 }
 
+variable "drain_at" {
+  description = "In a cluster (RROTOR_DRAIN_AT): head, the followers' logs, metrics, traces and audit events go by the head, which exports for every node (one egress); node, each node exports itself."
+  type        = string
+  default     = "head"
+
+  validation {
+    condition     = contains(["head", "node"], var.drain_at)
+    error_message = "drain_at is head or node."
+  }
+}
+
 variable "log_payloads" {
   description = "Models' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS=on); never anywhere else."
   type        = bool
@@ -102,6 +113,30 @@ variable "audit_retention_days" {
     condition     = var.audit_retention_days >= 1 && floor(var.audit_retention_days) == var.audit_retention_days
     error_message = "audit_retention_days is a whole number of days, 1 or more."
   }
+}
+
+variable "node_count" {
+  description = "The nodes: 1 is one VM behind Caddy; more is a cluster (a licence key with cluster sync, at most its max_nodes) across zones behind a Network Load Balancer."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.node_count >= 1 && floor(var.node_count) == var.node_count
+    error_message = "node_count is a whole number, 1 or more."
+  }
+}
+
+variable "cluster_secret" {
+  description = "A cluster's secret (RROTOR_CLUSTER_SECRET): 32 or more random bytes, base64 (openssl rand -base64 32). Empty: one is made. Kept in Secrets Manager; each node reads it at boot."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "certificate_arn" {
+  description = "A cluster: an ACM certificate for public_host, for the load balancer. Null makes one, validated in route53_zone_id."
+  type        = string
+  default     = null
 }
 
 variable "size" {
@@ -138,6 +173,12 @@ variable "subnet_id" {
   default     = null
 }
 
+variable "subnet_ids" {
+  description = "Existing public subnets in vpc_id, for a cluster: the nodes and the load balancer are spread over them (one per zone). Overrides subnet_id."
+  type        = list(string)
+  default     = []
+}
+
 variable "vpc_cidr" {
   description = "The CIDR of the VPC made when vpc_id is null."
   type        = string
@@ -145,13 +186,13 @@ variable "vpc_cidr" {
 }
 
 variable "ingress_cidrs" {
-  description = "Who may reach ports 80 and 443. Port 80 must stay open to Let's Encrypt for the certificate."
+  description = "Who may reach ports 80 and 443 (a cluster: 443 on the load balancer). Port 80 must stay open to Let's Encrypt for one node's certificate."
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
 
 variable "route53_zone_id" {
-  description = "A Route 53 hosted zone to write public_host's A record in. Null leaves DNS to you."
+  description = "A Route 53 hosted zone to write public_host's A record in (a cluster: an alias to the load balancer, and the certificate's validation). Null leaves DNS to you."
   type        = string
   default     = null
 }

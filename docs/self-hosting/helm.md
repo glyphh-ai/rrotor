@@ -1,10 +1,10 @@
 # rrotor with Helm
 
 One rrotor per release: a StatefulSet of **one** replica with its own volume for `/data`, a Service, an Ingress at
-your public host, and a Secret for the runtime's token. It is one box, as everywhere: there is no high availability
-and no autoscaling, and the chart does not let you set replicas. For a second rrotor, register a second runtime and
-install a second release. The chart is `deploy/helm/rrotor/`. A cluster of N replicas with a head is decided, not
-built ([`specs/cluster.md`](../specs/cluster.md#12-the-packages)).
+your public host, and a Secret for the runtime's token. It is one box, and the chart refuses more replicas, unless
+you make it a [cluster](#a-cluster): `replicas` nodes of the one runtime behind the same Service and Ingress. There
+is no autoscaling. For a second rrotor, register a second runtime and install a second release. The chart is
+`deploy/helm/rrotor/`.
 
 ## What the cluster must allow
 
@@ -89,24 +89,58 @@ helm install rrotor deploy/helm/rrotor -n rrotor --set publicHost=rrotor.acme.co
 | `ingress.certManagerClusterIssuer` | | Adds `cert-manager.io/cluster-issuer`, so cert-manager issues the certificate |
 | `ingress.tls.enabled`, `ingress.tls.secretName` | `true`, `<release>-rrotor-tls` | The certificate's Secret |
 | `ingress.annotations` | | More annotations, for your controller |
-| `podDisruptionBudget.enabled` | `false` | `minAvailable: 1`: a node drain then waits until you move rrotor by hand |
+| `podDisruptionBudget.enabled` | `false` | One replica: `minAvailable: 1`, a node drain then waits until you move rrotor by hand. A cluster always has `maxUnavailable: 1` |
+| `cluster.enabled`, `replicas` | `false`, 3 | A cluster of `replicas` nodes ([below](#a-cluster)); without it, one replica |
+| `cluster.secret`, `cluster.secretPrevious` | made on install | `RROTOR_CLUSTER_SECRET` (and `_PREVIOUS` while one rolls out), into the Secret `<release>-rrotor-cluster` |
+| `cluster.existingSecret` | | A Secret of yours with `RROTOR_CLUSTER_SECRET` (and optionally `RROTOR_CLUSTER_SECRET_PREVIOUS`) |
+| `cluster.head` | `<release>-rrotor-0` | `RROTOR_CLUSTER_HEAD`: the pod that makes the cluster the first time |
+| `cluster.evictAfter`, `cluster.logKeep` | rrotor's, `24h` and `1g` | `RROTOR_CLUSTER_EVICT_AFTER`, `RROTOR_CLUSTER_LOG_KEEP` |
+| `cluster.port`, `cluster.clusterDomain` | `7778`, `cluster.local` | The cluster's port, and Kubernetes' DNS domain for the headless Service's name |
+| `cluster.networkPolicy.enabled`, `cluster.antiAffinity` | `true`, `true` | The NetworkPolicy; the spread across machines and zones (not with `affinity` set) |
 | `nodeSelector`, `tolerations`, `affinity` | | Where it runs: e.g. a node group that meets the requirements above |
 | `drain.endpoint` | | Your OpenTelemetry collector, OTLP over HTTP (`OTEL_EXPORTER_OTLP_ENDPOINT`), e.g. `http://otel-collector.observability:4318`; empty: no drain |
 | `drain.headers` | | `OTEL_EXPORTER_OTLP_HEADERS` (an API key), into the Secret; or that key in `existingSecret` |
 | `drain.resourceAttributes`, `drain.serviceName` | | `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_SERVICE_NAME` |
 | `drain.tracesSampler`, `drain.tracesSamplerArg` | | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` (other `OTEL_*` variables, such as a CA certificate, in `extraEnv`) |
 | `drain.signals`, `drain.buffer` | `logs,metrics,traces,audit`, `10000` | `RROTOR_DRAIN_SIGNALS`, `RROTOR_DRAIN_BUFFER` |
+| `drain.at` | `head` | `RROTOR_DRAIN_AT`: in a cluster, `head` sends every pod's signals by the head (one egress, from the head's pod); `node`, each pod exports itself |
 | `drain.payloads` | `off` | `RROTOR_LOG_PAYLOADS`: inputs and results in your drain |
 | `serverLogs` | `off` | `RROTOR_SERVER_LOGS`: the same signals to Glyphh too; the chart refuses it with `link: "off"` |
 | `audit.retentionDays`, `audit.maxMb` | `90`, `1024` | The audit log (Enterprise) on the volume ([Logs, audit and drains](README.md#logs-audit-and-drains)) |
 | `extraEnv` | | More environment, e.g. `RROTOR_LOG_LEVEL` |
 
-The probes (`startupProbe`, `livenessProbe`, `readinessProbe`) check `/healthz` and can be changed. The Ingress must
+The probes check `/healthz` (startup, liveness) and `/readyz` (readiness: 200 while the pod may take traffic) and
+can be changed. The Ingress must
 pass the `Host` header through (every common controller does) and keep a stream open: for ingress-nginx,
 `nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"` keeps long MCP streams from being cut.
 
 Without an Ingress (`ingress.enabled=false`), put your own load balancer in front of the Service on port 80: it
 must end TLS for the public host and pass `Host` through.
+
+## A cluster
+
+Several nodes of one runtime ([README, A cluster](README.md#a-cluster)), for a licence key with cluster sync:
+
+```sh
+helm install rrotor deploy/helm/rrotor -n rrotor --set publicHost=rrotor.acme.com --set existingSecret=rrotor-runtime \
+  --set cluster.enabled=true --set replicas=3
+```
+
+- **The pods** `rrotor-0..2` start together (`podManagementPolicy: Parallel`), each with its own claim
+  (`data-rrotor-<n>`), spread across machines and zones where the scheduler can. `RROTOR_NODE_ID` is the pod's
+  name; the nodes find each other at the headless Service (`RROTOR_CLUSTER_DNS`), which carries port 7778 and lists
+  pods before they are ready. `rrotor-0` makes the cluster and is its head.
+- **Traffic:** the Service and the Ingress reach the ready pods only: `/readyz` keeps a pod joining, catching up or
+  refused (past the key's `max_nodes`, which the chart does not know) out.
+- **The secret** is made on install and kept across upgrades (`lookup`), and kept when the release is uninstalled;
+  or bring your own in `cluster.existingSecret`. To roll it: the new one in `cluster.secret`, the old in
+  `cluster.secretPrevious`, upgrade, then drop the old.
+- **The NetworkPolicy** lets 7778 in from the release's own pods only, and the API's port from anywhere (your
+  Ingress controller); it needs a CNI that enforces policy.
+- **Commands:** `kubectl -n rrotor exec rrotor-0 -- rrotord cluster leave rrotor-2`. To shrink, leave the highest
+  pods first, then lower `replicas`; their claims stay until you delete them.
+- `replicas` defaults to 3 with the cluster on; `replicas` above 1 without it is refused. A cluster of one
+  (`replicas=1`) is allowed, to grow later.
 
 ## Air-gapped
 
@@ -117,7 +151,10 @@ the platform, and install with `link=off` and the key in the Secret (`runtime.li
 ## Upgrade, back up, remove
 
 - **Upgrade:** `helm upgrade rrotor deploy/helm/rrotor -n rrotor --reuse-values --set image.tag=<version>`. The one
-  pod is replaced; the volume stays.
+  pod is replaced; the volume stays. In a cluster the pods are replaced one at a time, the highest first.
+- **From chart 0.1:** chart 0.2 starts pods in parallel, a StatefulSet field Kubernetes does not let change in
+  place. Once, before the upgrade: `kubectl -n rrotor delete statefulset rrotor --cascade=orphan` (the pod and its
+  volume stay; the upgrade adopts them).
 - **Back up:** a VolumeSnapshot of the claim `data-rrotor-0`, or stop the pod
   (`kubectl -n rrotor scale statefulset/rrotor --replicas=0`, the one time you scale it) and copy the volume
   ([README, Backups](README.md#backups)), then `--replicas=1` again.

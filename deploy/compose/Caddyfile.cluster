@@ -1,0 +1,10 @@
+# HTTPS for a cluster on one machine (docker-compose.cluster.yml): as Caddyfile, but balanced over the three nodes,
+# each in the pool only while its /readyz answers 200 (a node joining, catching up or refused is left out).
+{$RROTOR_PUBLIC_HOST} {
+	reverse_proxy rrotor-0:7777 rrotor-1:7777 rrotor-2:7777 {
+		lb_policy least_conn
+		health_uri /readyz
+		health_interval 5s
+		health_timeout 2s
+	}
+}
