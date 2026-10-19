@@ -18,7 +18,7 @@ provisioning) is in `glyphh-ai/server`, `docs/architecture.md`; running your own
 | **The platform** | `https://platform.glyphh.ai`: where a person makes and starts machines, makes runtime keys, registers a self-hosted runtime and issues an offline licence |
 | **Fly** | Hosts the hosted machines: one app, `*.glyphh.app`, a machine and a volume per runtime, and the doorman |
 
-One image, five modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
+One image, four modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
 
 | Mode | Where | Reached at | Callers authenticate with |
 |---|---|---|---|
