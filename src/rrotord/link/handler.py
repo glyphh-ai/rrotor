@@ -1,5 +1,5 @@
-"""What the Cloud's messages do here: a welcome's licence is kept, a call opens a run, continue and cancel go to it,
-deploy, activate and remove change the versions. Every run the Cloud called answers its Results up the link; a
+"""What the Cloud's messages do here: a welcome's licence key is offered, a call opens a run, continue and cancel go
+to it, deploy, activate and remove change the versions. Every run the Cloud called answers its Results up the link; a
 deploy answers `deployed`, or an event `deploy_failed` (protocol 1 has no refusal of its own). Every other deploy
 (the API's and its MCP's) reports `deployed` through here too."""
 
@@ -37,15 +37,16 @@ class LinkHandler:
         return self.models.deployed()
 
     async def on_welcome(self, message: p.Welcome) -> None:
-        """The licence and the keys the welcome carries (a hosted rrotor's only way to either) are kept."""
+        """The runtime keys the welcome carries are kept, and its licence key (and, release N, its legacy licence)
+        offered: a refused one is logged by the licence, never fatal."""
         if message.keys is not None and self.access is not None:
             self.access.set_keys(message.keys)
-        if message.licence is None or self.licence is None:
+        if self.licence is None:
             return
-        try:
-            self.licence.set(message.licence.payload, message.licence.signature)
-        except RrotorError as err:
-            log.warning("the welcome's licence was refused", extra={"code": err.code, "reason": err.message})
+        if message.license_key is not None:
+            self.licence.offer(message.license_key, "welcome")
+        if message.licence is not None:
+            self.licence.offer(message.licence.model_dump(), "welcome")
 
     async def on_access(self, message: p.Keys | p.Pause | p.Resume) -> None:
         """The keys changed, or the plan's hours ran out (or came back)."""

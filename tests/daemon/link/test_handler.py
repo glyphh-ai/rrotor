@@ -214,18 +214,22 @@ async def test_deploy_without_a_link_says_nothing(env):
     assert env.link.sent == []
 
 
-async def test_a_welcomes_licence_is_kept_when_it_checks_and_logged_when_it_does_not(env, tmp_path, caplog):
+async def test_a_welcomes_licence_key_is_offered_preferred_to_its_legacy_licence_and_a_bad_one_logged(
+    env, tmp_path, caplog
+):
     await env.handler.on_welcome(p.Welcome(type="welcome", licence=p.Signed(payload={"plan": "Pro"}, signature="x")))
-    env.handler.licence = Licence(tmp_path / "lic", keys().public)
+    env.handler.licence = Licence(tmp_path / "lic")
     await env.handler.on_welcome(p.Welcome(type="welcome"))
-    assert env.handler.licence.mods() == []
-    given = keys().licence(["ada"])
+    assert env.handler.licence.state == "none"
+    given = keys().licence(["ada"], plan="Team")
     await env.handler.on_welcome(p.Welcome(type="welcome", licence=p.Signed(**given)))
-    assert env.handler.licence.mods() == ["ada"]
-    with caplog.at_level("WARNING", logger="rrotor.link"):
-        bad = p.Signed(payload={**given["payload"], "plan": "Team"}, signature=given["signature"])
-        await env.handler.on_welcome(p.Welcome(type="welcome", licence=bad))
-    assert "the welcome's licence was refused" in caplog.text and env.handler.licence.mods() == ["ada"]
+    assert env.handler.licence.limits().tier == "team"  # release N: the legacy licence alone, mapped
+    key = keys().key(tier="pro")
+    await env.handler.on_welcome(p.Welcome(type="welcome", licence=p.Signed(**given), license_key=key))
+    assert env.handler.licence.limits().tier == "pro" and env.handler.licence.view()["source"] == "welcome"
+    with caplog.at_level("ERROR", logger="rrotor.licence"):
+        await env.handler.on_welcome(p.Welcome(type="welcome", license_key=keys().key(drop=("tier",))))
+    assert "licence key refused: tier missing" in caplog.text and env.handler.licence.limits().tier == "pro"
 
 
 async def test_keys_and_the_pause_reach_the_access_store(env, tmp_path):

@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
+import signal
 import sqlite3
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +48,7 @@ def test_the_daemon_wires_its_parts(tmp_path, short_dir):
         d.parts,
         d.licence,
     )
-    assert s.fetch is not None and d.parts.key is None and d.licence.key is None
+    assert s.fetch is not None and d.parts.key is None and d.licence.state == "none"
     assert s.report == d.handler.report and d.handler.link is d.link
     assert d.deployer.scratch == short_dir / "deploy"
 
@@ -376,6 +379,7 @@ def self_daemon(tmp_path: Path, short_dir: Path, link: bool = True) -> Daemon:
         runtime_token=TOKEN,
         public_host="rrotor.acme.com",
         link=link,
+        node_id="rrotor-1",
     )
     return Daemon(c, ready(), launcher=LocalLauncher())
 
@@ -396,16 +400,117 @@ async def test_a_self_hosted_daemon_links_and_introspects_unless_its_link_is_off
     assert off.link.outbox.pending == []  # nothing owed to a Cloud it never reaches
 
 
-def test_an_offline_licence_in_the_environment_is_read_at_boot(tmp_path, short_dir):
+@pytest.mark.parametrize(
+    ("given", "state", "tier", "cap"),
+    [
+        (None, "none", "free", 5000),
+        ("not-a-key", "bad", "free", 5000),
+        (30, "live", "pro", 50000),
+        (-2, "grace", "pro", 50000),
+        (-20, "expired", "pro", 5000),
+    ],
+)
+async def test_a_node_runs_on_no_key_a_bad_key_a_good_key_and_an_expired_one(
+    tmp_path, short_dir, given, state, tier, cap
+):
+    c = self_daemon(tmp_path / "first", short_dir, link=False).config
+    if isinstance(given, int):
+        expires = (datetime.now(UTC) + timedelta(days=given)).isoformat().replace("+00:00", "Z")
+        given = keys().key(issued_at="2026-01-01T00:00:00Z", expires_at=expires)
+    if given is not None:
+        c = dataclasses.replace(c, licence_env=(("GLYPHH_LICENSE_KEY", given),))
+    d = Daemon(dataclasses.replace(c, data=tmp_path / "data"), ready(), launcher=LocalLauncher())
+    view = d.services().licence.view()
+    assert (view["state"], view["tier"], view["max_precedents"]) == (state, tier, cap)
+    stop = asyncio.Event()
+    stop.set()
+    await d.serve(stop)  # serves, and stops, whatever the key
+
+
+def test_the_environments_key_and_a_legacy_offline_licence_are_read_at_boot(tmp_path, short_dir):
     d = self_daemon(tmp_path, short_dir, link=False)
     runtime_id = d.config.runtime_id
-    offline = keys().licence(["ada"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline")
+    offline = keys().licence(["ada"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline", plan="Team")
     own = keys().licence(["ada"], runtime_id=runtime_id, kind="offline", licence_id="own")
-    c = dataclasses.replace(d.config, data=tmp_path / "booted", licence_key=keys().public_text)
-    booted = Daemon(dataclasses.replace(c, licence_token=keys().token(offline)), ready(), launcher=LocalLauncher())
-    assert booted.licence.view()["kind"] == "offline"  # type: ignore[index]
-    again = Daemon(dataclasses.replace(c, licence_token=keys().token(own)), ready(), launcher=LocalLauncher())
+    c = dataclasses.replace(d.config, data=tmp_path / "booted")
+    booted = Daemon(
+        dataclasses.replace(c, licence_env=(("RROTOR_LICENCE", keys().token(offline)),)),
+        ready(),
+        launcher=LocalLauncher(),
+    )
+    assert booted.licence.limits().tier == "team" and booted.licence.view()["source"] == "RROTOR_LICENCE"
+    again = Daemon(
+        dataclasses.replace(c, data=tmp_path / "again", licence_env=(("RROTOR_LICENCE", keys().token(own)),)),
+        ready(),
+        launcher=LocalLauncher(),
+    )
     assert again.licence.licence_id == "own" and again.licence.runtime_id == runtime_id
+    both = (("GLYPHH_LICENSE_KEY", keys().key(tier="team", max_nodes=10)), ("RROTOR_LICENCE", keys().token(offline)))
+    keyed = Daemon(dataclasses.replace(c, data=tmp_path / "keyed", licence_env=both), ready(), launcher=LocalLauncher())
+    assert keyed.licence.view()["source"] == "GLYPHH_LICENSE_KEY"  # the key preferred to the legacy licence
+
+
+async def test_an_unlinked_node_still_counts_its_precedents_and_warns_when_over_the_cap(tmp_path, short_dir, caplog):
+    d = self_daemon(tmp_path, short_dir, link=False)
+    model(d, "tickets", 7)
+    d.licence.offer(keys().key(tier="free", max_nodes=1, max_precedents=5), "test")
+    await d.report_usage()
+    assert d.precedents.total == 7 and "over the licence key's cap" in caplog.text
+    assert d.link.outbox.pending == [] and d.services().precedents is d.precedents
+    assert d.services().licence.view(d.precedents.current())["precedents"] == {"held": 7, "cap": 5, "over": True}
+
+
+async def test_the_key_file_is_read_again_every_hour_and_a_failure_is_logged(tmp_path, short_dir, monkeypatch, caplog):
+    monkeypatch.setattr(daemon, "LICENCE_EVERY", 0.01)
+    d = self_daemon(tmp_path, short_dir, link=False)
+    ticks = []
+
+    def tick() -> None:
+        ticks.append(1)
+        if len(ticks) == 1:
+            raise OSError("disk gone")
+
+    monkeypatch.setattr(d.licence, "tick", tick)
+    task = asyncio.create_task(d._licence())
+    for _ in range(200):
+        if len(ticks) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert len(ticks) >= 2 and "reading the licence key again failed" in caplog.text
+
+
+async def test_sighup_reads_the_key_file_again_while_serving(tmp_path, short_dir, caplog):
+    d = self_daemon(tmp_path, short_dir, link=False)
+    assert d.licence.state == "none"
+    stop = asyncio.Event()
+    serving = asyncio.create_task(d.serve(stop))
+    for _ in range(200):
+        if signal.getsignal(signal.SIGHUP) != signal.SIG_DFL:
+            break
+        await asyncio.sleep(0.01)
+    (d.config.data / "licence.token").write_text(keys().key(tier="team", max_nodes=10))
+    os.kill(os.getpid(), signal.SIGHUP)
+    for _ in range(100):
+        if d.licence.state == "live":
+            break
+        await asyncio.sleep(0.01)
+    assert d.licence.limits().tier == "team"
+
+    def broken() -> None:
+        raise OSError("disk gone")
+
+    d.licence.tick = broken  # type: ignore[method-assign]
+    os.kill(os.getpid(), signal.SIGHUP)
+    for _ in range(100):
+        if "reading the licence key again failed" in caplog.text:
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(serving, 5)
+    assert "reading the licence key again failed" in caplog.text
+    assert signal.getsignal(signal.SIGHUP) == signal.SIG_DFL  # the handler goes with the daemon
 
 
 async def test_a_self_hosted_daemon_starts_its_heartbeat_with_the_link(tmp_path, short_dir):

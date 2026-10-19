@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -124,33 +125,121 @@ def test_the_workers_internal_reencode_is_not_a_models_function(tmp_path, kernel
     assert outcome.result.status == "done" and outcome.result.data == {"reencoded": 0}
 
 
-def test_the_plans_precedents_limit_caps_record(tmp_path, kernel):
-    (tmp_path / "spec.json").write_text(json.dumps(SPEC))
-    c = ctx(tmp_path, tmp_path / "data")
-    c.limits = {"precedents": 2, "models": 1}
-    model = ada.open(c)
-    model.record({"a": {"b": {"x": "one"}}}, "yes")
-    model.record({"a": {"b": {"x": "two"}}}, "yes")
-    with pytest.raises(ModelError, match="allows 2 precedents") as caught:
-        model.record({"a": {"b": {"x": "three"}}}, "yes")
-    assert caught.value.code == "E_LIMIT_PRECEDENTS" and len(model) == 2
-    free = ctx(tmp_path, tmp_path / "data2")
-    free.limits = {"precedents": None}
-    assert ada.open(free).record({"a": {"b": {"x": "one"}}}, "yes")
+KEYED = {
+    "name": "t",
+    "seed": 7,
+    "dimension": 2048,
+    "layers": [{"name": "a", "segments": [{"name": "b", "roles": [{"name": "x"}, {"name": "id", "key_part": True}]}]}],
+}
 
 
-def test_the_cap_is_on_the_runtimes_total_with_the_other_models_precedents_counted(tmp_path, kernel):
-    (tmp_path / "spec.json").write_text(json.dumps(SPEC))
-    c = ctx(tmp_path, tmp_path / "data")
-    c.limits = {"precedents": 3, "precedents_elsewhere": 2}
-    model = ada.open(c)
-    model.record({"a": {"b": {"x": "one"}}}, "yes")
-    with pytest.raises(ModelError, match="allows 3 precedents across the runtime's Ada models; they hold 3") as caught:
-        model.record({"a": {"b": {"x": "two"}}}, "yes")
-    assert caught.value.code == "E_LIMIT_PRECEDENTS" and len(model) == 1
-    odd = ctx(tmp_path, tmp_path / "data2")
-    odd.limits = {"precedents": 1, "precedents_elsewhere": True}  # not a count: none elsewhere
-    assert ada.open(odd).record({"a": {"b": {"x": "one"}}}, "yes")
+def case(i: int, x: str = "one") -> dict[str, Any]:
+    return {"a": {"b": {"x": x, "id": i}}}
+
+
+def capped(tmp_path: Path, data: str = "data", spec: dict[str, Any] = KEYED, **limits: Any) -> Any:
+    (tmp_path / "spec.json").write_text(json.dumps(spec))
+    c = ctx(tmp_path, tmp_path / data)
+    c.limits = limits
+    return ada.open(c)
+
+
+def test_at_the_cap_a_new_key_is_limit_exceeded_not_indexed_and_the_store_unchanged(tmp_path, kernel):
+    model = capped(tmp_path, precedents=2, plan="Pro")
+    model.record(case(1), "yes")
+    model.record(case(2), "yes")
+    with pytest.raises(ada.LimitExceeded) as caught:
+        model.record(case(3), "yes")
+    assert caught.value.data == {
+        "status": "limit_exceeded",
+        "indexed": False,
+        "message": "Precedent store capacity limit reached (2 max for the Pro plan). "
+        "Upgrade the key to index further precedents.",
+        "precedents": 2,
+        "cap": 2,
+    }
+    assert str(caught.value) == caught.value.data["message"] and not isinstance(caught.value, ModelError)
+    assert len(model) == 2 and ada.count(tmp_path / "data" / ada.STORE) == 2
+    with pytest.raises(ada.LimitExceeded):
+        model.space.record({"a": {"b": {"x": "raw"}}}, "yes")  # the kernel's own record, no id: new
+    big = capped(tmp_path, "big", precedents=50000, plan="Pro", precedents_elsewhere=50000)
+    with pytest.raises(ada.LimitExceeded, match=r"\(50,000 max for the Pro plan\)"):
+        big.record(case(1), "yes")
+
+
+def test_a_record_whose_key_the_store_holds_replaces_its_row_at_the_cap(tmp_path, kernel):
+    model = capped(tmp_path, precedents=2)
+    model.record(case(1), "yes")
+    model.record(case(2), "yes")
+    model.record(case(2, "two"), "no")  # the same key: replaces, the store does not grow
+    assert len(model) == 2 and model.query(case(2, "two")).top == "no"
+    rid = model.space.record({"a": {"b": {"x": "kept"}}}, "yes", None, ada._ids(tmp_path / "data" / ada.STORE).pop())
+    assert isinstance(rid, str) and len(model) == 2  # by position, too
+    with pytest.raises(ada.LimitExceeded, match="for the Community plan"):  # no plan named: Community
+        model.record(case(3), "yes")
+
+
+def test_unlimited_or_no_cap_is_never_checked(tmp_path, kernel):
+    assert capped(tmp_path, "a", precedents=None).record(case(1), "yes")
+    assert capped(tmp_path, "b").record(case(1), "yes")
+    odd = capped(tmp_path, "c", precedents=1, precedents_elsewhere=True)  # not a count: none elsewhere
+    assert odd.record(case(1), "yes")
+    assert capped(tmp_path, "d", precedents=True).record(case(1), "yes")  # not a count: no cap
+
+
+def test_the_cap_is_on_the_nodes_total_with_the_other_models_counted(tmp_path, kernel):
+    model = capped(tmp_path, precedents=3, precedents_elsewhere=2)
+    model.record(case(1), "yes")
+    with pytest.raises(ada.LimitExceeded) as caught:
+        model.record(case(2), "yes")
+    assert (caught.value.data["precedents"], caught.value.data["cap"], len(model)) == (3, 3, 1)
+
+
+def store_of(tmp_path: Path, name: str, ids: range) -> Path:
+    other = capped(tmp_path, name)
+    for i in ids:
+        other.record(case(i), "yes")
+    other.space.close()
+    return tmp_path / name / ada.STORE
+
+
+def test_a_merge_is_capped_all_or_nothing(tmp_path, kernel):
+    five = store_of(tmp_path, "five", range(5))
+    model = capped(tmp_path, precedents=4)
+    model.record(case(0), "yes")
+    with pytest.raises(ada.LimitExceeded) as caught:
+        model.space.merge(str(five))  # four new rows on one held: past the cap of four, so none
+    assert caught.value.data["precedents"] == 1 and len(model) == 1 and ada.count(tmp_path / "data" / ada.STORE) == 1
+    three = store_of(tmp_path, "three", range(3))
+    assert model.space.merge(str(three)) == 2 and len(model) == 3  # two new: within the cap
+    held = store_of(tmp_path, "held", range(3))
+    model.record(case(9), "yes")
+    assert len(model) == 4 and model.space.merge(str(held)) == 0  # at the cap, nothing new: it goes
+    (tmp_path / "junk.sqlite").write_bytes(b"not a database")
+    with pytest.raises(sqlite3.DatabaseError):
+        model.space.merge(str(tmp_path / "junk.sqlite"))  # not a store: the kernel says so
+    with pytest.raises(sqlite3.Error):
+        model.space.merge(str(tmp_path / "missing.sqlite"))  # no such file: nothing to add, and the kernel refuses it
+    fresh = capped(tmp_path, "fresh", precedents=10)
+    assert fresh.space.merge(str(three)) == 3  # into a store made at open, with nothing in it
+    assert not ada._held(tmp_path / "nowhere.sqlite", "x") and ada._ids(tmp_path / "nowhere.sqlite") == set()
+
+
+def test_a_store_over_the_cap_after_a_downgrade_is_kept_answers_and_learns_and_only_growth_is_refused(tmp_path, kernel):
+    full = capped(tmp_path)
+    for i in range(60):
+        full.record(case(i, "one" if i % 2 else "two"), "yes" if i % 2 else "no")
+    full.space.close()
+    model = capped(tmp_path, precedents=50, plan="Free")
+    assert len(model) == 60 and model.query(case(1)).top == "yes"
+    assert model.facts(case(1)) and model.probabilities(case(1))
+    model.refresh()  # learn: weights from the store's own precedents
+    model.calibrate()
+    with pytest.raises(ada.LimitExceeded) as caught:
+        model.record(case(100), "yes")
+    assert caught.value.data["precedents"] == 60 and len(model) == 60
+    model.record(case(1), "no")  # a replace still goes, over the cap
+    assert ada.count(tmp_path / "data" / ada.STORE) == 60  # nothing deleted, nothing added
 
 
 def test_count_reads_the_stores_precedents_as_the_cap_counts_them_without_the_kernel(tmp_path, kernel):

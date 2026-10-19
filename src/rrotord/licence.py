@@ -1,10 +1,14 @@
-"""The plan's licence: the server's signed {payload, signature}, checked with Glyphh's licence key and kept on /data.
-It comes three ways: down the link (`welcome`), from the heartbeat (rrotord/heartbeat.py), or offline, as a token
-(base64url of the same JSON) in RROTOR_LICENCE, the file /data/licence.token or, on a local rrotor only,
-`PUT /v1/licence`. A licence is live until `expires_at` plus its `grace_days`: past `expires_at` it is in grace, past
-grace it has expired. Of the valid licences handed in, the one live longest is kept. A part installs and a run that
-needs one goes only while the licence names the part's mod (docs/architecture.md, 10); an expired licence refuses
-those, and nothing else."""
+"""The licence key held (rrotord/licence_key.py), and the limits it sets. With no key rrotor runs as Community; a
+good key lifts that to its own limits until it expires, plus GRACE_DAYS.
+
+Keys come from: GLYPHH_LICENSE_KEY (alias RROTOR_LICENCE), read at start; /etc/rrotor/license.key (alias
+/data/licence.token), at start, every hour and on SIGHUP; the heartbeat's answer and the link's `welcome`
+(`license_key`); and, on a local rrotor only, `PUT /v1/licence`. Every one found is checked: a bad one is logged at
+error with its source (never fatal), and of the good ones the newest (`issued_at`) not past grace is held, ties to
+the later `expires_at`; when none is within grace the newest is still held, so the health can say what expired.
+Release N also takes the plan's legacy `{payload, signature}` licence wherever one arrives, mapped, and prefers a
+key to it. The key held is kept in /data/licence.json as {key, source}, so a restart without the environment keeps
+it. Nothing here refuses a run: the worst case is Community's limits."""
 
 from __future__ import annotations
 
@@ -12,181 +16,201 @@ import contextlib
 import json
 import logging
 import math
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable, Iterable
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-from rrotord.errors import BadRequest, Forbidden, RrotorError
-from rrotord.keys import canonical, unb64, verify
+from rrotord.errors import BadRequest
+from rrotord.licence_key import COMMUNITY, GRACE, Key, Plan, Refused, legacy, parse, unpack
 from rrotord.store import read_json, write_json
 
 log = logging.getLogger("rrotor.licence")
 DAY = timedelta(days=1)
+ETC_KEY = Path("/etc/rrotor/license.key")
+OLDEST = datetime.min.replace(tzinfo=UTC)
 
 
-def grace_of(payload: dict[str, Any]) -> int | None:
-    """`grace_days`: absent is 0; None when it is not a whole number of days."""
-    grace = payload.get("grace_days", 0)
-    return grace if isinstance(grace, int) and not isinstance(grace, bool) and grace >= 0 else None
-
-
-def live_until(payload: dict[str, Any] | None) -> datetime | None:
-    """`expires_at` plus `grace_days`; None when there is no licence or its dates do not read."""
-    if payload is None:
-        return None
-    grace = grace_of(payload)
-    try:
-        when = datetime.fromisoformat(str(payload.get("expires_at", "")).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if when.tzinfo is None or grace is None:
-        return None
-    return when + grace * DAY
-
-
-def unpack(token: str) -> tuple[Any, Any]:
-    """{payload, signature} from an offline token, base64url of its JSON."""
-    try:
-        signed = json.loads(unb64(token))
-    except (RrotorError, ValueError):
-        signed = None
-    if not isinstance(signed, dict):
-        raise BadRequest("The licence token is not base64url of {payload, signature}.", code="E_LICENCE")
-    return signed.get("payload"), signed.get("signature")
+def stamp(when: datetime | None) -> str | None:
+    return when.isoformat().replace("+00:00", "Z") if when is not None else None
 
 
 class Licence:
     def __init__(
         self,
         data: Path,
-        key: Ed25519PublicKey | None,
         runtime_id: str | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        etc: Path | None = None,
     ) -> None:
-        self.path, self.token_path = data / "licence.json", data / "licence.token"
-        self.key, self.runtime_id, self.clock = key, runtime_id, clock
-        self.payload: dict[str, Any] | None = None
-        saved = read_json(self.path)
-        if isinstance(saved, dict) and self._checks(saved.get("payload"), saved.get("signature")):
-            self.payload = saved["payload"]
+        self.path, self.files = data / "licence.json", (etc or ETC_KEY, data / "licence.token")
+        self.runtime_id, self.clock = runtime_id, clock
+        self.found: dict[tuple[str, bool], Key] = {}  # (source, legacy): the best good key found there
+        self.refused: dict[str, str] = {}  # source: why its key was refused, while it is
+        self.warned: date | None = None
+        self._saved()
 
-    def _checks(self, payload: Any, signature: Any) -> bool:
-        if self.key is None or not isinstance(payload, dict) or not isinstance(signature, str):
-            return False
+    def _saved(self) -> None:
+        """The key held before the restart, checked again."""
         try:
-            return verify(self.key, signature, canonical(payload))
-        except RrotorError:
-            return False
+            saved = read_json(self.path)
+        except (OSError, ValueError):
+            saved = None
+        if not isinstance(saved, dict):
+            return
+        source = str(saved.get("source") or "saved")
+        if isinstance(saved.get("key"), str):
+            self.offer(saved["key"], source)
+        elif isinstance(saved.get("licence"), dict):
+            self.offer(saved["licence"], source)
+        elif "payload" in saved:  # kept by a release before the key: the legacy licence itself
+            self.offer(saved, source)
 
-    def set(self, payload: Any, signature: Any) -> bool:
-        """A licence handed in: refused unless its signature checks with the licence key and it is for this runtime;
-        kept unless the one held is live for longer. Answers whether it was kept."""
-        if self.key is None:
-            raise RrotorError(
-                "This rrotor has no licence key (RROTOR_LICENCE_PUBLIC_KEY), so no licence is taken.", code="E_CONFIG"
-            )
-        if not isinstance(payload, dict) or not isinstance(signature, str):
-            raise BadRequest("Send the licence as the server answered it: {payload, signature}.", code="E_LICENCE")
-        if not self._checks(payload, signature):
-            raise BadRequest("The licence's signature does not check out.", code="E_LICENCE")
-        named = payload.get("runtime_id")
-        if named is not None and self.runtime_id is not None and str(named) != self.runtime_id:
-            raise BadRequest("This licence is for another runtime.", code="E_LICENCE")
-        held, given = live_until(self.payload), live_until(payload)
-        if held is not None and (given is None or held > given):
-            return False
-        write_json(self.path, {"payload": payload, "signature": signature})
-        self.payload = payload
-        return True
-
-    def take(self, sent: Any) -> bool:
-        """A licence in any form it is handed in: {payload, signature}, {token} or the token itself."""
+    def check(self, sent: Any) -> Key:
+        """A key or a legacy licence in any form it arrives in: the key's text, a legacy offline token,
+        {token} or {payload, signature}. Raises Refused."""
+        if isinstance(sent, str) and "." in sent:
+            return parse(sent)
         if isinstance(sent, str):
-            return self.set(*unpack(sent))
+            return legacy(*unpack(sent), self.runtime_id)
         if isinstance(sent, dict) and isinstance(sent.get("token"), str):
-            return self.set(*unpack(sent["token"]))
+            return self.check(sent["token"])
         if isinstance(sent, dict):
-            return self.set(sent.get("payload"), sent.get("signature"))
-        raise BadRequest("Send {payload, signature}, {token} or the token itself.", code="E_LICENCE")
+            return legacy(sent.get("payload"), sent.get("signature"), self.runtime_id)
+        raise Refused("neither a key nor a legacy licence")
 
-    def load(self, token: str | None) -> None:
-        """At boot, the offline licences: RROTOR_LICENCE and /data/licence.token. One that is refused is logged."""
-        found = [("RROTOR_LICENCE", token)]
-        with contextlib.suppress(OSError):
-            found.append((str(self.token_path), self.token_path.read_text().strip() or None))
-        for source, text in found:
-            if text is None:
-                continue
-            try:
-                kept = self.take(text)
-            except RrotorError as err:
-                log.warning("an offline licence was refused", extra={"source": source, "reason": err.message})
-                continue
-            log.info("offline licence read", extra={"source": source, "kept": kept, "state": self.state})
-
-    @property
-    def state(self) -> str | None:
-        """live, grace (past expires_at, within grace_days) or expired; None with no licence."""
-        if self.payload is None:
+    def offer(self, sent: Any, source: str) -> Key | None:
+        """A key found at `source`: kept as that source's if good (and held if it is the best), logged at error if
+        not. Answers the key when it was good."""
+        try:
+            key = self.check(sent)
+        except Refused as why:
+            self.refused[source] = why.reason
+            log.error(f"licence key refused: {why.reason}", extra={"source": source})
             return None
-        until, now = live_until(self.payload), self.clock()
-        if until is None or until <= now:
-            return "expired"
-        return "grace" if until - (grace_of(self.payload) or 0) * DAY <= now else "live"
+        self.refused.pop(source, None)
+        kept = self.found.get((source, key.legacy))
+        if kept is None or self._rank(key) >= self._rank(kept):  # each source keeps the best it has given
+            self.found[(source, key.legacy)] = key
+        if self.held is key:
+            write_json(self.path, {"key" if not key.legacy else "licence": key.raw, "source": source})
+        return key
+
+    def take(self, sent: Any, source: str = "api") -> bool:
+        """`PUT /v1/licence` (a local rrotor's): refused 400 E_LICENCE when bad; answers whether it is now held."""
+        try:
+            key = self.check(sent)
+        except Refused as why:
+            raise BadRequest(f"The licence key is refused: {why.reason}.", code="E_LICENCE") from None
+        return self.offer(key.raw, source) is self.held
+
+    def _rank(self, key: Key) -> tuple[bool, bool, datetime, datetime]:
+        return key.state(self.clock()) != "expired", not key.legacy, key.issued_at or OLDEST, key.expires_at
 
     @property
-    def expired(self) -> bool:
-        return self.state in (None, "expired")
+    def held_from(self) -> tuple[str, Key] | None:
+        if not self.found:
+            return None
+        (source, _), key = max(self.found.items(), key=lambda found: self._rank(found[1]))
+        return source, key
+
+    @property
+    def held(self) -> Key | None:
+        found = self.held_from
+        return found[1] if found is not None else None
+
+    def start(self, environment: Iterable[tuple[str, str]]) -> None:
+        """At start: the environment's keys, then the files; Community said once when there is none anywhere."""
+        for source, text in environment:
+            self.offer(text, source)
+        self.reread()
+        if not self.found and not self.refused:
+            log.info("community: no licence key")
+        self.warn()
+
+    def reread(self) -> None:
+        """The key files, read again: at start, every hour and on SIGHUP (a renewal dropped in, nothing restarted)."""
+        for path in self.files:
+            text = ""
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                text = path.read_text().strip()
+            if text:
+                sent: Any = text
+                with contextlib.suppress(ValueError):
+                    sent = json.loads(text)  # a legacy licence as its JSON
+                self.offer(sent, str(path))
+
+    def warn(self) -> None:
+        """Once a day while the key held has expired: when it did, and when Community's limits apply."""
+        held, now = self.held, self.clock()
+        if held is None or held.state(now) == "live" or self.warned == now.date():
+            return
+        self.warned = now.date()
+        ends = held.expires_at + GRACE
+        when = "from" if held.state(now) == "grace" else "since"
+        log.warning(f"licence key expired {held.expires_at.date()}; Community limits {when} {ends.date()}")
+
+    def tick(self) -> None:
+        """Hourly, and on SIGHUP."""
+        self.reread()
+        self.warn()
+
+    @property
+    def state(self) -> str:
+        """live, grace (past expires_at, within GRACE_DAYS), expired; bad (no good key, one refused); none."""
+        held = self.held
+        if held is not None:
+            return held.state(self.clock())
+        return "bad" if self.refused else "none"
+
+    @property
+    def community(self) -> bool:
+        return self.state not in ("live", "grace")
+
+    def limits(self) -> Plan:
+        """What applies now: the key's while it counts, else Community's."""
+        held = self.held
+        return COMMUNITY if held is None or self.community else held.plan
+
+    @property
+    def plan_name(self) -> str:
+        """The plan as a caller is told it: Community, or the key's tier (Free, Pro, Team, Enterprise)."""
+        return "Community" if self.community else self.limits().tier.capitalize()
 
     @property
     def licence_id(self) -> str | None:
-        found = (self.payload or {}).get("licence_id")
-        return str(found) if found is not None else None
+        held = self.held
+        return held.license_id if held is not None else None
 
-    def mods(self) -> list[str]:
-        """The mods the licence includes now (in grace too); none when there is no licence or it has expired."""
-        if self.payload is None or self.expired:
-            return []
-        mods = self.payload.get("mods")
-        return sorted(mods) if isinstance(mods, dict) else []
-
-    def features(self) -> dict[str, bool]:
-        """The plan's features as the licence signed them (`sync`, `ha`, `offline`, `sso`), each a flag; none when
-        there is no licence or it has expired. Shown only: nothing here acts on them yet."""
-        if self.payload is None or self.expired:
-            return {}
-        found = self.payload.get("features")
-        return {k: v for k, v in sorted(found.items()) if isinstance(v, bool)} if isinstance(found, dict) else {}
-
-    def require(self, mod: str) -> None:
-        """Refused with E_NOT_IN_PLAN unless the licence includes `mod` now."""
-        if mod not in self.mods():
-            why = (
-                "no licence"
-                if self.payload is None
-                else ("the licence has expired" if self.expired else "not in the plan")
-            )
-            raise Forbidden(f"{mod} is not in this machine's plan: {why}.", code="E_NOT_IN_PLAN", mod=mod)
-
-    def view(self) -> dict[str, Any] | None:
-        """The licence held: its plan, mods and features, and its state (in grace, the days left)."""
-        if self.payload is None:
+    def days_left(self) -> int | None:
+        held, now = self.held, self.clock()
+        if held is None:
             return None
-        until = live_until(self.payload)
-        left = 0 if until is None else max(0, math.ceil((until - self.clock()) / DAY))
+        until = {"live": held.expires_at, "grace": held.expires_at + GRACE}.get(held.state(now))
+        return 0 if until is None else math.ceil((until - now) / DAY)
+
+    def view(self, precedents: int | None = None) -> dict[str, Any]:
+        """The key held, its state, the limits that apply (`GET /v1/licence`, the health), and the node's precedents
+        against the cap (`over` after a downgrade: nothing deleted, growth refused)."""
+        found, limits = self.held_from, self.limits()
+        source, held = found if found is not None else (None, None)
+        cap = limits.max_precedents
         return {
-            "plan": self.payload.get("plan"),
-            "mods": self.mods(),
-            "features": self.features(),
-            "kind": self.payload.get("kind"),
-            "licence_id": self.licence_id,
-            "expires_at": self.payload.get("expires_at"),
-            "grace_days": grace_of(self.payload),
-            "live_until": until.isoformat().replace("+00:00", "Z") if until is not None else None,
+            "tier": held.plan.tier if held is not None else COMMUNITY.tier,
+            "community": self.community,
+            "license_id": held.license_id if held is not None else None,
+            "customer_id": held.customer_id if held is not None else None,
+            "source": source,
+            "issued_at": stamp(held.issued_at) if held is not None else None,
+            "expires_at": stamp(held.expires_at) if held is not None else None,
             "state": self.state,
-            "days_left": left,
-            "expired": self.expired,
+            "days_left": self.days_left(),
+            "max_nodes": limits.max_nodes,
+            "max_precedents": limits.max_precedents,
+            "cluster_sync_enabled": limits.cluster_sync_enabled,
+            "precedents": {
+                "held": precedents,
+                "cap": cap,
+                "over": precedents is not None and cap is not None and precedents > cap,
+            },
         }

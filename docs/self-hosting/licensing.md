@@ -1,57 +1,61 @@
 # Licensing a self-hosted rrotor
 
-Written for the people who review what a piece of software sends out of their network. In short: rrotor checks a
-signed licence on the machine, with no network request; it renews that licence over the link or a small daily
-HTTPS call whose whole body is shown below; and an air-gapped rrotor never calls out at all.
+Written for the people who review what a piece of software sends out of their network. In short: rrotor runs
+without a licence key at Community's limits; it checks a signed key on the machine, with no network request; it
+gets the next key over the link or a small daily HTTPS call whose whole body is shown below; and an air-gapped
+rrotor never calls out at all.
 
-This is the licence as built. Decided and **not built yet**: a signed licence key (`GLYPHH_LICENSE_KEY`) carrying
-each plan's node and precedent limits, with Free's limits when there is none
-([`specs/licensing.md`](../specs/licensing.md); the plans are in the [README](README.md#the-plans)).
+Built as [`specs/licensing.md`](../specs/licensing.md) decides (its node cap and cluster sync come with the cluster);
+the plans are in the [README](README.md#the-plans).
 
-## The licence
+## The licence key
 
-A licence is a JSON object `{payload, signature}`. The signature is Ed25519 over the payload's canonical JSON (keys
-sorted, no spaces, ASCII only), made by the Glyphh server with its licence key. rrotor checks it with the public
-half, which is baked into the image (`RROTOR_LICENCE_PUBLIC_KEY`): checking needs no network, and a licence changed
-by one byte is refused.
+rrotor runs without one, as **Community**: one node, 5,000 precedents across its Ada models, no cluster sync. A
+licence key lifts those limits to the ones it carries.
+
+A key is `<payload>.<signature>`, each base64url without padding. The payload is JSON; the signature is Ed25519
+over its exact bytes, made by the Glyphh server. rrotor checks it with Glyphh's public key, which is in rrotor's code
+(`rrotord/licence_key.py`), not in the environment: checking needs no network, a key changed by one byte is refused,
+and setting an environment variable cannot make rrotor trust another signer.
 
 | Field | What it says |
 |---|---|
-| `user_id`, `org_id` | The account and organisation that registered the runtime |
-| `install_id` | Always `null` for a runtime's licence |
-| `plan`, `limits` | The plan, and its hosted machines (`machines`, unused while Glyphh does not host) |
-| `features` | The plan's flags: `sync`, `ha`, `offline`, `sso` (shown; nothing acts on them yet) |
-| `mods` | What the plan includes, with its limits: `ada` being here is what lets Ada models run; its `precedents` is null for a self-hosted runtime today, so nothing caps it until the licence key is built |
-| `expires_at` | When it stops being current (UTC) |
-| `runtime_id` | The one runtime it is for |
-| `licence_id` | This licence's own id (a UUID) |
-| `kind` | How it came: `link`, `heartbeat` or `offline` |
-| `grace_days` | How many days it still holds past `expires_at` (absent means none) |
+| `license_id` | This key's id (a UUID) |
+| `tier` | `free`, `pro`, `team` or `enterprise` |
+| `max_nodes` | Nodes one cluster may have (null: unlimited) |
+| `max_precedents` | Precedents one node may hold, across its Ada models (null: unlimited) |
+| `cluster_sync_enabled` | Whether the nodes of a cluster may sync |
+| `issued_at`, `expires_at` | When it was issued (at a payment) and when it stops being current (UTC) |
+| `customer_id` | The paying customer, as the server's id: no name or address |
 
-Nothing else is in it: no names, no email addresses, no machine details. You can read any licence you hold; an
-offline token is base64url of that JSON:
+Nothing else is in it. You can read any key you hold:
 
 ```sh
-printf %s "$RROTOR_LICENCE" | tr '_-' '/+' | base64 -d | python3 -m json.tool
+printf %s "$GLYPHH_LICENSE_KEY" | cut -d. -f1 | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -m json.tool
 ```
 
-`GET /v1/licence` shows the licence rrotor holds, and `GET /v1/health` its state, `grace` with the days left once
-it is past `expires_at`.
+`GET /v1/licence` and `GET /v1/health` show the key held, where it came from, its state (`live`, `grace`,
+`expired`, `bad`, or `none`) with the days left, the limits that apply, and the node's precedents against its cap
+(`over: true` after a downgrade: nothing is deleted, growth is refused).
 
-## Three ways it arrives
+## Where rrotor reads it
 
-| Path | How | Lasts | Network |
-|---|---|---|---|
-| **Link** | The server's `welcome`, each time rrotor's link connects | 24 hours, then 14 days' grace | The link: an outbound WebSocket to `api.glyphh.ai:443` |
-| **Heartbeat** | rrotor asks for one at boot and every 24 hours | 24 hours, then 14 days' grace | One HTTPS `POST` to `api.glyphh.ai:443` |
-| **Offline** | You issue it on the platform and hand it to rrotor | Up to 365 days, then 14 days' grace | None |
+| Source | When |
+|---|---|
+| `GLYPHH_LICENSE_KEY` (or `RROTOR_LICENCE`) | At start |
+| The file `/etc/rrotor/license.key` (or `/data/licence.token`) | At start, every hour, and on `SIGHUP` |
+| The heartbeat's answer | At boot and every 24 hours, with the link on |
+| The link's `welcome` | Each time the link connects |
 
-With `RROTOR_LINK=on` (the default) rrotor uses both the link and the heartbeat; either alone keeps the licence
-current, so a proxy that refuses WebSockets but passes ordinary HTTPS still leaves rrotor licensed. With
-`RROTOR_LINK=off` it makes neither call and runs on an offline licence alone.
+Every key found is checked. Of the good ones rrotor holds the one **issued last** that is not more than 14 days
+past its expiry, so a change of plan at the next payment takes effect and an older key left in a file cannot
+override a newer one. The key held is kept in `/data/licence.json`, so a restart without the variable keeps it.
 
-rrotor keeps whichever valid licence expires last, so an offline licence and a daily one can be held together: the
-daily ones never shorten it.
+A key that does not check out is logged at error, with where it came from, at every start and every hourly
+re-read (`licence key refused: <why>`), and rrotor runs as Community: a typo in a secret never stops it.
+
+**This release** still takes the licence of earlier releases (`{payload, signature}`, or its offline token)
+wherever one arrives, with its plan's limits; a key is preferred to it. The next release takes keys only.
 
 ## The heartbeat, exactly
 
@@ -63,22 +67,27 @@ Host: api.glyphh.ai
 Authorization: Bearer <runtime token>
 Content-Type: application/json
 
-{"machine": "<64 hex characters>", "licence_id": "<uuid or null>", "version": "<rrotor version>", "active_runs": <int>}
+{"machine": "<64 hex characters>", "licence_id": "<uuid or null>", "version": "<rrotor version>", "active_runs": <int>,
+ "node_id": "<this node's name>", "cluster_id": null, "role": "standalone", "precedents": <int or null>}
 ```
 
 | Field | What it is | Why |
 |---|---|---|
 | `machine` | SHA-256 (hex) of `<runtime id>:<machine id>`, where the machine id is the host's `/etc/machine-id` when the container can read one, else a random id rrotor makes once and keeps in `/data` | To tell apart two machines running the same runtime. It is a hash: the machine id cannot be read back from it |
-| `licence_id` | The id of the licence rrotor holds now, or `null` | To see which licence is in use |
+| `licence_id` | The id of the key rrotor holds now (`license_id`), or `null` | To see which key is in use |
 | `version` | rrotor's version, e.g. `0.1.0` | To show it on the platform |
 | `active_runs` | How many runs are in progress, a number | A count only, nothing about the runs |
+| `node_id` | `RROTOR_NODE_ID`, else the container's hostname: your own name for the node | To count your nodes |
+| `cluster_id`, `role` | `null` and `standalone` (clusters are not built yet) | To count your nodes |
+| `precedents` | How many precedents the node holds across its Ada models, a number | To show use against the key's cap |
 
-The answer is `200 {"licence": {"payload": …, "signature": …}}`: a licence of kind `heartbeat`, current for 24
-hours, with `grace_days: 14`. If the call fails or is refused, rrotor keeps the licence it has and tries again.
+The answer is `200 {"license_key": "<key>"}`: the newest key the server holds for your subscription (this release
+also takes the earlier `licence` beside it). If the call fails or is refused, rrotor keeps the key it has and tries
+again.
 
 **Never sent, in the heartbeat or anywhere it is stored:** IP addresses, hostnames, prompts, model inputs or
-outputs, model code, files, secrets, or anything about your users. The server keeps only four things from it:
-`last_heartbeat_at`, `version`, `active_runs` and the `machine` hash. It does not store or log the caller's address
+outputs, model code, files, secrets, or anything about your users. The server keeps only what the body
+carries and when it came. It does not store or log the caller's address
 for this route. As with any HTTPS request, the address is visible on the network path itself (your egress proxy,
 the edge of Glyphh's hosting provider); it is not in the request and the server does not keep it.
 
@@ -102,26 +111,23 @@ answer a minute. With `RROTOR_LINK=off` none of this happens, and callers use ru
 
 ## Grace, and past it
 
-A licence counts as live until `expires_at` plus `grace_days`. A rrotor that loses contact with Glyphh therefore
-keeps everything running for 15 days on a daily licence (24 hours plus 14 days), and up to 379 on an offline one.
+A key is current until `expires_at` (the end of the paid month). A new one comes with each payment, over the
+heartbeat or the link, so a running subscription never lapses.
 
-- **Within grace:** everything runs. `GET /v1/health` and `GET /v1/licence` say `grace` and how many days are left.
-- **Past grace:** a run that needs a licensed mod, an Ada model, is refused with `E_NOT_IN_PLAN` ("the licence has
-  expired"). Nothing crashes and nothing is deleted: rrotor keeps serving its API, models that need no licensed mod
-  keep running, and it keeps trying to renew. A new licence, from any path, lifts the refusal at once.
+- **Past `expires_at`, for 14 days:** everything runs on the key's limits. The health says `grace` and how many
+  days are left, and rrotor logs a warning daily.
+- **More than 14 days past:** Community's limits: the precedents past 5,000 stay and are served, and a record
+  that would add one answers `limit_exceeded` (`indexed: false`, a finished call, not a failure). Nothing crashes, nothing is deleted, no model is refused,
+  and a new key from any source lifts the limits at once.
 
-## Air-gapped: the offline licence
+## Air-gapped
 
-1. On the platform, open the runtime and issue an offline licence for up to 365 days (the API:
-   `POST /v1/runtimes/{id}/offline-licence {"days": 365}` answers `{token, expires_at}`).
-2. Carry the token across, and give it to rrotor in the environment `RROTOR_LICENCE` or the file
-   `/data/licence.token`, both read when rrotor starts. `PUT /v1/licence` is refused on a self-hosted rrotor
-   (403 `E_LOCAL_ONLY`): anyone with a runtime key could otherwise hand it an older or smaller plan's licence that
-   runs longer, and rrotor would keep it over the daily ones.
-3. Set `RROTOR_LINK=off`. rrotor makes no network request for its licence, or for anything else of Glyphh's.
-4. Before it expires, issue the next one, put it in the same place and restart rrotor; it keeps the one that
-   expires last.
+1. Take the key from the platform.
+2. Give it to rrotor in `GLYPHH_LICENSE_KEY`, or in the file `/etc/rrotor/license.key` (or `/data/licence.token`).
+   `PUT /v1/licence` is refused on a self-hosted rrotor (403 `E_LOCAL_ONLY`): anyone with a runtime key could
+   otherwise hand it a key.
+3. Set `RROTOR_LINK=off`. rrotor makes no network request for its key, or for anything else of Glyphh's.
+4. Each month, put the next key in the file and send rrotor `SIGHUP` (`docker compose kill -s HUP rrotor`), or wait
+   up to an hour: rrotor reads the file again and holds the newer key. Nothing restarts.
 
-An offline licence cannot be called back once issued: it holds until its `expires_at` plus 14 days. Issue shorter
-ones if that matters to you. Rotating the runtime's token on the platform stops the link and the heartbeat for the
-old token at once.
+A key cannot be called back once issued: it holds until its `expires_at` plus 14 days.

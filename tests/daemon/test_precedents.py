@@ -75,3 +75,32 @@ def test_a_reading_that_fails_keeps_the_one_before(tmp_path, monkeypatch):
     assert not counted.due() and counted.total is None  # nothing has read: nothing to report
     counted.total, counted.reported, counted.read_at = 4, 4, -precedents.READ_EVERY
     assert not counted.due() and counted.total == 4
+
+
+def test_current_is_the_last_reading_or_one_now_when_none_has_read(tmp_path):
+    models = Models(tmp_path)
+    model(models, "tickets", ["ada"], 3)
+    counted = Precedents(models)
+    assert counted.current() == 3 and counted.total == 3  # the heartbeat at boot: read now
+    store(models.data("tickets") / ada.STORE, 5)
+    assert counted.current() == 3  # then the nine-minute reading's
+
+
+def test_a_total_over_the_licence_keys_cap_is_warned_of_once_per_change(tmp_path, caplog):
+    models = Models(tmp_path)
+    model(models, "tickets", ["ada"], 60)
+    cap: list[int | None] = [50]
+    now = [0.0]
+    counted = Precedents(models, clock=lambda: now[0], cap=lambda: cap[0])
+    for _ in range(2):  # read twice, unchanged: said once
+        counted.due()
+        now[0] += precedents.READ_EVERY
+    assert caplog.text.count("over the licence key's cap") == 1 and counted.warned == 60
+    store(models.data("tickets") / ada.STORE, 61)
+    counted.due()
+    now[0] += precedents.READ_EVERY
+    assert caplog.text.count("over the licence key's cap") == 2  # changed: said again
+    cap[0] = None  # an upgrade to unlimited
+    counted.due()
+    assert counted.warned is None and caplog.text.count("over the licence key's cap") == 2
+    assert Precedents(models).cap() is None  # no cap given: none

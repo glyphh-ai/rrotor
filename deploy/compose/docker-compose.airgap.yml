@@ -1,12 +1,12 @@
 # The air-gapped variant, laid over docker-compose.yml (docs/self-hosting/compose.md, "Air-gapped"):
 #   docker compose -f docker-compose.yml -f docker-compose.airgap.yml up -d
-# No link and no heartbeat: rrotor runs on the offline licence alone (RROTOR_LICENCE in .env, or /data/licence.token),
+# No link and no heartbeat: rrotor runs on its licence key alone (GLYPHH_LICENSE_KEY in .env, or /data/licence.token),
 # and Caddy serves your own certificate from ./certs.
 services:
   rrotor:
     environment:
       RROTOR_LINK: "off"
-      RROTOR_LICENCE: ${RROTOR_LICENCE:?an air-gapped rrotor needs RROTOR_LICENCE, the offline licence token, in .env}
+      GLYPHH_LICENSE_KEY: ${GLYPHH_LICENSE_KEY:-${RROTOR_LICENCE:-}}  # set it in .env: without a key an air-gapped rrotor runs as Community
 
   caddy:
     volumes:

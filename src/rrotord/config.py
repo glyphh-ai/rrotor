@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pathlib import Path
 from rrotord.errors import RrotorError
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+NODE_ID = re.compile(r"^[a-z0-9-]{1,63}$")
 MODES = ("local", "hosted", "self", "doorman")
 SERVER = "https://api.glyphh.ai"  # Glyphh's server: a self-hosted rrotor's default
 
@@ -32,7 +34,6 @@ class Config:
     sdk: Path  # the rrotor SDK package, mounted into every sandbox
     run_dir: Path  # sockets and scratch, on tmpfs
     release_key: str | None = None  # Glyphh's release public key: what signs a part
-    licence_key: str | None = None  # Glyphh's licence public key: what signs the plan's licence
     runtime_id: str | None = None  # hosted: the runtime this machine is, from its secrets
     runtime_token: str | None = None  # hosted: its token for the link, from its secrets
     builtin_parts: Path = Path("/opt/parts-builtin")  # parts the image carries, installed at boot
@@ -40,8 +41,9 @@ class Config:
     machine_id: str | None = None  # hosted: this machine's id (Fly's FLY_MACHINE_ID), its own address
     keys_sha256: tuple[str, ...] = ()  # hosted: the runtime keys' SHA-256s at first; the Cloud's list after
     public_host: str | None = None  # self (and hosted in development): the one exact Host it answers at
-    link: bool = True  # off: no link and no heartbeat (air-gapped, self), the offline licence alone
-    licence_token: str | None = None  # self: an offline licence, base64url of {payload, signature}
+    link: bool = True  # off: no link and no heartbeat (air-gapped, self): the licence key from its variable or file
+    licence_env: tuple[tuple[str, str], ...] = ()  # (variable, text): GLYPHH_LICENSE_KEY and its alias RROTOR_LICENCE
+    node_id: str = "rrotor"  # this node's name (RROTOR_NODE_ID, else the hostname), sent in the heartbeat
 
     @property
     def public(self) -> bool:
@@ -51,6 +53,12 @@ class Config:
     @property
     def link_url(self) -> str:
         return re.sub(r"^http", "ws", self.server.rstrip("/")) + "/v1/runtime/link"
+
+
+def hostname() -> str:
+    """The node's default name: the host's first label, lowercased, anything but a-z, 0-9 and - as -."""
+    label = re.sub(r"[^a-z0-9-]", "-", socket.gethostname().split(".")[0].lower())[:63]
+    return label or "rrotor"
 
 
 def load(env: Mapping[str, str] | None = None) -> Config:
@@ -96,6 +104,10 @@ def load(env: Mapping[str, str] | None = None) -> Config:
             "A hosted rrotor needs its machine id (FLY_MACHINE_ID), or RROTOR_PUBLIC_HOST in development.",
             code="E_CONFIG",
         )
+    node_id = env.get("RROTOR_NODE_ID") or None
+    if node_id is not None and not NODE_ID.match(node_id):
+        raise RrotorError("RROTOR_NODE_ID is this node's name: 1 to 63 of a-z, 0-9 and -.", code="E_CONFIG")
+    node_id = node_id or hostname()
     keys = tuple(k.strip().lower() for k in env.get("RROTOR_KEYS_SHA256", "").split(",") if k.strip())
     if any(not HEX64.match(k) for k in keys):
         raise RrotorError("RROTOR_KEYS_SHA256 is a comma-separated list of SHA-256 hex digests.", code="E_CONFIG")
@@ -112,7 +124,6 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         sdk=Path(rrotor.__file__).parent,
         run_dir=Path(env.get("RROTOR_RUN_DIR", "/tmp/rrotor")),  # noqa: S108  (tmpfs in the container)
         release_key=env.get("RROTOR_RELEASE_PUBLIC_KEY") or None,
-        licence_key=env.get("RROTOR_LICENCE_PUBLIC_KEY") or None,
         runtime_id=runtime_id,
         runtime_token=runtime_token,
         builtin_parts=Path(env.get("RROTOR_BUILTIN_PARTS", "/opt/parts-builtin")),
@@ -121,5 +132,8 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         keys_sha256=keys,
         public_host=public_host,
         link=link == "on",
-        licence_token=(env.get("RROTOR_LICENCE") or "").strip() or None,
+        licence_env=tuple(
+            (name, env[name].strip()) for name in ("GLYPHH_LICENSE_KEY", "RROTOR_LICENCE") if env.get(name, "").strip()
+        ),
+        node_id=node_id,
     )

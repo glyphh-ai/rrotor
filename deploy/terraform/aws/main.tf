@@ -24,7 +24,7 @@ locals {
       server        = var.server
       cpus          = local.size.cpus
       memory        = local.size.memory
-      licence       = var.offline_licence
+      licence       = var.license_key != "" ? var.license_key : var.offline_licence
       keys          = join(",", var.runtime_keys_sha256)
     }))
     # Nitro instances name an EBS volume by its id, without the dash.

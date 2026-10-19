@@ -40,6 +40,7 @@ from rrotord.sandbox.probe import Layers, container_needs, probe
 log = logging.getLogger("rrotor")
 EXPIRE_EVERY = 30.0
 USAGE_EVERY = 60.0
+LICENCE_EVERY = 3600.0  # the licence key's file read again (and on SIGHUP)
 
 
 @dataclass(slots=True)
@@ -66,10 +67,10 @@ class Daemon:
         models = Models(c.data)
         self.deployer = Deployer(models, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
-        self.licence = Licence(c.data, public_key(c.licence_key) if c.licence_key else None, c.runtime_id)
-        self.licence.load(c.licence_token)
+        self.licence = Licence(c.data, c.runtime_id)
+        self.licence.start(c.licence_env)  # never fatal: a bad key is logged and the node runs as Community
         self.access = Access(c.data, c.keys_sha256)
-        self.precedents = Precedents(models)
+        self.precedents = Precedents(models, cap=lambda: self.licence.limits().max_precedents)
         self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
         self.runner = Runner(
             models=models,
@@ -110,6 +111,8 @@ class Daemon:
                 active_runs=lambda: len(self.runner.workers),
                 data=c.data,
                 version=VERSION,
+                node_id=c.node_id,
+                precedents=self.precedents.current,
             )
             if c.mode == "self" and c.link
             else None
@@ -161,6 +164,7 @@ class Daemon:
             else None,
             self.handler.report,
             self.heartbeat,
+            self.precedents,
         )
 
     def install_builtin(self) -> list[str]:
@@ -195,14 +199,29 @@ class Daemon:
             except Exception:
                 log.exception("expiring waiting runs failed")
 
+    async def _licence(self) -> None:
+        while True:
+            await asyncio.sleep(LICENCE_EVERY)
+            try:
+                self.licence.tick()
+            except Exception:
+                log.exception("reading the licence key again failed")
+
+    def reread(self) -> None:
+        """SIGHUP: the licence key's file read again now."""
+        try:
+            self.licence.tick()
+        except Exception:
+            log.exception("reading the licence key again failed")
+
     async def report_usage(self) -> None:
         """The runtime keys' calls since the last report and the runtime's precedents, owed up the link as one
         numbered `usage`: when there were calls, or when the precedents' total is due (`rrotord/precedents.py`);
         nothing otherwise, or when there is no runtime token to owe them under."""
         keys = self.access.usage.take()
+        due = self.precedents.due()  # read on every node, linked or not: the cap's warning, the health
         if not self.link.configured:
             return
-        due = self.precedents.due()
         if keys or due:
             total = self.precedents.total
             await self.link.owe(lambda seq: p.usage(seq, keys, total))
@@ -228,7 +247,10 @@ class Daemon:
             asyncio.create_task(self.link.run()),
             asyncio.create_task(self._expire()),
             asyncio.create_task(self._usage()),
+            asyncio.create_task(self._licence()),
         ]
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGHUP, self.reread)
         if self.heartbeat is not None:
             tasks.append(asyncio.create_task(self.heartbeat.run()))
         await stop.wait()
@@ -236,6 +258,7 @@ class Daemon:
             await self.report_usage()  # the last minute's calls, while the link may still carry them
         except Exception:
             log.exception("reporting usage failed")
+        loop.remove_signal_handler(signal.SIGHUP)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

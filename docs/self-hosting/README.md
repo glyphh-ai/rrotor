@@ -18,10 +18,10 @@ no autoscaling; a second copy of the same runtime is not a replica, it takes the
 | Air-gapped | no | optional | optional | yes |
 | Audit log | no | no | no | yes |
 
-**Not built yet:** the signed licence key that carries these limits, the node and precedent caps on a self-hosted
-rrotor, and clusters (several nodes as one runtime, sync, a head, high availability, audit logs, log drains). Today
-a self-hosted rrotor is one box, licensed as [Licensing](#licensing) says, with no precedent cap. The decided design
-is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
+**Built:** the signed licence key that carries these limits, Community (Free's limits) without one, and the
+precedent cap per node ([Licensing](#licensing)). **Not built yet:** the node cap and clusters (several nodes as one
+runtime, sync, a head, high availability, audit logs, log drains); today a self-hosted rrotor is one box. The
+decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
 server's (`glyphh-ai/server`, `docs/architecture.md`).
 
 ## The three ways
@@ -51,8 +51,8 @@ What rrotor reads in `self` mode. Each package sets these for you.
 | `RROTOR_RUNTIME_ID`, `RROTOR_RUNTIME_TOKEN` | yes, together | From registering the runtime on the platform. The token is this rrotor's identity to Glyphh: keep it secret |
 | `RROTOR_PUBLIC_HOST` | yes | The exact host it answers at, e.g. `rrotor.acme.com`. Any other `Host` is refused (421 `E_HOST`) |
 | `RROTOR_SERVER` | no, default `https://api.glyphh.ai` | The Glyphh server |
-| `RROTOR_LICENCE` | no | An offline licence token, for air-gapped use. Also read from `/data/licence.token`, at start (`PUT /v1/licence` is for a local rrotor only) |
-| `RROTOR_LINK` | no, default `on` | `off` for air-gapped: no link and no heartbeat; rrotor runs on the offline licence alone |
+| `GLYPHH_LICENSE_KEY` | no | The licence key, for air-gapped use (normally it arrives over the link or the heartbeat; without one, Community's limits). `RROTOR_LICENCE` is its alias; also read from `/etc/rrotor/license.key` or `/data/licence.token`, at start, hourly and on `SIGHUP` (`PUT /v1/licence` is for a local rrotor only) |
+| `RROTOR_LINK` | no, default `on` | `off` for air-gapped: no link and no heartbeat; rrotor runs on its licence key from the variable or the file |
 | `RROTOR_KEYS_SHA256` | air-gapped | The SHA-256 of each runtime key that may call it, comma-separated (`printf %s "$KEY" \| sha256sum`). With the link on, the keys come down the link and this is not needed. With the link off there is no Glyphh sign-in either: runtime keys are the only way in |
 | `RROTOR_DATA` | no, default `/data` | The persistent volume. One rrotor writes it, never two |
 
@@ -99,11 +99,11 @@ and what the heartbeat carries, is in [licensing.md](licensing.md).
 
 ## Licensing
 
-What is built today: one signed licence, by one of three paths: the **link** (a 24 hour licence on each connect), the **heartbeat** (a
-small HTTPS call every 24 hours, for networks that block WebSockets), or **offline** (a licence of up to a year,
-for air-gapped networks). Each holds for 14 days past its expiry. The exact heartbeat, and what is never sent, are
-in [licensing.md](licensing.md). The licence key that replaces it is not built yet
-([`specs/licensing.md`](../specs/licensing.md)).
+Without a licence key rrotor runs as Community (Free's limits). A signed key, checked on the node with no network
+request, arrives over the **link** or the **heartbeat** (a small HTTPS call every 24 hours, for networks that block
+WebSockets), or, air-gapped, in `GLYPHH_LICENSE_KEY` or `/etc/rrotor/license.key` (read again hourly and on
+`SIGHUP`). Each key holds for 14 days past its expiry. Where it is read, the exact heartbeat, and what is never sent,
+are in [licensing.md](licensing.md).
 
 ## Upgrades
 

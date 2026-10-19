@@ -1,5 +1,5 @@
-"""A run that needs parts: refused while one is missing or its mod is not in the plan; else each is mounted read-only
-and on the model's PYTHONPATH, so the model imports from it."""
+"""A run that needs parts: refused while one is missing (never by the licence); else each is mounted read-only and on
+the model's PYTHONPATH, so the model imports from it."""
 
 from __future__ import annotations
 
@@ -18,11 +18,9 @@ def start(ctx, inputs):
 """
 
 
-def _ready(root, sock, mods: list[str]) -> tuple[Env, Parts, Licence]:
+def _ready(root, sock) -> tuple[Env, Parts, Licence]:
     store = Parts(root, keys().public, "arm64")
-    lic = Licence(root, keys().public)
-    given = keys().licence(mods)
-    lic.set(given["payload"], given["signature"])
+    lic = Licence(root)  # no key: Community, and nothing refused
     env = Env(root, sock)
     env.runner = env.make()
     env.runner.parts, env.runner.licence = store, lic
@@ -30,27 +28,15 @@ def _ready(root, sock, mods: list[str]) -> tuple[Env, Parts, Licence]:
 
 
 async def test_a_missing_part_names_itself_and_the_mod_that_brings_it(tmp_path, short_dir):
-    env, _, _ = _ready(tmp_path, short_dir, ["ada"])
+    env, _, _ = _ready(tmp_path, short_dir)
     env.deploy(USES_PART, needs=["ada"], databases=["postgres"])
     run = await env.runner.call(model="sample", function="start", inputs={})
     assert outcome(run)["data"]["code"] == "E_PART_MISSING"
     assert "needs the parts postgres, ada, not installed (from the ada, rrotor mods)" in outcome(run)["data"]["reason"]
 
 
-async def test_a_part_not_in_the_plan_refuses_the_run(tmp_path, short_dir):
-    env, store, _ = _ready(tmp_path, short_dir, ["Other"])
-    data, sha, sig = part_archive(tmp_path)
-    store.install("ada", "1.0.0", data, sha, sig)
-    env.deploy(USES_PART, needs=["ada"])
-    run = await env.runner.call(model="sample", function="start", inputs={})
-    assert (
-        outcome(run)["data"]["code"] == "E_NOT_IN_PLAN"
-        and "ada is not in this machine's plan" in outcome(run)["data"]["reason"]
-    )
-
-
-async def test_an_installed_licensed_part_is_mounted_and_importable(tmp_path, short_dir):
-    env, store, _ = _ready(tmp_path, short_dir, ["ada"])
+async def test_an_installed_part_is_mounted_and_importable_with_no_licence_key(tmp_path, short_dir):
+    env, store, _ = _ready(tmp_path, short_dir)
     data, sha, sig = part_archive(tmp_path)
     made = store.install("ada", "1.0.0", data, sha, sig)
     env.deploy(USES_PART, needs=["ada"])
@@ -73,7 +59,7 @@ async def test_without_a_parts_store_every_part_is_missing(tmp_path, short_dir):
 
 
 async def test_a_base_part_needs_no_plan(tmp_path, short_dir):
-    env, store, _ = _ready(tmp_path, short_dir, ["other"])
+    env, store, _ = _ready(tmp_path, short_dir)
     data, sha, sig = part_archive(tmp_path, name="postgres", mod="rrotor", files={"lib/kernel.py": "VALUE = 7\n"})
     store.install("postgres", "1.0.0", data, sha, sig)
     env.deploy(USES_PART, databases=["postgres"])

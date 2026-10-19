@@ -15,16 +15,19 @@ publicHost: ""
 # The Glyphh server.
 server: https://api.glyphh.ai
 
-# "off" for an air-gapped rrotor: no link, no heartbeat, it runs on the offline licence alone.
+# "off" for an air-gapped rrotor: no link, no heartbeat, it runs on its licence key alone.
 link: "on"
 
 # The runtime, from registering it on the platform (the token is shown once). Either fill these in and the chart
 # makes the Secret, or name a Secret you made yourself in existingSecret, with the keys RROTOR_RUNTIME_ID,
-# RROTOR_RUNTIME_TOKEN and, optionally, RROTOR_LICENCE.
+# RROTOR_RUNTIME_TOKEN and, optionally, GLYPHH_LICENSE_KEY (RROTOR_LICENCE is still read).
 runtime:
   id: ""
   token: ""
-  # An offline licence token (air-gapped). Optional.
+  # The licence key, optional: normally it arrives over the link or the heartbeat; set it for an air-gapped rrotor.
+  # Without one rrotor runs at Community's limits. Goes into the Secret as GLYPHH_LICENSE_KEY.
+  licenseKey: ""
+  # Deprecated alias of licenseKey (an earlier release's offline licence), used when licenseKey is empty.
   licence: ""
   # Air-gapped: the SHA-256 of each runtime key that may call it (printf %s "$KEY" | sha256sum). With the link on, the
   # keys come down the link instead. Not secret: hashes only.

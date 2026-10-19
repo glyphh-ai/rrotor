@@ -8,54 +8,45 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tests.daemon.api.conftest import Api, open_api
+from tests.daemon.api.conftest import open_api
 from tests.daemon.api.test_routes import send
 from tests.fakes import keys, part_archive
 
 
-async def _licensed(api: Api, mods: list[str]) -> None:
-    given = keys().licence(mods)
-    status, body = await send(api, "PUT", "/v1/licence", json=given)
-    assert status == 200 and body["licence"]["mods"] == mods
-
-
-async def test_a_licence_is_handed_in_and_shown(api):
+async def test_no_key_is_community_and_a_key_is_handed_in_as_the_body_and_shown(api):
     status, body = await send(api, "GET", "/v1/licence")
-    assert (status, body) == (200, {"licence": None})
-    await _licensed(api, ["ada"])
+    assert status == 200 and (body["licence"]["state"], body["licence"]["tier"], body["licence"]["community"]) == (
+        "none",
+        "free",
+        True,
+    )
+    key = keys().key(tier="team", max_nodes=10, max_precedents=500000)
+    status, body = await send(api, "PUT", "/v1/licence", data=key + "\n")
+    assert (status, body["kept"], body["licence"]["tier"], body["licence"]["source"]) == (200, True, "team", "api")
+    status, body = await send(api, "PUT", "/v1/licence", json=keys().key(issued_at="2026-01-01T00:00:00Z"))
+    assert (status, body["kept"], body["licence"]["tier"]) == (200, False, "team")  # older: the newer one stays
     status, body = await send(api, "GET", "/v1/health")
-    assert body["licence"]["mods"] == ["ada"] and body["parts"] == []
-    status, body = await send(api, "PUT", "/v1/licence", json={"payload": {}, "signature": "x"})
-    assert (status, body["error"]["code"]) == (400, "E_LICENCE")
+    assert (body["licence"]["state"], body["licence"]["max_precedents"], body["parts"]) == ("live", 500000, [])
+    status, body = await send(api, "PUT", "/v1/licence", data=keys().key(drop=("tier",)))
+    assert (status, body["error"]["code"]) == (400, "E_LICENCE") and "tier missing" in body["error"]["message"]
 
 
-async def test_the_licences_features_are_shown_in_the_licence_and_the_health(api):
-    features = {"sync": True, "ha": False, "offline": False, "sso": False}
-    status, body = await send(api, "PUT", "/v1/licence", json=keys().licence(["ada"], features=features))
-    assert (status, body["licence"]["features"]) == (200, features)
-    status, body = await send(api, "GET", "/v1/licence")
-    assert body["licence"]["features"] == features
-    status, body = await send(api, "GET", "/v1/health")
-    assert body["licence"]["features"] == features
-
-
-async def test_an_offline_licence_is_handed_in_as_its_token_and_the_health_says_its_state(api):
-    offline = keys().licence(["ada"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline")
+async def test_a_legacy_licence_is_still_handed_in_as_json_its_token_or_token_in_release_n(api):
+    offline = keys().licence(["ada"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline", plan="Team")
     status, body = await send(api, "PUT", "/v1/licence", data=keys().token(offline) + "\n")
-    assert (status, body["kept"], body["licence"]["kind"], body["licence"]["state"]) == (200, True, "offline", "live")
+    assert (status, body["kept"], body["licence"]["tier"], body["licence"]["state"]) == (200, True, "team", "live")
     status, body = await send(api, "PUT", "/v1/licence", json={"token": keys().token(offline)})
     assert (status, body["kept"]) == (200, True)
-    status, body = await send(api, "PUT", "/v1/licence", json=keys().licence(["zeta"], expires="2997-01-01T00:00:00Z"))
-    assert (status, body["kept"], body["licence"]["mods"]) == (200, False, ["ada"])  # the longer one stays
-    status, body = await send(api, "GET", "/v1/health")
-    assert (body["licence"]["state"], body["licence"]["grace_days"]) == ("live", 14)
+    status, body = await send(api, "PUT", "/v1/licence", json=keys().licence([], expires="2997-01-01T00:00:00Z"))
+    assert (status, body["kept"], body["licence"]["tier"]) == (200, False, "team")  # the longer one stays
+    for bad in ({"payload": {}, "signature": "x"}, [1]):
+        status, body = await send(api, "PUT", "/v1/licence", json=bad)
+        assert (status, body["error"]["code"]) == (400, "E_LICENCE")
     status, body = await send(api, "PUT", "/v1/licence", data="not a token")
     assert (status, body["error"]["code"]) == (400, "E_LICENCE")
-    status, body = await send(api, "PUT", "/v1/licence", json=[1])
-    assert (status, body["error"]["code"]) == (400, "E_LICENCE")
 
 
-async def test_a_part_installs_by_archive_only_while_its_mod_is_in_the_plan(api, tmp_path):
+async def test_a_part_installs_by_archive_with_no_licence_at_all(api, tmp_path):
     data, sha, sig = part_archive(tmp_path)
     ask: dict[str, Any] = {
         "name": "ada",
@@ -64,9 +55,6 @@ async def test_a_part_installs_by_archive_only_while_its_mod_is_in_the_plan(api,
         "signature": sig,
         "archive": base64.b64encode(data).decode(),
     }
-    status, body = await send(api, "POST", "/v1/parts", json=ask)
-    assert (status, body["error"]["code"]) == (403, "E_NOT_IN_PLAN")
-    await _licensed(api, ["ada"])
     status, body = await send(api, "POST", "/v1/parts", json=ask)
     assert (status, body) == (201, {"name": "ada", "version": "1.0.0", "mod": "ada", "arch": "arm64"})
     status, body = await send(api, "GET", "/v1/parts")
@@ -80,7 +68,6 @@ async def test_a_part_installs_by_archive_only_while_its_mod_is_in_the_plan(api,
 
 
 async def test_the_request_is_checked_and_a_bad_archive_or_not_a_tarball_is_refused(api, tmp_path):
-    await _licensed(api, ["ada"])
     for ask, code in (
         ({"name": "ada"}, "E_BAD_REQUEST"),
         ({"name": "ada", "version": "1.0.0", "sha256": "x", "signature": "y", "archive": "***"}, "E_PART_ARCHIVE"),
@@ -115,7 +102,6 @@ async def test_a_part_by_url_is_fetched_when_the_daemon_can(tmp_path, short_dir)
 
     api = await open_api(tmp_path, short_dir, fetch)
     try:
-        await _licensed(api, ["ada"])
         ask = {
             "name": "ada",
             "version": "1.0.0",
@@ -144,7 +130,6 @@ async def test_an_ada_model_deploys_and_a_changed_encoding_that_cannot_be_reenco
     from tests.fakes import GitRepo, ada_part
 
     data, sha, sig = ada_part(tmp_path)
-    await _licensed(api, ["ada"])
     ask = {
         "name": "ada",
         "version": "3.9.0",
@@ -186,3 +171,15 @@ async def test_an_ada_model_deploys_and_a_changed_encoding_that_cannot_be_reenco
     assert (status, body["error"]["code"]) == (422, "E_ADA_ENCODING"), body
     active = api.services.models.active("tickets")
     assert active is not None and active.commit_sha == first and api.services.models.by_sha("tickets", second) is None
+
+
+async def test_the_licence_shows_the_nodes_precedents_against_the_cap_and_over_after_a_downgrade(api):
+    from tests.daemon.test_precedents import model
+
+    model(api.services.models, "tickets", ["ada"], 6)
+    status, body = await send(api, "GET", "/v1/licence")
+    assert status == 200 and body["licence"]["precedents"] == {"held": 6, "cap": 5000, "over": False}
+    status, body = await send(api, "PUT", "/v1/licence", data=keys().key(tier="free", max_precedents=5))
+    assert status == 200 and body["licence"]["precedents"] == {"held": 6, "cap": 5, "over": True}  # nothing deleted
+    status, body = await send(api, "GET", "/v1/health")
+    assert status == 200 and body["licence"]["precedents"]["over"] is True

@@ -16,11 +16,12 @@ from typing import Any
 
 from rrotor.ctx import RunState
 from rrotord import precedents
-from rrotord.errors import Conflict, NotFound, RrotorError, Unavailable
+from rrotord.errors import Conflict, NotFound, Unavailable
 from rrotord.licence import Licence
+from rrotord.licence_key import COMMUNITY
 from rrotord.manifest import check_inputs
 from rrotord.models import Models, Version
-from rrotord.parts import BASE_MOD, KNOWN, Parts
+from rrotord.parts import KNOWN, Parts
 from rrotord.proxy import EgressProxy
 from rrotord.runner.launch import Launcher, Spec
 from rrotord.runner.record import WAITING, Records, Run, new_id, now
@@ -105,7 +106,7 @@ class Runner:
         return run
 
     def _parts_refused(self, model: str, found: Version) -> dict[str, Any] | None:
-        """Why the run cannot go: a part its manifest asks for is not installed, or not in the plan."""
+        """Why the run cannot go: a part its manifest asks for is not installed (a licence never refuses a run)."""
         needed = found.manifest.parts()
         if not needed:
             return None
@@ -117,13 +118,6 @@ class Runner:
                 f"(from the {', '.join(brings)} mod{'s' if len(brings) > 1 else ''})."
             )
             return failed("parts", "E_PART_MISSING", reason)
-        for name in needed:
-            installed = self.parts.get(name) if self.parts else None
-            try:
-                if installed is not None and self.licence is not None and installed.info.mod != BASE_MOD:
-                    self.licence.require(installed.info.mod)
-            except RrotorError as err:
-                return failed("parts", err.code, err.message)
         return None
 
     async def resume(self, run_id: str, answer: Any) -> Run:
@@ -182,19 +176,15 @@ class Runner:
         return bwrap.Mounts(found.src, found.venv, self.sdk, files, socket, data, tuple(part_mounts), tuple(pythonpath))
 
     def _limits(self, found: Version) -> dict[str, Any]:
-        """The plan's limits for the mods whose parts this version uses (the licence's mods.<mod>.limits), merged;
-        with a `precedents` cap, an Ada version also gets `precedents_elsewhere`, the other models' total now."""
-        out: dict[str, Any] = {}
-        if self.parts is None or self.licence is None or self.licence.payload is None:
-            return out
-        mods = self.licence.payload.get("mods") or {}
-        for name in found.manifest.parts():
-            installed = self.parts.get(name)
-            entry = mods.get(installed.info.mod) if installed else None
-            if isinstance(entry, dict) and isinstance(entry.get("limits"), dict):
-                out.update(entry["limits"])
-        cap = out.get("precedents")
-        if "ada" in found.manifest.needs and isinstance(cap, int) and not isinstance(cap, bool):
+        """An Ada version's precedent cap: the licence key's `max_precedents` (Community's without one; null is
+        unlimited), the plan's name for the caller's message, and, with a cap, `precedents_elsewhere`, the other
+        models' total now (the node's cap is on its total)."""
+        if "ada" not in found.manifest.needs:
+            return {}
+        plan = self.licence.limits() if self.licence is not None else COMMUNITY
+        name = self.licence.plan_name if self.licence is not None else "Community"
+        out: dict[str, Any] = {"precedents": plan.max_precedents, "plan": name}
+        if plan.max_precedents is not None:
             out["precedents_elsewhere"] = self._elsewhere(found.model)
         return out
 
