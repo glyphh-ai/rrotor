@@ -422,3 +422,10 @@ def test_a_head_whose_key_stops_allowing_a_cluster_cuts_nobody_and_wakes_the_gat
     a.raft.members = [cluster_node.Member(n, "", "", n, "t").to_json() for n in ("a", "b")]
     a._fit()
     assert a.changed.is_set() and len(a.members()) == 2
+
+
+async def test_stopping_cancels_what_the_node_was_still_telling(nodes: Nodes):
+    c = nodes.make("solo", ["solo"], cluster_head="solo")
+    c._spawn(asyncio.sleep(30))
+    await c.stop()
+    assert not c.telling

@@ -1,8 +1,8 @@
 apiVersion: v2
 name: rrotor
-description: rrotor, Glyphh's runtime, self-hosted on Kubernetes. One rrotor per release, one replica.
+description: rrotor, Glyphh's runtime, self-hosted on Kubernetes. One rrotor per release; one replica, or a cluster of several.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
 home: https://github.com/glyphh-ai/rrotor
 sources:

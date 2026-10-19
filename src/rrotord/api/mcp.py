@@ -86,7 +86,7 @@ async def model_deploy(s: Services, args: dict[str, Any]) -> dict[str, Any]:
 async def audit_query(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     from rrotord.api.routes import audited
 
-    return audited(s, args)
+    return await audited(s, args)
 
 
 async def cluster_status(s: Services, _: dict[str, Any]) -> dict[str, Any]:

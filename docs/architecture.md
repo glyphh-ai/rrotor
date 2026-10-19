@@ -457,7 +457,7 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `GET /v1/approvals` | Runs waiting for approval: run, model, step, prompt, when |
 | `GET /v1/parts`, `POST /v1/parts`, `DELETE /v1/parts/{name}` | The parts installed; install one (`{name, version, sha256, signature, archive \| url}`); remove one ([10](#10-parts)); installing and removing are local only |
 | `GET /v1/licence`, `PUT /v1/licence` | `{licence}`: the key held, its state and the limits that apply ([9](#9-the-licence)); hand one in as the body (release N: or a legacy `{payload, signature}`, `{token}` or offline token), `{licence, kept}`, `kept: false` when another is held; a bad one is 400 `E_LICENCE`; handing one in is local only |
-| `GET /v1/audit` | `?since&until&kind&actor&model&run_id&limit&cursor`: the audit log, newest first, `{events, cursor}` (`limit` 100, at most 1000; `cursor` null at the end); Enterprise only, 403 `E_NOT_IN_PLAN` otherwise ([13](#13-logs-audit-and-drains)) |
+| `GET /v1/audit` | `?since&until&kind&actor&model&run_id&limit&cursor`: the audit log, newest first, `{events, cursor}` (`limit` 100, at most 1000; `cursor` null at the end); Enterprise only, 403 `E_NOT_IN_PLAN` otherwise; in a cluster, the cluster's, which its head keeps (a follower asks it) ([13](#13-logs-audit-and-drains)) |
 | `PUT /v1/runtime/token` | `{runtime_id, token}`: a runtime token handed in (a local runtime's way to get one); kept in `/data/runtime.json`, and the link reconnects with it; local only |
 
 **MCP:** `POST /mcp`, Streamable HTTP, stateless, one JSON-RPC message per POST; MCP 2026-07-28 (`server/discover`,
@@ -611,8 +611,8 @@ A **part** is what a model needs beside the base. One is built: **ada**, the Ada
 | Job | What |
 |---|---|
 | `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the examples' tests |
-| `deploy` | Compose (and the air-gapped overlay) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file, `terraform fmt -check` and `validate` for both modules and their examples. Nothing is started |
-| `image` | Builds the base and runs the sandbox tests inside it; starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off` |
+| `deploy` | Compose (the air-gapped overlay, the cluster file and the per-node file, which refuses to render without its node's settings) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file (one replica, and two clusters of three), `terraform fmt -check` and `validate` for both modules and their examples (one node and a cluster). Nothing is started |
+| `image` | Builds the base and runs the sandbox tests inside it; starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off`; with the secret `CI_CLUSTER_LICENSE_KEY` (a key with cluster sync), brings up the three-node Compose cluster and checks every node ready, `rrotor-0` the head of three |
 | `part-ada` (main) | Clones `glyphh-ai/ada-private` at `main` (`ADA_KERNEL_TOKEN`), builds and signs the Ada part for amd64 and arm64 (`RROTOR_RELEASE_KEY`), publishes the release `part-ada-<version>` |
 | `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with the release public key baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |
 
@@ -640,13 +640,13 @@ container's privileges, the outbound connections, backups and upgrades are in
   health as `sandbox.container_needs`, one sentence each with the fix. Runs are refused until it is fixed; the API
   is served.
 - **Never paused:** a `pause` is ignored in `self` mode.
-- **Several nodes as one runtime:** the cluster's membership, replication, manual failover and elected heads are
-  built ([14](#14-the-cluster)).
+- **Several nodes as one runtime:** the cluster's membership, replication, manual failover, elected heads and its
+  drain at the head are built ([14](#14-the-cluster)), and the packages run one.
 
 ## 13. Logs, audit and drains
 
-Built as [`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains) section 7 decides, for one node (build
-order steps 3 and 4); the head gathering a cluster's follows with the cluster ([Not built yet](#not-built-yet)).
+Built as [`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains) section 7 decides: for one node (build
+order steps 3 and 4), and for a cluster, gathered at its head (step 9).
 **Everything stays on the rrotor by default:** nothing leaves it unless the customer sets a drain or turns on
 server-side logging. The heartbeat and the link's `usage` are licensing, not telemetry, and keep their fixed fields.
 
@@ -673,13 +673,39 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
   collector, through OpenTelemetry's own exporters, so `OTEL_EXPORTER_OTLP_*` mean what OpenTelemetry says;
   `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` is `E_CONFIG` at start. `RROTOR_DRAIN_SIGNALS` picks what goes. The resource:
   `service.name` (`OTEL_SERVICE_NAME`, default `rrotor`), `service.version`, `service.instance.id` (the node id),
-  `rrotor.runtime.id`, `rrotor.node.role` (`standalone`), `rrotor.mode`, and `OTEL_RESOURCE_ATTRIBUTES`. Log lines
-  are log records (the line's fields as attributes); audit events are log records named
-  `rrotor.audit.<kind>`. Metrics: `rrotor.runs` (model, function, status), `rrotor.run.seconds`,
-  `rrotor.precedents` (per model) and `rrotor.precedents.cap`, `rrotor.link.state`, `rrotor.drain.dropped`. Traces
+  `rrotor.runtime.id`, `rrotor.cluster.id` (in a cluster), `rrotor.node.role` (`standalone`, `head` or `follower`,
+  as it is when the batch goes), `rrotor.mode`, and `OTEL_RESOURCE_ATTRIBUTES`. Log lines are log records (the
+  line's fields as attributes); audit events are log records named `rrotor.audit.<kind>`. Metrics: `rrotor.runs`
+  (model, function, status), `rrotor.run.seconds`, `rrotor.precedents` (per model) and `rrotor.precedents.cap`,
+  `rrotor.link.state`, `rrotor.drain.dropped` (per destination and signal), and on a member `rrotor.cluster.term`
+  and, on the head, `rrotor.cluster.lag` (per follower, the seqs it last acknowledged behind the head's log). Traces
   (`OTEL_TRACES_SAMPLER`, default `parentbased_always_on`): a span per API request, a child of the caller's
-  `traceparent`, with `rrotor.sandbox.start` and `rrotor.function` under it. Each node exports itself
-  (`RROTOR_DRAIN_AT` is read; with no cluster a node is its own head).
+  `traceparent`, with `rrotor.sandbox.start` and `rrotor.function` under it; on a follower `rrotor.cluster.forward`
+  (its `traceparent` carried in the forward, so the head's `rrotor.cluster.forwarded` is of the same trace) and
+  `rrotor.cluster.commit_wait` (the wait to have applied the head's seq). Each batch goes as one OTLP export
+  request (`otel.encoded`), through the OTLP exporter's own HTTP client, so its retries, headers, certificates and
+  compression are OpenTelemetry's.
+- **The cluster's drain** (`rrotord/aggregate.py`, `drain.py`): with `RROTOR_DRAIN_AT=head` (the default) a
+  follower's logs, metrics and traces go to its head as `telemetry {signal, to, body}` frames over its own cluster
+  connection (`body` its export request, `to` the head's destinations it is for: `collector`, and `glyphh` with
+  server-side logging). The head buffers each record for those destinations it has, under its buffer's rule, and
+  exports it as it came, with its node's resource: one endpoint and one egress, every node's identity intact. A
+  follower with no head buffers as for an endpoint that is down, the oldest dropped and counted
+  (`rrotor.drain.dropped`, drain `head`); the health's `drains` say `via: head`. `node`: each node exports itself.
+  Server-side logging always goes by the head, whatever `RROTOR_DRAIN_AT`: a follower never sends to Glyphh. The
+  head's settings say where the cluster's signals go; the packages give every node the same. Each frame carries the
+  sender's term and is fenced like the rest of a member's traffic (a lower term refused, a higher one deposing the
+  head). The drain follows the head: where a node sends is decided by its role at each batch, so a head that steps
+  down stops exporting and sends to the new head (buffering until it finds it), and the new head exports for all.
+- **The cluster's audit store** (Enterprise, on the head): `/data/audit/cluster/`, the same day files, retention
+  and size, holding every member's kept events: the head's own copied in (every 5 s, and before a query), each
+  follower's sent from `/data/audit/.cursor-head` in `telemetry {signal: audit, since, events: [[file, offset,
+  event], …]}`. The head answers with how far it holds that node's (`through`, kept in `.through.json`) and keeps
+  each event once: one sent again is skipped, and a follower ahead of the head (a store lost, a new head) goes back
+  to `through` and sends again, as long as its own retention holds the files. Events are filed by the day they
+  arrive, so a drain reading forward never misses one. `GET /v1/audit` and `audit_query` read it on the head, and on
+  a follower by way of the head. The head's drain exports it (with `RROTOR_DRAIN_AT=head`, and always to Glyphh) from
+  its own cursor, each event under its node's `service.instance.id`; with `node` each node exports its own store.
 - **Buffer and drop:** logs, metrics and traces wait in memory, `RROTOR_DRAIN_BUFFER` (10,000) per signal per
   destination, sent every 5 s in batches of 512, a failure tried again after 10 s doubling to a minute; past the
   buffer the oldest go, counted (`rrotor.drain.dropped`, the health) and logged at most once a minute. Audit events
@@ -689,7 +715,9 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
   `{RROTOR_SERVER}/v1/otlp/v1/{logs,metrics,traces}`, OTLP protobuf, gzipped, with the runtime token, and never the
   customer's OTLP headers or certificates. rrotor logs at every start, and the health shows: "Server-side logging is
   on: this rrotor's logs, metrics, traces and audit events are sent to Glyphh (api.glyphh.ai) and leave your
-  infrastructure. Set RROTOR_SERVER_LOGS=off to keep them here." Turning it on or off is an audit event.
+  infrastructure. Set RROTOR_SERVER_LOGS=off to keep them here." Turning it on or off is an audit event. In a
+  cluster the head sends it for every node. The server keeps what it receives for 7 days and shows it on the
+  platform's Settings → Logs (`glyphh-ai/server`).
 - **Redaction:** never in a log line, audit event, span or metric: a model's inputs or outputs, `ctx.log`'s fields,
   secrets, tokens or keys (keys as SHA-256 only), request bodies; a drain sends each line exactly as stdout masks it.
   `RROTOR_LOG_PAYLOADS=on` adds inputs and `Result.data` (4 KB each) to the `rrotor.function` span and the kept
@@ -698,8 +726,9 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
 
 ## 14. The cluster
 
-Built as [`specs/cluster.md`](specs/cluster.md) build order steps 5 to 8 decide: membership, replication, manual
-failover, and elected heads (`rrotord/cluster/`). Several self-hosted rrotors of one runtime find and authenticate each other, one
+Built as [`specs/cluster.md`](specs/cluster.md) build order steps 5 to 10 decide: membership, replication, manual
+failover and elected heads (`rrotord/cluster/`), the cluster's drain and audit store at the head
+([13](#13-logs-audit-and-drains)), and the packages that run it. Several self-hosted rrotors of one runtime find and authenticate each other, one
 makes the cluster and is its **head**, the rest join it as **followers** up to the key's `max_nodes`. The head is the
 single writer of what syncs (each Ada model's precedent store, the deployed versions, the runtime keys, the licence
 key) and ships it to every follower as one ordered log; followers serve every read from their replica and forward
@@ -716,8 +745,9 @@ every write to the head.
   request (`hello`, `join`, `ping`, `command`) is answered by an `answer` with its id, `ok` or an `error {code,
   message, status, detail}`; the head pushes `removed` unasked, and asks a follower `append`, `snapshot` and
   `forward` over the follower's own connection. `GET /cluster/v1/versions/<model>/<commit>.tar` and `GET
-  /cluster/v1/snapshot` are plain requests on the same listener, for members only. Any other type is
-  `E_CLUSTER_MESSAGE` (`vote` and `telemetry` come with elections and the aggregate drain).
+  /cluster/v1/snapshot` are plain requests on the same listener, for members only. A member's `telemetry` (its
+  drain's batches and kept audit events) is the head's to take ([13](#13-logs-audit-and-drains)). Any other type is
+  `E_CLUSTER_MESSAGE` (`vote` comes with elections).
 - **Mutual TLS from one secret** (`cluster/tls.py`): from `RROTOR_CLUSTER_SECRET` (32 bytes or more, base64) every
   node derives, with HKDF-SHA256, the same Ed25519 cluster CA key and the same CA certificate; at start it makes its
   own key and a leaf from that CA naming its node id. TLS 1.3, a certificate from the cluster CA required on both
@@ -798,7 +828,8 @@ every write to the head.
   restarted leads again in its term unless a member it reaches knows a higher one.
 - **What the rest of rrotor sees:** `GET /readyz`, `GET /v1/cluster`, MCP's `cluster_status` and the health's
   `cluster` ([7](#7-the-api)); the heartbeat's `cluster_id` and `role` ([12](#12-self-hosting)); `cluster_id` and
-  `role` on every log line and `cluster_id` on every audit event ([13](#13-logs-audit-and-drains)).
+  `role` on every log line and `cluster_id` on every audit event, and the drain's resource
+  ([13](#13-logs-audit-and-drains)).
 - **Which calls write** (`manifest.py`): each function's `"writes"`, default the model's `data` (the examples
   and the Ada skill mark `query`, `facts` and `probabilities` false). A follower runs a `false` one itself, with
   `/files` and `/data` mounted read-only (`--ro-bind`, and Landlock read-only) and the Ada store opened with the
@@ -848,16 +879,26 @@ every write to the head.
 - **Read-your-writes:** `Rrotor-Cluster-Seq` on every member's answers, the follower's wait of up to 2 s for a write
   it forwarded, and `Rrotor-Min-Seq` ([7](#7-the-api)). `commit_seq` and `applied_seq` in `GET /v1/cluster` are
   real, and each member's `applied_seq` and `lag` are what it last acknowledged.
-- **The head's other jobs:** only the head opens the runtime's link (a follower's stays `follower`, and closes if
+- **The head's other jobs:** it exports the cluster's drain and keeps the cluster's audit store
+  ([13](#13-logs-audit-and-drains)); only the head opens the runtime's link (a follower's stays `follower`, and closes if
   it was up when it became one); its `hello` names the node, its cluster and its role. Each follower's ping carries
   its runtime keys' calls since the last one, which the head adds to its own: its `usage` is the cluster's, with
   the synced store's precedents. Every node still heartbeats. The precedent cap is the head's to hold, on the
   synced store: every node holds the same precedents, so a Pro cluster holds 50,000 across its nodes, not 50,000 on
   each ([9](#9-the-licence)).
+- **The packages** (`deploy/`, [`self-hosting/`](self-hosting/README.md#a-cluster)): Helm's `cluster.enabled` and
+  `replicas` (a Parallel StatefulSet, `RROTOR_NODE_ID` from the pod name, `RROTOR_CLUSTER_DNS` at the headless
+  Service with port 7778 and `publishNotReadyAddresses`, the advertised address the pod's name under it, the head
+  `<name>-0`, the secret made once and kept with `lookup` or `cluster.existingSecret`, readiness on `/readyz`, a
+  NetworkPolicy for 7778 between the release's pods, `maxUnavailable: 1`, a spread across machines and zones);
+  Compose's `docker-compose.cluster.yml` (three nodes and Caddy on one machine, to try) and
+  `docker-compose.node.yml` (one per machine, peers by private address); Terraform's `node_count` (nodes across
+  zones at fixed private addresses, the secret in the cloud's secret store and read at boot with the instance's own
+  identity, 7778 between the nodes only, an AWS NLB with ACM or Google's external HTTPS load balancer checking
+  `/readyz`, no Caddy). `replicas` and `node_count` of 1 are the single box as before.
 - **The seams left for what comes next:** the snapshot is a plain GET on the listener rather than binary frames on
-  the WebSocket; a deposed head takes a whole snapshot rather than only the models it touched; the drain's
-  `rrotor.node.role` resource attribute is `standalone`; the clients' retry of `E_NO_HEAD` is the SDKs' (in
-  `glyphh-ai/ada`), not this repo's.
+  the WebSocket; a deposed head takes a whole snapshot rather than only the models it touched; the clients' retry
+  of `E_NO_HEAD` is the SDKs' (in `glyphh-ai/ada`), not this repo's.
 - **Proven by simulation** (`tests/daemon/cluster/sim.py`): the nodes' Raft over a seeded network in one thread, no
   clock but the scheduler's: messages delayed, reordered, lost and doubled, partitions, crashes and restarts (log,
   term, vote and store kept), writes, members joining and leaving, compaction, and an operator's promotions, forced
@@ -874,14 +915,6 @@ every write to the head.
   logged and skipped).
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a model's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
-- **The cluster's packages** (build order step 10): Helm's `cluster.enabled`, Compose's cluster files and Terraform's
-  `node_count`, with the cluster port, the secret and `/readyz` as the readiness probe.
-- **The cluster's drain and audit log** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains), build
-  order step 9): followers sending their telemetry to the head, `RROTOR_DRAIN_AT=head` exporting it there, the
-  cluster's audit store under `/data/audit/cluster/` and `GET /v1/audit` answered by the head; the
-  `rrotor.cluster.lag` and `rrotor.cluster.term` metrics and the forward and commit-wait spans. Each node logs,
-  audits and drains itself today ([13](#13-logs-audit-and-drains)). Server-side logging also needs the server's
-  OTLP receiver (`glyphh-ai/server`).
 - **SSO and SAML, roles (RBAC).**
 - **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
   ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).

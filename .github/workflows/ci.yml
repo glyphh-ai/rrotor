@@ -42,28 +42,38 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Docker Compose, and the air-gapped overlay, from .env.example
+      - name: Docker Compose, the air-gapped overlay, and the cluster files, from .env.example
         working-directory: deploy/compose
         run: |
           cp .env.example .env
           docker compose config -q
           echo GLYPHH_LICENSE_KEY=example >> .env
           docker compose -f docker-compose.yml -f docker-compose.airgap.yml config -q
+          echo "RROTOR_CLUSTER_SECRET=$(openssl rand -base64 32)" >> .env
+          docker compose -f docker-compose.cluster.yml config -q
+          test "$(docker compose -f docker-compose.cluster.yml config --services | sort | tr '\n' ' ')" = "caddy rrotor-0 rrotor-1 rrotor-2 "
+          ! docker compose -f docker-compose.node.yml config -q 2>/dev/null  # refused without the node's settings
+          printf '%s\n' RROTOR_NODE_ID=rrotor-0 RROTOR_CLUSTER_ADVERTISE=10.0.1.10:7778 \
+            RROTOR_CLUSTER_PEERS=10.0.1.10:7778,10.0.2.10:7778,10.0.3.10:7778 >> .env
+          docker compose -f docker-compose.node.yml config -q
       - name: The Caddyfiles parse
         working-directory: deploy/compose
         run: |
-          for f in Caddyfile Caddyfile.airgap; do
+          for f in Caddyfile Caddyfile.airgap Caddyfile.cluster; do
             docker run --rm -e RROTOR_PUBLIC_HOST=rrotor.example.com -v "$PWD/$f:/etc/caddy/Caddyfile:ro" \
               caddy:2 caddy adapt --config /etc/caddy/Caddyfile >/dev/null
           done
       - uses: azure/setup-helm@v4
-      - name: The Helm chart lints and renders, with each set of CI values
+      - name: The Helm chart lints and renders, with each set of CI values (one replica, and clusters of three)
         working-directory: deploy/helm/rrotor
         run: |
           for f in ci/*.yaml; do
             helm lint . --strict -f "$f"
             helm template rrotor . -f "$f" >/dev/null
           done
+          helm template rrotor . -f ci/cluster-values.yaml | grep -q 'podManagementPolicy: Parallel'
+          helm template rrotor . -f ci/cluster-values.yaml | grep -q 'publishNotReadyAddresses: true'
+          ! helm template rrotor . -f ci/default-values.yaml --set replicas=3 >/dev/null 2>&1  # no replicas without a cluster
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
@@ -71,7 +81,7 @@ jobs:
         working-directory: deploy/terraform
         run: |
           terraform fmt -recursive -check
-          for d in aws aws/examples/basic gcp gcp/examples/basic; do
+          for d in aws aws/examples/basic aws/examples/cluster gcp gcp/examples/basic gcp/examples/cluster; do
             terraform -chdir="$d" init -backend=false -input=false >/dev/null
             terraform -chdir="$d" validate
           done
@@ -124,6 +134,32 @@ jobs:
           python3 -c "import json; h=json.load(open('health-self.json')); assert (h['mode'], h['link']['state'], h['sandbox']['ready']) == ('self', 'off', True), h"
           test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: elsewhere.example.com' http://127.0.0.1:7778/v1/health)" = 421
           docker rm -f smoke-self
+      - name: A three-node Compose cluster comes up (with a licence key that allows sync, the secret CI_CLUSTER_LICENSE_KEY)
+        working-directory: deploy/compose
+        env:
+          KEY: ${{ secrets.CI_CLUSTER_LICENSE_KEY }}
+        run: |
+          [ -n "$KEY" ] || { echo "::notice::CI_CLUSTER_LICENSE_KEY is not set; the cluster is not brought up."; exit 0; }
+          docker tag rrotor:ci ghcr.io/glyphh-ai/rrotor:ci
+          key=$(openssl rand -hex 32); sha=$(printf %s "$key" | sha256sum | cut -d' ' -f1)
+          cp .env.example .env
+          sed -i "s/^RROTOR_RUNTIME_ID=.*/RROTOR_RUNTIME_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')/; s/^RROTOR_RUNTIME_TOKEN=.*/RROTOR_RUNTIME_TOKEN=tok_$(openssl rand -hex 16)/; s/^RROTOR_VERSION=.*/RROTOR_VERSION=ci/" .env
+          printf '%s\n' RROTOR_LINK=off "GLYPHH_LICENSE_KEY=$KEY" "RROTOR_KEYS_SHA256=$sha" \
+            "RROTOR_CLUSTER_SECRET=$(openssl rand -base64 32)" >> .env
+          c="docker compose -f docker-compose.cluster.yml"
+          $c up -d rrotor-0 rrotor-1 rrotor-2
+          ready() { $c exec -T "$1" /opt/rrotord/bin/python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:7777/readyz', timeout=2)" 2>/dev/null; }
+          for i in $(seq 1 90); do ready rrotor-0 && ready rrotor-1 && ready rrotor-2 && break; sleep 2; done
+          # The head holds the membership; a follower's view can trail it by a ping.
+          for i in $(seq 1 30); do
+            $c exec -T rrotor-0 /opt/rrotord/bin/python -c "import json, urllib.request as u; r = u.Request('http://127.0.0.1:7777/v1/cluster', headers={'Host': 'rrotor.example.com', 'Authorization': 'Bearer $key'}); print(json.dumps(json.load(u.urlopen(r, timeout=5))))" > cluster.json || true
+            python3 -c "import json; c=json.load(open('cluster.json')); assert (c['head'], len(c['members'])) == ('rrotor-0', 3)" 2>/dev/null && break
+            sleep 2
+          done
+          cat cluster.json
+          python3 -c "import json; c=json.load(open('cluster.json')); assert (c['head'], len(c['members'])) == ('rrotor-0', 3), c"
+          $c logs --no-color | tail -50
+          $c down -v
       - name: "The WSL root filesystem (Windows, designed): exported from the base image"
         run: |
           id=$(docker create rrotor:ci)

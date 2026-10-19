@@ -1,8 +1,8 @@
 # Spec: clustered rrotor, logging and log drains
 
-Status: decided 2026-10-19; build order steps 5 (the skeleton), 6 (replication with a fixed head), 7 (manual
-failover, with membership in the log) and 8 (elected heads) built, as
-[architecture](../architecture.md#14-the-cluster) section 14 describes; steps 9 and 10 not built. Today a self-hosted rrotor is one box ([architecture](../architecture.md));
+Status: decided 2026-10-19; build order steps 5 to 10 built (the skeleton, replication, manual failover with
+membership in the log, elected heads, the aggregate drain, the packages), as
+[architecture](../architecture.md#14-the-cluster) sections 13 and 14 describe. Today a self-hosted rrotor is one box ([architecture](../architecture.md));
 this is how several become one runtime, and how what they log reaches the customer. The licence key and its caps,
 which gate all of this, are [licensing.md](licensing.md).
 

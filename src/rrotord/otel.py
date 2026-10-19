@@ -2,6 +2,11 @@
 and audit events as OTLP log records, the metrics' instruments, the tracer for a span per API request and a run's
 sandbox start and function, and the redaction of what goes to Glyphh. The sending is rrotord/drain.py's.
 
+Every batch goes as its OTLP export request, serialized (`encoded`): this node's own records with the resource as it
+stands when the batch goes (a node that joins a cluster becomes `rrotor.node.role` head or follower, with its
+`rrotor.cluster.id`), and, on a cluster's head, the records its followers sent (`Wire`, `unwrapped`), each with its
+own node's resource exactly as that node sent it.
+
 Nothing here is on unless a drain or server-side logging is: without one, rrotor has no tracer or meter at all."""
 
 from __future__ import annotations
@@ -11,10 +16,12 @@ import json
 import logging
 import urllib.parse
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from opentelemetry import context as otel_context
 from opentelemetry._logs import LogRecord, SeverityNumber
+from opentelemetry.exporter.otlp.proto.common._internal import _encode_resource
 from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
 from opentelemetry.exporter.otlp.proto.common.metrics_encoder import encode_metrics
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
@@ -52,11 +59,17 @@ Observe = Callable[[], Iterable[tuple[float, Mapping[str, str]]]]
 
 
 def resource(
-    otel: Mapping[str, str], *, node_id: str, runtime_id: str | None, mode: str, role: str = "standalone"
+    otel: Mapping[str, str],
+    *,
+    node_id: str,
+    runtime_id: str | None,
+    mode: str,
+    role: str = "standalone",
+    cluster_id: str | None = None,
 ) -> Resource:
     """`OTEL_RESOURCE_ATTRIBUTES` (key=value, comma-separated, percent-encoded), then rrotor's own: service.name
     (`OTEL_SERVICE_NAME`, default rrotor), service.version, service.instance.id (the node id), rrotor.runtime.id,
-    rrotor.cluster.id (none while standalone), rrotor.node.role and rrotor.mode."""
+    rrotor.cluster.id (none while standalone), rrotor.node.role (standalone, head or follower) and rrotor.mode."""
     attributes: dict[str, str] = {}
     for pair in otel.get("OTEL_RESOURCE_ATTRIBUTES", "").split(","):
         key, eq, value = pair.partition("=")
@@ -71,6 +84,8 @@ def resource(
     }
     if runtime_id:
         attributes["rrotor.runtime.id"] = runtime_id
+    if cluster_id:
+        attributes["rrotor.cluster.id"] = cluster_id
     return Resource(attributes)
 
 
@@ -125,7 +140,12 @@ def log_record(record: logging.LogRecord, line: Mapping[str, Any], res: Resource
 
 
 def audit_record(event: Mapping[str, Any], res: Resource) -> ReadableLogRecord:
-    """A kept audit event as an OTLP log record: `event.name = rrotor.audit.<kind>`, its fields as attributes."""
+    """A kept audit event as an OTLP log record: `event.name = rrotor.audit.<kind>`, its fields as attributes. An
+    event another node kept (the cluster's audit store, exported by its head) carries that node's identity:
+    service.instance.id its node id, rrotor.node.role follower."""
+    node = event.get("node_id")
+    if isinstance(node, str) and node != res.attributes.get("service.instance.id"):
+        res = Resource({**res.attributes, "service.instance.id": node, "rrotor.node.role": "follower"})
     at = int(moment(str(event.get("at")), "at").timestamp() * 1e9) if event.get("at") else None
     return ReadableLogRecord(
         LogRecord(
@@ -148,20 +168,73 @@ def _strip(attributes: Any) -> None:
     attributes.extend(kept)
 
 
-def encoded(signal: str, batch: list[Any], for_glyphh: bool) -> bytes:
-    """A batch as its OTLP export request, serialized; for Glyphh, without client addresses or payloads."""
+@dataclass(frozen=True, slots=True)
+class Wire:
+    """One record another node sent, as OTLP: a log record or a span with its resource and scope, or a metrics
+    reading whole (its ResourceMetrics, `scope` None). Exported as it came, so it keeps its node's identity."""
+
+    resource: Any
+    scope: Any
+    item: Any
+
+
+def unwrapped(signal: str, body: bytes) -> list[Wire]:
+    """An export request another node sent, as its records: what a head buffers for its destinations."""
+    request = decoded("logs" if signal == "audit" else signal, body)
+    if signal == "metrics":
+        return [Wire(rm.resource, None, rm) for rm in request.resource_metrics]
+    if signal == "traces":
+        return [
+            Wire(rs.resource, ss.scope, s) for rs in request.resource_spans for ss in rs.scope_spans for s in ss.spans
+        ]
+    return [
+        Wire(rl.resource, sl.scope, r) for rl in request.resource_logs for sl in rl.scope_logs for r in sl.log_records
+    ]
+
+
+def _wired(request: Any, signal: str, wires: list[Wire]) -> None:
+    """Records another node sent, added to a request: each under its own resource and scope, consecutive ones that
+    share them grouped."""
+    for wire in wires:
+        if signal == "metrics":
+            request.resource_metrics.append(wire.item)
+            continue
+        groups = request.resource_spans if signal == "traces" else request.resource_logs
+        if not groups or groups[-1].resource != wire.resource:
+            groups.add().resource.CopyFrom(wire.resource)
+        scopes = groups[-1].scope_spans if signal == "traces" else groups[-1].scope_logs
+        if not scopes or scopes[-1].scope != wire.scope:
+            scopes.add().scope.CopyFrom(wire.scope)
+        (scopes[-1].spans if signal == "traces" else scopes[-1].log_records).append(wire.item)
+
+
+def encoded(signal: str, batch: list[Any], for_glyphh: bool, res: Resource | None = None) -> bytes:
+    """A batch as its OTLP export request, serialized; for Glyphh, without client addresses or payloads. This node's
+    spans and metrics carry `res`, the resource as it stands now (their providers keep the one they started with);
+    its log records were made with it. Records from other nodes keep theirs."""
+    wires = [item for item in batch if isinstance(item, Wire)]
+    local = [item for item in batch if not isinstance(item, Wire)]
     if signal == "metrics":
         request: Any = ExportMetricsServiceRequest()
-        for data in batch:
+        for data in local:
             request.resource_metrics.extend(encode_metrics(data).resource_metrics)
-        return bytes(request.SerializeToString())
-    if signal == "traces":
-        request = encode_spans(batch)
-        records: Iterable[Any] = (s for rs in request.resource_spans for ss in rs.scope_spans for s in ss.spans)
+        groups: Any = request.resource_metrics
+    elif signal == "traces":
+        request = encode_spans(local)
+        groups = request.resource_spans
     else:
-        request = encode_logs(batch)
-        records = (r for rl in request.resource_logs for sl in rl.scope_logs for r in sl.log_records)
-    if for_glyphh:
+        request = encode_logs(local)
+        groups = ()
+    if res is not None:
+        for group in groups:
+            group.resource.CopyFrom(_encode_resource(res))
+    _wired(request, signal, wires)
+    if for_glyphh and signal != "metrics":
+        records: Iterable[Any] = (
+            (s for rs in request.resource_spans for ss in rs.scope_spans for s in ss.spans)
+            if signal == "traces"
+            else (r for rl in request.resource_logs for sl in rl.scope_logs for r in sl.log_records)
+        )
         for each in records:
             _strip(each.attributes)
     return bytes(request.SerializeToString())

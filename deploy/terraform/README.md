@@ -15,3 +15,8 @@ module "rrotor" {
 ```
 
 Outputs: `connector_url`, `public_ip`, `instance_id`.
+
+`node_count = 3` (a licence key with cluster sync) makes a cluster instead: three VMs across zones, each running
+`deploy/compose/docker-compose.node.yml`, the cluster secret in the cloud's secret store, port 7778 between the nodes
+only, and an AWS Network Load Balancer or Google's external HTTPS load balancer in front, health-checking `/readyz`.
+See `examples/cluster/`.

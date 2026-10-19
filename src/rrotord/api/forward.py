@@ -15,14 +15,23 @@ a run, and what a forwarded request does where it lands.
   waits up to 2 s, then sends the call to the head.
 
 The caller travels as data: the head does the request as who the follower's gate let in (its audit events name
-them), and a forwarded call is audited where it runs, never twice."""
+them), and a forwarded call is audited where it runs, never twice.
+
+**Traced, with a drain:** the forward is a span (`rrotor.cluster.forward`, under the request's) and so is the wait
+for the seq the head answered (`rrotor.cluster.commit_wait`); the forward carries its `traceparent`, so what the head
+does is a span of the same trace (`rrotor.cluster.forwarded`)."""
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from opentelemetry.trace import SpanKind
+
 from rrotord.errors import BadRequest, RrotorError
+from rrotord.otel import PROPAGATOR
 from rrotord.runner.record import holder
 
 if TYPE_CHECKING:
@@ -72,24 +81,46 @@ async def committed(s: Services, term: int | None) -> None:
         await s.cluster.committed(term)
 
 
+@contextlib.contextmanager
+def traced(s: Services, name: str, attributes: dict[str, Any], **given: Any) -> Iterator[None]:
+    """A span, with a drain; nothing without one."""
+    if s.drain is None:
+        yield
+        return
+    with s.drain.telemetry.span(name, attributes, **given):
+        yield
+
+
 async def relayed(s: Services, op: str, args: dict[str, Any], target: str | None = None) -> dict[str, Any]:
     """Done by the head (or the node named), and, for a write, answered once this node has applied it."""
     assert s.cluster is not None  # noqa: S101  (only a member forwards)
-    got = await s.cluster.forward(op, args, target)
+    with traced(s, "rrotor.cluster.forward", {"rrotor.op": op, "rrotor.target": target or "head"}):
+        carrier: dict[str, str] = {}
+        PROPAGATOR.inject(carrier)
+        got = await s.cluster.forward(op, {**args, "trace": carrier} if carrier else args, target)
     seq = got.get("seq")
     if isinstance(seq, int):
-        await s.cluster.caught_up(seq)
+        with traced(s, "rrotor.cluster.commit_wait", {"rrotor.seq": seq}):
+            await s.cluster.caught_up(seq)
     result = got.get("result")
     return result if isinstance(result, dict) else {}
 
 
 async def serve(s: Services, request: dict[str, Any]) -> dict[str, Any]:
-    """A forwarded request, done here as its caller (the cluster set who that is)."""
-    from rrotord.api import ops
-
+    """A forwarded request, done here as its caller (the cluster set who that is); with a drain, a span of the
+    sender's trace."""
     op, args = request.get("op"), request.get("args") or {}
     if not isinstance(args, dict):
         raise BadRequest("A forwarded request's args are an object.")
+    carrier = args.pop("trace", None)
+    parent = PROPAGATOR.extract(carrier=carrier) if isinstance(carrier, dict) else None
+    with traced(s, "rrotor.cluster.forwarded", {"rrotor.op": str(op)}, kind=SpanKind.SERVER, parent=parent):
+        return await _serve(s, op, args)
+
+
+async def _serve(s: Services, op: Any, args: dict[str, Any]) -> dict[str, Any]:
+    from rrotord.api import ops, routes
+
     run_id = str(args.get("run_id") or "")
     match op:
         case "call":
@@ -108,4 +139,6 @@ async def serve(s: Services, request: dict[str, Any]) -> dict[str, Any]:
             return {"approvals": await ops.approvals(s)}
         case "approvals_here":
             return {"approvals": s.runner.approvals()}
+        case "audit":
+            return await routes.audited(s, args)
     raise BadRequest(f"There is no forwarded operation {op!r}.", code="E_CLUSTER_MESSAGE")

@@ -1,4 +1,17 @@
-{{- if .Values.podDisruptionBudget.enabled }}
+{{- if .Values.cluster.enabled }}
+# A cluster: a drain takes one node at a time; the others serve meanwhile.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rrotor.fullname" . }}
+  labels:
+    {{- include "rrotor.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "rrotor.selectorLabels" . | nindent 6 }}
+{{- else if .Values.podDisruptionBudget.enabled }}
 # One replica: this budget makes a node drain wait until rrotor is moved by hand (kubectl delete pod).
 apiVersion: policy/v1
 kind: PodDisruptionBudget

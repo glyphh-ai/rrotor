@@ -21,6 +21,7 @@ from aiohttp import web
 from rrotord import VERSION
 from rrotord import drain as drains
 from rrotord.access import Access
+from rrotord.aggregate import ClusterAudit
 from rrotord.api import mcp, ops
 from rrotord.api.gate import METADATA, SCOPE, public_url
 from rrotord.audit import Audit
@@ -79,6 +80,7 @@ class Services:
     audit: Audit | None = None  # the audit events: kept (Enterprise) and read by GET /v1/audit, or logged
     drain: Drain | None = None  # the customer's collector and server-side logging, when either is on
     cluster: Cluster | None = None  # this node's place in its cluster; none: standalone
+    gathered: ClusterAudit | None = None  # the cluster's audit store, read on its head
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -104,14 +106,22 @@ def local_only(mode: str, handler: Handler) -> Handler:
     return handler if mode == "local" else refused
 
 
-def audited(s: Services, query: dict[str, Any]) -> dict[str, Any]:
-    """`GET /v1/audit` and `audit_query`: the kept audit events, Enterprise only."""
+async def audited(s: Services, query: dict[str, Any]) -> dict[str, Any]:
+    """`GET /v1/audit` and `audit_query`: the kept audit events, Enterprise only; in a cluster, the cluster's, which
+    its head keeps (a follower asks it)."""
     if s.audit is None or not s.audit.kept:
         raise RrotorError(
             "The audit log is part of the Enterprise plan; below it audit events are log lines (logger rrotor.audit).",
             code="E_NOT_IN_PLAN",
             status=403,
         )
+    c = s.cluster
+    if c is not None and c.role == "follower":
+        got = (await c.forward("audit", query)).get("result")
+        return got if isinstance(got, dict) else {}
+    if c is not None and c.role == "head" and s.gathered is not None:
+        s.gathered.catch_up()
+        return s.gathered.query(query)
     return s.audit.query(query)
 
 
@@ -222,7 +232,7 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response({"removed": request.match_info["name"]})
 
     async def audit(request: web.Request) -> web.Response:
-        return web.json_response(audited(s, dict(request.query)))
+        return web.json_response(await audited(s, dict(request.query)))
 
     async def licence_get(_: web.Request) -> web.Response:
         return web.json_response({"licence": licence()})

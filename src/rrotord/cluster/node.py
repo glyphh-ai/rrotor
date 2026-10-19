@@ -66,7 +66,8 @@ done on the head is answered once a majority of voters hold it (`committed`: `E_
 kept), and `E_NO_HEAD` carries `Retry-After: 2`. An elected head restarted follows whoever is elected, its stores
 taken again first. Under HA `promote` moves the head only to a voter, never forced (`E_CLUSTER_HA`).
 
-**Not built yet:** the followers' telemetry to the head."""
+**Telemetry** (`telemetry`): a follower's drain batches and kept audit events, to its head, over its own connection;
+what the head does with them is rrotord/aggregate.py's (`on_telemetry`)."""
 
 from __future__ import annotations
 
@@ -126,6 +127,10 @@ async def _nothing() -> None:
 
 def no_head(message: str = "No head answers this node: writes wait for it.") -> Unavailable:
     return Unavailable(message, code="E_NO_HEAD", headers={"Retry-After": RETRY_AFTER})
+
+
+async def _no_telemetry(node: str, msg: dict[str, Any]) -> dict[str, Any]:
+    raise ClusterError("This node takes no telemetry.", code="E_CLUSTER_MESSAGE")
 
 
 def names(members: Any) -> list[str]:
@@ -240,6 +245,8 @@ class Cluster:
         self.usage: Callable[[list[dict[str, Any]]], None] = lambda _: None  # the head: a follower's key calls
         self.taken: Callable[[], list[dict[str, Any]]] = list  # a follower: its key calls since the last ping
         self.roled: Callable[[], None] = lambda: None  # this node's role changed (the link looks again)
+        # a member's telemetry at the head: rrotord/aggregate.py, set by the daemon
+        self.on_telemetry: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] = _no_telemetry
 
     # What the rest of rrotor reads
 
@@ -1011,7 +1018,18 @@ class Cluster:
             return answer(msg, **got)
         if kind == "command":
             return answer(msg, **await self._command(peer, msg))
+        if kind == "telemetry" and peer.get("member"):
+            self._fenced(msg.get("term"))
+            return answer(msg, **await self.on_telemetry(str(peer["member"]), msg))
         raise ClusterError(f"There is no message {kind!r} here.", code="E_CLUSTER_MESSAGE")
+
+    def _fenced(self, term: Any) -> None:
+        """A member's traffic to the head checked like the rest: a lower term refused (E_CLUSTER_TERM), a higher one
+        taken (this head deposed: E_NOT_HEAD, and the sender finds the new head)."""
+        if type(term) is not int or term < self.raft.term:
+            raise ClusterError("Of another term than this node's.", code="E_CLUSTER_TERM", term=self.raft.term)
+        self.raft.observe(term)
+        self._reconcile()
 
     def _greet(self, channel: Channel, peer: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any]:
         """The hello: the node it names must be the one its certificate names (or `rrotord cluster`'s own)."""

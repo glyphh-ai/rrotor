@@ -250,6 +250,14 @@ class Audit:
     def read(self, cursor: tuple[str, int] | None, limit: int) -> tuple[list[dict[str, Any]], tuple[str, int] | None]:
         """Up to `limit` events after the cursor (a day file and a byte offset), oldest first, and the cursor after
         them: a drain's way through the store. A cursor whose file retention deleted moves to the next kept."""
+        marked, after = self.marked(cursor, limit)
+        return [event for event, _ in marked], after
+
+    def marked(
+        self, cursor: tuple[str, int] | None, limit: int
+    ) -> tuple[list[tuple[dict[str, Any], tuple[str, int]]], tuple[str, int] | None]:
+        """`read`, each event with the cursor just after it: how a follower sends its events to the cluster's store,
+        which takes each once whatever is sent again."""
         files = self.days()
         if not files:
             return [], cursor
@@ -259,7 +267,7 @@ class Audit:
             if not later:
                 return [], cursor
             name, offset = later[0], 0
-        events: list[dict[str, Any]] = []
+        events: list[tuple[dict[str, Any], tuple[str, int]]] = []
         while True:
             with (self.folder / name).open("rb") as f:
                 f.seek(offset)
@@ -270,7 +278,7 @@ class Audit:
                     offset += len(line)
                     event = decoded(line)
                     if event is not None:
-                        events.append(event)
+                        events.append((event, (name, offset)))
             later = [f for f in files if f > name]
             if len(events) >= limit or not later:
                 return events, (name, offset)
