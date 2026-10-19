@@ -14,15 +14,19 @@ spec:
       targetPort: http
       protocol: TCP
 ---
-# The StatefulSet's governing Service (headless): the pod's own DNS name.
+# The StatefulSet's governing Service (headless): each pod's own DNS name. In a cluster it is also how the nodes
+# find each other (RROTOR_CLUSTER_DNS), so it lists pods before they are ready: a node joining is not ready yet.
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "rrotor.fullname" . }}-headless
+  name: {{ include "rrotor.headless" . }}
   labels:
     {{- include "rrotor.labels" . | nindent 4 }}
 spec:
   clusterIP: None
+  {{- if .Values.cluster.enabled }}
+  publishNotReadyAddresses: true
+  {{- end }}
   selector:
     {{- include "rrotor.selectorLabels" . | nindent 4 }}
   ports:
@@ -30,3 +34,9 @@ spec:
       port: 7777
       targetPort: http
       protocol: TCP
+    {{- if .Values.cluster.enabled }}
+    - name: cluster
+      port: {{ .Values.cluster.port }}
+      targetPort: cluster
+      protocol: TCP
+    {{- end }}

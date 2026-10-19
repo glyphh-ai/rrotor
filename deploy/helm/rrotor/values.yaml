@@ -1,5 +1,6 @@
-# rrotor on Kubernetes: one rrotor per release, a StatefulSet of one replica with its own volume for /data. It is
-# one box: there is no high availability and no autoscaling (docs/self-hosting/helm.md).
+# rrotor on Kubernetes: one rrotor per release, a StatefulSet with a volume for /data per pod. With the cluster off
+# (the default) it is one replica, one box; with cluster.enabled, `replicas` nodes of one runtime that sync, behind
+# the one Service and Ingress (docs/self-hosting/helm.md).
 
 image:
   repository: ghcr.io/glyphh-ai/rrotor
@@ -66,6 +67,38 @@ audit:
   retentionDays: 90
   maxMb: 1024
 
+# A cluster (docs/self-hosting/helm.md, "A cluster"): needs a licence key with cluster sync, and at most its
+# max_nodes replicas (rrotor refuses the rest; the chart does not know the key).
+cluster:
+  enabled: false
+  # The cluster secret (RROTOR_CLUSTER_SECRET): 32 or more random bytes, base64 (openssl rand -base64 32). Empty:
+  # the chart makes one on install and keeps it on upgrades. Or name a Secret you made in existingSecret, with the
+  # key RROTOR_CLUSTER_SECRET (and RROTOR_CLUSTER_SECRET_PREVIOUS while a new one rolls out).
+  secret: ""
+  # The old secret, trusted too while a new one rolls out (RROTOR_CLUSTER_SECRET_PREVIOUS).
+  secretPrevious: ""
+  existingSecret: ""
+  # The node that makes the cluster the first time (RROTOR_CLUSTER_HEAD). Empty: the first pod, <name>-0.
+  head: ""
+  # A member unseen this long is removed by the head (RROTOR_CLUSTER_EVICT_AFTER), and the replication log kept for
+  # catch-up (RROTOR_CLUSTER_LOG_KEEP). Empty: rrotor's defaults, 24h and 1g.
+  evictAfter: ""
+  logKeep: ""
+  # The cluster's port, node to node only: on the headless Service, never on the Service or the Ingress.
+  port: 7778
+  # Kubernetes' DNS domain, for the headless Service's name (RROTOR_CLUSTER_DNS).
+  clusterDomain: cluster.local
+  # Allow the cluster's port between this release's pods only, and the API's port from anywhere. Needs a CNI that
+  # enforces NetworkPolicy.
+  networkPolicy:
+    enabled: true
+  # Spread the pods across nodes and zones (preferred, so a smaller cluster still schedules). Ignored when affinity
+  # is set.
+  antiAffinity: true
+
+# The nodes, with cluster.enabled. Empty: 3. Without the cluster, always one.
+replicas: ""
+
 # small: shared 1 CPU, 1 GiB, 3 GiB disk; medium: 2 CPU, 4 GiB, 10 GiB; large: 2 CPU, 8 GiB, 20 GiB.
 size: small
 # Set to override the preset's requests and limits.
@@ -99,8 +132,8 @@ serviceAccount:
   name: ""
   annotations: {}
 
-# Off by default: with one replica, a budget of minAvailable 1 stops node drains until you move rrotor yourself.
-# Turn it on to keep a drain from stopping rrotor mid-run.
+# One replica: off by default, since minAvailable 1 stops node drains until you move rrotor yourself; turn it on to
+# keep a drain from stopping rrotor mid-run. A cluster: on whatever this says, maxUnavailable 1.
 podDisruptionBudget:
   enabled: false
 
@@ -137,9 +170,10 @@ livenessProbe:
     port: http
   periodSeconds: 30
   timeoutSeconds: 3
+# /readyz: 200 while this node may take traffic (standalone and up, or a member in step with the head).
 readinessProbe:
   httpGet:
-    path: /healthz
+    path: /readyz
     port: http
   periodSeconds: 10
   timeoutSeconds: 3

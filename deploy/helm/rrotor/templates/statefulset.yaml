@@ -1,4 +1,6 @@
-# One rrotor: one replica, one writer of /data. Not scaled: a second replica would be a second runtime.
+# One rrotor: one replica, one writer of /data; a second replica outside a cluster would be a second runtime. With
+# cluster.enabled, `replicas` nodes of one runtime, each with its own /data, started together (Parallel): the head
+# is the only writer and ships what it writes to the others (docs/self-hosting/helm.md, "A cluster").
 {{- if and (eq (toString .Values.serverLogs) "on") (eq (toString .Values.link) "off") }}
 {{- fail "serverLogs \"on\" needs the link: an air-gapped rrotor (link \"off\") sends nothing to Glyphh" }}
 {{- end }}
@@ -9,9 +11,9 @@ metadata:
   labels:
     {{- include "rrotor.labels" . | nindent 4 }}
 spec:
-  replicas: 1
-  serviceName: {{ include "rrotor.fullname" . }}-headless
-  podManagementPolicy: OrderedReady
+  replicas: {{ include "rrotor.replicas" . }}
+  serviceName: {{ include "rrotor.headless" . }}
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       {{- include "rrotor.selectorLabels" . | nindent 6 }}
@@ -50,6 +52,11 @@ spec:
             - name: http
               containerPort: 7777
               protocol: TCP
+            {{- if .Values.cluster.enabled }}
+            - name: cluster
+              containerPort: {{ .Values.cluster.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: RROTOR_MODE
               value: self
@@ -125,6 +132,42 @@ spec:
             - name: OTEL_TRACES_SAMPLER_ARG
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.cluster.enabled }}
+            {{- $dns := printf "%s.%s.svc.%s" (include "rrotor.headless" .) .Release.Namespace .Values.cluster.clusterDomain }}
+            - name: RROTOR_CLUSTER
+              value: "on"
+            - name: RROTOR_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RROTOR_CLUSTER_DNS
+              value: {{ $dns | quote }}
+            - name: RROTOR_CLUSTER_PORT
+              value: {{ .Values.cluster.port | quote }}
+            - name: RROTOR_CLUSTER_ADVERTISE  # the pod's own name under the headless Service
+              value: "$(RROTOR_NODE_ID).{{ $dns }}:{{ .Values.cluster.port }}"
+            - name: RROTOR_CLUSTER_HEAD
+              value: {{ .Values.cluster.head | default (printf "%s-0" (include "rrotor.fullname" .)) | quote }}
+            - name: RROTOR_CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rrotor.clusterSecretName" . }}
+                  key: RROTOR_CLUSTER_SECRET
+            - name: RROTOR_CLUSTER_SECRET_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rrotor.clusterSecretName" . }}
+                  key: RROTOR_CLUSTER_SECRET_PREVIOUS
+                  optional: true
+            {{- with .Values.cluster.evictAfter }}
+            - name: RROTOR_CLUSTER_EVICT_AFTER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.cluster.logKeep }}
+            - name: RROTOR_CLUSTER_LOG_KEEP
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -159,9 +202,26 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- if .Values.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if and .Values.cluster.enabled .Values.cluster.antiAffinity }}
+      # The nodes on different machines and, where there are zones, in different zones.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "rrotor.selectorLabels" . | nindent 20 }}
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    {{- include "rrotor.selectorLabels" . | nindent 20 }}
       {{- end }}
   persistentVolumeClaimRetentionPolicy:
     whenDeleted: Retain

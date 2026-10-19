@@ -104,6 +104,30 @@ variable "audit_retention_days" {
   }
 }
 
+variable "node_count" {
+  description = "The nodes: 1 is one VM behind Caddy; more is a cluster (a licence key with cluster sync, at most its max_nodes) across zones behind a Network Load Balancer."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.node_count >= 1 && floor(var.node_count) == var.node_count
+    error_message = "node_count is a whole number, 1 or more."
+  }
+}
+
+variable "cluster_secret" {
+  description = "A cluster's secret (RROTOR_CLUSTER_SECRET): 32 or more random bytes, base64 (openssl rand -base64 32). Empty: one is made. Kept in Secrets Manager; each node reads it at boot."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "certificate_arn" {
+  description = "A cluster: an ACM certificate for public_host, for the load balancer. Null makes one, validated in route53_zone_id."
+  type        = string
+  default     = null
+}
+
 variable "size" {
   description = "small (1 CPU, 1 GiB, 3 GiB disk), medium (2, 4 GiB, 10 GiB) or large (2, 8 GiB, 20 GiB)."
   type        = string
@@ -138,6 +162,12 @@ variable "subnet_id" {
   default     = null
 }
 
+variable "subnet_ids" {
+  description = "Existing public subnets in vpc_id, for a cluster: the nodes and the load balancer are spread over them (one per zone). Overrides subnet_id."
+  type        = list(string)
+  default     = []
+}
+
 variable "vpc_cidr" {
   description = "The CIDR of the VPC made when vpc_id is null."
   type        = string
@@ -145,13 +175,13 @@ variable "vpc_cidr" {
 }
 
 variable "ingress_cidrs" {
-  description = "Who may reach ports 80 and 443. Port 80 must stay open to Let's Encrypt for the certificate."
+  description = "Who may reach ports 80 and 443 (a cluster: 443 on the load balancer). Port 80 must stay open to Let's Encrypt for one node's certificate."
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
 
 variable "route53_zone_id" {
-  description = "A Route 53 hosted zone to write public_host's A record in. Null leaves DNS to you."
+  description = "A Route 53 hosted zone to write public_host's A record in (a cluster: an alias to the load balancer, and the certificate's validation). Null leaves DNS to you."
   type        = string
   default     = null
 }

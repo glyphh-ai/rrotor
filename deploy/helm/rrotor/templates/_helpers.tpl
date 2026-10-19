@@ -65,3 +65,27 @@ limits:
 {{- define "rrotor.publicHost" -}}
 {{- required "publicHost is required: the exact host rrotor answers at, e.g. rrotor.acme.com" .Values.publicHost -}}
 {{- end -}}
+
+{{/* The pods: one without the cluster (a second would be a second runtime), `replicas` (default 3) with it. */}}
+{{- define "rrotor.replicas" -}}
+{{- if .Values.cluster.enabled -}}
+{{- $n := .Values.replicas | default 3 | int -}}
+{{- if lt $n 1 -}}
+{{- fail "replicas is 1 or more" -}}
+{{- end -}}
+{{- $n -}}
+{{- else -}}
+{{- if and .Values.replicas (ne (.Values.replicas | int) 1) -}}
+{{- fail "replicas above 1 is a cluster: set cluster.enabled=true (and a licence key with cluster sync)" -}}
+{{- end -}}
+1
+{{- end -}}
+{{- end -}}
+
+{{- define "rrotor.headless" -}}
+{{- printf "%s-headless" (include "rrotor.fullname" .) -}}
+{{- end -}}
+
+{{- define "rrotor.clusterSecretName" -}}
+{{- .Values.cluster.existingSecret | default (printf "%s-cluster" (include "rrotor.fullname" .)) -}}
+{{- end -}}

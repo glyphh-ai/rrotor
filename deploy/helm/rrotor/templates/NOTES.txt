@@ -1,4 +1,12 @@
-rrotor {{ .Values.image.tag | default .Chart.AppVersion }} is starting: one replica, its data on the volume data-{{ include "rrotor.fullname" . }}-0.
+{{- $name := include "rrotor.fullname" . }}
+{{- if .Values.cluster.enabled }}
+rrotor {{ .Values.image.tag | default .Chart.AppVersion }} is starting: a cluster of {{ include "rrotor.replicas" . }}, {{ $name }}-0 to {{ $name }}-{{ sub (include "rrotor.replicas" . | int) 1 }}, each with its own volume
+(data-{{ $name }}-<n>). {{ .Values.cluster.head | default (printf "%s-0" $name) }} makes the cluster and is its head; the others join it and are
+ready once they have caught up. It needs a licence key with cluster sync and at most its max_nodes replicas: a
+node past it is refused and stays not ready. The cluster secret is in the Secret {{ include "rrotor.clusterSecretName" . }}.
+{{- else }}
+rrotor {{ .Values.image.tag | default .Chart.AppVersion }} is starting: one replica, its data on the volume data-{{ $name }}-0.
+{{- end }}
 
 The Glyphh connector:
 
@@ -11,6 +19,9 @@ Check it:
 
   kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "rrotor.fullname" . }}
   kubectl -n {{ .Release.Namespace }} logs {{ include "rrotor.fullname" . }}-0
+{{- if .Values.cluster.enabled }}
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}   # READY 1/1: in step with the head
+{{- end }}
 
 If the pod is refused at admission, or its health says the sandbox cannot start, the cluster does not allow what the
 sandbox needs: docs/self-hosting/helm.md, "What the cluster must allow".

@@ -1,0 +1,24 @@
+# One node of a rrotor cluster across machines, for high availability: run this on each of N machines, with the
+# same .env but for this machine's RROTOR_NODE_ID and RROTOR_CLUSTER_ADVERTISE (docs/self-hosting/compose.md,
+# "A cluster"). No Caddy: your load balancer ends TLS for the public host and sends the API, port 7777, to every
+# node, health-checking /readyz. Port 7778 is the cluster's: open it between the nodes and nowhere else.
+#   docker compose -f docker-compose.node.yml up -d
+name: rrotor
+
+services:
+  rrotor:
+    extends:
+      file: docker-compose.yml
+      service: rrotor
+    environment:
+      RROTOR_CLUSTER: "on"
+      RROTOR_NODE_ID: ${RROTOR_NODE_ID:?set RROTOR_NODE_ID in .env, this machine's node id, e.g. rrotor-0}
+      RROTOR_CLUSTER_PEERS: ${RROTOR_CLUSTER_PEERS:?set RROTOR_CLUSTER_PEERS in .env, every node's private address:7778}
+      RROTOR_CLUSTER_ADVERTISE: ${RROTOR_CLUSTER_ADVERTISE:?set RROTOR_CLUSTER_ADVERTISE in .env, this machine's private address:7778}
+      RROTOR_CLUSTER_SECRET: ${RROTOR_CLUSTER_SECRET:?set RROTOR_CLUSTER_SECRET in .env (openssl rand -base64 32), the same on every node}
+    ports:
+      - "7777:7777"
+      - "7778:7778"
+
+volumes:
+  rrotor-data:
