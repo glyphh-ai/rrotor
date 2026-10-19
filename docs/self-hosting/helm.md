@@ -74,9 +74,9 @@ helm install rrotor deploy/helm/rrotor -n rrotor --set publicHost=rrotor.acme.co
 |---|---|---|
 | `publicHost` | (required) | The exact host rrotor answers at |
 | `runtime.id`, `runtime.token` | | The runtime, unless `existingSecret` is set |
-| `runtime.licence` | | An offline licence token, optional |
+| `runtime.licenseKey` | | The licence key, optional (air-gapped; normally it arrives over the link or heartbeat), into the Secret as `GLYPHH_LICENSE_KEY`; `runtime.licence` is its old alias |
 | `runtime.keysSha256` | `[]` | Air-gapped: the SHA-256 of each runtime key that may call it; with the link on, the keys come down the link |
-| `existingSecret` | | A Secret with `RROTOR_RUNTIME_ID`, `RROTOR_RUNTIME_TOKEN` and optionally `RROTOR_LICENCE` |
+| `existingSecret` | | A Secret with `RROTOR_RUNTIME_ID`, `RROTOR_RUNTIME_TOKEN` and optionally `GLYPHH_LICENSE_KEY` (`RROTOR_LICENCE` is still read) |
 | `image.repository`, `image.tag` | `ghcr.io/glyphh-ai/rrotor`, the chart's `appVersion` | The image |
 | `pullSecrets` | `[]` | Image pull secrets, for a mirror |
 | `server` | `https://api.glyphh.ai` | The Glyphh server |
@@ -101,8 +101,8 @@ must end TLS for the public host and pass `Host` through.
 
 ## Air-gapped
 
-Mirror the image into your registry (`image.repository`, `image.tag`, `pullSecrets`), issue an offline licence on
-the platform, and install with `link=off` and the licence in the Secret (`runtime.licence`, or `RROTOR_LICENCE` in
+Mirror the image into your registry (`image.repository`, `image.tag`, `pullSecrets`), take the licence key from
+the platform, and install with `link=off` and the key in the Secret (`runtime.licenseKey`, or `GLYPHH_LICENSE_KEY` in
 `existingSecret`). The certificate comes from your own issuer or a TLS Secret you make (`ingress.tls.secretName`).
 
 ## Upgrade, back up, remove

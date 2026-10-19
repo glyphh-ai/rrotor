@@ -14,7 +14,7 @@ docker compose up -d
 The runtime's connector is then at `https://<public host>/mcp`. Linux hosts on Ubuntu 23.10 or later first need
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (kept in `/etc/sysctl.d/`), or the sandbox cannot start.
 
-**Air-gapped:** put the offline licence in `.env` as `RROTOR_LICENCE`, your certificate and key in `certs/tls.crt` and
+**Air-gapped:** put the licence key in `.env` as `GLYPHH_LICENSE_KEY`, your certificate and key in `certs/tls.crt` and
 `certs/tls.key`, and start with the overlay, which turns the link off:
 
 ```sh

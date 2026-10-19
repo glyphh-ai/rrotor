@@ -68,7 +68,7 @@ certificate once the name resolves; the first boot takes a few minutes. The outp
 
 ## Inputs
 
-Both modules: `public_host`, `runtime_id`, `runtime_token` (required); `offline_licence`, `rrotor_version`
+Both modules: `public_host`, `runtime_id`, `runtime_token` (required); `license_key` (written as `GLYPHH_LICENSE_KEY`; `offline_licence` is its old alias), `rrotor_version`
 (default `latest`; pin one), `server`, `size`, `data_disk_gb`, `ingress_cidrs` (default anywhere: port 80 must stay
 reachable by Let's Encrypt), and `name` for the resources. AWS adds `vpc_id`, `subnet_id`, `vpc_cidr`,
 `instance_type`, `route53_zone_id` and `tags`; Google Cloud adds `project`, `region`, `zone`, `network`,

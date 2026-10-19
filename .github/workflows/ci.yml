@@ -47,7 +47,7 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config -q
-          echo RROTOR_LICENCE=example >> .env
+          echo GLYPHH_LICENSE_KEY=example >> .env
           docker compose -f docker-compose.yml -f docker-compose.airgap.yml config -q
       - name: The Caddyfiles parse
         working-directory: deploy/compose

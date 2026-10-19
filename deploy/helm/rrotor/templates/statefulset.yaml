@@ -68,7 +68,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "rrotor.secretName" . }}
                   key: RROTOR_RUNTIME_TOKEN
-            - name: RROTOR_LICENCE
+            - name: GLYPHH_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rrotor.secretName" . }}
+                  key: GLYPHH_LICENSE_KEY
+                  optional: true
+            - name: RROTOR_LICENCE  # an earlier release's name, in a Secret made outside the chart
               valueFrom:
                 secretKeyRef:
                   name: {{ include "rrotor.secretName" . }}

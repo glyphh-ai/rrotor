@@ -37,8 +37,15 @@ variable "runtime_token" {
   sensitive   = true
 }
 
+variable "license_key" {
+  description = "The licence key, optional: written as GLYPHH_LICENSE_KEY. Normally it arrives over the link or the heartbeat; set it for an air-gapped rrotor (without one, rrotor runs at Community's limits)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "offline_licence" {
-  description = "An offline licence token, optional: rrotor then runs past a lost link on it alone."
+  description = "Deprecated alias of license_key (an earlier release's offline licence token), used when license_key is empty."
   type        = string
   default     = ""
   sensitive   = true
