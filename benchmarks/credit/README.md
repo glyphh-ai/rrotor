@@ -32,7 +32,7 @@ the bank's cost counts a bad loan approved as five good ones refused. Dollars fo
 | **Ada, learned fields and interactions, calibrated, `decide`** | 70.0% | **100** | $0.00001 |
 | Ada, asking a person where every answer is dear (111 of 200 decided) | 81.1% | 45 on those | $0.00001 |
 
-## Results, 200 held out
+## The first run: hand-set weights, a plain vote
 
 | | Accuracy | Bad loans approved (×5) | Good refused (×1) | Bank's cost | Same answer every time |
 |---|---|---|---|---|---|
@@ -69,12 +69,12 @@ public rates because the model's own was not to hand.
 The LLM keeps nothing between runs: every run re-reads the examples, and neither run read all 800 (430 and ~140).
 Ada's ingest is paid once; every decision after is a query.
 
-## What it says
+## What the first run says
 
 - **Accuracy: a tie.** Ada 77%, the LLM 77–79%, logistic regression 75%, all from the same 800 cases.
-- **The bank's cost: the LLM and the classic model ahead of Ada today.** Ada's `outcomes` is a similarity-weighted
-  vote, not a calibrated probability, so a cost threshold over-refuses (71 good loans). Calibration and a cost matrix
-  in the spec are the fix (below).
+- **The bank's cost: the LLM and the classic model ahead of this first run.** A similarity-weighted vote is not a
+  calibrated probability, so a cost threshold over-refuses (71 good loans). Learned weights, calibration and a cost
+  matrix in the spec fixed it (below).
 - **Determinism:** the two LLM runs disagreed on 12 of 200 decisions. Ada and the classic model never do.
 - **Cost per decision:** Ada is three to five orders of magnitude cheaper, and keeps the data in the runtime.
 - **The uncomfortable line:** on purely structured data a classic model with a threshold is hard to beat on numbers.
@@ -148,11 +148,7 @@ the loss here; both are reported.
 2. **Three-way interactions**, and pairs with a text role (a bag of words cannot be paired today).
 3. **The ask as a product control** in the platform: who answers, and what their answer records.
 
-Rerun on kernels 3.8.0 (the seeded lexicon, word pairs) and 3.9.0 (word evidence): every number on this page unchanged, as it should be with no text role.
-
-Done since the first run: learned role and value weights, costs and `decide` in the kernel; the priced `ask`; a
-model that learns from its own store and refreshes as cases arrive (`refresh_every`); the vectorised query;
-interactions between roles; a finer temperature grid and the fit by cost.
+Every number on this page holds on kernel 3.9.0: with no text role, the lexicon and word evidence change nothing.
 
 ## Reproduce
 
