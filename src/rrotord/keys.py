@@ -1,5 +1,6 @@
-"""The two public keys rrotor checks signatures with: Glyphh's release key (what signs a part) and its licence key
-(what signs the plan's licence). Both come in as base64 or base64url of the raw 32 bytes; neither is a secret."""
+"""Checking Ed25519 signatures: Glyphh's release key (what signs a part) comes in as base64 or base64url of the raw 32
+bytes, and is not a secret; the licence key's public half is in the code (rrotord/licence_key.py), which checks a
+legacy licence here too, over its canonical JSON."""
 
 from __future__ import annotations
 

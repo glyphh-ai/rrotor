@@ -36,8 +36,7 @@ class Limits(BaseModel):
 
 
 class Signed(BaseModel):
-    """The plan's licence as the server signed it: what a hosted or self-hosted rrotor gets in its
-    welcome, and what `PUT /v1/licence` takes."""
+    """The plan's legacy licence as the server signed it (release N still takes it, mapped to a key)."""
 
     payload: dict[str, Any]
     signature: str
@@ -48,6 +47,7 @@ class Welcome(Message):
     accepted: bool = True
     limits: Limits = Limits()
     licence: Signed | None = None
+    license_key: str | None = None  # the licence key, preferred to `licence`
     keys: list[str] | None = None  # hosted: the runtime keys' SHA-256s, the whole list
 
 

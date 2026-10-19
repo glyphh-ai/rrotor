@@ -136,7 +136,7 @@ jobs:
           retention-days: 14
 
   # The published image: the base with the Ada part built in, one image for hosted, self-hosted and local rrotors
-  # (RROTOR_MODE decides; the licence decides whether Ada runs). Pushed first to Fly's own registry for the runtimes app
+  # (RROTOR_MODE decides; the licence key sets its limits). Pushed first to Fly's own registry for the runtimes app
   # (vars.FLY_RUNTIME_APP, glyphh-ai-runtime), the one private registry Fly machines pull from, amd64, which is what
   # Fly runs (the server's GLYPHH_FLY_IMAGE names registry.fly.io/<app>:<version>); then to
   # ghcr.io/glyphh-ai/rrotor:<version> and :latest, amd64 and arm64, for the deploy packages. Built only
@@ -168,15 +168,14 @@ jobs:
           password: ${{ secrets.FLY_API_TOKEN }}
       - name: Push the hosted image to Fly's registry (amd64)
         env:
-          # The keys a hosted rrotor checks signatures with, baked in: nothing else hands them to the machine.
+          # The key a hosted rrotor checks a part's signature with, baked in (the licence key's is in the code).
           RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
-          LICENCE_PUBLIC_KEY: ${{ vars.LICENCE_PUBLIC_KEY }}
         run: |
-          [ -n "$RELEASE_PUBLIC_KEY" ] && [ -n "$LICENCE_PUBLIC_KEY" ] || { echo "::error::Set the variables RELEASE_PUBLIC_KEY and LICENCE_PUBLIC_KEY."; exit 1; }
+          [ -n "$RELEASE_PUBLIC_KEY" ] || { echo "::error::Set the variable RELEASE_PUBLIC_KEY."; exit 1; }
           repo=registry.fly.io/$APP; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
           docker buildx build -f image/Dockerfile --target hosted --platform linux/amd64 \
-            --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" \
-            --build-arg LICENCE_PUBLIC_KEY="$LICENCE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:$s" --push .
+            --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:$s" \
+            --push .
           echo "hosted: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
       - name: Sign in to GHCR
         uses: docker/login-action@v3
@@ -187,12 +186,11 @@ jobs:
       - name: Push the same image to GHCR (amd64 and arm64), :<version> and :latest
         env:
           RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
-          LICENCE_PUBLIC_KEY: ${{ vars.LICENCE_PUBLIC_KEY }}
         run: |
           repo=ghcr.io/glyphh-ai/rrotor; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
           docker buildx build -f image/Dockerfile --target hosted --platform linux/amd64,linux/arm64 \
             --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" \
-            --build-arg LICENCE_PUBLIC_KEY="$LICENCE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:latest" -t "$repo:$s" --push .
+            -t "$repo:$v" -t "$repo:latest" -t "$repo:$s" --push .
           echo "ghcr: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
 
   # The Ada part, for both architectures: the kernel from glyphh-ai/ada-private (branch main, read

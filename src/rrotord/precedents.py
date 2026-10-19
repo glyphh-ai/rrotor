@@ -43,6 +43,12 @@ class Precedents:
             log.warning("a precedent store did not read", extra={"reason": str(err)})
             return None
 
+    def current(self) -> int | None:
+        """The last reading; read now when none has yet (the heartbeat at boot comes before the first tick)."""
+        if self.total is None:
+            self.total = self.count()
+        return self.total
+
     def due(self) -> bool:
         """Whether the total is to be reported now: the stores read again when their time has come (a reading that
         fails keeps the one before), and the total not yet reported."""

@@ -4,8 +4,8 @@ with the MCP server (mcp.py).
 
 What changes the runtime itself, not its models (its link's token, its parts, its licence), answers only on a local
 rrotor, to its owner's mod with the local token. A hosted or self-hosted rrotor takes those from its environment, its
-image and Glyphh (the link, the heartbeat, an offline licence in RROTOR_LICENCE or /data/licence.token), never from a
-caller: a runtime key or a Glyphh sign-in calls and deploys models, and is refused E_LOCAL_ONLY there."""
+image and Glyphh (the link, the heartbeat, a licence key in GLYPHH_LICENSE_KEY or /etc/rrotor/license.key), never
+from a caller: a runtime key or a Glyphh sign-in calls and deploys models, and is refused E_LOCAL_ONLY there."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from rrotord.introspect import Introspector
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
 from rrotord.models import Models, Version
-from rrotord.parts import BASE_MOD, Parts
+from rrotord.parts import Parts
 from rrotord.runner.engine import Runner
 from rrotord.sandbox.probe import Layers
 
@@ -171,9 +171,6 @@ def setup(app: web.Application, s: Services) -> None:
             raise BadRequest("This rrotor takes a part as archive (base64), not by url.", code="E_PART_ARCHIVE")
         else:
             raw = await s.fetch(str(url))
-        info = Parts.read_info(raw) if raw[:2] == b"\x1f\x8b" else None
-        if info is not None and info.mod != BASE_MOD:
-            s.licence.require(info.mod)
         installed = s.parts.install(str(name), str(version), raw, str(sha256), str(signature))
         return web.json_response(Parts.view([installed])[0], status=201)
 
@@ -185,7 +182,8 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response({"licence": s.licence.view()})
 
     async def licence_put(request: web.Request) -> web.Response:
-        """{payload, signature} as the server answered it, {token}, or the offline token itself as the body."""
+        """The licence key as the body (or a JSON string); release N also takes a legacy licence: {payload,
+        signature}, {token} or its offline token."""
         text = (await request.text()).strip()
         try:
             sent = json.loads(text)

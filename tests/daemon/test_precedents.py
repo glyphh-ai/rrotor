@@ -75,3 +75,12 @@ def test_a_reading_that_fails_keeps_the_one_before(tmp_path, monkeypatch):
     assert not counted.due() and counted.total is None  # nothing has read: nothing to report
     counted.total, counted.reported, counted.read_at = 4, 4, -precedents.READ_EVERY
     assert not counted.due() and counted.total == 4
+
+
+def test_current_is_the_last_reading_or_one_now_when_none_has_read(tmp_path):
+    models = Models(tmp_path)
+    model(models, "tickets", ["ada"], 3)
+    counted = Precedents(models)
+    assert counted.current() == 3 and counted.total == 3  # the heartbeat at boot: read now
+    store(models.data("tickets") / ada.STORE, 5)
+    assert counted.current() == 3  # then the nine-minute reading's

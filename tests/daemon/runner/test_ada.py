@@ -28,9 +28,8 @@ def ada_ready(root: Path, sock: Path) -> tuple[Env, Parts]:
     store = Parts(root, keys().public, "arm64")
     data, sha, sig = ada_part(root)
     store.install("ada", "3.9.0", data, sha, sig)
-    lic = Licence(root, keys().public)
-    given = keys().licence(["ada"])
-    lic.set(given["payload"], given["signature"])
+    lic = Licence(root)
+    lic.offer(keys().key(), "test")
     env = Env(root, sock)
     env.runner.parts, env.runner.licence = store, lic
     return env, store
@@ -123,16 +122,11 @@ async def test_the_internal_operation_is_never_a_models_function(tmp_path, short
     assert outcome(run)["data"] == 0.25
 
 
-async def test_the_licences_limits_reach_the_model(tmp_path, short_dir):
-    from rrotord.keys import canonical
-
-    env, store = ada_ready(tmp_path, short_dir)
-    given = keys().licence(["ada"])
-    given["payload"]["mods"]["ada"] = {"limits": {"models": 3, "precedents": 1}}
-    given["signature"] = keys().sign(canonical(given["payload"]))
+async def test_the_keys_precedent_cap_reaches_the_model(tmp_path, short_dir):
+    env, _ = ada_ready(tmp_path, short_dir)
     lic = env.runner.licence
     assert lic is not None
-    lic.set(given["payload"], given["signature"])
+    lic.offer(keys().key(max_precedents=1, issued_at="2026-10-02T00:00:00Z"), "test")
     tickets_version(env.models)
     one = {"data": ticket(1, "login fails", "auth", 8), "outcome": "page oncall"}
     two = {"data": ticket(2, "login slow", "auth", 5), "outcome": "page oncall"}
@@ -142,25 +136,30 @@ async def test_the_licences_limits_reach_the_model(tmp_path, short_dir):
     assert outcome(second)["status"] == "failed" and outcome(second)["data"]["code"] == "E_LIMIT_PRECEDENTS"
     v1 = env.models.active("tickets")
     assert v1 is not None
-    assert env.runner._limits(v1) == {"models": 3, "precedents": 1, "precedents_elsewhere": 0}
-    lic.payload = None
-    assert env.runner._limits(v1) == {}
-    lic.payload = {**given["payload"], "mods": {"ada": {"limits": "junk"}}}
-    assert env.runner._limits(v1) == {}
-    store.remove("ada")
-    assert env.runner._limits(v1) == {}
+    assert env.runner._limits(v1) == {"precedents": 1, "precedents_elsewhere": 0}
+    lic.offer(keys().key(tier="enterprise", max_precedents=None, issued_at="2026-10-03T00:00:00Z"), "test")
+    assert env.runner._limits(v1) == {"precedents": None}  # unlimited: nothing to count
+    env.runner.licence = None
+    assert env.runner._limits(v1) == {"precedents": 5000, "precedents_elsewhere": 0}  # no licence: Community
+
+
+async def test_an_ada_model_runs_with_no_key_at_all_under_communitys_cap(tmp_path, short_dir):
+    env, _ = ada_ready(tmp_path, short_dir)
+    env.runner.licence = Licence(tmp_path / "none")
+    tickets_version(env.models)
+    run = await env.runner.call(
+        model="tickets", function="record", inputs={"data": ticket(1, "login fails", "auth", 8), "outcome": "x"}
+    )
+    assert outcome(run)["status"] == "done"
+    v1 = env.models.active("tickets")
+    assert v1 is not None and env.runner._limits(v1) == {"precedents": 5000, "precedents_elsewhere": 0}
 
 
 async def test_the_cap_is_on_the_runtimes_total_across_its_ada_models(tmp_path, short_dir, caplog):
-    from rrotord.keys import canonical
-
     env, _ = ada_ready(tmp_path, short_dir)
     lic = env.runner.licence
     assert lic is not None
-    given = keys().licence(["ada"])
-    given["payload"]["mods"]["ada"] = {"limits": {"precedents": 2}}
-    given["signature"] = keys().sign(canonical(given["payload"]))
-    lic.set(given["payload"], given["signature"])
+    lic.offer(keys().key(max_precedents=2, issued_at="2026-10-02T00:00:00Z"), "test")
     tickets_version(env.models)
     data = json.loads((HERE / "glyphh.json").read_text())
     other = install(env.models, {**data, "name": "triage"}, (HERE / "model.py").read_text(), sha="b" * 40)
@@ -178,6 +177,4 @@ async def test_the_cap_is_on_the_runtimes_total_across_its_ada_models(tmp_path, 
     (env.models.data("triage") / ada.STORE).write_bytes(b"not a database")
     assert env.runner._limits(v1)["precedents_elsewhere"] == 0 and "a precedent store did not read" in caplog.text
     plain = install(env.models, manifest("sample"), "def start(ctx, inputs):\n    return None\n", sha="c" * 40)
-    assert "precedents_elsewhere" not in env.runner._limits(plain)  # not an Ada model
-    lic.payload = {**given["payload"], "mods": {"ada": {"limits": {"precedents": None}}}}
-    assert env.runner._limits(v1) == {"precedents": None}  # unlimited: nothing to count
+    assert env.runner._limits(plain) == {}  # not an Ada model

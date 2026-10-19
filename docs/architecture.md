@@ -140,7 +140,7 @@ sequenceDiagram
     Note over G,F: RROTOR_MODE=hosted, RROTOR_SERVER, RROTOR_RUNTIME_ID, RROTOR_RUNTIME_TOKEN, RROTOR_PUBLIC_DOMAIN
     F->>R: boot: the built-in Ada part installed
     R->>G: WebSocket /v1/runtime/link, hello {mode: hosted}
-    G-->>R: welcome {licence, keys}
+    G-->>R: welcome {license_key, keys}
     Note over F,R: idle, Fly's proxy stops the machine
     P->>D: a request for machine.glyphh.app, landing on a started machine
     D-->>F: fly-replay: instance=machine
@@ -154,7 +154,7 @@ sequenceDiagram
   `rrotord/doorman.py`) answers every request that way and `/healthz` itself, so nobody's machine is woken to
   bounce someone else's request. Any other `Host` is 421 `E_HOST`. `fly-replay` carries bodies up to 1 MB.
 - **The token and the keys:** the runtime token is in the machine's environment, so nobody hands anything in. The
-  runtime keys' SHA-256s arrive in `welcome` and as `keys` whenever they change; the licence arrives in `welcome`.
+  runtime keys' SHA-256s arrive in `welcome` and as `keys` whenever they change; the licence key arrives in `welcome`.
 - **In development**, `RROTOR_PUBLIC_HOST` (an ngrok name, say) is the one exact host instead, and nothing is
   replayed.
 
@@ -229,7 +229,7 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 |---|---|
 | `runtime.json` | The runtime's id and token (0600) |
 | `access.json` | The runtime keys' SHA-256s |
-| `licence.json`, `licence.token` | The licence held; an offline licence handed in as a file |
+| `licence.json`, `licence.token` | The licence key held, `{key, source}`; a key dropped in as a file (as `/etc/rrotor/license.key`) |
 | `machine-id` | A self-hosted rrotor's machine id, where the host gives none |
 | `link/outbox.json` | The sequence counter and what is not yet acknowledged |
 | `models/<name>/versions/<commit>/` | A deployed version: `src/` (the checkout), `venv/`, `version.json`; immutable |
@@ -315,7 +315,7 @@ ctx.data                      # its persistent data folder ("data": true), else 
 ctx.home                      # its code (spec.json beside model.py)
 ctx.clearance                 # who asks, 0 to 1; 1 unless the call says
 ctx.caller                    # who called
-ctx.limits                    # the plan's limits for the part it uses (Ada: precedents)
+ctx.limits                    # an Ada model's precedent cap, from the licence key (8)
 ctx.log(message, **detail)
 ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 ada.open(ctx)                 # an Ada model: the spec and the store, on ctx.ada (8)
@@ -364,7 +364,7 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 | Direction | `type` | Carries |
 |---|---|---|
 | up | `hello` | protocol 1, rrotor's version, mode, runtime id, the versions deployed |
-| down | `welcome` | accepted; for a hosted or self-hosted runtime, the licence (`licence: {payload, signature}`, `kind: link`, 24 hours; `grace_days: 14` for a self-hosted one) and the runtime keys' SHA-256s (`keys`, the whole list) |
+| down | `welcome` | accepted; for a hosted or self-hosted runtime, the licence key (`license_key`, [9](#9-the-licence)), in release N also the legacy licence (`licence: {payload, signature}`; the key is preferred), and the runtime keys' SHA-256s (`keys`, the whole list) |
 | down | `keys` | `hashes`: the whole list again, whenever a key is made, revoked or expires |
 | down | `deploy`, `activate`, `remove` | model, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
 | down | `continue` | `run_id`, `answer` |
@@ -430,7 +430,7 @@ those take their token, parts and licence from their environment, their image an
 | Call | Does |
 |---|---|
 | `GET /healthz` | `{ok: true}` while the process is up |
-| `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence and its state, the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of models |
+| `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of models |
 | `GET /v1/models` | Each model, its versions (number, commit, when), the active one, its functions |
 | `POST /v1/models/deploy` | `{repo, commit, token?}` or `{bundle, commit}` ([2.2](#22-build-deploy-and-call)): `201 {model, version, commit_sha, deployed_at}` |
 | `POST /v1/runs` | `{model, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, model, version, function, status, data, step, prompt, seconds}` |
@@ -440,7 +440,7 @@ those take their token, parts and licence from their environment, their image an
 | `GET /v1/runs/{id}/log` | The run's log lines |
 | `GET /v1/approvals` | Runs waiting for approval: run, model, step, prompt, when |
 | `GET /v1/parts`, `POST /v1/parts`, `DELETE /v1/parts/{name}` | The parts installed; install one (`{name, version, sha256, signature, archive \| url}`); remove one ([10](#10-parts)); installing and removing are local only |
-| `GET /v1/licence`, `PUT /v1/licence` | The licence held; hand one in as `{payload, signature}`, `{token}` or the offline token as the body; `kept: false` when the one held lives longer ([9](#9-the-licence)); handing one in is local only |
+| `GET /v1/licence`, `PUT /v1/licence` | `{licence}`: the key held, its state and the limits that apply ([9](#9-the-licence)); hand one in as the body (release N: or a legacy `{payload, signature}`, `{token}` or offline token), `{licence, kept}`, `kept: false` when another is held; a bad one is 400 `E_LICENCE`; handing one in is local only |
 | `PUT /v1/runtime/token` | `{runtime_id, token}`: a runtime token handed in (a local runtime's way to get one); kept in `/data/runtime.json`, and the link reconnects with it; local only |
 
 **MCP:** `POST /mcp`, Streamable HTTP, stateless, one JSON-RPC message per POST; MCP 2026-07-28 (`server/discover`,
@@ -491,8 +491,8 @@ def query(ctx, inputs):
 - **`clearance`** (0 to 1) comes with the call (`clearance` on `POST /v1/runs` and `model_call`), never from the
   inputs; the model passes `ctx.clearance` to the kernel, which cuts what a reader below a layer's
   `security_weight` may see.
-- **The precedent cap:** the licence's `mods.ada.limits.precedents`, the plan's managed precedents on a hosted
-  runtime and null (unlimited) on a self-hosted or local one. rrotor holds the runtime's **total** to it: when an
+- **The precedent cap:** the licence key's `max_precedents` ([9](#9-the-licence)): Community's 5,000 with no key,
+  null (unlimited) on Enterprise. rrotor holds the runtime's **total** to it: when an
   Ada run starts, the runner counts the other Ada models' stores and hands the run `limits.precedents_elsewhere`
   beside `limits.precedents`, and `record` is refused (`E_LIMIT_PRECEDENTS`) once the model's own count plus that
   would pass the cap. Nothing is counted on the hot path, so runs of different models at the same time can
@@ -508,26 +508,34 @@ def query(ctx, inputs):
 
 ## 9. The licence
 
-The plan's licence, signed by the server with Ed25519 over the payload's canonical JSON, checked by rrotor with
-`RROTOR_LICENCE_PUBLIC_KEY` (baked into the published image) and no network request (`rrotord/licence.py`). Its
-payload: `user_id`, `org_id`, `install_id` (null), `plan`, `limits` (`machines`), `features`
-(`{sync, ha, offline, sso}`, each a flag), `mods` (each active mod with its limits: `ada` with `precedents`),
-`expires_at`, and for a runtime `runtime_id`, `licence_id`, `kind` and `grace_days`.
+rrotor runs with no key at all, as **Community** (one node, 5,000 precedents, no sync); a signed **licence key**,
+checked on the node with no network request, lifts those limits to its own (`rrotord/licence_key.py`,
+`rrotord/licence.py`).
 
-| Comes as | `kind` | Lasts |
-|---|---|---|
-| `welcome`, on each link connect | `link` | 24 hours; 14 days' grace for a self-hosted runtime |
-| The heartbeat, self-hosted with the link on ([12](#12-self-hosting)) | `heartbeat` | 24 hours, 14 days' grace |
-| An offline token, Enterprise ([12](#12-self-hosting)) | `offline` | Up to 365 days, 14 days' grace |
-| `PUT /v1/licence`, local only | as signed | as signed |
-
-- **Refused** if it does not check, or its `runtime_id` names another runtime. Of the valid licences handed in,
-  rrotor keeps the one live longest.
-- **Live** until `expires_at` plus `grace_days` (absent: 0): `live`, then `grace` (with `days_left`), then
-  `expired`. Expired, a run or an install that needs a licensed mod (an Ada model, the Ada part) is refused
-  `E_NOT_IN_PLAN` ("the licence has expired"); everything else is served, and the link and the heartbeat keep
-  trying to renew. With no licence, the same refusal says so; a mod the licence does not name is "not in the plan".
-- **Features** are shown in `GET /v1/licence` and the health; nothing acts on them yet.
+- **The key:** `<base64url payload>.<base64url signature>`, base64url without padding; Ed25519 over the payload's
+  exact bytes. The payload is UTF-8 JSON: `license_id` (UUID), `tier` (`free`, `pro`, `team`, `enterprise`),
+  `max_nodes` (≥ 1, or null), `max_precedents` (≥ 0, or null: unlimited), `cluster_sync_enabled`, `issued_at`,
+  `expires_at` (RFC 3339 UTC) and `customer_id`. Unknown fields are ignored; one missing or mistyped makes it bad.
+- **The public key is in the code** (`licence_key.PUBLIC_KEYS`: Glyphh's, and the next during a rotation); a key is
+  good if any of them verifies it. `RROTOR_LICENCE_PUBLIC_KEY` is no longer read: whoever sets the environment could
+  then sign their own.
+- **Where it is read:** `GLYPHH_LICENSE_KEY` (alias `RROTOR_LICENCE`), at start; `/etc/rrotor/license.key` (alias
+  `/data/licence.token`), at start, every hour and on `SIGHUP`; the heartbeat's answer and `welcome`
+  (`license_key`); `PUT /v1/licence`, local only. The key held is kept in `/data/licence.json` as `{key, source}`.
+- **Which is held:** of the good keys found, the newest `issued_at` not past grace (ties: the later `expires_at`);
+  with none within grace, the newest, so the health says what expired.
+- **Outcomes:** none: Community, logged once (`community: no licence key`). Bad: logged at error with its source at
+  every start and re-read (`licence key refused: <why>`), state `bad`, Community; never a failed start. Good: the
+  key's limits, `live`; past `expires_at` 14 days' grace (`GRACE_DAYS`, rrotor's constant) with the key's limits,
+  `grace` and `days_left`, a warning daily; past that, `expired`, Community, a warning daily.
+- **Nothing a licence does refuses a run:** an Ada model runs with no key; the worst case is Community's cap.
+- **The legacy licence** (release N only): the server's `{payload, signature}` over canonical JSON, wherever one
+  arrives, mapped: `plan` as the tier (unknown: `free`), `max_nodes` and `max_precedents` from the plan table (Pro 3
+  and 50,000, Team 10 and 500,000, Enterprise unlimited), `features.sync` as `cluster_sync_enabled`, `expires_at`
+  plus `grace_days` as `expires_at`; refused if it names another runtime. A key is preferred to it.
+- **`GET /v1/licence` and the health:** `{tier, community, license_id, customer_id, source, issued_at, expires_at,
+  state (live, grace, expired, bad, none), days_left, max_nodes, max_precedents, cluster_sync_enabled}`, the limits
+  those that apply now.
 
 ## 10. Parts
 
@@ -542,13 +550,12 @@ A **part** is what a model needs beside the base. One is built: **ada**, the Ada
   `part-ada-<kernel version>` (`<name>-<version>-<arch>.tar.gz`, `.sha256`, `.sig`); the published image carries it
   in `/opt/parts-builtin` and installs it at boot, this architecture's only.
 - **Install, upgrade, remove** (a local rrotor; hosted and self-hosted take the image's): `POST /v1/parts` (the archive in base64, or a URL fetched up to 256 MB), `GET
-  /v1/parts`, `DELETE /v1/parts/{name}`. The licence must allow the part's mod. rrotor checks the hash and the
+  /v1/parts`, `DELETE /v1/parts/{name}`. rrotor checks the hash and the
   signature with `RROTOR_RELEASE_PUBLIC_KEY` before it unpacks anything, then `part.json` (the part asked for, this
   architecture, this rrotor); it unpacks to `/data/parts/<name>/<version>/` and switches `current` in one rename, and the older
   version goes. A failed install leaves the one before.
 - **A model's parts** (`needs`) are each mounted read-only at `/opt/parts/<name>`, their `env.PYTHONPATH` folders
-  after the SDK's. A run whose part is not installed fails `E_PART_MISSING`, naming the part; one whose part's mod
-  the licence does not allow fails `E_NOT_IN_PLAN`.
+  after the SDK's. A run whose part is not installed fails `E_PART_MISSING`, naming the part; no licence refuses one.
 
 ## 11. The image and CI
 
@@ -560,7 +567,7 @@ A **part** is what a model needs beside the base. One is built: **ada**, the Ada
 | `deploy` | Compose (and the air-gapped overlay) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file, `terraform fmt -check` and `validate` for both modules and their examples. Nothing is started |
 | `image` | Builds the base and runs the sandbox tests inside it; starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off` |
 | `part-ada` (main) | Clones `glyphh-ai/ada-private` at `main` (`ADA_KERNEL_TOKEN`), builds and signs the Ada part for amd64 and arm64 (`RROTOR_RELEASE_KEY`), publishes the release `part-ada-<version>` |
-| `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with both public keys baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |
+| `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with the release public key baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |
 
 The version is `pyproject.toml`'s; a new version is a new image tag.
 
@@ -576,8 +583,10 @@ container's privileges, the outbound connections, backups and upgrades are in
 `E_CONFIG`, naming the variable.
 
 - **The heartbeat** (`rrotord/heartbeat.py`): at boot and every 24 hours, `POST {RROTOR_SERVER}/v1/license/verify`
-  with the runtime token and exactly `{machine, licence_id, version, active_runs}`. A failure is logged and shown
-  in the health, and tried again after a minute, doubling to an hour; it never stops rrotor.
+  with the runtime token and exactly `{machine, licence_id, version, active_runs, node_id, cluster_id, role,
+  precedents}` (`node_id` is `RROTOR_NODE_ID`, else the hostname; `cluster_id` null and `role` `standalone` until
+  there are clusters; `precedents` the node's count); the answer's `license_key` is offered as a key. A failure is
+  logged and shown in the health, and tried again after a minute, doubling to an hour; it never stops rrotor.
 - **What the container lacks:** when bwrap cannot start, a self-hosted rrotor reads from `/proc` what is in its way
   (its seccomp mode, its AppArmor profile, mounts over `/proc`, the user-namespace sysctl) and puts it in the
   health as `sandbox.container_needs`, one sentence each with the fix. Runs are refused until it is fixed; the API
@@ -591,8 +600,8 @@ container's privileges, the outbound connections, backups and upgrades are in
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a model's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
 - **Precedent-store sync across instances, and high availability:** a self-hosted rrotor is one box; a second copy
-  of the same runtime takes the link over from the first. The licence's `sync` and `ha` features gate them when
-  they are built.
-- **SSO and SAML, roles (RBAC) and audit logs** (the licence's `sso` feature).
+  of the same runtime takes the link over from the first. The key's `cluster_sync_enabled` and `tier` gate them
+  when they are built.
+- **SSO and SAML, roles (RBAC) and audit logs.**
 - **Programs:** coding-agent CLIs run on the runtime.
 - **The gateway.**

@@ -72,13 +72,27 @@ def test_a_self_hosted_rrotor_answers_at_its_public_host_with_glyphhs_server_as_
         RUNTIME.lower(),
         "t",
     )
-    assert c.public and c.link and c.licence_token is None and c.link_url == "wss://api.glyphh.ai/v1/runtime/link"
+    assert c.public and c.link and c.licence_env == () and c.link_url == "wss://api.glyphh.ai/v1/runtime/link"
     off = config.load(
         SELF | {"RROTOR_SERVER": "https://glyphh.acme.com", "RROTOR_LINK": "OFF", "RROTOR_LICENCE": " t "}
     )
-    assert (off.server, off.link, off.licence_token) == ("https://glyphh.acme.com", False, "t")
+    assert (off.server, off.link, off.licence_env) == ("https://glyphh.acme.com", False, (("RROTOR_LICENCE", "t"),))
     assert config.load({**SELF, "RROTOR_SERVER": ""}).server == "https://api.glyphh.ai"
     assert not config.load({"RROTOR_SERVER": "http://s", "RROTOR_LOCAL_TOKEN_SHA256": DIGEST}).public
+
+
+def test_the_licence_key_comes_from_glyphh_license_key_or_its_alias_and_no_public_key_from_the_environment():
+    c = config.load(SELF | {"GLYPHH_LICENSE_KEY": " a.b\n", "RROTOR_LICENCE": "c.d", "RROTOR_LICENCE_PUBLIC_KEY": "x"})
+    assert c.licence_env == (("GLYPHH_LICENSE_KEY", "a.b"), ("RROTOR_LICENCE", "c.d"))
+    assert not hasattr(c, "licence_key")  # the licence's public key is the code's alone
+
+
+def test_the_node_id_is_rrotor_node_id_or_the_hostname_made_one(monkeypatch):
+    assert config.load(SELF | {"RROTOR_NODE_ID": "rrotor-0"}).node_id == "rrotor-0"
+    monkeypatch.setattr("socket.gethostname", lambda: "Build_Box.Acme.com")
+    assert config.load(SELF).node_id == "build-box"
+    monkeypatch.setattr("socket.gethostname", lambda: "")
+    assert config.load(SELF).node_id == "rrotor"
 
 
 def test_load_from_the_process_environment(monkeypatch):
@@ -105,6 +119,8 @@ def test_load_from_the_process_environment(monkeypatch):
         {**SELF, "RROTOR_PUBLIC_HOST": "https://rr.acme.com/"},
         {**SELF, "RROTOR_LINK": "maybe"},
         {**SELF, "RROTOR_RUNTIME_ID": "r"},
+        {**SELF, "RROTOR_NODE_ID": "Rrotor_1"},
+        {**SELF, "RROTOR_NODE_ID": "a" * 64},
     ],
 )
 def test_load_refuses_bad_settings(env):

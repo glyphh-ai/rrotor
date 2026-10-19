@@ -21,10 +21,9 @@ RUN uv pip install -q --no-cache --no-deps --python /opt/rrotord/bin/python . \
 
 FROM os AS base
 ARG VERSION=dev
-# The two public keys rrotor checks signatures with: Glyphh's release key (parts) and its licence key (the plan's
-# licence). Neither is a secret; either can also be set in the environment.
+# The public key rrotor checks a part's signature with: Glyphh's release key, not a secret (it can also be set in the
+# environment). The licence key's public half is in the code (rrotord/licence_key.py), never the environment.
 ARG RELEASE_PUBLIC_KEY=
-ARG LICENCE_PUBLIC_KEY=
 LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/rrotor" \
       org.opencontainers.image.description="rrotor: Glyphh's per-person runtime (base)" \
       org.opencontainers.image.version="${VERSION}"
@@ -33,7 +32,7 @@ RUN useradd --uid 10001 --user-group --create-home --home-dir /home/rrotor --she
  && mkdir -p /data && chown rrotor:rrotor /data
 ENV PATH=/opt/rrotord/bin:/usr/local/bin:/usr/bin:/bin \
     RROTOR_DATA=/data RROTOR_LOCAL_PORT=7777 PYTHONDONTWRITEBYTECODE=1 \
-    RROTOR_RELEASE_PUBLIC_KEY=$RELEASE_PUBLIC_KEY RROTOR_LICENCE_PUBLIC_KEY=$LICENCE_PUBLIC_KEY
+    RROTOR_RELEASE_PUBLIC_KEY=$RELEASE_PUBLIC_KEY
 USER rrotor
 VOLUME /data
 EXPOSE 7777
@@ -45,7 +44,7 @@ CMD ["rrotord"]
 # The published image, ghcr.io/glyphh-ai/rrotor (and Fly's registry for the hosted machines): the base with the Ada
 # part built in (dist/parts, from parts/ada/build.sh; this architecture's kept), installed at boot. One image for
 # every rrotor: the environment decides which it is (RROTOR_MODE: local, the default; hosted,
-# as the server provisions it; self, as the deploy packages run it), and the licence decides whether Ada runs.
+# as the server provisions it; self, as the deploy packages run it), and the licence key sets Ada's limits.
 FROM base AS hosted
 ARG TARGETARCH
 COPY --chown=rrotor:rrotor dist/parts/ /opt/parts-builtin/

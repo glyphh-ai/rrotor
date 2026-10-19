@@ -11,6 +11,7 @@ import os
 import secrets
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,8 +63,8 @@ def token() -> str:
 
 @dataclass(frozen=True)
 class Keys:
-    """A signing key pair made for the tests: the private half signs parts and licences, the public one is what a
-    rrotor under test is configured with."""
+    """A signing key pair made for the tests: the private half signs parts and licence keys, the public one is what a
+    rrotor under test is configured with (the licence key's: tests/conftest.py patches it in)."""
 
     private: Ed25519PrivateKey
     public: Ed25519PublicKey
@@ -71,6 +72,27 @@ class Keys:
     @property
     def public_text(self) -> str:
         return base64.b64encode(self.public.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+
+    @property
+    def public_url(self) -> str:
+        """The public half as rrotord/licence_key.py carries one: base64url of the raw 32 bytes, unpadded."""
+        return b64url(self.public.public_bytes(Encoding.Raw, PublicFormat.Raw))
+
+    def key(self, drop: tuple[str, ...] = (), **fields: Any) -> str:
+        """A licence key, `<payload>.<signature>`, signed by this pair: a Pro key, live until 2999, unless `fields`
+        say otherwise (`drop` leaves fields out)."""
+        payload: dict[str, Any] = {
+            "license_id": str(uuid.uuid4()),
+            "tier": "pro",
+            "max_nodes": 3,
+            "max_precedents": 50000,
+            "cluster_sync_enabled": True,
+            "issued_at": "2026-10-01T00:00:00Z",
+            "expires_at": "2999-01-01T00:00:00Z",
+            "customer_id": "cus_1",
+        } | fields
+        raw = json.dumps({k: v for k, v in payload.items() if k not in drop}).encode()
+        return f"{b64url(raw)}.{b64url(self.private.sign(raw))}"
 
     def sign(self, message: bytes) -> str:
         return base64.b64encode(self.private.sign(message)).decode()
@@ -85,6 +107,10 @@ class Keys:
     def token(self, signed: dict[str, Any]) -> str:
         """An offline licence as the platform hands it out: base64url of {payload, signature}, unpadded."""
         return base64.urlsafe_b64encode(json.dumps(signed).encode()).decode().rstrip("=")
+
+
+def b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 _KEYS: Keys | None = None

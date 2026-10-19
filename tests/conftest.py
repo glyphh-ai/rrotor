@@ -1,4 +1,5 @@
-"""Shared fixtures: short folders for unix sockets, git repos and bundles of sample models, restored signals."""
+"""Shared fixtures: the licence's public key patched to the tests' own (and its /etc file away from the host's), short
+folders for unix sockets, git repos and bundles of sample models, restored signals."""
 
 from __future__ import annotations
 
@@ -10,7 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.fakes import GitRepo
+from rrotord import licence, licence_key
+from tests.fakes import GitRepo, keys
+
+
+@pytest.fixture(autouse=True)
+def licence_public_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Licence keys in tests are signed by the tests' own pair: the module's tuple patched, as the spec says."""
+    monkeypatch.setattr(licence_key, "PUBLIC_KEYS", (keys().public_url,))
+    monkeypatch.setattr(licence, "ETC_KEY", Path("/nonexistent/rrotor/license.key"))  # never the host's own
 
 
 @pytest.fixture
