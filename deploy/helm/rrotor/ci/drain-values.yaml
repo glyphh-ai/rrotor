@@ -1,0 +1,19 @@
+# A drain to the customer's collector with a header in the Secret, a sampler, and server-side logging on.
+publicHost: rrotor.example.com
+runtime:
+  id: rt_example
+  token: example-token
+drain:
+  endpoint: http://otel-collector.observability:4318
+  headers: x-api-key=example
+  resourceAttributes: deployment.environment=ci
+  serviceName: rrotor-ci
+  tracesSampler: parentbased_traceidratio
+  tracesSamplerArg: "0.25"
+  signals: logs,audit
+  buffer: 5000
+  payloads: "on"
+serverLogs: "on"
+audit:
+  retentionDays: 30
+  maxMb: 256
