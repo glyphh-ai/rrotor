@@ -36,8 +36,9 @@ printf %s "$GLYPHH_LICENSE_KEY" | cut -d. -f1 | tr '_-' '/+' | base64 -d 2>/dev/
 ```
 
 `GET /v1/licence` and `GET /v1/health` show the key held, where it came from, its state (`live`, `grace`,
-`expired`, `bad`, or `none`) with the days left, the limits that apply, and the node's precedents against its cap
-(`over: true` after a downgrade: nothing is deleted, growth is refused).
+`expired`, `bad`, or `none`) with the days left, the limits that apply, whether a cluster elects its own head
+(`ha`: Enterprise, [High availability](README.md#high-availability-enterprise)), and the node's precedents against its
+cap (`over: true` after a downgrade: nothing is deleted, growth is refused).
 
 ## Where rrotor reads it
 

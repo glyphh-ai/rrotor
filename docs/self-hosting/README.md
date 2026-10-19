@@ -22,9 +22,9 @@ no autoscaling; a second copy of the same runtime is not a replica, it takes the
 precedent cap per node ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains, each
 node its own ([Logs, audit and drains](#logs-audit-and-drains)); a cluster: nodes that find and authenticate each
 other, a head, the key's node cap at join, sync gated by the key, replication from the head (the stores, models,
-keys and licence; writes forwarded to it, reads on every node), and manual failover (`rrotord cluster promote`)
-([A cluster](#a-cluster)). **Not built yet:** high availability (elected heads, Enterprise), the head gathering the
-cluster's drain and audit log, and the packages' cluster settings. The
+keys and licence; writes forwarded to it, reads on every node), manual failover (`rrotord cluster promote`) and,
+on Enterprise, high availability: an elected head ([A cluster](#a-cluster)). **Not built yet:** the head gathering
+the cluster's drain and audit log, and the packages' cluster settings. The
 decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
 server's (`glyphh-ai/server`, `docs/architecture.md`).
 
@@ -74,8 +74,10 @@ other, authenticate each other with mutual TLS derived from one secret you make,
 admits the others up to your key's `max_nodes`. The head is the only writer: it holds the runtime's link, and ships
 the precedent stores, the deployed models, the runtime keys and the licence key to every other node, which serves
 reads from its own copy and sends writes (functions marked `"writes": true`, deploys) to the head. While the head
-is down the others go on serving reads and answer writes 503 `E_NO_HEAD` until it restarts (Kubernetes and
-`restart: unless-stopped` do that in seconds) or you promote another node ([Failover](#failover)). A key without
+is down the others go on serving reads and answer writes 503 `E_NO_HEAD` (with `Retry-After: 2`): on Enterprise
+until another node is elected, in 1.5 to 3 seconds ([High availability](#high-availability-enterprise)); on Pro and
+Team until it restarts (Kubernetes and `restart: unless-stopped` do that in seconds) or you promote another node
+([Failover](#failover-pro-and-team)). A key without
 cluster sync (Community, Free) never starts it: rrotor logs `cluster synchronisation disabled under the Community
 licence` and runs alone.
 
@@ -116,7 +118,27 @@ licence` and runs alone.
 | `RROTOR_CLUSTER_EVICT_AFTER` | `24h` | A member unseen this long is removed by the head (`s`, `m`, `h`, `d`) |
 | `RROTOR_CLUSTER_LOG_KEEP` | `1g` | The replication log kept for catch-up (`k`, `m`, `g`); a node further behind takes a snapshot |
 
-### Failover
+### High availability (Enterprise)
+
+An Enterprise key (`ha: true` in `GET /v1/licence`) makes the cluster elect its own head. The first five members are
+**voters**; any more are learners, which hold everything and serve reads but never vote (so a large cluster's writes
+wait on five, not on all); when a voter leaves, the first learner takes its place.
+
+- **The head lost:** after 1.5 to 3 seconds without hearing from it, a voter stands and a majority of voters elects
+  it. Reads go on throughout; writes answer 503 `E_NO_HEAD` with `Retry-After: 2` until the new head is found.
+- **A write is answered once most voters hold it**, so no acknowledged write is lost when a head dies. If they do not
+  within 5 seconds the write answers 503 `E_NOT_COMMITTED`: it is kept, and committed when they return.
+- **A partition:** the side with a majority of voters keeps (or elects) a head; the other side's head steps down
+  within 1.5 s, and that side serves reads at what it has and refuses writes until the network heals, when it
+  catches up.
+- **A head that comes back** follows the one elected, taking its copy first.
+- **Run three or more voters, an odd number:** a cluster of two cannot survive a loss (no majority is left), and
+  behaves like Pro.
+
+`rrotord cluster promote <node>` still moves the head on purpose, to a voter whose log is as up to date as most
+voters'; `--force` is refused (`E_CLUSTER_HA`): it could lose acknowledged writes.
+
+### Failover (Pro and Team)
 
 Pro and Team move the head by hand; nothing elects one on its own, so there is never a second head unless you make
 one. On any node:
