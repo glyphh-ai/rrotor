@@ -1,4 +1,4 @@
-"""The local API's application: the gate, the errors, the routes."""
+"""The API's application: the gate, the errors, the routes."""
 
 from __future__ import annotations
 

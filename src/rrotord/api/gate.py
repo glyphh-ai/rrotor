@@ -1,6 +1,6 @@
 """Who may call the API.
 
-Locally: the mod that holds the local token, from this machine. Host must be this API's loopback address (no DNS
+Locally: the caller that holds the local token, from this machine. Host must be this API's loopback address (no DNS
 rebinding), an Origin other than its own is refused (no web page may call it), and the bearer token is compared by
 its SHA-256, in constant time.
 
