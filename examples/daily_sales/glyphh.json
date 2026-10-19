@@ -5,6 +5,7 @@
   "python": "3.13",
   "functions": {
     "start": {
+      "writes": true,
       "description": "Read a day's sales export, add it up, and write the total to the ledger (asks approval first)",
       "inputs": {
         "type": "object",
@@ -14,6 +15,7 @@
       "approvals": ["write"]
     },
     "summary": {
+      "writes": false,
       "description": "The ledger: each day written, its total in dollars and euros",
       "inputs": { "type": "object", "additionalProperties": false }
     }

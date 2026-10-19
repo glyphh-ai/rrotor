@@ -70,8 +70,10 @@ class Ctx:
         clearance: float = 1.0,
         caller: str = "claude",
         limits: dict[str, Any] | None = None,
+        readonly: bool = False,
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
+        self.readonly = readonly  # a cluster follower's run: its folders read-only, its Ada store opened read-only
         self.limits: dict[str, Any] = dict(limits or {})  # an Ada model's precedent cap, from the licence key
         self.ada: Any = None  # the Ada model, once rrotor.ada.open(ctx) has run
         self.inputs: dict[str, Any] = inputs

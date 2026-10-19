@@ -254,3 +254,45 @@ def test_count_reads_the_stores_precedents_as_the_cap_counts_them_without_the_ke
     (tmp_path / "other.sqlite").write_bytes(b"")
     with pytest.raises(sqlite3.Error):
         ada.count(tmp_path / "other.sqlite")  # no precedents table: not a store
+
+
+def test_a_followers_run_opens_the_store_read_only_on_kernel_3_10(tmp_path, kernel):
+    (tmp_path / "spec.json").write_text(json.dumps(SPEC))
+    data = tmp_path / "data"
+    writer = ada.open(ctx(tmp_path, data))
+    writer.record({"a": {"b": {"x": "one"}}}, "yes")
+    follower = ctx(tmp_path, data)
+    follower.readonly = True
+    model = ada.open(follower)
+    assert model.readonly and len(model.space) == 1
+    with pytest.raises(Exception, match="E_READ_ONLY") as caught:
+        model.record({"a": {"b": {"x": "two"}}}, "no")
+    assert getattr(caught.value, "code", None) == "E_READ_ONLY" and ada.count(data / ada.STORE) == 1
+
+
+def test_an_older_kernel_cannot_open_a_store_read_only(tmp_path, monkeypatch):
+    (tmp_path / "spec.json").write_text(json.dumps(SPEC))
+
+    class Spec:
+        @staticmethod
+        def from_json(_data: Any) -> object:
+            return object()
+
+    class Model:  # kernel 3.9: no readonly
+        def __init__(self, spec: Any, *, author: str, **levers: Any) -> None:
+            if author == "boom":
+                raise TypeError("boom")
+            raise TypeError("Model.__init__() got an unexpected keyword argument 'readonly'")
+
+    old = type(sys)("glyphh_spec")
+    old.Spec, old.Model, old.SpecError = Spec, Model, ValueError  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "glyphh_spec", old)
+    monkeypatch.setitem(sys.modules, "glyphh_kernel", type(sys)("glyphh_kernel"))
+    monkeypatch.setattr(ada, "_kernel", lambda: (sys.modules["glyphh_kernel"], old))
+    follower = ctx(tmp_path, tmp_path / "data")
+    follower.readonly = True
+    with pytest.raises(ada.KernelTooOld, match=r"kernel 3\.10") as caught:
+        ada.open(follower)
+    assert caught.value.code == "E_ADA_KERNEL"
+    with pytest.raises(TypeError, match="boom"):
+        ada.open(follower, author="boom")

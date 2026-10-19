@@ -471,3 +471,34 @@ async def test_the_pinger_leaves_a_link_heard_from_too_long_ago(tmp_path):
     )
     await client._ping(Ws(), lambda: 0.0)  # type: ignore[arg-type]
     assert closed == [{"code": 1000, "message": b"reconnecting"}]
+
+
+async def test_only_a_clusters_head_links_and_a_follower_lets_it_go(tmp_path, session):
+    cloud = Cloud(hold)
+    link = await link_to(cloud, tmp_path, session)
+    link.sign_in()
+    role = {"now": "follower"}
+    link.client.held = lambda: role["now"] == "follower"
+    link.client.identity = lambda: ("rrotor-1", "c-1", role["now"])
+    link.client.BACKOFF_MAX = 0.05
+    link.start()
+    await until(lambda: link.client.state == "follower")
+    await asyncio.sleep(0.1)
+    assert cloud.connections == 0
+    role["now"] = "head"
+    link.client.regate.set()
+    await until(lambda: link.client.state == "online")
+    assert {k: cloud.hellos[0][k] for k in ("node_id", "cluster_id", "role")} == {
+        "node_id": "rrotor-1",
+        "cluster_id": "c-1",
+        "role": "head",
+    }
+    link.client.regate.set()  # looked at again, still the head: it stays
+    await asyncio.sleep(0.05)
+    assert link.client.state == "online"
+    role["now"] = "follower"
+    link.client.regate.set()
+    await until(lambda: link.client.state == "follower")
+    assert cloud.connections == 1
+    await link.stop()
+    await cloud.server.close()

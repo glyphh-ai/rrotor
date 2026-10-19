@@ -87,12 +87,11 @@ class Daemon:
             max_mb=c.audit_max_mb,
             payloads=c.log_payloads,
         )
-        self.cluster = Cluster(c, self.licence, self.audit, VERSION)
+        self.access = Access(c.data, c.keys_sha256, on_change=self._keys_changed)
+        self.cluster = Cluster(c, self.licence, self.audit, VERSION, models=models, access=self.access)
+        self.cluster.usage, self.cluster.taken = self.access.usage.merge, self.access.usage.take
         self.licence.on_event = self._licence_event
         self.licence.start(c.licence_env)  # never fatal: a bad key is logged and the node runs as Community
-        self.access = Access(
-            c.data, c.keys_sha256, on_change=lambda change: self.audit.emit("keys.changed", who=SERVER, **change)
-        )
         credentials = Credentials(c.data)
         if (
             c.runtime_id
@@ -119,7 +118,11 @@ class Daemon:
             licence=self.licence,
             audit=self.audit,
             telemetry=self.drain.telemetry if self.drain is not None else None,
+            node=lambda: c.node_id if self.cluster.member else None,
+            readonly=lambda: self.cluster.role == "follower",
+            changes=self.cluster.replication,
         )
+        self.cluster.replication.busy = lambda: bool(self.runner.workers)
         handler.runner = self.runner
         self.link = LinkClient(
             url=c.link_url,
@@ -130,7 +133,10 @@ class Daemon:
             handler=handler,
             connect=self._connect,
             enabled=c.link,
+            held=lambda: self.cluster.role == "follower",
+            identity=lambda: (c.node_id, *self.cluster.identity()),
         )
+        self.cluster.roled = self.link.regate.set
         handler.link = self.link
         self.heartbeat = (
             Heartbeat(
@@ -160,6 +166,11 @@ class Daemon:
             lambda: [(float(cap), {})] if (cap := self.licence.limits().max_precedents) is not None else [],
         )
         t.gauge("rrotor.link.state", lambda: [(1.0, {"state": self.link.state})])
+
+    def _keys_changed(self, change: dict[str, Any]) -> None:
+        """The runtime keys' list changed: an audit event, and on a cluster's head a `keys` entry."""
+        self.audit.emit("keys.changed", who=SERVER, **change)
+        self.cluster.replication.keys_changed()
 
     def _licence_event(self, kind: str, detail: dict[str, Any]) -> None:
         """A licence key taken, past grace or refused, as the audit log tells it: from the heartbeat or `welcome`,
@@ -280,7 +291,12 @@ class Daemon:
     async def report_usage(self) -> None:
         """The runtime keys' calls since the last report and the runtime's precedents, owed up the link as one
         numbered `usage`: when there were calls, or when the precedents' total is due (`rrotord/precedents.py`);
-        nothing otherwise, or when there is no runtime token to owe them under."""
+        nothing otherwise, or when there is no runtime token to owe them under. A cluster's follower sends its calls
+        to its head with each ping instead, and the head's `usage` is the cluster's (the synced store's precedents
+        once)."""
+        if self.cluster.role == "follower":
+            self.precedents.due()
+            return
         keys = self.access.usage.take()
         due = self.precedents.due()  # read on every node, linked or not: the cap's warning, the health
         if not self.link.configured:

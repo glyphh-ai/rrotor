@@ -40,6 +40,20 @@ class Usage:
         calls = self.counts[key][0] if key in self.counts else 0
         self.counts[key] = (calls + 1, self.clock())
 
+    def merge(self, counted: list[dict[str, Any]]) -> None:
+        """A cluster's follower's counts (sent to its head with each ping), added to this node's: the head's `usage`
+        is the cluster's."""
+        for entry in counted:
+            key, calls, at = entry.get("key_sha256"), entry.get("calls"), entry.get("last_used_at")
+            if not isinstance(key, str) or not isinstance(calls, int) or not isinstance(at, str):
+                continue
+            try:
+                when = dt.datetime.fromisoformat(at)
+            except ValueError:
+                continue
+            had, last = self.counts.get(key, (0, when))
+            self.counts[key] = (had + calls, max(last, when))
+
     def take(self) -> list[dict[str, Any]]:
         """Every key's calls and when it was last used, and the counts start again."""
         taken = [

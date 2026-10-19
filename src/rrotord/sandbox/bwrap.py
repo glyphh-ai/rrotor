@@ -1,5 +1,6 @@
 """The `bwrap` command line for one run: new namespaces, a read-only system, the version's code and venv, its folder
-writable, the SDK, the proxy's socket and nothing else of /data."""
+writable, the SDK, the proxy's socket and nothing else of /data. On a cluster's follower (`readonly`) the folder and
+the data folder are mounted read-only too: the head is the only writer of what syncs (docs/specs/cluster.md, 3)."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ class Mounts:
     data: Path | None = None  # the model's persistent data folder, when its manifest asks
     parts: tuple[tuple[str, Path], ...] = ()  # the parts its manifest asks for: (name, where it is installed)
     pythonpath: tuple[str, ...] = ()  # the parts' PYTHONPATH entries, as paths inside the sandbox
+    readonly: bool = False  # a follower's run: /files and /data read-only
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,9 +36,11 @@ class Limits:
 
 def landlock_rules(mounts: Mounts) -> dict[str, object]:
     """What the worker locks itself to, as paths inside the sandbox."""
-    write = [FILES, "/tmp", "/dev"] + ([DATA] if mounts.data else [])
+    mine = [FILES] + ([DATA] if mounts.data else [])
+    write = [FILES, "/tmp", "/dev", *mine[1:]] if not mounts.readonly else ["/tmp", "/dev"]
+    read = [*SYSTEM_RO, MODEL, VENV, SDK, "/proc", *(f"{PARTS}/{name}" for name, _ in mounts.parts)]
     return {
-        "read": [*SYSTEM_RO, MODEL, VENV, SDK, "/proc", *(f"{PARTS}/{name}" for name, _ in mounts.parts)],
+        "read": read + (mine if mounts.readonly else []),
         "write": write,
         "tcp_ports": [3128] if mounts.proxy else [],
     }
@@ -96,12 +100,12 @@ def command(
         "--ro-bind",
         str(mounts.sdk),
         f"{SDK}/rrotor",
-        "--bind",
+        "--ro-bind" if mounts.readonly else "--bind",
         str(mounts.files),
         FILES,
     ]
     if mounts.data:
-        argv += ["--bind", str(mounts.data), DATA]
+        argv += ["--ro-bind" if mounts.readonly else "--bind", str(mounts.data), DATA]
     for name, where in mounts.parts:
         argv += ["--ro-bind", str(where), f"{PARTS}/{name}"]
     if mounts.proxy:

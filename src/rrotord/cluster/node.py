@@ -1,4 +1,5 @@
-"""This node in its cluster (docs/specs/cluster.md, 4 and 5): the skeleton, with nothing replicated yet.
+"""This node in its cluster (docs/specs/cluster.md, 3, 4 and 5): membership, and replication with a fixed head
+(replication.py).
 
 **Gated by the licence key.** With `RROTOR_CLUSTER=on` the transport starts only while the key held has
 `cluster_sync_enabled`; under Community (or a key without it) the listener never starts, rrotor logs `cluster
@@ -25,10 +26,21 @@ cluster fits; a member unseen for `RROTOR_CLUSTER_EVICT_AFTER` is removed (`clus
 a follower passes it to the head. The node removed is told, and does not ask again until `rrotord cluster join` is
 run on it. The head cannot leave: moving the head is `rrotord cluster promote` (manual failover, not built yet).
 
-**Not built yet, with their seams here:** the replication log and its seqs (`commit_seq` and `applied_seq` are 0, so
-a joined follower is ready at once; catch-up will make it `catching_up` until within a second of the head), writes
-forwarded to the head, snapshots, the head-only link, terms past 1 and elections (`ha` is false), and the followers'
-telemetry to the head. Membership is kept in `cluster/state.json`, not yet in the log."""
+**Replication.** The head ships its log to each follower it admits, from what the follower says it applied (a
+snapshot first for a new node or one behind the log), over the follower's own connection: `append` and `snapshot`
+are the head's requests, answered with the seq applied. A joined follower is `catching_up` (not ready) until it has
+applied what the head had committed, and again once behind it for more than a second. `GET /cluster/v1/versions/
+<model>/<commit>.tar` and `GET /cluster/v1/snapshot` are plain requests on the listener, for members only.
+
+**Forwarding** (`forward`): a follower sends a writing call, a deploy, and anything about a run another node holds
+to its head, with the caller as data (who, from where, by which route) and a deadline; the head does it (as that
+caller), or passes it to the follower that holds the run (`E_RUN_LOST`, 410, when that node is not connected), and
+answers with the seq its log stands at. A follower with no head answers `E_NO_HEAD` (503). What a forward does is
+the API's own operations (`rrotord/api/forward.py`, `serve_forward`). Each ping of a follower carries its applied
+seq and its runtime keys' calls since the last, which the head adds to its own `usage`.
+
+**Not built yet:** terms past 1, fencing and promotion (manual failover), elections and majority commit (`ha` is
+false), `member` entries (membership is kept in `cluster/state.json`), and the followers' telemetry to the head."""
 
 from __future__ import annotations
 
@@ -38,21 +50,25 @@ import datetime as dt
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 from aiohttp import web
 
 from rrotord import log as logs
-from rrotord.audit import Audit, Who
+from rrotord.access import Access
+from rrotord.audit import WHO, Audit, Who
 from rrotord.cluster.discovery import Discovery, Resolve, getaddrinfo
+from rrotord.cluster.replication import Replication
 from rrotord.cluster.tls import COMMAND, Credentials, peer_name
-from rrotord.cluster.transport import PATH, Channel, ClusterError, answer, dial, failed, frame
+from rrotord.cluster.transport import MESSAGE_MAX, PATH, Channel, ClusterError, answer, dial, failed, fetch, frame
 from rrotord.config import NODE_ID, Config
-from rrotord.errors import BadRequest, RrotorError
+from rrotord.errors import BadRequest, RrotorError, Unavailable
 from rrotord.licence import Licence
+from rrotord.models import Models
 from rrotord.store import read_json, write_json
 
 log = logging.getLogger("rrotor.cluster")
@@ -66,6 +82,8 @@ SHUTDOWN = 5.0  # seconds the listener waits for its connections' handlers when 
 ASKED_WITHIN = 10.0  # `rrotord cluster join` waits this long for the outcome
 VOTERS = 5  # the first five members by join (election: not built yet)
 REFUSED_KEPT = 50
+FORWARD_WITHIN = 3630.0  # a forwarded request's answer: a run's longest seconds (3600) and its end
+READ_YOUR_WRITES = 2.0  # a node waits this long to have applied a seq it was asked to be at
 REFUSALS = frozenset({"E_CLUSTER_FULL", "E_CLUSTER_NODE_ID", "E_CLUSTER_LEFT", "E_CLUSTER_ID"})
 NODE = Who({"type": "rrotor"}, None, "cluster")
 OPERATOR = Who({"type": "local"}, None, "cluster")  # `rrotord cluster ...`, on a node, with the cluster secret
@@ -114,6 +132,8 @@ class Cluster:
         version: str,
         resolve: Resolve = getaddrinfo,
         wall: Callable[[], float] = time.time,
+        models: Models | None = None,
+        access: Access | None = None,
     ) -> None:
         self.config, self.licence, self.audit, self.version, self.wall = config, licence, audit, version, wall
         self.node_id, self.address, self.port = config.node_id, config.advertise, config.cluster_port
@@ -140,7 +160,27 @@ class Cluster:
         self.wake = asyncio.Event()  # `rrotord cluster join`: ask now
         self.attempted = asyncio.Event()
         self.asked = False
-        self.telling: set[asyncio.Task[None]] = set()  # the head telling removed nodes so
+        self.telling: set[asyncio.Task[None]] = set()  # the head telling removed nodes so; a follower answering
+        self.access = access or Access(config.data)
+        self.replication = Replication(
+            config.data / "cluster" / "log",
+            config.run_dir / "cluster" / "scratch",
+            config.cluster_log_keep,
+            models or Models(config.data),
+            self.access,
+            licence,
+            role=lambda: self.role,
+            term=lambda: int(self.state.get("term") or 1),
+            saved=self._applied,
+            applied=int(self.state.get("applied_seq") or 0),
+            wall=wall,
+        )
+        self.replication.fetch = self._fetch
+        # what a forwarded request does: the API's operations, set by rrotord/api/app.py
+        self.serve_forward: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
+        self.usage: Callable[[list[dict[str, Any]]], None] = lambda _: None  # the head: a follower's key calls
+        self.taken: Callable[[], list[dict[str, Any]]] = list  # a follower: its key calls since the last ping
+        self.roled: Callable[[], None] = lambda: None  # this node's role changed (the link looks again)
 
     # What the rest of rrotor reads
 
@@ -156,12 +196,31 @@ class Cluster:
         """(cluster_id, role) for the heartbeat."""
         return self.cluster_id, self.role
 
+    @property
+    def shown(self) -> str:
+        """The status as told: a follower that is a member but not in step with its head is `catching_up`."""
+        if self.status == "ready" and self.role == "follower" and not self.replication.current():
+            return "catching_up"
+        return self.status
+
     def ready(self) -> tuple[bool, str | None, str | None]:
         """Whether this node may take traffic (`/readyz`), else why: joining, catching_up, refused, no_cluster."""
-        if self.status in ("standalone", "ready"):
+        status = self.shown
+        if status in ("standalone", "ready"):
             return True, None, None
         code = self.refusal.get("code") if self.refusal is not None else None
-        return False, self.status, code
+        if status == "catching_up" and self.replication.failure is not None:
+            code = self.replication.failure["code"]
+        return False, status, code
+
+    @property
+    def member(self) -> bool:
+        """A head or a follower: what syncs is the head's to write."""
+        return self.role in ("head", "follower")
+
+    def _applied(self, seq: int) -> None:
+        self.state["applied_seq"] = seq
+        self._save()
 
     def members(self) -> list[Member]:
         found = (Member.of(m) for m in self.state.get("members") or [])
@@ -177,8 +236,8 @@ class Cluster:
                 "address": m.address,
                 "role": "head" if m.node_id == head else "follower",
                 "voter": i < VOTERS,
-                "applied_seq": 0,
-                "lag": 0,
+                "applied_seq": self._applied_by(m.node_id),
+                "lag": max(self.replication.log.last - self._applied_by(m.node_id), 0),
                 "last_seen": stamp(now if m.node_id == self.node_id else self.seen.get(m.node_id, now)),
                 "connected": m.node_id == self.node_id or m.node_id in self.links,
                 "version": m.version,
@@ -187,6 +246,9 @@ class Cluster:
             }
             for i, m in enumerate(self.members())
         ]
+
+    def _applied_by(self, node: str) -> int:
+        return self.replication.log.last if node == self.node_id else self.replication.acked.get(node) or 0
 
     def _reason(self) -> str:
         return f"cluster synchronisation disabled under {'the Community' if self.licence.community else 'this'} licence"
@@ -202,11 +264,11 @@ class Cluster:
             "cluster_id": self.cluster_id,
             "node_id": self.node_id,
             "role": self.role,
-            "status": self.status,
+            "status": self.shown,
             "head": self.state.get("head"),
             "term": self.state.get("term"),
-            "commit_seq": 0,
-            "applied_seq": 0,
+            "commit_seq": self.replication.commit_seq if self.member else 0,
+            "applied_seq": self.replication.applied_seq if self.member else 0,
             "tier": limits.tier,
             "max_nodes": limits.max_nodes,
             "ha": False,  # elected heads: not built yet
@@ -224,7 +286,7 @@ class Cluster:
             "cluster_id": self.cluster_id,
             "node_id": self.node_id,
             "role": self.role,
-            "status": self.status,
+            "status": self.shown,
             "ready": ready,
             "head": self.state.get("head"),
             "term": self.state.get("term"),
@@ -234,6 +296,7 @@ class Cluster:
 
     def licence_changed(self) -> None:
         self.changed.set()
+        self.replication.licence_changed()  # the head ships a new key held
 
     # Running
 
@@ -248,6 +311,9 @@ class Cluster:
             await asyncio.gather(self.supervisor, return_exceptions=True)
             self.supervisor = None
         await self._shut()
+        for task in list(self.telling):
+            task.cancel()
+        await asyncio.gather(*self.telling, return_exceptions=True)
         if self.session is not None:
             await self.session.close()
             self.session = None
@@ -273,6 +339,7 @@ class Cluster:
         """Every log line and audit event names the cluster and this node's role while it is in one."""
         cluster_id = self.cluster_id
         self.audit.cluster_id = cluster_id
+        self.roled()
         if cluster_id is None:
             logs.identify(node_id=self.node_id)
         else:
@@ -292,6 +359,8 @@ class Cluster:
         self.status = "joining" if self.refusal is None else "refused"
         app = web.Application()
         app.router.add_get(PATH, self._accept)
+        app.router.add_get("/cluster/v1/versions/{model}/{commit}.tar", self._version)
+        app.router.add_get("/cluster/v1/snapshot", self._snapshot)
         self.listener = web.AppRunner(app, access_log=None, shutdown_timeout=SHUTDOWN)
         await self.listener.setup()
         await web.TCPSite(self.listener, BIND, self.port, ssl_context=self.credentials.server).start()
@@ -315,6 +384,7 @@ class Cluster:
         self._identify()
 
     async def _shut(self) -> None:
+        await self.replication.stop()
         if self.membership is not None:
             self.membership.cancel()
             await asyncio.gather(self.membership, return_exceptions=True)
@@ -401,9 +471,10 @@ class Cluster:
 
     async def _join(self, head_address: str) -> float:
         assert self.session is not None and self.credentials is not None  # noqa: S101  (opened first)
+        box: dict[str, Channel] = {}
         try:
             channel, answered, reader = await dial(
-                self.session, self.credentials, head_address, self._hello(), self._pushed
+                self.session, self.credentials, head_address, self._hello(), lambda m: self._pushed(m, box)
             )
         except ClusterError:
             self._waiting("joining")
@@ -413,6 +484,7 @@ class Cluster:
             await channel.close()
             self._waiting("joining")
             return RETRY
+        box["head"] = channel
         asked, self.asked = self.asked, False
         try:
             welcome = await channel.request(
@@ -422,6 +494,7 @@ class Cluster:
                 instance=self.state["instance"],
                 cluster_id=self.state.get("cluster_id"),
                 asked=asked,
+                applied_seq=self.replication.applied,
             )
         except ClusterError as err:
             reader.cancel()
@@ -442,6 +515,7 @@ class Cluster:
         )
         self._save()
         self.told = welcome
+        self.replication.synced = False  # not ready until it has applied what the head has
         self.role, self.status = "follower", "ready"
         self._identify()
         self.attempted.set()
@@ -454,7 +528,7 @@ class Cluster:
         self.head_channel = channel
         try:
             while not reader.done():
-                told = await channel.request("ping", applied_seq=0)
+                told = await channel.request("ping", applied_seq=self.replication.applied, usage=self.taken())
                 self.told = told
                 if names(told.get("members")) != names(self.state.get("members")):
                     self.state["members"] = told["members"]  # kept for a restart: who the members were
@@ -469,9 +543,31 @@ class Cluster:
         if self.refusal is None:
             log.warning("cluster: lost the head; asking again", extra={"head": self.state.get("head")})
 
-    def _pushed(self, msg: dict[str, Any]) -> None:
-        if msg.get("type") == "removed":
+    def _pushed(self, msg: dict[str, Any], box: dict[str, Channel]) -> None:
+        kind = msg.get("type")
+        if kind == "removed":
             self._refuse(str(msg.get("code") or "E_CLUSTER_FULL"), str(msg.get("message") or "Removed by the head."))
+        elif kind in ("append", "snapshot", "forward") and "head" in box:
+            self._spawn(self._answer_head(box["head"], msg))
+
+    def _spawn(self, work: Awaitable[None]) -> None:
+        task: asyncio.Task[None] = asyncio.ensure_future(work)
+        self.telling.add(task)
+        task.add_done_callback(self.telling.discard)
+
+    async def _answer_head(self, channel: Channel, msg: dict[str, Any]) -> None:
+        """What the head asks of a follower: entries to apply, a snapshot to install, a forward of a run held here."""
+        try:
+            if msg["type"] == "append":
+                reply = answer(msg, applied_seq=await self.replication.receive(msg))
+            elif msg["type"] == "snapshot":
+                reply = answer(msg, applied_seq=await self.replication.install())
+            else:
+                reply = answer(msg, **await self._local(msg))
+        except RrotorError as err:
+            reply = failed(msg, err)
+        with contextlib.suppress(Exception):
+            await channel.send(reply)
 
     def _refuse(self, code: str, message: str) -> None:
         self.refusal = {"code": code, "message": message, "at": stamp(self.wall())}
@@ -510,6 +606,7 @@ class Cluster:
         self._save()
         self.role, self.status, self.refusal = "head", "ready", None
         self._identify()
+        self.replication.lead()
 
     def told_view(self) -> dict[str, Any]:
         """What the head tells a node it admits, and each follower at its every ping."""
@@ -518,7 +615,7 @@ class Cluster:
             "term": self.state["term"],
             "head": self.node_id,
             "head_address": self.address,
-            "commit_seq": 0,
+            "commit_seq": self.replication.log.last,
             "members": self._members_view(),
             "refused": list(self.refused),
         }
@@ -568,13 +665,20 @@ class Cluster:
         self._save()
         self.links[node], peer["member"], self.seen[node] = channel, node, self.wall()
         self.refused = [r for r in self.refused if r["node_id"] != node]
+        self.replication.attach(node, channel, msg.get("applied_seq"))
         return self.told_view()
 
-    def _ping(self, peer: dict[str, Any]) -> dict[str, Any]:
+    def _ping(self, peer: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any]:
         node = peer.get("member")
-        if self.role != "head" or node not in {m.node_id for m in self.members()}:
+        members = [m.node_id for m in self.members()]
+        if self.role != "head" or node not in members:
             raise ClusterError("Not a member: join first.", code="E_CLUSTER_MEMBER")
         self.seen[str(node)] = self.wall()
+        self.replication.heard_from(str(node), msg.get("applied_seq"))
+        self.replication.trim([m for m in members if m != self.node_id])
+        usage = msg.get("usage")
+        if isinstance(usage, list) and usage:
+            self.usage([u for u in usage if isinstance(u, dict)])
         return self.told_view()
 
     def _remove(self, node: str, code: str, reason: str, who: Who) -> dict[str, Any]:
@@ -598,6 +702,7 @@ class Cluster:
             "E_CLUSTER_FULL": "The licence key's max_nodes is below the cluster's size: the last joined are removed.",
         }
         channel = self.links.pop(node, None)
+        self.replication.detach(node)
         if channel is not None:
             task = asyncio.get_running_loop().create_task(
                 self._tell_removed(channel, code, messages.get(code, "Removed from the cluster."))
@@ -640,23 +745,31 @@ class Cluster:
         transport = request.transport
         assert transport is not None  # noqa: S101  (a request being served has its connection)
         name = peer_name(transport.get_extra_info("ssl_object"))
-        ws = web.WebSocketResponse(autoping=True)
+        ws = web.WebSocketResponse(autoping=True, max_msg_size=MESSAGE_MAX)
         await ws.prepare(request)
         channel, peer = Channel(ws, name), dict[str, Any]()
         self.accepted.add(channel)
         try:
             async for msg in channel.frames():
-                try:
-                    reply = await self._serve(channel, peer, msg)
-                except RrotorError as err:
-                    reply = failed(msg, err)
-                await channel.send(reply)
+                if msg["type"] == "forward" and peer.get("member"):
+                    self._spawn(self._reply(channel, msg, self._forwarded(msg)))  # a run: never in the loop's way
+                    continue
+                await self._reply(channel, msg, self._serve(channel, peer, msg))
         finally:
             self.accepted.discard(channel)
             node = peer.get("member")
             if node is not None and self.links.get(node) is channel:
                 del self.links[node]
+                self.replication.detach(node)
         return ws
+
+    async def _reply(self, channel: Channel, msg: dict[str, Any], work: Awaitable[dict[str, Any]]) -> None:
+        try:
+            reply = await work
+        except RrotorError as err:
+            reply = failed(msg, err)
+        with contextlib.suppress(Exception):
+            await channel.send(reply)
 
     async def _serve(self, channel: Channel, peer: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any]:
         kind = msg["type"]
@@ -667,7 +780,7 @@ class Cluster:
         if kind == "join" and peer["kind"] == "node":
             return answer(msg, **self._admit(channel, peer, msg))
         if kind == "ping" and peer["kind"] == "node":
-            return answer(msg, **self._ping(peer))
+            return answer(msg, **self._ping(peer, msg))
         if kind == "command":
             return answer(msg, **await self._command(peer, msg))
         raise ClusterError(f"There is no message {kind!r} here.", code="E_CLUSTER_MESSAGE")
@@ -714,3 +827,111 @@ class Cluster:
                     await asyncio.wait_for(self.attempted.wait(), ASKED_WITHIN)
             return {"node_id": self.node_id, "role": self.role, "status": self.status, "refusal": self.refusal}
         raise BadRequest("The commands are join, and leave <node id>.")
+
+    # Replication's requests on the listener
+
+    def _member_asking(self, request: web.Request) -> None:
+        transport = request.transport
+        name = peer_name(transport.get_extra_info("ssl_object")) if transport is not None else None
+        if self.role != "head" or name not in {m.node_id for m in self.members()}:
+            raise web.HTTPForbidden(text="members only, from the head")
+
+    async def _send_file(self, request: web.Request, path: Path, headers: dict[str, str]) -> web.StreamResponse:
+        try:
+            res = web.StreamResponse(headers={"Content-Type": "application/x-tar", **headers})
+            res.content_length = path.stat().st_size
+            await res.prepare(request)
+            with path.open("rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    await res.write(chunk)
+            await res.write_eof()
+            return res
+        finally:
+            path.unlink(missing_ok=True)
+
+    async def _version(self, request: web.Request) -> web.StreamResponse:
+        """A version's `src/` and `venv/`, the head's build, with the head's architecture."""
+        self._member_asking(request)
+        model, commit = request.match_info["model"], request.match_info["commit"]
+        try:
+            tar = await asyncio.to_thread(self.replication.version_tar, model, commit)
+        except RrotorError as err:
+            return web.json_response(err.to_json(), status=err.status)
+        return await self._send_file(request, tar, {"Rrotor-Arch": self.replication.arch})
+
+    async def _snapshot(self, request: web.Request) -> web.StreamResponse:
+        self._member_asking(request)
+        tar, seq = await self.replication.snapshot()
+        return await self._send_file(request, tar, {"Rrotor-Cluster-Seq": str(seq)})
+
+    async def _fetch(self, path: str, dest: Path) -> dict[str, str]:
+        """A follower's GET on its head's listener."""
+        address = self.state.get("head_address")
+        if self.session is None or self.credentials is None or not isinstance(address, str):
+            raise ClusterError("No head to fetch from.", code="E_NO_HEAD")
+        from rrotord.cluster.replication import SNAPSHOT_WITHIN
+
+        return await fetch(self.session, self.credentials, address, path, dest, SNAPSHOT_WITHIN)
+
+    # Forwarding
+
+    async def forward(
+        self, op: str, args: dict[str, Any], target: str | None = None, within: float = FORWARD_WITHIN
+    ) -> dict[str, Any]:
+        """A request done by another node, as the caller in hand: the head (`target` None), or the node that holds a
+        run. Answers what it answered (and the seq it stood at, `seq`); raises what it refused."""
+        who = WHO.get()
+        msg = {"op": op, "args": args, "target": target, "deadline": within}
+        if who is not None:
+            msg["who"] = {"actor": who.actor, "client": who.client, "via": who.via}
+        if target == self.node_id or (target is None and self.role == "head"):
+            return await self._local(msg)
+        if self.role == "head":
+            return await self._relay(str(target), msg)
+        channel = self.head_channel
+        if channel is None or self.role != "follower":
+            raise Unavailable("No head answers this node: writes wait for it.", code="E_NO_HEAD")
+        got = await channel.request("forward", within=within, **msg)
+        return {k: v for k, v in got.items() if k not in ("type", "id", "ok")}
+
+    async def _relay(self, target: str, msg: dict[str, Any]) -> dict[str, Any]:
+        channel = self.links.get(target)
+        if channel is None:
+            raise RrotorError(
+                f"The node that holds this run ({target}) is not in the cluster now: the run is lost.",
+                code="E_RUN_LOST",
+                status=410,
+            )
+        deadline = msg.get("deadline")
+        got = await channel.request("forward", within=deadline if isinstance(deadline, float | int) else None, **msg)
+        return {k: v for k, v in got.items() if k not in ("type", "id", "ok")}
+
+    async def _forwarded(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """A follower's forward at the head: done here, or passed to the node it names."""
+        target = msg.get("target")
+        body = {k: msg.get(k) for k in ("op", "args", "who", "deadline")}
+        if isinstance(target, str) and target != self.node_id:
+            return answer(msg, **await self._relay(target, {**body, "target": target}))
+        return answer(msg, **await self._local(body))
+
+    async def _local(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """A forwarded request done on this node, as its caller (who, from where, by which route)."""
+        if self.serve_forward is None:
+            raise Unavailable("This node does not serve forwarded requests.", code="E_NO_HEAD")
+        sent = msg.get("who")
+        token = WHO.set(
+            Who(dict(sent.get("actor") or {}), sent.get("client"), sent.get("via")) if isinstance(sent, dict) else None
+        )
+        try:
+            done = await self.serve_forward({"op": msg.get("op"), "args": msg.get("args") or {}})
+        finally:
+            WHO.reset(token)
+        return {"result": done, "seq": self.replication.log.last if self.role == "head" else None}
+
+    async def caught_up(self, seq: int, within: float = READ_YOUR_WRITES) -> bool:
+        """Whether this node has applied `seq`, waiting up to `within` seconds for it (read-your-writes)."""
+        for _ in range(int(within / 0.02) + 1):
+            if self.role != "follower" or self.replication.applied >= seq:
+                return True
+            await asyncio.sleep(0.02)
+        return False

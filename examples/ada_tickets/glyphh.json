@@ -7,6 +7,7 @@
   "data": true,
   "functions": {
     "record": {
+      "writes": true,
       "description": "Record a ticket and, when known, how it was handled (its outcome)",
       "inputs": {
         "type": "object",
@@ -16,10 +17,12 @@
       }
     },
     "query": {
+      "writes": false,
       "description": "What the precedents say about a ticket: the leading outcome, its confidence, and the precedents it stands on",
       "inputs": { "type": "object", "properties": { "data": { "type": "object" } }, "required": ["data"], "additionalProperties": false }
     },
     "facts": {
+      "writes": false,
       "description": "The closest precedents, best first, each cut to what the caller may see",
       "inputs": {
         "type": "object",
@@ -29,22 +32,27 @@
       }
     },
     "probabilities": {
+      "writes": false,
       "description": "P(outcome | ticket) over the nearest precedents",
       "inputs": { "type": "object", "properties": { "data": { "type": "object" } }, "required": ["data"], "additionalProperties": false }
     },
     "decide": {
+      "writes": true,
       "description": "Decide a ticket's handling from precedent; with no precedent close enough, asks for the outcome and records it",
       "inputs": { "type": "object", "properties": { "data": { "type": "object" } }, "required": ["data"], "additionalProperties": false }
     },
     "learn": {
+      "writes": true,
       "description": "Learn the roles' weights from the recorded tickets and calibrate the probabilities; kept with the store",
       "inputs": { "type": "object", "properties": { "sample": { "type": "integer", "minimum": 10 }, "by": { "type": "string", "enum": ["loss", "cost"] } }, "additionalProperties": false }
     },
     "settings": {
+      "writes": true,
       "description": "The model's levers (k, min_sim, word_floor, interactions, calibrate_by, refresh_every, ...): read them, or change some; kept with the store",
       "inputs": { "type": "object", "properties": { "changes": { "type": "object" } }, "additionalProperties": false }
     },
     "start": {
+      "writes": true,
       "description": "How many precedents the model holds",
       "inputs": { "type": "object", "additionalProperties": false }
     }

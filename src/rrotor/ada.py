@@ -52,6 +52,10 @@ class AdaError(ModelError):
     code = "E_ADA"
 
 
+class KernelTooOld(AdaError):
+    code = "E_ADA_KERNEL"
+
+
 def encoding_of(spec: dict[str, Any]) -> dict[str, Any]:
     """What a spec fixes about the store's glyphs: a change here needs a re-encode."""
     return {"seed": spec.get("seed", 42), "dimension": spec.get("dimension", 4096)}
@@ -99,7 +103,11 @@ def open(
 ) -> Any:
     """The model: its spec read, its store opened (made on first use), kept on `ctx.ada` and returned. Its levers
     (k, min_sim, refresh_every and the learning and calibration settings) come from the spec's `settings`, then
-    from what `ctx.ada.configure()` kept with the store, then from the arguments given here."""
+    from what `ctx.ada.configure()` kept with the store, then from the arguments given here.
+
+    On a cluster's follower (`ctx.readonly`) the store is opened with the kernel's read-only mode (kernel 3.10:
+    `mode=ro`, nothing made or written, a restatement kept in memory): reads as ever, and a write raises the
+    kernel's ReadOnlyError, which the run answers as E_READ_ONLY. An older kernel cannot open it so: E_ADA_KERNEL."""
     _, glyphh_spec = _kernel()
     home = ctx.home if ctx.home is not None else Path.cwd()
     store = _store(ctx)
@@ -107,9 +115,17 @@ def open(
         spec = glyphh_spec.Spec.from_json(read_spec(home))
     except glyphh_spec.SpecError as err:
         raise AdaError(f"{SPEC} is refused: {err}") from None
-    model = glyphh_spec.Model(
-        spec, k=k, min_sim=min_sim, author=author or ctx.caller, path=str(store), tau=tau, refresh_every=refresh_every
-    )
+    levers: dict[str, Any] = {"k": k, "min_sim": min_sim, "tau": tau, "refresh_every": refresh_every}
+    if ctx.readonly:
+        levers["readonly"] = True
+    try:
+        model = glyphh_spec.Model(spec, author=author or ctx.caller, path=str(store), **levers)
+    except TypeError as err:
+        if not ctx.readonly or "readonly" not in str(err):
+            raise
+        raise KernelTooOld(
+            "This node is a cluster's follower and opens the store read-only, which needs the Ada kernel 3.10 or later."
+        ) from None
     _cap(model, store, ctx.limits)
     ctx.ada = model
     return model

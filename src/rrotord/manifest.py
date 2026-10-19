@@ -26,6 +26,7 @@ class Function(BaseModel):
     description: str = ""
     inputs: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
     approvals: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]] = []
+    writes: bool | None = None  # whether it changes what syncs; unset: the model's `data` (docs/specs/cluster.md, 3)
 
     @field_validator("inputs")
     @classmethod
@@ -80,7 +81,21 @@ class Manifest(BaseModel):
         reserved = RESERVED & set(self.functions)
         if reserved:
             raise ValueError(f"{', '.join(sorted(reserved))} cannot be a function: load and end run on their own")
+        for function in self.functions.values():
+            if function.writes is None:
+                function.writes = self.data  # safe: a model with data writes unless it says a function does not
         return self
+
+    @property
+    def head_only(self) -> bool:
+        """A model that keeps state no replication carries (data without Ada): every call to it runs on the head."""
+        return self.data and "ada" not in self.needs
+
+    def writes(self, function: str) -> bool:
+        """Whether a call of `function` runs on the cluster's head: it writes, or its model is the head's alone. A
+        function the manifest does not name writes (the head says it is missing)."""
+        found = self.functions.get(function)
+        return found is None or bool(found.writes) or self.head_only
 
     def parts(self) -> list[str]:
         """The parts this model needs beside the base (docs/architecture.md, 10): its databases, and the ones it

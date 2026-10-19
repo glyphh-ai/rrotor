@@ -1,5 +1,6 @@
 """The API's application: the request's context (who it is for, forgotten after it; its span, with a drain), the
-errors, a cluster's refusal, the gate, the routes."""
+errors, a cluster's refusal and its seqs, the gate, the routes; and, in a cluster, what a forwarded request does
+here (rrotord/api/forward.py)."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ from aiohttp import web
 from aiohttp.typedefs import Middleware
 
 from rrotord.access import Access
+from rrotord.api import forward
 from rrotord.api.errors import AUDIT, Handler, errors
 from rrotord.api.gate import gate
 from rrotord.api.routes import BODY_MAX, Services, setup
@@ -52,6 +54,25 @@ def refused(cluster: Cluster | None) -> Middleware:
     return middleware
 
 
+def seqs(cluster: Cluster | None) -> Middleware:
+    """A member's answers carry `Rrotor-Cluster-Seq` (the head's last seq, a follower's applied one); a request's
+    `Rrotor-Min-Seq` is the seq a read must see (forward.py)."""
+
+    @web.middleware
+    async def middleware(request: web.Request, handler: Handler) -> web.StreamResponse:
+        sent = request.headers.get(forward.MIN_SEQ_HEADER, "")
+        token = forward.MIN_SEQ.set(int(sent) if sent.isdigit() else 0)
+        try:
+            response = await handler(request)
+        finally:
+            forward.MIN_SEQ.reset(token)
+        if cluster is not None and cluster.member:
+            response.headers[forward.SEQ_HEADER] = str(cluster.replication.applied_seq)
+        return response
+
+    return middleware
+
+
 def make(services: Services) -> web.Application:
     access = services.access or Access(services.config.data)
     telemetry = services.drain.telemetry if services.drain is not None else None
@@ -60,6 +81,7 @@ def make(services: Services) -> web.Application:
             context(telemetry),
             errors,
             refused(services.cluster),
+            seqs(services.cluster),
             gate(services.config, access, services.introspect),
         ],
         client_max_size=BODY_MAX,
@@ -67,4 +89,6 @@ def make(services: Services) -> web.Application:
     if services.audit is not None:
         app[AUDIT] = services.audit
     setup(app, services)
+    if services.cluster is not None:
+        services.cluster.serve_forward = lambda request: forward.serve(services, request)
     return app

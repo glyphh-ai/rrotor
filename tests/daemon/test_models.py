@@ -96,4 +96,6 @@ def test_describe_shows_the_active_or_the_latest(tmp_path):
     assert described["a"]["description"] == "first" and described["a"]["active"] is None
     assert described["b"]["description"] == "old" and described["b"]["active"] == 1
     assert described["c"] == {"name": "c", "description": "", "active": None, "functions": {}, "versions": []}
-    assert described["a"]["functions"] == {"start": {"description": "", "inputs": {"type": "object"}, "approvals": []}}
+    assert described["a"]["functions"] == {
+        "start": {"description": "", "inputs": {"type": "object"}, "approvals": [], "writes": False}
+    }

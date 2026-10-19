@@ -1,7 +1,11 @@
 """The link client: connects out, says hello, keeps the link (pings both ways, answers the Cloud's messages), replays
 what is not acknowledged after each reconnect, and reconnects with backoff, 1 s to 30 s with jitter. A close that
 says not to retry (4401 refused, 4409 replaced, 4426 upgrade, 4400 bad hello) stops it until a new token is handed
-in (docs/architecture.md, section 6). An air-gapped rrotor's link is off: it never connects and owes nothing."""
+in (docs/architecture.md, section 6). An air-gapped rrotor's link is off: it never connects and owes nothing.
+
+In a cluster only the head links (docs/specs/cluster.md, 4): there is one link per runtime, so a follower never
+takes it over. While `held` says this node is a follower the link stays down (`follower`), and closes if it was up;
+`regate` is set when the node's role changes, to look again. Its hello names the node, its cluster and its role."""
 
 from __future__ import annotations
 
@@ -52,7 +56,11 @@ class LinkClient:
         connect: Connect,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         enabled: bool = True,
+        held: Callable[[], bool] = lambda: False,
+        identity: Callable[[], tuple[str | None, str | None, str]] = lambda: (None, None, "standalone"),
     ) -> None:
+        self.held, self.identity = held, identity
+        self.regate = asyncio.Event()  # this node's role in its cluster changed
         self.url, self.version, self.mode, self.enabled = url, version, mode, enabled
         self.credentials, self.outbox, self.handler = credentials, outbox, handler
         self.connect, self.sleep = connect, sleep
@@ -102,6 +110,14 @@ class LinkClient:
         if not self.enabled:
             return
         while True:
+            if self.held():
+                self._set("follower")
+                self.regate.clear()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.regate.wait(), self.BACKOFF_MAX)
+                continue
+            if self.state == "follower":
+                self._set("connecting")
             token, runtime_id = self.credentials.token, self.credentials.runtime_id
             if token is None or runtime_id is None or self.state in p.STOPS.values():
                 if token is None:
@@ -138,7 +154,9 @@ class LinkClient:
             return None
         self.ws, self.reason = ws, None
         try:
-            await ws.send_str(json.dumps(p.hello(self.version, self.mode, runtime_id, self.handler.deployed())))
+            node_id, cluster_id, role = self.identity()
+            hello = p.hello(self.version, self.mode, runtime_id, self.handler.deployed(), node_id, cluster_id, role)
+            await ws.send_str(json.dumps(hello))
             if not await self._welcomed(ws):
                 await ws.close()
                 return self._closed(ws)
@@ -206,9 +224,21 @@ class LinkClient:
             await asyncio.gather(pinger, watcher, return_exceptions=True)
 
     async def _watch(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        """A new token handed in: this link closes, and the next one uses it."""
-        await self.credentials.changed.wait()
-        await ws.close(code=1000, message=b"new token")
+        """A new token handed in: this link closes, and the next one uses it. This node became a cluster's
+        follower: it closes, and the head links."""
+        token = asyncio.ensure_future(self.credentials.changed.wait())
+        role = asyncio.ensure_future(self._followed())
+        try:
+            await asyncio.wait({token, role}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            token.cancel()
+            role.cancel()
+        await ws.close(code=1000, message=b"new token" if token.done() and not token.cancelled() else b"follower")
+
+    async def _followed(self) -> None:
+        while not self.held():
+            self.regate.clear()
+            await self.regate.wait()
 
     async def _ping(self, ws: aiohttp.ClientWebSocketResponse, heard: Callable[[], float]) -> None:
         while True:

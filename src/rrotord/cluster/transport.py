@@ -7,8 +7,11 @@ answered by an `answer` with the request's id: `ok` true and the answer's fields
 connection is the dialer's `hello`, naming the node (or `rrotord cluster`'s command) its certificate names; the
 listener's answer names the listener, which the dialer checks against the listener's certificate the same way.
 
-Replication's messages (`append`, `ack`, `snapshot`, `forward`, `vote`, `telemetry`) and `GET /cluster/v1/versions`
-come with replication, election and the aggregate drain: an unknown type is answered E_CLUSTER_MESSAGE."""
+Replication's (replication.py, node.py): the head's `append` and `snapshot`, asked of a follower over the follower's
+own connection and answered with the seq applied; `forward`, either way; and two plain GETs on the same listener with
+the same mutual TLS (`fetch`), `/cluster/v1/versions/<model>/<commit>.tar` and `/cluster/v1/snapshot`. A refusal
+carries its HTTP status and detail, so a forwarded request's caller sees what the head said. `vote` and `telemetry`
+come with elections and the aggregate drain: an unknown type is answered E_CLUSTER_MESSAGE."""
 
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ import logging
 import ssl
 import uuid
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -30,6 +34,8 @@ log = logging.getLogger("rrotor.cluster")
 PATH = "/cluster/v1/link"
 ANSWER_WITHIN = 10.0  # seconds a request waits for its answer
 CONNECT_WITHIN = 5.0
+MESSAGE_MAX = 128 * 1024 * 1024  # a forwarded deploy's bundle, an append of a store's rows
+CHUNK = 1024 * 1024
 FOREIGN = "cluster: peer certificate not from this cluster"
 
 
@@ -46,7 +52,9 @@ def answer(asked: dict[str, Any], /, **fields: Any) -> dict[str, Any]:
 
 
 def failed(asked: dict[str, Any], err: RrotorError) -> dict[str, Any]:
-    return {"type": "answer", "id": asked.get("id"), "ok": False, "error": {"code": err.code, "message": err.message}}
+    """A refusal, as the asking end raises it again: its code, message, HTTP status and detail."""
+    error = {"code": err.code, "message": err.message, "status": err.status, "detail": err.detail}
+    return {"type": "answer", "id": asked.get("id"), "ok": False, "error": error}
 
 
 def decoded(text: str) -> dict[str, Any] | None:
@@ -68,20 +76,29 @@ class Channel:
     async def send(self, msg: dict[str, Any]) -> None:
         await self.ws.send_str(json.dumps(msg, separators=(",", ":")))
 
-    async def request(self, kind: str, /, **fields: Any) -> dict[str, Any]:
-        """A request and its answer; a refusal raises ClusterError with the code the other end gave. Someone must be
-        reading this channel (`pump`) for the answer to arrive."""
+    async def request(self, kind: str, /, *, within: float | None = None, **fields: Any) -> dict[str, Any]:
+        """A request and its answer, within `within` seconds (TimeoutError past it); a refusal raises ClusterError
+        with the code, status and detail the other end gave. Someone must be reading this channel (`pump`, or the
+        listener's loop) for the answer to arrive."""
         msg = frame(kind, **fields)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self.pending[msg["id"]] = future
         try:
             await self.send(msg)
-            got = await asyncio.wait_for(future, ANSWER_WITHIN)
+            got = await asyncio.wait_for(future, within or ANSWER_WITHIN)
         finally:
             self.pending.pop(msg["id"], None)
         if not got.get("ok"):
             error = got["error"] if isinstance(got.get("error"), dict) else {}
-            raise ClusterError(str(error.get("message", "refused")), code=str(error.get("code", "E_CLUSTER")))
+            status = error.get("status")
+            sent = error.get("detail")
+            detail: dict[str, Any] = sent if isinstance(sent, dict) else {}
+            raise ClusterError(
+                str(error.get("message", "refused")),
+                code=str(error.get("code", "E_CLUSTER")),
+                status=status if isinstance(status, int) else None,
+                **detail,
+            )
         return got
 
     async def frames(self) -> AsyncIterator[dict[str, Any]]:
@@ -136,6 +153,7 @@ async def dial(
                 timeout=aiohttp.ClientWSTimeout(ws_close=CONNECT_WITHIN),
                 autoping=True,
                 heartbeat=None,
+                max_msg_size=MESSAGE_MAX,
             )
         except aiohttp.ClientConnectorCertificateError:
             foreign = True
@@ -162,3 +180,32 @@ async def dial(
         log.error(FOREIGN, extra={"address": address})
         raise ClusterError(f"{address}: {FOREIGN}.", code="E_CLUSTER_FOREIGN")
     raise ClusterError(f"No node answered at {address}.", code="E_CLUSTER_UNREACHABLE")
+
+
+async def fetch(
+    session: aiohttp.ClientSession, credentials: Credentials, address: str, path: str, dest: Path, within: float
+) -> dict[str, str]:
+    """A plain GET on a node's listener (`/cluster/v1/...`), with the same mutual TLS, streamed into `dest`; answers
+    its headers. Raises ClusterError: what the other end refused (its code and status), or E_CLUSTER_UNREACHABLE."""
+    for identity in credentials.identities:
+        try:
+            async with session.get(
+                f"https://{address}{path}",
+                ssl=identity.client,
+                server_hostname=identity.server_name,
+                timeout=aiohttp.ClientTimeout(total=within),
+            ) as res:
+                if res.status != 200:
+                    error = (await res.json(content_type=None) or {}).get("error") or {}
+                    raise ClusterError(
+                        str(error.get("message", f"{res.status} from {path}")),
+                        code=str(error.get("code", "E_CLUSTER")),
+                        status=res.status,
+                    )
+                with dest.open("wb") as f:
+                    async for chunk in res.content.iter_chunked(CHUNK):
+                        f.write(chunk)
+                return dict(res.headers)
+        except (aiohttp.ClientError, OSError, TimeoutError, ssl.SSLError, ValueError):
+            continue
+    raise ClusterError(f"No node answered {path} at {address}.", code="E_CLUSTER_UNREACHABLE")

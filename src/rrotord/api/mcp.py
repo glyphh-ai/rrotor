@@ -68,15 +68,15 @@ async def model_cancel(s: Services, args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def run_status(s: Services, args: dict[str, Any]) -> dict[str, Any]:
-    return ops.run_status(s, ops.run_id_of(args))
+    return await ops.run_status(s, ops.run_id_of(args))
 
 
 async def run_log(s: Services, args: dict[str, Any]) -> dict[str, Any]:
-    return ops.run_log(s, ops.run_id_of(args))
+    return await ops.run_log(s, ops.run_id_of(args))
 
 
 async def approvals(s: Services, _: dict[str, Any]) -> dict[str, Any]:
-    return {"approvals": s.runner.approvals()}
+    return {"approvals": await ops.approvals(s)}
 
 
 async def model_deploy(s: Services, args: dict[str, Any]) -> dict[str, Any]:
