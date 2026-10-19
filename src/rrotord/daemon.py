@@ -123,6 +123,7 @@ class Daemon:
             changes=self.cluster.replication,
         )
         self.cluster.replication.busy = lambda: bool(self.runner.workers)
+        self.cluster.deposed = self._deposed
         handler.runner = self.runner
         self.link = LinkClient(
             url=c.link_url,
@@ -166,6 +167,10 @@ class Daemon:
             lambda: [(float(cap), {})] if (cap := self.licence.limits().max_precedents) is not None else [],
         )
         t.gauge("rrotor.link.state", lambda: [(1.0, {"state": self.link.state})])
+
+    async def _deposed(self) -> None:
+        """This node was the cluster's head and is no longer: its writing runs in flight fail."""
+        await self.runner.stop_writing("E_NO_HEAD", "This node stopped being the cluster's head during the run.")
 
     def _keys_changed(self, change: dict[str, Any]) -> None:
         """The runtime keys' list changed: an audit event, and on a cluster's head a `keys` entry."""

@@ -24,23 +24,42 @@ cluster fits; a member unseen for `RROTOR_CLUSTER_EVICT_AFTER` is removed (`clus
 
 **Leaving** is `rrotord cluster leave <node>` (command.py), run on any node and authenticated by the cluster secret:
 a follower passes it to the head. The node removed is told, and does not ask again until `rrotord cluster join` is
-run on it. The head cannot leave: moving the head is `rrotord cluster promote` (manual failover, not built yet).
+run on it. The head cannot leave: another node is promoted first.
+
+**Membership is in the log** (raft.py): the head commits a `member` entry for each node it admits (or whose address
+or version changed), removes or evicts, carrying the members after it in order of joining, each a voter or a learner.
+Changes go one at a time: a change waits until the last one is held by a majority (`E_CLUSTER_BUSY` meanwhile, and
+the node asks again).
+
+**Terms and fencing.** Every append, snapshot, vote, join and forward carries the term; a node refuses anything of a
+lower term and takes a higher one at once. A head that sees a higher term steps down there and then: its shippers
+stop, its followers' connections close, its in-flight writing runs fail (`E_NO_HEAD`), and its stores may hold
+writes no log has, so it takes the new head's snapshot before it follows (`stale`).
+
+**Manual failover (Pro, Team):** `rrotord cluster promote <node> [--force] [--yes]` (command.py), on any node: the
+node named asks every member who it is (its term, its log); with a majority of members reachable, a log behind
+none of theirs (else `E_CLUSTER_LAG` with each member's lag, unless `--force`) and the head either reachable or
+confirmed down (`E_CLUSTER_CONFIRM`, unless `--yes`), it asks every member for its vote at the next term, and a
+majority makes it head (`cluster.head`, `promoted`). A forced vote is given only by a member with the same members
+as the candidate, so two heads can never share a term. A head restarted without HA leads again in its term unless a
+member it reaches knows a higher one; a head that has lost its followers looks for one every few seconds, so an old
+head that comes back is fenced by the promoted one's term.
 
 **Replication.** The head ships its log to each follower it admits, from what the follower says it applied (a
 snapshot first for a new node or one behind the log), over the follower's own connection: `append` and `snapshot`
-are the head's requests, answered with the seq applied. A joined follower is `catching_up` (not ready) until it has
-applied what the head had committed, and again once behind it for more than a second. `GET /cluster/v1/versions/
+are the head's requests, answered as Raft does. A joined follower is `catching_up` (not ready) until it has applied
+what the head had committed, and again once behind it for more than a second. `GET /cluster/v1/versions/
 <model>/<commit>.tar` and `GET /cluster/v1/snapshot` are plain requests on the listener, for members only.
 
 **Forwarding** (`forward`): a follower sends a writing call, a deploy, and anything about a run another node holds
-to its head, with the caller as data (who, from where, by which route) and a deadline; the head does it (as that
-caller), or passes it to the follower that holds the run (`E_RUN_LOST`, 410, when that node is not connected), and
-answers with the seq its log stands at. A follower with no head answers `E_NO_HEAD` (503). What a forward does is
-the API's own operations (`rrotord/api/forward.py`, `serve_forward`). Each ping of a follower carries its applied
-seq and its runtime keys' calls since the last, which the head adds to its own `usage`.
+to its head, with the caller as data (who, from where, by which route), a deadline and its term; the head does it
+(as that caller), or passes it to the follower that holds the run (`E_RUN_LOST`, 410, when that node is not
+connected), and answers with the seq its log stands at. A follower with no head, or whose head has been deposed,
+answers `E_NO_HEAD` (503). What a forward does is the API's own operations (`rrotord/api/forward.py`,
+`serve_forward`). Each ping of a follower carries its applied seq and its runtime keys' calls since the last, which
+the head adds to its own `usage`.
 
-**Not built yet:** terms past 1, fencing and promotion (manual failover), elections and majority commit (`ha` is
-false), `member` entries (membership is kept in `cluster/state.json`), and the followers' telemetry to the head."""
+**Not built yet:** elections and majority commit (`ha` is false), and the followers' telemetry to the head."""
 
 from __future__ import annotations
 
@@ -62,6 +81,7 @@ from rrotord import log as logs
 from rrotord.access import Access
 from rrotord.audit import WHO, Audit, Who
 from rrotord.cluster.discovery import Discovery, Resolve, getaddrinfo
+from rrotord.cluster.raft import majority
 from rrotord.cluster.replication import Replication
 from rrotord.cluster.tls import COMMAND, Credentials, peer_name
 from rrotord.cluster.transport import MESSAGE_MAX, PATH, Channel, ClusterError, answer, dial, failed, fetch, frame
@@ -80,13 +100,22 @@ GATE = 10.0  # the licence's gate looked at again
 HEAD_EVERY = 5.0  # the head checks the cap and the members unseen
 SHUTDOWN = 5.0  # seconds the listener waits for its connections' handlers when it stops
 ASKED_WITHIN = 10.0  # `rrotord cluster join` waits this long for the outcome
-VOTERS = 5  # the first five members by join (election: not built yet)
 REFUSED_KEPT = 50
+VOTE_WITHIN = 5.0  # a vote's answer
+CHANGE_WITHIN = 5.0  # `rrotord cluster leave` waits this long for the last membership change to be committed
 FORWARD_WITHIN = 3630.0  # a forwarded request's answer: a run's longest seconds (3600) and its end
 READ_YOUR_WRITES = 2.0  # a node waits this long to have applied a seq it was asked to be at
 REFUSALS = frozenset({"E_CLUSTER_FULL", "E_CLUSTER_NODE_ID", "E_CLUSTER_LEFT", "E_CLUSTER_ID"})
 NODE = Who({"type": "rrotor"}, None, "cluster")
 OPERATOR = Who({"type": "local"}, None, "cluster")  # `rrotord cluster ...`, on a node, with the cluster secret
+
+
+async def _nothing() -> None:
+    return None
+
+
+def no_head(message: str = "No head answers this node: writes wait for it.") -> Unavailable:
+    return Unavailable(message, code="E_NO_HEAD")
 
 
 def names(members: Any) -> list[str]:
@@ -134,8 +163,10 @@ class Cluster:
         wall: Callable[[], float] = time.time,
         models: Models | None = None,
         access: Access | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config, self.licence, self.audit, self.version, self.wall = config, licence, audit, version, wall
+        self.clock = clock
         self.node_id, self.address, self.port = config.node_id, config.advertise, config.cluster_port
         self.discovery = Discovery(config.cluster_peers, config.cluster_dns, config.cluster_port, resolve)
         self.path = config.data / "cluster" / "state.json"
@@ -162,6 +193,7 @@ class Cluster:
         self.asked = False
         self.telling: set[asyncio.Task[None]] = set()  # the head telling removed nodes so; a follower answering
         self.access = access or Access(config.data)
+        self.ha: Callable[[], bool] = lambda: False  # elected heads (Enterprise): not built yet
         self.replication = Replication(
             config.data / "cluster" / "log",
             config.run_dir / "cluster" / "scratch",
@@ -170,12 +202,26 @@ class Cluster:
             self.access,
             licence,
             role=lambda: self.role,
-            term=lambda: int(self.state.get("term") or 1),
             saved=self._applied,
             applied=int(self.state.get("applied_seq") or 0),
             wall=wall,
+            me=self.node_id,
+            state=self.state,
+            persist=self._persist,
+            ha=lambda: self.ha(),
+            clock=clock,
         )
+        self.raft = self.replication.raft
+        if self.state.get("head") == self.node_id:  # a head's stores hold all its log: it applied as it wrote
+            self.replication.applied = max(self.replication.applied, self.replication.log.last)
         self.replication.fetch = self._fetch
+        self.replication.moved = self._reconcile
+        self.replication.member = self._member_applied
+        self.following: tuple[str, int] | None = None  # a follower's: the head it follows and its term
+        self.leading = asyncio.Lock()
+        self.said: dict[str, dict[str, str]] = {}  # the head's: each member's address, version, instance at join
+        self.promoting = False  # `rrotord cluster promote` in hand: it leads, as the operator
+        self.deposed: Callable[[], Awaitable[None]] = _nothing  # a head that steps down: its writing runs fail
         # what a forwarded request does: the API's operations, set by rrotord/api/app.py
         self.serve_forward: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
         self.usage: Callable[[list[dict[str, Any]]], None] = lambda _: None  # the head: a follower's key calls
@@ -222,20 +268,32 @@ class Cluster:
         self.state["applied_seq"] = seq
         self._save()
 
-    def members(self) -> list[Member]:
-        found = (Member.of(m) for m in self.state.get("members") or [])
+    def _persist(self, values: dict[str, Any]) -> None:
+        """Raft's term, vote, head and members, kept before it answers anyone."""
+        if values.get("head") != self.state.get("head"):
+            found = next((m for m in self.members_of(values["members"]) if m.node_id == values.get("head")), None)
+            self.state["head_address"] = found.address if found is not None else None
+        self.state.update(values)
+        self._save()
+
+    @staticmethod
+    def members_of(members: Any) -> list[Member]:
+        found = (Member.of(m) for m in members or [])
         return [m for m in found if m is not None]
+
+    def members(self) -> list[Member]:
+        return self.members_of(self.raft.members)
 
     def _members_view(self) -> list[dict[str, Any]]:
         if self.role != "head":
             return list(self.told.get("members") or [])
-        now, head = self.wall(), self.state.get("head")
+        now, voters = self.wall(), set(self.raft.voters())
         return [
             {
                 "node_id": m.node_id,
                 "address": m.address,
-                "role": "head" if m.node_id == head else "follower",
-                "voter": i < VOTERS,
+                "role": "head" if m.node_id == self.node_id else "follower",
+                "voter": m.node_id in voters,
                 "applied_seq": self._applied_by(m.node_id),
                 "lag": max(self.replication.log.last - self._applied_by(m.node_id), 0),
                 "last_seen": stamp(now if m.node_id == self.node_id else self.seen.get(m.node_id, now)),
@@ -244,7 +302,7 @@ class Cluster:
                 "instance": m.instance,
                 "joined_at": m.joined_at,
             }
-            for i, m in enumerate(self.members())
+            for m in self.members()
         ]
 
     def _applied_by(self, node: str) -> int:
@@ -266,12 +324,12 @@ class Cluster:
             "role": self.role,
             "status": self.shown,
             "head": self.state.get("head"),
-            "term": self.state.get("term"),
+            "term": self.raft.term,
             "commit_seq": self.replication.commit_seq if self.member else 0,
             "applied_seq": self.replication.applied_seq if self.member else 0,
             "tier": limits.tier,
             "max_nodes": limits.max_nodes,
-            "ha": False,  # elected heads: not built yet
+            "ha": self.ha(),
             "members": self._members_view(),
             "refused": list(self.refused) if self.role == "head" else list(self.told.get("refused") or []),
             "refusal": self.refusal,
@@ -289,7 +347,7 @@ class Cluster:
             "status": self.shown,
             "ready": ready,
             "head": self.state.get("head"),
-            "term": self.state.get("term"),
+            "term": self.raft.term,
             "members": len(self.members()),
             "reason": why,
         }
@@ -411,15 +469,24 @@ class Cluster:
     async def _member(self) -> float:
         """One step: lead, or find the head and join it (following it until the connection drops), or make the
         cluster. Answers how long to wait before the next."""
-        if self.state.get("cluster_id") and self.state.get("head") == self.node_id:
-            self._lead()
-            self._fit()
-            self._evict()
-            return HEAD_EVERY
+        if self.state.get("cluster_id"):
+            if self.role == "head":
+                await self._fence()
+                if self.role == "head":
+                    self._fit()
+                    self._evict()
+                    self._refresh()
+                    return HEAD_EVERY
+            elif self.raft.role == "head" and not self.promoting:  # elected, or a head the gate closed and opens
+                await self._lead("elected" if self.raft.via == "votes" else "resumed")
+                return HEAD_EVERY
+            elif self.state.get("head") == self.node_id and self.refusal is None and await self._resume():
+                return HEAD_EVERY
         if self.refusal is not None and self.refusal["code"] == "E_CLUSTER_LEFT" and not self.asked:
             return REJOIN  # it left: it asks again only when `rrotord cluster join` says so
         answers, everyone = await self._survey()
-        heads = sorted(answers, key=lambda a: a.get("role") != "head")
+        self._observe(answers)
+        heads = sorted(answers, key=lambda a: (a.get("role") != "head", -int(a.get("term") or 0)))
         found = next((a for a in heads if a.get("cluster_id") and a.get("head_address")), None)
         if found is not None:
             if self.state.get("heard") != found["cluster_id"]:
@@ -432,10 +499,33 @@ class Cluster:
         named = {str(a.get("node_id")) for a in answers} | {self.node_id}
         chosen = self.config.cluster_head or (min(named) if everyone else None)
         if chosen == self.node_id:
-            self._make()
+            await self._make()
             return 0.0
         self._waiting("no_cluster")
         return RETRY
+
+    def _observe(self, answers: list[dict[str, Any]]) -> None:
+        """Terms heard in hellos' answers: a higher one taken (fencing a head that was away)."""
+        terms = [a.get("term") for a in answers if a.get("cluster_id") == self.state.get("cluster_id")]
+        self.raft.observe(max((t for t in terms if isinstance(t, int)), default=0))
+        self._reconcile()
+
+    async def _resume(self) -> bool:
+        """A head restarted (Pro, Team): it leads again in its term unless a member it reaches knows a higher one."""
+        answers, _ = await self._survey()
+        self._observe(answers)
+        if self.state.get("head") != self.node_id:
+            return False
+        self.raft.resume(self.clock())
+        await self._lead("restarted")
+        return True
+
+    async def _fence(self) -> None:
+        """A head with members it is not connected to asks each who it is: a higher term deposes it."""
+        if all(m.node_id == self.node_id or m.node_id in self.links for m in self.members()):
+            return
+        answers, _ = await self._survey()
+        self._observe(answers)
 
     def _waiting(self, status: str) -> None:
         if self.status != "ready" and self.status != status and self.refusal is None:
@@ -449,6 +539,7 @@ class Cluster:
             "cluster_id": self.state.get("cluster_id"),
             "address": self.address,
             "version": self.version,
+            "term": self.raft.term,
         }
 
     async def _survey(self) -> tuple[list[dict[str, Any]], bool]:
@@ -495,28 +586,28 @@ class Cluster:
                 cluster_id=self.state.get("cluster_id"),
                 asked=asked,
                 applied_seq=self.replication.applied,
+                term=self.raft.term,
             )
         except ClusterError as err:
             reader.cancel()
             await channel.close()
-            self.attempted.set()
             if err.code in REFUSALS:
+                self.attempted.set()
                 self._refuse(err.code, err.message)
                 return REJOIN
+            self.asked = self.asked or asked  # not now (a membership change in progress): asked again as it was
             self._waiting("joining")
             return RETRY
+        self.raft.observe(int(welcome["term"]))
         self.refusal = None
-        self.state.update(
-            cluster_id=welcome["cluster_id"],
-            term=welcome["term"],
-            head=welcome["head"],
-            head_address=welcome["head_address"],
-            members=welcome["members"],
-        )
+        self.state.update(cluster_id=welcome["cluster_id"], head=welcome["head"], head_address=welcome["head_address"])
+        self.state.pop("heard", None)
         self._save()
         self.told = welcome
         self.replication.synced = False  # not ready until it has applied what the head has
         self.role, self.status = "follower", "ready"
+        self.head_channel, self.following = channel, (str(welcome["head"]), int(welcome["term"]))
+        self._reconcile()  # a term heard meanwhile: this head is no longer the one to follow
         self._identify()
         self.attempted.set()
         log.info("cluster: joined", extra={"head": welcome["head"], "members": len(welcome["members"])})
@@ -528,18 +619,14 @@ class Cluster:
         self.head_channel = channel
         try:
             while not reader.done():
-                told = await channel.request("ping", applied_seq=self.replication.applied, usage=self.taken())
-                self.told = told
-                if names(told.get("members")) != names(self.state.get("members")):
-                    self.state["members"] = told["members"]  # kept for a restart: who the members were
-                    self._save()
+                self.told = await channel.request("ping", applied_seq=self.replication.applied, usage=self.taken())
                 await asyncio.wait({reader}, timeout=PING)
         except ClusterError as err:
             log.debug("cluster: the head's connection ended", extra={"code": err.code})
         finally:
             reader.cancel()
             await channel.close()
-            self.head_channel = None
+            self.head_channel, self.following = None, None
         if self.refusal is None:
             log.warning("cluster: lost the head; asking again", extra={"head": self.state.get("head")})
 
@@ -556,16 +643,18 @@ class Cluster:
         task.add_done_callback(self.telling.discard)
 
     async def _answer_head(self, channel: Channel, msg: dict[str, Any]) -> None:
-        """What the head asks of a follower: entries to apply, a snapshot to install, a forward of a run held here."""
+        """What the head asks of a follower: entries to take, a snapshot to install, a forward of a run held here."""
         try:
             if msg["type"] == "append":
-                reply = answer(msg, applied_seq=await self.replication.receive(msg))
+                reply = answer(msg, **await self.replication.receive(msg))
             elif msg["type"] == "snapshot":
-                reply = answer(msg, applied_seq=await self.replication.install())
+                reply = answer(msg, **await self.replication.install(msg))
             else:
                 reply = answer(msg, **await self._local(msg))
         except RrotorError as err:
             reply = failed(msg, err)
+        except (KeyError, TypeError, ValueError):
+            reply = failed(msg, ClusterError("Not a request this node can read.", code="E_CLUSTER_MESSAGE"))
         with contextlib.suppress(Exception):
             await channel.send(reply)
 
@@ -575,47 +664,101 @@ class Cluster:
         self._identify()
         log.error("cluster: this node is refused", extra={"code": code, "reason": message})
 
+    # Raft's changes, as the node acts on them
+
+    def _reconcile(self) -> None:
+        """After anything Raft heard: a head that is no longer one steps down; a follower whose head is no longer
+        the one it follows lets it go (and finds the new one)."""
+        raft = self.raft
+        if self.role == "head" and raft.role != "head":
+            self._step_down()
+        following = self.following
+        if (
+            self.head_channel is not None
+            and following is not None
+            and (raft.term > following[1] or raft.head not in (None, following[0]))
+        ):
+            self.following = None
+            self._spawn(self.head_channel.close())
+
+    def _step_down(self) -> None:
+        log.warning("cluster: a higher term: this node is no longer the head", extra={"term": self.raft.term})
+        self.role = "follower"
+        self.replication.saved(self.replication.applied)
+        self._identify()
+        self.audit.emit("cluster.head", who=NODE, node=self.node_id, term=self.raft.term, reason="deposed")
+        self._spawn(self._resign())
+
+    async def _resign(self) -> None:
+        await self.replication.stop()
+        for channel in list(self.links.values()):
+            await channel.close()
+        self.links.clear()
+        await self.deposed()
+
+    def _member_applied(self, entry: dict[str, Any]) -> None:
+        """A `member` entry applied on a follower: who left (and may come back only when asked) is kept too."""
+        left = set(self.state.get("left") or [])
+        if entry.get("op") == "remove" and entry.get("left"):
+            left.add(str(entry.get("node")))
+        elif entry.get("op") == "add":
+            left.discard(str(entry.get("node")))
+        self.state["left"] = sorted(left)
+        self._save()
+
     # The head
 
-    def _make(self) -> None:
-        self.state.update(
-            cluster_id=str(uuid.uuid4()),
-            term=1,
-            head=self.node_id,
-            head_address=self.address,
-            members=[
-                Member(self.node_id, self.address, self.version, self.state["instance"], stamp(self.wall())).to_json()
-            ],
-            left=[],
-        )
-        self.state.pop("heard", None)
-        self._save()
-        log.info("cluster: made, this node its head", extra={"cluster_id": self.state["cluster_id"]})
-        self._lead()
-        self.audit.emit("cluster.head", who=NODE, node=self.node_id, term=1, reason="bootstrap")
+    def _me(self) -> dict[str, Any]:
+        return Member(self.node_id, self.address, self.version, self.state["instance"], stamp(self.wall())).to_json()
 
-    def _lead(self) -> None:
-        if self.role == "head":
-            return
-        members = self.members()
-        for m in members:
-            if m.node_id == self.node_id:
-                m.address, m.version = self.address, self.version
+    async def _make(self) -> None:
+        self.state.update(cluster_id=str(uuid.uuid4()), left=[])
+        self.state.pop("heard", None)
+        self.raft.bootstrap(self._me(), self.clock())
+        log.info("cluster: made, this node its head", extra={"cluster_id": self.state["cluster_id"]})
+        await self._lead("bootstrap")
+
+    async def _lead(self, reason: str, who: Who = NODE) -> None:
+        """Raft made this node head: what its log holds applied first (a follower promoted), then it leads."""
+        async with self.leading:
+            if self.role != "head" and await self.replication.own() and self.raft.role == "head":
+                self._took(reason, who)
+
+    def _took(self, reason: str, who: Who) -> None:
+        for m in self.members():
             self.seen.setdefault(m.node_id, self.wall())
-        self.state.update(members=[m.to_json() for m in members], head_address=self.address)
+        self.state.update(head=self.node_id, head_address=self.address)
         self._save()
         self.role, self.status, self.refusal = "head", "ready", None
         self._identify()
         self.replication.lead()
+        if reason not in ("restarted", "resumed"):
+            log.info("cluster: this node is the head", extra={"term": self.raft.term, "reason": reason})
+            self.audit.emit("cluster.head", who=who, node=self.node_id, term=self.raft.term, reason=reason)
+
+    def _refresh(self) -> None:
+        """Each member's address, version and instance kept as it last said them (the head's own too), and a
+        learner made a voter while there are fewer than five: a change at a time, each once the last is held."""
+        if not self.raft.ready_for_change():
+            return
+        self.said[self.node_id] = {"address": self.address, "version": self.version, "instance": self.state["instance"]}
+        for m in self.raft.members:
+            said = self.said.get(str(m["node_id"]))
+            if said is not None and any(m.get(k) != v for k, v in said.items()):
+                self.raft.add({**m, **said})
+                break
+        else:
+            self.raft.fill()
+        self.replication.wake()
 
     def told_view(self) -> dict[str, Any]:
         """What the head tells a node it admits, and each follower at its every ping."""
         return {
             "cluster_id": self.state["cluster_id"],
-            "term": self.state["term"],
+            "term": self.raft.term,
             "head": self.node_id,
             "head_address": self.address,
-            "commit_seq": self.replication.log.last,
+            "commit_seq": self.replication.commit_seq,
             "members": self._members_view(),
             "refused": list(self.refused),
         }
@@ -624,10 +767,19 @@ class Cluster:
         self.refused = [r for r in self.refused if r["node_id"] != node][-(REFUSED_KEPT - 1) :]
         self.refused.append({"node_id": node, "at": stamp(self.wall()), "code": code})
         log.warning("cluster: a node was refused", extra={"node": node, "code": code})
-        self.audit.emit("cluster.refused", who=NODE, node=node, code=code, term=self.state.get("term"))
+        self.audit.emit("cluster.refused", who=NODE, node=node, code=code, term=self.raft.term)
         return ClusterError(message, code=code)
 
+    def _busy(self) -> ClusterError:
+        return ClusterError(
+            "A membership change is being committed; asked again in a moment.", code="E_CLUSTER_BUSY", status=409
+        )
+
     def _admit(self, channel: Channel, peer: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any]:
+        term = msg.get("term")
+        if isinstance(term, int) and not isinstance(term, bool):
+            self.raft.observe(term)
+            self._reconcile()
         if self.role != "head":
             raise ClusterError("This node is not the head.", code="E_NOT_HEAD")
         node, instance = str(peer["node_id"]), str(msg.get("instance") or "")
@@ -639,6 +791,7 @@ class Cluster:
         live = existing is not None and existing.instance != instance and node in self.links
         if node == self.node_id or live:
             raise self._refused(node, "E_CLUSTER_NODE_ID", f"Another node in the cluster is already {node}.")
+        address, version = str(msg.get("address") or ""), str(msg.get("version") or "")
         if existing is None:
             if node in left and not msg.get("asked"):
                 raise self._refused(
@@ -651,18 +804,15 @@ class Cluster:
                     "E_CLUSTER_FULL",
                     f"The cluster has {len(members)} members, the licence key's max_nodes ({cap}).",
                 )
-            existing = Member(node, "", "", instance, stamp(self.wall()))
-            members.append(existing)
+            if not self.raft.ready_for_change():
+                raise self._busy()
+            self.raft.add(Member(node, address, version, instance, stamp(self.wall())).to_json())
+            self.replication.wake()
             self.state["left"] = [n for n in left if n != node]
-            log.info("cluster: a node joined", extra={"node": node, "members": len(members)})
-            self.audit.emit("cluster.join", who=NODE, node=node, term=self.state["term"], members=len(members))
-        existing.address, existing.version, existing.instance = (
-            str(msg.get("address") or ""),
-            str(msg.get("version") or ""),
-            instance,
-        )
-        self.state["members"] = [m.to_json() for m in members]
-        self._save()
+            self._save()
+            log.info("cluster: a node joined", extra={"node": node, "members": len(members) + 1})
+            self.audit.emit("cluster.join", who=NODE, node=node, term=self.raft.term, members=len(members) + 1)
+        self.said[node] = {"address": address, "version": version, "instance": instance}
         self.links[node], peer["member"], self.seen[node] = channel, node, self.wall()
         self.refused = [r for r in self.refused if r["node_id"] != node]
         self.replication.attach(node, channel, msg.get("applied_seq"))
@@ -684,18 +834,19 @@ class Cluster:
     def _remove(self, node: str, code: str, reason: str, who: Who) -> dict[str, Any]:
         if node == self.node_id:
             raise ClusterError(
-                "The head cannot leave the cluster: another node must be made head first (rrotord cluster promote, "
-                "not built yet).",
+                "The head cannot leave the cluster: promote another node first (rrotord cluster promote <node>).",
                 code="E_CLUSTER_HEAD",
             )
         members = self.members()
         if node not in {m.node_id for m in members}:
             raise ClusterError(f"{node} is not a member of the cluster.", code="E_CLUSTER_MEMBER", status=404)
-        members = [m for m in members if m.node_id != node]
-        self.state["members"] = [m.to_json() for m in members]
+        if not self.raft.ready_for_change():
+            raise self._busy()
+        self.raft.remove(node, **({"left": True} if code == "E_CLUSTER_LEFT" else {}))
+        self.replication.wake()
         if code == "E_CLUSTER_LEFT":
             self.state["left"] = sorted({*(self.state.get("left") or []), node})
-        self._save()
+            self._save()
         self.seen.pop(node, None)
         messages = {
             "E_CLUSTER_LEFT": "This node was removed from the cluster: rrotord cluster join on it asks again.",
@@ -704,14 +855,10 @@ class Cluster:
         channel = self.links.pop(node, None)
         self.replication.detach(node)
         if channel is not None:
-            task = asyncio.get_running_loop().create_task(
-                self._tell_removed(channel, code, messages.get(code, "Removed from the cluster."))
-            )
-            self.telling.add(task)
-            task.add_done_callback(self.telling.discard)
+            self._spawn(self._tell_removed(channel, code, messages.get(code, "Removed from the cluster.")))
         log.warning("cluster: a node was removed", extra={"node": node, "reason": reason})
-        self.audit.emit("cluster.leave", who=who, node=node, reason=reason, term=self.state["term"])
-        return {"removed": node, "members": len(members)}
+        self.audit.emit("cluster.leave", who=who, node=node, reason=reason, term=self.raft.term)
+        return {"removed": node, "members": len(members) - 1}
 
     async def _tell_removed(self, channel: Channel, code: str, message: str) -> None:
         with contextlib.suppress(Exception):
@@ -719,13 +866,15 @@ class Cluster:
         await channel.close()
 
     def _fit(self) -> None:
-        """A key with a smaller max_nodes: the members joined last go (never the head) until the cluster fits."""
+        """A key with a smaller max_nodes: the members joined last go (never the head) until the cluster fits,
+        one change at a time."""
         limits = self.licence.limits()
         if not limits.cluster_sync_enabled:
             self.changed.set()  # the key no longer allows a cluster at all: the gate closes it, nobody is cut
             return
         cap = limits.max_nodes
-        while cap is not None and len(members := self.members()) > cap:
+        members = self.members()
+        if cap is not None and len(members) > cap and self.raft.ready_for_change():
             last = next(m for m in reversed(members) if m.node_id != self.node_id)
             self._remove(last.node_id, "E_CLUSTER_FULL", "max_nodes", NODE)
             self._refused(last.node_id, "E_CLUSTER_FULL", "")
@@ -734,7 +883,7 @@ class Cluster:
         """A member unseen for RROTOR_CLUSTER_EVICT_AFTER is removed; it may join again when it is back."""
         now = self.wall()
         for m in self.members():
-            if m.node_id == self.node_id or m.node_id in self.links:
+            if m.node_id == self.node_id or m.node_id in self.links or not self.raft.ready_for_change():
                 continue
             if now - self.seen.get(m.node_id, now) > self.config.cluster_evict_after:
                 self._remove(m.node_id, "E_CLUSTER_EVICTED", "unseen", NODE)
@@ -781,6 +930,16 @@ class Cluster:
             return answer(msg, **self._admit(channel, peer, msg))
         if kind == "ping" and peer["kind"] == "node":
             return answer(msg, **self._ping(peer, msg))
+        if kind == "vote" and peer["kind"] == "node":
+            if msg.get("candidate") != peer["node_id"] or not all(
+                type(msg.get(k)) is int for k in ("term", "last_seq", "last_term")
+            ):
+                raise ClusterError(
+                    "A vote names its term, its candidate (the asker) and its log.", code="E_CLUSTER_MESSAGE"
+                )
+            got = self.raft.on_vote(msg, self.clock())
+            self._reconcile()
+            return answer(msg, **got)
         if kind == "command":
             return answer(msg, **await self._command(peer, msg))
         raise ClusterError(f"There is no message {kind!r} here.", code="E_CLUSTER_MESSAGE")
@@ -802,18 +961,30 @@ class Cluster:
             "cluster_id": self.state.get("cluster_id"),
             "head": self.state.get("head"),
             "head_address": self.state.get("head_address") if self.state.get("cluster_id") else None,
-            "term": self.state.get("term"),
+            "term": self.raft.term,
+            "last_seq": self.replication.log.last,
+            "last_term": self.raft.last_term,
+            "applied_seq": self.replication.applied,
             "version": self.version,
         }
 
     async def _command(self, peer: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any]:
-        """`rrotord cluster join | leave <node>` (a leave passed on by a follower too)."""
+        """`rrotord cluster join | leave <node> | promote <node>` (a leave passed on to the head, a promotion to the
+        node named)."""
         name, node = msg.get("name"), msg.get("node")
+        if name == "promote":
+            if not isinstance(node, str) or not NODE_ID.match(node):
+                raise BadRequest("Name the node to make head: rrotord cluster promote <node id>.")
+            return await self._promote(node, bool(msg.get("force")), bool(msg.get("yes")))
         if name == "leave":
             if not isinstance(node, str) or not NODE_ID.match(node):
                 raise BadRequest("Name the node to remove: rrotord cluster leave <node id>.")
             if self.role == "head":
-                return self._remove(node, "E_CLUSTER_LEFT", "left", OPERATOR)
+                for _ in range(int(CHANGE_WITHIN / 0.02)):  # the last change committed first
+                    if self.raft.ready_for_change():
+                        return self._remove(node, "E_CLUSTER_LEFT", "left", OPERATOR)
+                    await asyncio.sleep(0.02)
+                raise self._busy()
             if self.head_channel is not None:
                 got = await self.head_channel.request("command", name="leave", node=node)
                 return {k: v for k, v in got.items() if k not in ("type", "id", "ok")}
@@ -826,7 +997,110 @@ class Cluster:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self.attempted.wait(), ASKED_WITHIN)
             return {"node_id": self.node_id, "role": self.role, "status": self.status, "refusal": self.refusal}
-        raise BadRequest("The commands are join, and leave <node id>.")
+        raise BadRequest("The commands are join, leave <node id> and promote <node id>.")
+
+    # Manual failover
+
+    async def _promote(self, node: str, force: bool, yes: bool) -> dict[str, Any]:
+        """`rrotord cluster promote <node>`: done by the node named (passed on to it from any other)."""
+        members = {m.node_id: m for m in self.members()}
+        if node not in members:
+            raise ClusterError(f"{node} is not a member of the cluster.", code="E_CLUSTER_MEMBER", status=404)
+        if node != self.node_id:
+            assert self.session is not None and self.credentials is not None  # noqa: S101  (opened first)
+            channel, _, reader = await dial(self.session, self.credentials, members[node].address, self._hello())
+            try:
+                got = await channel.request("command", name="promote", node=node, force=force, yes=yes, within=60.0)
+            finally:
+                reader.cancel()
+                await channel.close()
+            return {k: v for k, v in got.items() if k not in ("type", "id", "ok")}
+        if self.role == "head":
+            return {"head": self.node_id, "term": self.raft.term, "promoted": False, "reason": "already the head"}
+        others = [m for m in members.values() if m.node_id != self.node_id]
+        found = await asyncio.gather(*(self._ask(m.address) for m in others))
+        reached = {
+            m.node_id: a
+            for m, a in zip(others, found, strict=True)
+            if a is not None and a.get("node_id") == m.node_id and a.get("cluster_id") == self.state.get("cluster_id")
+        }
+        top = max([self.replication.log.last, *(int(a.get("last_seq") or 0) for a in reached.values())])
+        lags = {
+            m: {
+                "reachable": m == self.node_id or m in reached,
+                "last_seq": self.replication.log.last if m == self.node_id else (reached.get(m) or {}).get("last_seq"),
+                "lag": top - (self.replication.log.last if m == self.node_id else int(reached[m].get("last_seq") or 0))
+                if m == self.node_id or m in reached
+                else None,
+            }
+            for m in members
+        }
+        quorum = self.raft.quorum()
+        if len([n for n in quorum if n == self.node_id or n in reached]) < majority(len(quorum)):
+            raise ClusterError(
+                "A majority of the members must be reachable from the node promoted.",
+                code="E_CLUSTER_QUORUM",
+                status=409,
+                members=lags,
+            )
+        mine = (self.raft.last_term, self.replication.log.last)
+        if not force and any(
+            (int(a.get("last_term") or 0), int(a.get("last_seq") or 0)) > mine for a in reached.values()
+        ):
+            raise ClusterError(
+                f"{node} is behind another member: the writes it lacks would be lost. Promote the member with "
+                "no lag, or add --force to lose them.",
+                code="E_CLUSTER_LAG",
+                status=409,
+                members=lags,
+            )
+        head = self.state.get("head")
+        if isinstance(head, str) and head != self.node_id and head not in reached and not yes:
+            raise ClusterError(
+                f"The head ({head}) does not answer. Make sure it is down (or cut off from every node) before "
+                "another node is made head, then confirm.",
+                code="E_CLUSTER_CONFIRM",
+                status=409,
+                head=head,
+                members=lags,
+            )
+        self._observe(list(reached.values()))
+        self.promoting = True
+        try:
+            asked = self.raft.campaign(self.clock(), promote=True, force=force)
+            self._reconcile()
+            await asyncio.gather(*(self._vote(members[n], asked) for n in quorum if n in reached))
+            if self.raft.role != "head":
+                self.raft.abandon()
+                raise ClusterError(
+                    "The members did not give this node their votes (another promotion, or a member with a longer "
+                    "log). The term has moved and a head that answered may have stepped down: run it again.",
+                    code="E_CLUSTER_VOTES",
+                    status=409,
+                    members=lags,
+                )
+            await self._lead("promoted", OPERATOR)
+        finally:
+            self.promoting = False
+        return {"head": self.node_id, "term": self.raft.term, "promoted": True, "forced": force, "members": lags}
+
+    async def _vote(self, member: Member, asked: dict[str, Any]) -> None:
+        """A vote asked of one member, on a connection of its own; its answer given to Raft."""
+        assert self.session is not None and self.credentials is not None  # noqa: S101  (opened first)
+        try:
+            channel, _, reader = await dial(self.session, self.credentials, member.address, self._hello())
+        except ClusterError:
+            return
+        try:
+            body = {k: v for k, v in asked.items() if k != "type"}
+            got = await channel.request("vote", within=VOTE_WITHIN, **body)
+        except (ClusterError, TimeoutError):
+            return
+        finally:
+            reader.cancel()
+            await channel.close()
+        self.raft.voted_for(member.node_id, asked, got, self.clock())
+        self._reconcile()
 
     # Replication's requests on the listener
 
@@ -881,7 +1155,7 @@ class Cluster:
         """A request done by another node, as the caller in hand: the head (`target` None), or the node that holds a
         run. Answers what it answered (and the seq it stood at, `seq`); raises what it refused."""
         who = WHO.get()
-        msg = {"op": op, "args": args, "target": target, "deadline": within}
+        msg = {"op": op, "args": args, "target": target, "deadline": within, "term": self.raft.term}
         if who is not None:
             msg["who"] = {"actor": who.actor, "client": who.client, "via": who.via}
         if target == self.node_id or (target is None and self.role == "head"):
@@ -890,8 +1164,13 @@ class Cluster:
             return await self._relay(str(target), msg)
         channel = self.head_channel
         if channel is None or self.role != "follower":
-            raise Unavailable("No head answers this node: writes wait for it.", code="E_NO_HEAD")
-        got = await channel.request("forward", within=within, **msg)
+            raise no_head()
+        try:
+            got = await channel.request("forward", within=within, **msg)
+        except ClusterError as err:
+            if err.code in ("E_NO_HEAD", "E_CLUSTER_CLOSED"):
+                raise no_head("The head went while this request was with it: writes wait for the next.") from None
+            raise
         return {k: v for k, v in got.items() if k not in ("type", "id", "ok")}
 
     async def _relay(self, target: str, msg: dict[str, Any]) -> dict[str, Any]:
@@ -908,7 +1187,12 @@ class Cluster:
 
     async def _forwarded(self, msg: dict[str, Any]) -> dict[str, Any]:
         """A follower's forward at the head: done here, or passed to the node it names."""
-        target = msg.get("target")
+        target, term = msg.get("target"), msg.get("term")
+        if isinstance(term, int) and term > self.raft.term:  # the follower knows a newer head: this one is deposed
+            self.raft.observe(term)
+            self._reconcile()
+        if self.role != "head":
+            raise no_head("This node is no longer the head.")
         body = {k: msg.get(k) for k in ("op", "args", "who", "deadline")}
         if isinstance(target, str) and target != self.node_id:
             return answer(msg, **await self._relay(target, {**body, "target": target}))
@@ -917,7 +1201,7 @@ class Cluster:
     async def _local(self, msg: dict[str, Any]) -> dict[str, Any]:
         """A forwarded request done on this node, as its caller (who, from where, by which route)."""
         if self.serve_forward is None:
-            raise Unavailable("This node does not serve forwarded requests.", code="E_NO_HEAD")
+            raise no_head("This node does not serve forwarded requests.")
         sent = msg.get("who")
         token = WHO.set(
             Who(dict(sent.get("actor") or {}), sent.get("client"), sent.get("via")) if isinstance(sent, dict) else None

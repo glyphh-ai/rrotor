@@ -44,13 +44,9 @@ async def test_three_nodes_find_each_other_the_lowest_makes_the_cluster_and_the_
     assert all(e["cluster_id"] == head.cluster_id for e in audited(head, "cluster.join"))
     await until(lambda: len(followers[0].view()["members"]) == 3)
     view = followers[0].view()
-    assert (view["role"], view["head"], view["term"], view["commit_seq"], view["applied_seq"]) == (
-        "follower",
-        "rrotor-0",
-        1,
-        0,
-        0,
-    )
+    # the log: rrotor-0 made a member, its `head` entry, the two others' `member add`
+    assert (view["role"], view["head"], view["term"]) == ("follower", "rrotor-0", 1)
+    await until(lambda: followers[0].view()["applied_seq"] == 4)
     assert sorted(m["node_id"] for m in view["members"]) == ids and all(m["voter"] for m in view["members"])
     assert head.view()["members"][0]["role"] == "head" and head.view()["tier"] == "enterprise"
     assert head.ready() == (True, None, None) and followers[0].identity() == (head.cluster_id, "follower")
@@ -178,7 +174,7 @@ async def test_a_member_whose_disk_was_replaced_takes_its_place_once_the_old_one
     fresh = nodes.make("b", ["a"], folder="b-new")
     await start(fresh)
     await until(lambda: fresh.status == "ready")
-    assert [m.instance for m in a.members() if m.node_id == "b"] == [fresh.state["instance"]]
+    await until(lambda: [m.instance for m in a.members() if m.node_id == "b"] == [fresh.state["instance"]])
 
 
 async def test_a_member_unseen_past_evict_after_is_removed_and_may_join_again(nodes: Nodes):
@@ -186,7 +182,7 @@ async def test_a_member_unseen_past_evict_after_is_removed_and_may_join_again(no
     a = nodes.make("a", ids, tier="enterprise", cluster_evict_after=0.2)
     b = nodes.make("b", ids)
     await start(a, b)
-    await until(lambda: b.status == "ready")
+    await until(lambda: b.status == "ready" and a.raft.ready_for_change())  # b holds its joining: a change may go
     await b.stop()
     await until(lambda: len(a.members()) == 1)
     assert audited(a, "cluster.leave")[0]["reason"] == "unseen"
@@ -423,6 +419,6 @@ async def test_a_follower_whose_head_goes_stops_following_and_says_so(nodes: Nod
 
 def test_a_head_whose_key_stops_allowing_a_cluster_cuts_nobody_and_wakes_the_gate(nodes: Nodes):
     a = nodes.make("a", ["a"], key=None)
-    a.state["members"] = [cluster_node.Member(n, "", "", n, "t").to_json() for n in ("a", "b")]
+    a.raft.members = [cluster_node.Member(n, "", "", n, "t").to_json() for n in ("a", "b")]
     a._fit()
     assert a.changed.is_set() and len(a.members()) == 2

@@ -1,4 +1,5 @@
-"""`rrotord cluster join | leave <node>`: on a node, authenticated by the cluster secret, never over the API."""
+"""`rrotord cluster join | leave <node> | promote <node>`: on a node, authenticated by the cluster secret, never over
+the API."""
 
 from __future__ import annotations
 
@@ -30,11 +31,7 @@ async def test_leave_and_join_by_command(nodes: Nodes):
 
 async def test_what_the_command_line_refuses(nodes: Nodes):
     a = nodes.make("a", ["a"])
-    assert await command.run(a.config, ["promote", "a"]) == (
-        2,
-        "rrotord cluster promote: manual failover is not built yet.",
-    )
-    for wrong in ([], ["leave"], ["join", "x"], ["dance"]):
+    for wrong in ([], ["leave"], ["join", "x"], ["dance"], ["promote"], ["promote", "a", "--soon"]):
         assert await command.run(a.config, wrong) == (2, f"usage: {command.USAGE}")
     code, said = await command.run(replace(a.config, cluster=False), ["join"])
     assert code == 2 and "E_CONFIG" in said
@@ -61,15 +58,24 @@ def cluster_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
 def test_rrotord_cluster_runs_the_command_and_exits_with_its_code(cluster_env, monkeypatch, capsys):
     asked = []
 
-    async def run(settings, args):
-        asked.append((settings.cluster, args))
+    async def run(settings, args, confirm):
+        asked.append((settings.cluster, args, confirm))
         return (0, "{}") if args == ["join"] else (1, "rrotord cluster leave: E_X: no")
 
     monkeypatch.setattr(command, "run", run)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert keep_logging(lambda: entry.main(["cluster", "join"])) == 0
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)  # at a terminal: the operator is asked
     assert keep_logging(lambda: entry.main(["cluster", "leave", "b"])) == 1
     out = capsys.readouterr()
-    assert asked == [(True, ["join"]), (True, ["leave", "b"])]
+    assert asked == [(True, ["join"], None), (True, ["leave", "b"], command.terminal)]
     assert out.out == "{}\n" and out.err == "rrotord cluster leave: E_X: no\n"
     assert keep_logging(lambda: entry.main(["serve"])) == 2
     assert f"usage: rrotord, or {command.USAGE}" in capsys.readouterr().err
+
+
+def test_the_operator_says_yes_at_a_terminal(monkeypatch):
+    answers = iter(["y", " Yes ", "n", ""])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    assert [command.terminal("Is it down? ") for _ in range(4)] == [True, True, False, False]
+    assert command.lags({}) == "" and command.lags({"members": "x"}) == ""

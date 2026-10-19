@@ -342,3 +342,23 @@ def test_notes_keep_checkpoints_logs_and_output(env):
     assert run.state["checkpoints"] == {"k": 1}
     lines = env.records.lines(RUN_ID)
     assert (lines[0]["message"], lines[0]["detail"], lines[1]["line"]) == ("m", {}, "x")
+
+
+async def test_a_deposed_heads_writing_runs_fail_and_its_reads_and_waits_go_on(env):
+    """A cluster's head that steps down stops its runs in flight whose function writes, failed with the code."""
+    slow = "import time\n\ndef start(ctx, inputs):\n    ctx.log('going')\n    time.sleep(20)\n"
+    functions = {"start": {"writes": True}, "look": {"writes": False}}
+    install(env.models, manifest("sample", functions=functions), slow + "\nlook = start\n")
+    writing = asyncio.ensure_future(env.runner.call(model="sample", function="start", inputs={}, run_id=RUN_ID))
+    other = "6f1c2d4e-0000-4000-8000-000000000004"
+    reading = asyncio.ensure_future(env.runner.call(model="sample", function="look", inputs={}, run_id=other))
+    for _ in range(300):
+        if all(any(line.get("message") == "going" for line in env.records.lines(r)) for r in (RUN_ID, other)):
+            break
+        await asyncio.sleep(0.02)
+    assert await env.runner.stop_writing("E_NO_HEAD", "no longer the head") == [RUN_ID]
+    run = await writing
+    assert (run.status, outcome(run)["data"]) == ("failed", {"reason": "no longer the head", "code": "E_NO_HEAD"})
+    assert not reading.done()
+    await env.runner.cancel(other)
+    await reading
