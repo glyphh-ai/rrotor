@@ -711,7 +711,8 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
   customer's OTLP headers or certificates. rrotor logs at every start, and the health shows: "Server-side logging is
   on: this rrotor's logs, metrics, traces and audit events are sent to Glyphh (api.glyphh.ai) and leave your
   infrastructure. Set RROTOR_SERVER_LOGS=off to keep them here." Turning it on or off is an audit event. In a
-  cluster the head sends it for every node.
+  cluster the head sends it for every node. The server keeps what it receives for 7 days and shows it on the
+  platform's Settings → Logs (`glyphh-ai/server`).
 - **Redaction:** never in a log line, audit event, span or metric: a model's inputs or outputs, `ctx.log`'s fields,
   secrets, tokens or keys (keys as SHA-256 only), request bodies; a drain sends each line exactly as stdout masks it.
   `RROTOR_LOG_PAYLOADS=on` adds inputs and `Result.data` (4 KB each) to the `rrotor.function` span and the kept
@@ -859,8 +860,6 @@ every write to the head.
   majority commit, `E_NOT_COMMITTED`, `Retry-After` on `E_NO_HEAD` and the SDKs' retries), and membership kept in
   the log (`member` entries). Until then the head is fixed: while it is down the cluster serves reads and writes
   wait for it.
-- **Server-side logging's receiver:** rrotor sends it ([13](#13-logs-audit-and-drains)); the server's OTLP receiver
-  (`glyphh-ai/server`) is not built.
 - **SSO and SAML, roles (RBAC).**
 - **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
   ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
