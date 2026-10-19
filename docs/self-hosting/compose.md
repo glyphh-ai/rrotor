@@ -44,9 +44,9 @@ docker compose up -d
 
 | File | What |
 |---|---|
-| `docker-compose.yml` | rrotor (`RROTOR_MODE=self`, `.env`, `/data` on the named volume `rrotor-data`, the three security options, a read-only root with a tmpfs `/tmp`, restart unless stopped, a health check on `/healthz`) and Caddy (ports 80 and 443, its certificates on `caddy-data`) |
+| `docker-compose.yml` | rrotor (`RROTOR_MODE=self`, `.env`, `/data` on the named volume `rrotor-data`, the three security options, a read-only root with a tmpfs `/tmp`, restart unless stopped, a health check on `/healthz`) and Caddy (ports 80 and 443, its certificates on `caddy-data`); each one's log kept by Docker's `json-file` driver, 10 MB a file, five files |
 | `Caddyfile` | Serve `RROTOR_PUBLIC_HOST` over HTTPS and pass every request to `rrotor:7777` |
-| `.env.example` | The settings: runtime id and token, public host, version, size |
+| `.env.example` | The settings: runtime id and token, public host, version, size; commented, a drain to your OpenTelemetry collector (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, …), `RROTOR_SERVER_LOGS`, `RROTOR_LOG_PAYLOADS` and the audit log's retention ([Logs, audit and drains](README.md#logs-audit-and-drains)) |
 | `docker-compose.airgap.yml`, `Caddyfile.airgap` | The air-gapped overlay (below) |
 
 rrotor's port is not published: only Caddy reaches it, on the Compose network. To put your own load balancer or

@@ -75,6 +75,12 @@ reachable by Let's Encrypt), and `name` for the resources. AWS adds `vpc_id`, `s
 `subnetwork`, `subnetwork_cidr`, `machine_type`, `dns_managed_zone`, `allow_iap_ssh` and `labels`. Each variable's
 description is in the module's `variables.tf`.
 
+Logs, audit and drains ([README](README.md#logs-audit-and-drains)), in both modules: `otel_endpoint` (your
+OpenTelemetry collector, `OTEL_EXPORTER_OTLP_ENDPOINT`; empty, no drain), `otel_headers` (sensitive,
+`OTEL_EXPORTER_OTLP_HEADERS`), `otel_resource_attributes`, `server_logs` (default `false`: `RROTOR_SERVER_LOGS`),
+`log_payloads` (default `false`) and `audit_retention_days` (default `90`). Each is written to the VM's `.env`; any
+other setting can be added there.
+
 ## Where the token lives
 
 The runtime token reaches the VM in its first-boot configuration, so it is in three places: the Terraform state
