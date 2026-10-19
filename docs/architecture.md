@@ -431,7 +431,7 @@ is who the audit log names for what the request does, and every 401 and 403 is a
   `POST /v1/runtime/introspect` with its runtime token, `rrotord/introspect.py`, and keeps the answer a minute,
   good or bad). With the link off, only a runtime key. A hosted rrotor answers only its own address
   ([3](#3-hosted-machines)); a self-hosted one only `RROTOR_PUBLIC_HOST`; any other `Host` is 421 `E_HOST`.
-- **Open:** `GET /healthz`, and `GET /.well-known/oauth-protected-resource` (and `…/mcp`): `{resource:
+- **Open:** `GET /healthz`, `GET /readyz`, and `GET /.well-known/oauth-protected-resource` (and `…/mcp`): `{resource:
   https://<address>/mcp, authorization_servers: [RROTOR_SERVER], scopes_supported: [account]}`. A refusal is 401
   with `WWW-Authenticate: Bearer resource_metadata="https://<address>/.well-known/oauth-protected-resource/mcp",
   scope="account"` (and `error="invalid_token"` when a token was sent), which is how Claude finds where to sign in.
@@ -443,7 +443,9 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | Call | Does |
 |---|---|
 | `GET /healthz` | `{ok: true}` while the process is up |
-| `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of models, `drains` (per signal: `state` (`off`, `waiting`, `ok`, `failing`), `buffered`, `dropped`, `last_export_at`) and `server_logs` (`on`, and the warning while it is) |
+| `GET /readyz` | `200 {ready: true}` while this node may take traffic: standalone and up, or a cluster's member in step with its head; else `503 {ready: false, reason, code}`, the reason `joining`, `catching_up`, `refused` or `no_cluster` ([14](#14-the-cluster)) |
+| `GET /v1/cluster` | This node's cluster: `{cluster_id, node_id, role, status, head, term, commit_seq, applied_seq, tier, max_nodes, ha, members: [{node_id, address, role, voter, applied_seq, lag, last_seen, connected, version, instance, joined_at}], refused: [{node_id, at, code}], refusal}`; `{role: standalone}` with the cluster off, and the reason when the key does not allow it ([14](#14-the-cluster)) |
+| `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of models, `cluster` (`{role: standalone}`, or the cluster's id, this node's role and status, whether it is ready, the head, the term and the members' count), `drains` (per signal: `state` (`off`, `waiting`, `ok`, `failing`), `buffered`, `dropped`, `last_export_at`) and `server_logs` (`on`, and the warning while it is) |
 | `GET /v1/models` | Each model, its versions (number, commit, when), the active one, its functions |
 | `POST /v1/models/deploy` | `{repo, commit, token?}` or `{bundle, commit}` ([2.2](#22-build-deploy-and-call)): `201 {model, version, commit_sha, deployed_at}` |
 | `POST /v1/runs` | `{model, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, model, version, function, status, data, step, prompt, seconds}` |
@@ -471,8 +473,12 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `run_status`, `run_log` `{run_id}` | A run's status and last `Result`; its log lines |
 | `approvals` | The runs waiting for the person's approval |
 | `audit_query` `{since?, until?, kind?, model?, run_id?, limit?}` | `GET /v1/audit` |
+| `cluster_status` | `GET /v1/cluster` |
 
 A refusal is a tool error carrying the API's `{error}`.
+
+A node a cluster refused (past `max_nodes`, removed, or its key no longer allowing sync) answers 503 with the
+refusal's code to everything but `/healthz` and `/readyz` ([14](#14-the-cluster)).
 
 ## 8. Ada
 
@@ -533,8 +539,9 @@ def query(ctx, inputs):
 
 rrotor runs with no key at all, as **Community** (one node, 5,000 precedents, no sync); a signed **licence key**,
 checked on the node with no network request, lifts those limits to its own (`rrotord/licence_key.py`,
-`rrotord/licence.py`). Built as [`specs/licensing.md`](specs/licensing.md) sections 1 and 2 decide; its node cap,
-sync gating and HA follow with the cluster ([Not built yet](#not-built-yet)).
+`rrotord/licence.py`). Built as [`specs/licensing.md`](specs/licensing.md) sections 1 to 4 decide: the node cap is
+enforced at join and sync is gated by the key ([14](#14-the-cluster)); HA follows with elections
+([Not built yet](#not-built-yet)).
 
 - **The plans** (the server's policy for what it signs; rrotor acts on the key's own numbers): Free $0 (1 node,
   5,000 precedents), Pro $99/month (3, 50,000), Team $299/month (10, 500,000), Enterprise by contract (unlimited,
@@ -612,16 +619,17 @@ container's privileges, the outbound connections, backups and upgrades are in
 
 - **The heartbeat** (`rrotord/heartbeat.py`): at boot and every 24 hours, `POST {RROTOR_SERVER}/v1/license/verify`
   with the runtime token and exactly `{machine, licence_id, version, active_runs, node_id, cluster_id, role,
-  precedents}` (`node_id` is `RROTOR_NODE_ID`, else the hostname; `cluster_id` null and `role` `standalone` until
-  there are clusters; `precedents` the node's count); the answer's `license_key` is offered as a key. A failure is
+  precedents}` (`node_id` is `RROTOR_NODE_ID`, else the hostname; `cluster_id` and `role` the cluster's and
+  this node's, `head` or `follower`, else null and `standalone` ([14](#14-the-cluster)); `precedents` the node's
+  count); the answer's `license_key` is offered as a key. A failure is
   logged and shown in the health, and tried again after a minute, doubling to an hour; it never stops rrotor.
 - **What the container lacks:** when bwrap cannot start, a self-hosted rrotor reads from `/proc` what is in its way
   (its seccomp mode, its AppArmor profile, mounts over `/proc`, the user-namespace sysctl) and puts it in the
   health as `sandbox.container_needs`, one sentence each with the fix. Runs are refused until it is fixed; the API
   is served.
 - **Never paused:** a `pause` is ignored in `self` mode.
-- **One box:** several nodes as one runtime, with a head, are decided and specified in
-  [`specs/cluster.md`](specs/cluster.md) ([Not built yet](#not-built-yet)).
+- **Several nodes as one runtime:** the cluster's membership is built ([14](#14-the-cluster)); what they share
+  (replication) is not yet ([Not built yet](#not-built-yet)).
 
 ## 13. Logs, audit and drains
 
@@ -631,14 +639,15 @@ order steps 3 and 4); the head gathering a cluster's follows with the cluster ([
 server-side logging. The heartbeat and the link's `usage` are licensing, not telemetry, and keep their fixed fields.
 
 - **Log lines** (`rrotord/log.py`): JSON on stdout, `RROTOR_LOG_LEVEL`, tokens masked; every line has `at`, `level`,
-  `logger`, `message` and its fields, `node_id`, the run's `run_id`, `model`, `version` and `function` while one is
+  `logger`, `message` and its fields, `node_id` (and `cluster_id` and `role` in a cluster), the run's `run_id`, `model`, `version` and `function` while one is
   handled, and `trace_id` and `span_id` while a span is recorded. The packages rotate them (Docker's `json-file`,
   10 MB, five files; the kubelet). A run's `ctx.log` lines stay in `runs/<id>/log.jsonl`.
 - **Audit events** (`rrotord/audit.py`): `{id, at, node_id, cluster_id, kind, actor, client, via, …, outcome,
   seconds}`, one per `run.call`, `run.continue`, `run.cancel` (refused ones too, `outcome.status: refused` with the
   code) and `run.end`, by any route (REST, MCP, the link); `model.deploy`, `model.activate`, `model.remove`,
   `model.deploy_failed`; `keys.changed` (counts, hashes added and removed); `licence.changed`, `licence.expired`,
-  `licence.bad`; `access.denied` (a 401 or 403, with the code); `config.server_logs`. `actor.type` is `key` (its
+  `licence.bad`; `access.denied` (a 401 or 403, with the code); `config.server_logs`; `cluster.head`,
+  `cluster.join`, `cluster.refused` and `cluster.leave` (the node, the code or the reason, the term; on the head). `actor.type` is `key` (its
   SHA-256), `sign-in` (`sub` from the introspection's answer), `local`, `server` (the link), `rrotor` (its own work)
   or `anonymous` (a 401: the SHA-256 of the bearer sent, if any). `client` is the last `X-Forwarded-For` hop, else
   the connection's address; `via` is `rest`, `mcp` or `link`.
@@ -674,18 +683,83 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
   `run.end` event, for the customer's drain only: before anything goes to Glyphh, `client`, `inputs`, `data`,
   `rrotor.inputs` and `rrotor.data` are stripped.
 
+## 14. The cluster
+
+Built as [`specs/cluster.md`](specs/cluster.md) build order step 5 decides: the skeleton, with nothing replicated yet
+(`rrotord/cluster/`). Several self-hosted rrotors of one runtime find and authenticate each other, one makes the
+cluster and is its **head**, the rest join it as **followers** up to the key's `max_nodes`. Each node still serves
+from its own `/data`; the store, models, keys and licence are not shared between them yet.
+
+- **On, and gated by the key:** `RROTOR_CLUSTER=on` (a self-hosted rrotor only) starts the cluster's transport only
+  while the licence key held has `cluster_sync_enabled`. Under Community, or a key without it, the listener never
+  starts: rrotor logs `cluster synchronisation disabled under the Community licence` (or `under this licence`) at
+  warning and runs standalone. The gate is looked at every 10 seconds and on every licence change: when a key stops
+  allowing it (past grace, a downgrade to Free), the head runs on standalone and tells its followers, which become
+  refused (`E_LICENCE_CLUSTER`, `/data` kept); a key that allows it again resumes the cluster.
+- **The transport** (`cluster/transport.py`): a WebSocket on aiohttp on its own listener, `RROTOR_CLUSTER_PORT`
+  (7778), never the API's port and never behind the public load balancer. JSON frames with `type` and `id`; a
+  request (`hello`, `join`, `ping`, `command`) is answered by an `answer` with its id, `ok` or an `error {code,
+  message}`; the head pushes `removed` unasked. Any other type is `E_CLUSTER_MESSAGE` until replication brings it.
+- **Mutual TLS from one secret** (`cluster/tls.py`): from `RROTOR_CLUSTER_SECRET` (32 bytes or more, base64) every
+  node derives, with HKDF-SHA256, the same Ed25519 cluster CA key and the same CA certificate; at start it makes its
+  own key and a leaf from that CA naming its node id. TLS 1.3, a certificate from the cluster CA required on both
+  sides, and the node id in the peer's certificate must be the one its `hello` names (`E_CLUSTER_PEER`). A node
+  with another secret fails the handshake and logs `cluster: peer certificate not from this cluster`. While a new
+  secret rolls out, `RROTOR_CLUSTER_SECRET_PREVIOUS` is trusted too: a node holds a leaf from each CA, dials with the
+  current one then the previous, and its listener presents the leaf the dialer's TLS server name asks for
+  (`<CA tag>.rrotor-cluster`). No runtime key is ever used between nodes.
+- **Finding each other** (`cluster/discovery.py`): `RROTOR_CLUSTER_PEERS` (a static `host:port` list, the same on
+  every node) or `RROTOR_CLUSTER_DNS` (a headless Service's name, resolved at most every 10 seconds and dialled on
+  the cluster port). A node says hello to every address, itself among them; each answers its id, role, cluster and
+  head.
+- **Bootstrap:** with no cluster anywhere, the node named by `RROTOR_CLUSTER_HEAD`, else the lowest node id once
+  every address has answered, makes it: a new `cluster_id`, term 1, itself head (`cluster.head`). The others wait
+  (`no_cluster`); a node that has heard of a cluster never makes one. With a peer down at the very first start and
+  no head named, nobody makes it until that peer answers.
+- **Joining, and `max_nodes`:** a node that hears of a head asks it to join. The head admits it unless the cluster
+  already has the key's `max_nodes` members (`E_CLUSTER_FULL`), a connected member has its id
+  (`E_CLUSTER_NODE_ID`; a member that is not connected and comes back with a new disk takes its place), it belongs
+  to another cluster (`E_CLUSTER_ID`), or it left and was not asked back (`E_CLUSTER_LEFT`). A refusal is logged and
+  audited (`cluster.refused`) on the head and logged at error on the node, which keeps its `/data`, answers 503
+  with the code to everything but `/healthz` and `/readyz`, and asks again every minute. A member that reconnects
+  (a restart, a lost connection) is let back in without counting again. A follower pings its head every 5
+  seconds and is told the members; while the head is away it keeps serving and asks again.
+- **Leaving:** `rrotord cluster leave <node>` and `rrotord cluster join` (`cluster/command.py`), run on a node
+  (`docker compose exec`, `kubectl exec`), authenticated by the cluster secret: the command makes its own leaf from
+  the cluster CA and asks the node's listener on loopback; a follower passes a leave to its head. The node removed is
+  told (`removed`, `E_CLUSTER_LEFT`) and does not ask again until `rrotord cluster join` is run on it. The head
+  cannot leave (`E_CLUSTER_HEAD`). Not on the API, so no runtime key can change the cluster. A member unseen for
+  `RROTOR_CLUSTER_EVICT_AFTER` (24 hours) is removed by the head, and may join again when it is back. A key with a
+  smaller `max_nodes` makes the head remove the members joined last (never itself) until the cluster fits; they
+  become refused (`E_CLUSTER_FULL`). Each removal is `cluster.leave` with its reason.
+- **State:** `/data/cluster/state.json`: this node's random instance id, the cluster id, term, head and its address,
+  the members (id, address, version, instance, joined at) and the nodes that left. A restarted node finds its head
+  again from it.
+- **What the rest of rrotor sees:** `GET /readyz`, `GET /v1/cluster`, MCP's `cluster_status` and the health's
+  `cluster` ([7](#7-the-api)); the heartbeat's `cluster_id` and `role` ([12](#12-self-hosting)); `cluster_id` and
+  `role` on every log line and `cluster_id` on every audit event ([13](#13-logs-audit-and-drains)).
+- **The seams left for what comes next:** `commit_seq` and `applied_seq` are 0 and a joined follower is ready at
+  once (catch-up will make it `catching_up` until within a second of the head); `ha` is false and the term stays 1
+  (manual failover and elections); `ping` carries `applied_seq` for the lag; voters are the first five members by
+  join; the link is still opened by every node, not only the head, and the drain's `rrotor.node.role` resource
+  attribute is `standalone`.
+
 ## Not built yet
 
 - **Secrets:** a vault for a model's `secrets` (`ctx.secrets` answers `E_NOT_BUILT`; `secret_set` on the link is
   logged and skipped).
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a model's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
-- **Clusters: sync, a head and HA** ([`specs/cluster.md`](specs/cluster.md)): N nodes of one runtime behind the
-  customer's load balancer. With the key's sync on, one node is the **head**: the single writer of the precedent
-  stores, deployed models, runtime keys and the licence, replicated to followers by an ordered log; it holds the
-  link and the cluster's drain. Reads are local on every node. `max_nodes` is enforced at join. Pro and Team fail
-  over by restart or by hand; Enterprise elects a new head (HA). Today a self-hosted rrotor is one box, and a
-  second copy of the same runtime takes the link over from the first.
+- **Replication, failover and elections** ([`specs/cluster.md`](specs/cluster.md), build order steps 6 to 8): the
+  cluster's membership is built ([14](#14-the-cluster)), but nothing is shared yet. To come: the head as the single
+  writer of the precedent stores, deployed models, runtime keys and the licence, replicated to followers by an
+  ordered log with snapshots and catch-up; the `writes` manifest key, read-only follower runs and writes forwarded
+  to the head; run ids naming their holder; the head-only link and summed `usage`; manual failover for Pro and Team
+  (`rrotord cluster promote`, terms and fencing) and elected heads for Enterprise (HA). Until then each node of a
+  cluster serves from its own `/data`, and every node opens the runtime's link, so a second node takes it over from
+  the first.
+- **The cluster's packages** (build order step 10): Helm's `cluster.enabled`, Compose's cluster files and Terraform's
+  `node_count`, with the cluster port, the secret and `/readyz` as the readiness probe.
 - **The cluster's drain and audit log** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains), build
   order step 9): followers sending their telemetry to the head, `RROTOR_DRAIN_AT=head` exporting it there, the
   cluster's audit store under `/data/audit/cluster/` and `GET /v1/audit` answered by the head; the

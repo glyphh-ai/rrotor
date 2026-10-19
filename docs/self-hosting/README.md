@@ -20,9 +20,11 @@ no autoscaling; a second copy of the same runtime is not a replica, it takes the
 
 **Built:** the signed licence key that carries these limits, Community (Free's limits) without one, and the
 precedent cap per node ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains, each
-node its own ([Logs, audit and drains](#logs-audit-and-drains)). **Not built yet:** the node cap and clusters
-(several nodes as one runtime, sync, a head, high availability, and the head gathering the cluster's drain and audit
-log); today a self-hosted rrotor is one box. The
+node its own ([Logs, audit and drains](#logs-audit-and-drains)); a cluster's membership: nodes that find and
+authenticate each other, a head, the key's node cap at join and sync gated by the key ([A cluster](#a-cluster)).
+**Not built yet:** what a cluster shares (replication of the stores, models, keys and licence from the head),
+failover, high availability, the head gathering the cluster's drain and audit log, and the packages' cluster
+settings; until then each node of a cluster serves from its own `/data`. The
 decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
 server's (`glyphh-ai/server`, `docs/architecture.md`).
 
@@ -65,18 +67,57 @@ must pass the `Host` header through unchanged. `GET /healthz` is open and answer
 `GET /v1/health` (authenticated) reports the link, each sandbox layer, the licence, each drain and whether
 server-side logging is on.
 
+## A cluster
+
+Built so far: membership, with nothing shared yet (each node serves from its own `/data`, and every node opens the
+runtime's link). Several self-hosted rrotors of one runtime, each with its own volume, behind your load balancer:
+they find each other, authenticate each other with mutual TLS derived from one secret you make, and one of them,
+the **head**, admits the others up to your key's `max_nodes`. A key without cluster sync (Community, Free) never
+starts it: rrotor logs `cluster synchronisation disabled under the Community licence` and runs alone.
+
+- **The port:** **7778** (`RROTOR_CLUSTER_PORT`), node to node only. Open it between the nodes and nowhere else;
+  never put it behind the public load balancer.
+- **The secret:** `openssl rand -base64 32`, the same on every node, kept as you keep the runtime token: anyone with
+  it can join (up to `max_nodes`). To change it, set the new one in `RROTOR_CLUSTER_SECRET` and the old one in
+  `RROTOR_CLUSTER_SECRET_PREVIOUS` on each node in turn, then remove the old one.
+- **Readiness:** `GET /readyz` (open) is 200 while a node may take traffic and 503 with the reason (`joining`,
+  `no_cluster`, `refused`) otherwise: point the load balancer's health check at it, and liveness at `/healthz`.
+- **The node past `max_nodes`** is refused (`E_CLUSTER_FULL`), logged at error, kept out of the load balancer (it
+  answers 503 to everything but `/healthz` and `/readyz`), keeps its `/data`, and asks again every minute.
+- **Looking at it:** `GET /v1/cluster` (or the MCP tool `cluster_status`): the cluster's id, the head, every member,
+  the nodes refused. The health has a short `cluster`.
+- **Removing a node:** `rrotord cluster leave <node id>` on any node (`docker compose exec rrotor rrotord cluster
+  leave rrotor-2`, or `kubectl exec`); it does not ask to join again until `rrotord cluster join` is run on it. These
+  are not on the API: no runtime key can change the cluster.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RROTOR_CLUSTER` | `off` | `on`: join or make a cluster (a key with cluster sync; `RROTOR_MODE=self` only) |
+| `RROTOR_NODE_ID` | the hostname | This node's name, `[a-z0-9-]{1,63}`: the pod name on Kubernetes |
+| `RROTOR_CLUSTER_PEERS` | | `host:port,…` of every node, the same on each (Compose, Terraform). One of this and `RROTOR_CLUSTER_DNS` |
+| `RROTOR_CLUSTER_DNS` | | A name whose A/AAAA records are the nodes: a headless Service with `publishNotReadyAddresses: true` (Kubernetes); resolved every 10 s |
+| `RROTOR_CLUSTER_PORT` | `7778` | The cluster's listener; not the API's port |
+| `RROTOR_CLUSTER_ADVERTISE` | `<node id>:<port>` | How the other nodes reach this one |
+| `RROTOR_CLUSTER_SECRET` | | Required with the cluster on: 32 or more random bytes, base64 |
+| `RROTOR_CLUSTER_SECRET_PREVIOUS` | | Trusted too, while a new secret rolls out |
+| `RROTOR_CLUSTER_HEAD` | the lowest node id | The node that makes the cluster the first time. Without it, the lowest id makes it once every peer has answered: set it if a peer may be down at the very first start |
+| `RROTOR_CLUSTER_EVICT_AFTER` | `24h` | A member unseen this long is removed by the head (`s`, `m`, `h`, `d`) |
+| `RROTOR_CLUSTER_LOG_KEEP` | `1g` | The replication log kept for catch-up (`k`, `m`, `g`); read now, used once replication is built |
+
 ## Logs, audit and drains
 
 **Everything stays on rrotor by default.** Nothing leaves it unless you set a drain (your own collector) or turn on
 server-side logging (Glyphh). The heartbeat and the link's usage are licensing, not telemetry, and keep their fixed
 fields.
 
-- **Logs:** JSON lines on stdout, one per event, tokens masked; every line names the node (`node_id`), and the run
+- **Logs:** JSON lines on stdout, one per event, tokens masked; every line names the node (`node_id`, and in a
+  cluster `cluster_id` and `role`), and the run
   (`run_id`, `model`, `version`, `function`) and the trace (`trace_id`, `span_id`) where there is one. Docker keeps
   them rotated (the Compose package: 10 MB a file, five files); on Kubernetes the kubelet rotates them. A run's own
   `ctx.log` lines stay in its log on `/data` (`GET /v1/runs/{id}/log`).
 - **The audit log** (Enterprise): one event per call (REST, MCP or the link) and its end, deploy, change to the
-  runtime keys, licence key taken, expired or refused, 401 or 403, and server-side logging turned on or off; who did
+  runtime keys, licence key taken, expired or refused, 401 or 403, server-side logging turned on or off, and a
+  cluster made, joined, refused or left; who did
   it (a runtime key's SHA-256, never the key; a Glyphh sign-in's subject; the local token; Glyphh; rrotor itself),
   from which address, and how it ended. Kept in `/data/audit/<YYYY-MM-DD>.jsonl`, one file a day, each event fsynced;
   read with `GET /v1/audit` (`since`, `until`, `kind`, `actor`, `model`, `run_id`, `limit`, `cursor`; newest first)
@@ -105,7 +146,7 @@ fields.
 | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | `always_on`, `always_off`, `traceidratio` or their `parentbased_` forms, and the ratio |
 | `RROTOR_DRAIN_SIGNALS` | `logs,metrics,traces,audit` | What the drain sends |
 | `RROTOR_DRAIN_BUFFER` | `10000` | Records held per signal while the collector is down |
-| `RROTOR_DRAIN_AT` | `head` | `head` or `node`. One box exports itself either way; in a cluster (not built yet) the head will export for every node |
+| `RROTOR_DRAIN_AT` | `head` | `head` or `node`. Each node exports itself for now; once the head gathers the cluster's signals (not built yet), `head` exports for every node |
 | `RROTOR_LOG_PAYLOADS` | `off` | `on`: inputs and results in your drain |
 | `RROTOR_SERVER_LOGS` | `off` | `on`: also to Glyphh (`{RROTOR_SERVER}/v1/otlp/v1/…`, with the runtime token). Not with `RROTOR_LINK=off` |
 | `RROTOR_AUDIT_RETENTION_DAYS` | `90` | Days of audit log kept (Enterprise) |

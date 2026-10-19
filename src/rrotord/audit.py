@@ -163,6 +163,7 @@ class Audit:
         self.retention_days, self.max_bytes, self.payloads, self.clock = retention_days, max_mb << 20, payloads, clock
         self.size: int | None = None  # the folder's bytes, as of the last prune and what was added since
         self.day: str | None = None  # the day last pruned for
+        self.cluster_id: str | None = None  # the cluster this node is in, set by rrotord/cluster/node.py
 
     @property
     def kept(self) -> bool:
@@ -179,7 +180,7 @@ class Audit:
             "id": str(uuid.uuid4()),
             "at": stamp(self.clock()),
             "node_id": self.node_id,
-            "cluster_id": None,
+            "cluster_id": self.cluster_id,
             "kind": kind,
             "actor": actor.actor,
             "client": actor.client,

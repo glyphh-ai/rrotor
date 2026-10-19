@@ -1,5 +1,5 @@
 """The API's application: the request's context (who it is for, forgotten after it; its span, with a drain), the
-errors, the gate, the routes."""
+errors, a cluster's refusal, the gate, the routes."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from rrotord.api.errors import AUDIT, Handler, errors
 from rrotord.api.gate import gate
 from rrotord.api.routes import BODY_MAX, Services, setup
 from rrotord.audit import WHO
+from rrotord.cluster.node import Cluster
+from rrotord.errors import Unavailable
 from rrotord.otel import Telemetry
 
 
@@ -36,11 +38,30 @@ def context(telemetry: Telemetry | None) -> Middleware:
     return middleware
 
 
+def refused(cluster: Cluster | None) -> Middleware:
+    """A node the cluster refused (past max_nodes, removed, or its key no longer allowing sync) serves nothing but
+    `/healthz` and `/readyz`: 503 with the refusal's code, its /data kept, until it is let in."""
+
+    @web.middleware
+    async def middleware(request: web.Request, handler: Handler) -> web.StreamResponse:
+        refusal = cluster.refusal if cluster is not None and cluster.status == "refused" else None
+        if refusal is None or request.path in ("/healthz", "/readyz"):
+            return await handler(request)
+        raise Unavailable(str(refusal["message"]), code=str(refusal["code"]))
+
+    return middleware
+
+
 def make(services: Services) -> web.Application:
     access = services.access or Access(services.config.data)
     telemetry = services.drain.telemetry if services.drain is not None else None
     app = web.Application(
-        middlewares=[context(telemetry), errors, gate(services.config, access, services.introspect)],
+        middlewares=[
+            context(telemetry),
+            errors,
+            refused(services.cluster),
+            gate(services.config, access, services.introspect),
+        ],
         client_max_size=BODY_MAX,
     )
     if services.audit is not None:

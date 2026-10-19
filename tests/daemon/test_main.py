@@ -17,7 +17,7 @@ def keep_logging(fn: Callable[[], int]) -> int:
 
 def test_bad_settings_exit_2_saying_why(monkeypatch, capsys):
     monkeypatch.setenv("RROTOR_MODE", "nope")
-    assert keep_logging(entry.main) == 2
+    assert keep_logging(lambda: entry.main([])) == 2
     assert "rrotord: E_CONFIG: RROTOR_MODE must be local, hosted, self or doorman." in capsys.readouterr().err
 
 
@@ -31,5 +31,5 @@ def test_good_settings_start_the_daemon(monkeypatch):
     monkeypatch.setenv("FLY_MACHINE_ID", "abc123")
     monkeypatch.setenv("RROTOR_SERVER", "http://s")
     monkeypatch.setattr(daemon, "main", serve)
-    assert keep_logging(entry.main) == 0
+    assert keep_logging(lambda: entry.main([])) == 0
     assert served[0].mode == "hosted"

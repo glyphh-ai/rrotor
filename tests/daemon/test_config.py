@@ -185,3 +185,72 @@ def test_logging_audit_and_drain_settings_are_read():
         "https://otel.acme.com:4318/v1/traces",
     ]
     assert c.otel_env["OTEL_TRACES_SAMPLER_ARG"] == "0.1" and "OTEL_SERVICE_NAME" not in c.otel_env
+
+
+SECRET_TEXT = "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0LXNlY3JldA"  # 34 bytes, URL-safe base64 unpadded
+CLUSTER = SELF | {"RROTOR_CLUSTER": "on", "RROTOR_CLUSTER_SECRET": SECRET_TEXT, "RROTOR_NODE_ID": "rrotor-1"}
+
+
+def test_the_cluster_is_off_by_default_with_its_settings_defaulted():
+    c = config.load(SELF | {"RROTOR_NODE_ID": "rrotor-1"})
+    assert (c.cluster, c.cluster_peers, c.cluster_dns, c.cluster_port, c.cluster_secrets) == (False, (), None, 7778, ())
+    assert (c.cluster_head, c.cluster_log_keep, c.cluster_evict_after) == (None, 1 << 30, 86400.0)
+    assert c.advertise == "rrotor-1:7778" and "cluster_secrets" not in repr(c)
+
+
+def test_the_cluster_settings_are_read():
+    c = config.load(
+        CLUSTER
+        | {
+            "RROTOR_CLUSTER_PEERS": "rrotor-0:7778, rrotor-1:7778,[fd00::2]:7778",
+            "RROTOR_CLUSTER_PORT": "7800",
+            "RROTOR_CLUSTER_ADVERTISE": "10.0.0.5:7800",
+            "RROTOR_CLUSTER_SECRET_PREVIOUS": "b2xkLW9sZC1vbGQtb2xkLW9sZC1vbGQtb2xkLW9sZC1vbGQ=",
+            "RROTOR_CLUSTER_HEAD": "rrotor-0",
+            "RROTOR_CLUSTER_LOG_KEEP": "512m",
+            "RROTOR_CLUSTER_EVICT_AFTER": "90m",
+        }
+    )
+    assert c.cluster and c.cluster_peers == ("rrotor-0:7778", "rrotor-1:7778", "[fd00::2]:7778")
+    assert (c.cluster_port, c.advertise, c.cluster_head) == (7800, "10.0.0.5:7800", "rrotor-0")
+    assert [len(s) for s in c.cluster_secrets] == [34, 35] and c.cluster_secrets[1].startswith(b"old-")
+    assert (c.cluster_log_keep, c.cluster_evict_after) == (512 << 20, 5400.0)
+    dns = config.load(CLUSTER | {"RROTOR_CLUSTER_DNS": "Rrotor-Headless.rrotor.svc.cluster.local."})
+    assert (dns.cluster_dns, dns.cluster_peers) == ("rrotor-headless.rrotor.svc.cluster.local", ())
+    assert (
+        config.load(CLUSTER | {"RROTOR_CLUSTER_DNS": "x", "RROTOR_CLUSTER_LOG_KEEP": "4096"}).cluster_log_keep == 4096
+    )
+
+
+@pytest.mark.parametrize(
+    ("env", "named"),
+    [
+        ({"RROTOR_CLUSTER": "yes"}, "RROTOR_CLUSTER"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_MODE": "local"}, "RROTOR_MODE=self"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_PORT": "0"}, "RROTOR_CLUSTER_PORT"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_PORT": "x"}, "RROTOR_CLUSTER_PORT"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_PORT": "7777"}, "the API's port"),
+        ({"RROTOR_CLUSTER_PEERS": "a"}, "RROTOR_CLUSTER_PEERS"),
+        ({"RROTOR_CLUSTER_PEERS": "a:99999"}, "RROTOR_CLUSTER_PEERS"),
+        ({"RROTOR_CLUSTER_PEERS": "bad host:1"}, "RROTOR_CLUSTER_PEERS"),
+        ({"RROTOR_CLUSTER_DNS": "bad name"}, "RROTOR_CLUSTER_DNS"),
+        ({}, "one of RROTOR_CLUSTER_PEERS"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_DNS": "b"}, "one of RROTOR_CLUSTER_PEERS"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_ADVERTISE": "nope"}, "RROTOR_CLUSTER_ADVERTISE"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_SECRET": ""}, "needs RROTOR_CLUSTER_SECRET"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_SECRET": "c2hvcnQ="}, "RROTOR_CLUSTER_SECRET is 32"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_SECRET": "!!not base64!!"}, "RROTOR_CLUSTER_SECRET is"),
+        ({"RROTOR_CLUSTER": "off", "RROTOR_CLUSTER_SECRET": "", "RROTOR_CLUSTER_SECRET_PREVIOUS": SECRET_TEXT}, "goes"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_HEAD": "Head_0"}, "RROTOR_CLUSTER_HEAD"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_LOG_KEEP": "1t"}, "RROTOR_CLUSTER_LOG_KEEP"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_LOG_KEEP": "0g"}, "RROTOR_CLUSTER_LOG_KEEP"),
+        ({"RROTOR_CLUSTER_PEERS": "a:1", "RROTOR_CLUSTER_EVICT_AFTER": "soon"}, "RROTOR_CLUSTER_EVICT_AFTER"),
+    ],
+)
+def test_bad_cluster_settings_stop_rrotor_naming_them(env, named):
+    given = CLUSTER | env
+    if given.get("RROTOR_MODE") == "local":
+        given |= {"RROTOR_LOCAL_TOKEN_SHA256": DIGEST, "RROTOR_SERVER": "http://s"}
+    with pytest.raises(RrotorError) as err:
+        config.load(given)
+    assert err.value.code == "E_CONFIG" and named in err.value.message

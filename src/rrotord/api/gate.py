@@ -34,7 +34,7 @@ from rrotord.config import Config
 from rrotord.errors import Forbidden, RrotorError, Unauthorized
 from rrotord.introspect import Introspector
 
-OPEN = frozenset({"/healthz"})
+OPEN = frozenset({"/healthz", "/readyz"})
 METADATA = "/.well-known/oauth-protected-resource"
 SIGN_IN = frozenset({METADATA, METADATA + "/mcp"})  # open on a hosted rrotor: where a client finds how to sign in
 SCOPE = "account"

@@ -5,7 +5,8 @@ without a licence key at Community's limits; it checks a signed key on the machi
 gets the next key over the link or a small daily HTTPS call whose whole body is shown below; and an air-gapped
 rrotor never calls out at all.
 
-Built as [`specs/licensing.md`](../specs/licensing.md) decides (its node cap and cluster sync come with the cluster);
+Built as [`specs/licensing.md`](../specs/licensing.md) decides: the node cap is enforced when a node joins a cluster,
+and a cluster starts only with a key that allows sync ([A cluster](README.md#a-cluster));
 the plans are in the [README](README.md#the-plans).
 
 ## The licence key
@@ -68,7 +69,8 @@ Authorization: Bearer <runtime token>
 Content-Type: application/json
 
 {"machine": "<64 hex characters>", "licence_id": "<uuid or null>", "version": "<rrotor version>", "active_runs": <int>,
- "node_id": "<this node's name>", "cluster_id": null, "role": "standalone", "precedents": <int or null>}
+ "node_id": "<this node's name>", "cluster_id": "<uuid or null>", "role": "standalone | head | follower",
+ "precedents": <int or null>}
 ```
 
 | Field | What it is | Why |
@@ -78,7 +80,7 @@ Content-Type: application/json
 | `version` | rrotor's version, e.g. `0.1.0` | To show it on the platform |
 | `active_runs` | How many runs are in progress, a number | A count only, nothing about the runs |
 | `node_id` | `RROTOR_NODE_ID`, else the container's hostname: your own name for the node | To count your nodes |
-| `cluster_id`, `role` | `null` and `standalone` (clusters are not built yet) | To count your nodes |
+| `cluster_id`, `role` | The cluster's id and this node's role in it (`head` or `follower`); `null` and `standalone` for a node on its own (a node refused or still joining sends the cluster's id it asked to join, as `standalone`) | To count your nodes |
 | `precedents` | How many precedents the node holds across its Ada models, a number | To show use against the key's cap |
 
 The answer is `200 {"license_key": "<key>"}`: the newest key the server holds for your subscription (this release

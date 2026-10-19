@@ -24,6 +24,7 @@ from rrotord.access import Access
 from rrotord.api import mcp, ops
 from rrotord.api.gate import METADATA, SCOPE, public_url
 from rrotord.audit import Audit
+from rrotord.cluster.node import Cluster
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.drain import Drain
@@ -77,6 +78,7 @@ class Services:
     precedents: Precedents | None = None  # the daemon's nine-minute count; counted here when there is none
     audit: Audit | None = None  # the audit events: kept (Enterprise) and read by GET /v1/audit, or logged
     drain: Drain | None = None  # the customer's collector and server-side logging, when either is on
+    cluster: Cluster | None = None  # this node's place in its cluster; none: standalone
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -113,6 +115,11 @@ def audited(s: Services, query: dict[str, Any]) -> dict[str, Any]:
     return s.audit.query(query)
 
 
+def clustered(s: Services) -> dict[str, Any]:
+    """`GET /v1/cluster` and `cluster_status`."""
+    return s.cluster.view() if s.cluster is not None else {"role": "standalone"}
+
+
 def setup(app: web.Application, s: Services) -> None:
     counted = s.precedents or Precedents(s.models)
 
@@ -121,6 +128,17 @@ def setup(app: web.Application, s: Services) -> None:
 
     async def healthz(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
+
+    async def readyz(_: web.Request) -> web.Response:
+        """Open: 200 while this node may take traffic (standalone and up, or a member in step with its head); 503
+        with the reason otherwise, which keeps it out of the load balancer."""
+        ready, reason, code = s.cluster.ready() if s.cluster is not None else (True, None, None)
+        if ready:
+            return web.json_response({"ready": True})
+        return web.json_response({"ready": False, "reason": reason, "code": code}, status=503)
+
+    async def cluster(_: web.Request) -> web.Response:
+        return web.json_response(clustered(s))
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response(
@@ -133,6 +151,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "parts": Parts.view(s.parts.installed()),
                 "licence": licence(),
                 "heartbeat": s.heartbeat.view() if s.heartbeat is not None else None,
+                "cluster": s.cluster.short() if s.cluster is not None else {"role": "standalone"},
                 "access": s.access.view() if s.access is not None else None,
                 **drains.view(s.drain),
                 "approvals": len(s.runner.approvals()),
@@ -232,6 +251,8 @@ def setup(app: web.Application, s: Services) -> None:
         )
 
     app.router.add_get("/healthz", healthz)
+    app.router.add_get("/readyz", readyz)
+    app.router.add_get("/v1/cluster", cluster)
     app.router.add_get(METADATA, resource_metadata)
     app.router.add_get(METADATA + "/mcp", resource_metadata)
     app.router.add_get("/v1/health", health)

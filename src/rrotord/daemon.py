@@ -1,5 +1,6 @@
 """rrotord, put together: the sandbox checked, the runner, the link and the API, until it is told to stop; its log
-lines naming this node, its audit events (kept on Enterprise), and, when one is set, its drain."""
+lines naming this node, its audit events (kept on Enterprise), and, when one is set, its drain; with the cluster on,
+its place in the cluster (rrotord/cluster/node.py), gated by the licence key."""
 
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from rrotord.access import Access
 from rrotord.api.app import make
 from rrotord.api.routes import Services
 from rrotord.audit import SERVER, Audit, current
+from rrotord.cluster.node import Cluster
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.drain import Drain, warning
@@ -64,6 +66,7 @@ class Daemon:
     heartbeat: Heartbeat | None = field(init=False)
     audit: Audit = field(init=False)
     drain: Drain | None = field(init=False)
+    cluster: Cluster = field(init=False)
     session: aiohttp.ClientSession | None = None
 
     def __post_init__(self) -> None:
@@ -84,6 +87,7 @@ class Daemon:
             max_mb=c.audit_max_mb,
             payloads=c.log_payloads,
         )
+        self.cluster = Cluster(c, self.licence, self.audit, VERSION)
         self.licence.on_event = self._licence_event
         self.licence.start(c.licence_env)  # never fatal: a bad key is logged and the node runs as Community
         self.access = Access(
@@ -139,6 +143,7 @@ class Daemon:
                 version=VERSION,
                 node_id=c.node_id,
                 precedents=self.precedents.current,
+                cluster=self.cluster.identity,
             )
             if c.mode == "self" and c.link
             else None
@@ -160,6 +165,7 @@ class Daemon:
         """A licence key taken, past grace or refused, as the audit log tells it: from the heartbeat or `welcome`,
         the server's doing; from `PUT /v1/licence`, its caller's; from the environment or a file, rrotor's."""
         self.audit.emit(kind, who=SERVER if detail.get("source") in ("heartbeat", "welcome") else current(), **detail)
+        self.cluster.licence_changed()  # the cluster's gate looked at again
 
     def server_logs(self) -> None:
         """At every start: server-side logging's warning while it is on; turning it on or off is an audit event."""
@@ -221,6 +227,7 @@ class Daemon:
             self.precedents,
             self.audit,
             self.drain,
+            self.cluster,
         )
 
     def install_builtin(self) -> list[str]:
@@ -302,6 +309,7 @@ class Daemon:
         await api.setup()
         await web.TCPSite(api, "0.0.0.0", self.config.local_port).start()  # noqa: S104  (published to loopback only)
         log.info("rrotor up", extra={"version": VERSION, "mode": self.config.mode, "sandbox": self.layers.ready})
+        await self.cluster.start()
         tasks = [
             asyncio.create_task(self.link.run()),
             asyncio.create_task(self._expire()),
@@ -323,6 +331,7 @@ class Daemon:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self.cluster.stop()
         await self.runner.shutdown()
         await api.cleanup()
         if self.session is not None:
