@@ -70,7 +70,7 @@ class Daemon:
         self.licence = Licence(c.data, c.runtime_id)
         self.licence.start(c.licence_env)  # never fatal: a bad key is logged and the node runs as Community
         self.access = Access(c.data, c.keys_sha256)
-        self.precedents = Precedents(models)
+        self.precedents = Precedents(models, cap=lambda: self.licence.limits().max_precedents)
         self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
         self.runner = Runner(
             models=models,
@@ -164,6 +164,7 @@ class Daemon:
             else None,
             self.handler.report,
             self.heartbeat,
+            self.precedents,
         )
 
     def install_builtin(self) -> list[str]:
@@ -218,9 +219,9 @@ class Daemon:
         numbered `usage`: when there were calls, or when the precedents' total is due (`rrotord/precedents.py`);
         nothing otherwise, or when there is no runtime token to owe them under."""
         keys = self.access.usage.take()
+        due = self.precedents.due()  # read on every node, linked or not: the cap's warning, the health
         if not self.link.configured:
             return
-        due = self.precedents.due()
         if keys or due:
             total = self.precedents.total
             await self.link.owe(lambda seq: p.usage(seq, keys, total))

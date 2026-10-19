@@ -80,6 +80,20 @@ async def test_the_tools_run_models_and_read_runs(api):
     assert resumed["structuredContent"]["status"] == "needs_input"
 
 
+async def test_a_record_refused_by_the_cap_is_model_calls_result_not_a_tool_error(api):
+    from tests.daemon.runner.test_engine import FULL
+
+    install(api.services.models, manifest("full"), FULL)
+    full = await tool(api, "model_call", model="full")
+    assert full["isError"] is False and full["structuredContent"]["status"] == "done"
+    assert full["structuredContent"]["data"]["status"] == "limit_exceeded"
+    assert full["structuredContent"]["data"]["indexed"] is False
+    status, body = await rpc(api, "tools/call", {"name": "model_call", "arguments": {"model": "full"}})
+    assert status == 200 and "error" not in body
+    res = await api.client.post("/v1/runs", json={"model": "full"}, headers=api.auth())
+    assert res.status == 200 and (await res.json())["data"]["status"] == "limit_exceeded"  # REST: 200, as data
+
+
 async def test_refusals_are_tool_errors_and_bad_rpc_is_refused(api):
     missing = await tool(api, "model_call", model="nothing")
     assert missing["isError"] is True and missing["structuredContent"]["error"]["code"] == "E_MODEL_MISSING"

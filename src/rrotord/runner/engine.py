@@ -177,11 +177,13 @@ class Runner:
 
     def _limits(self, found: Version) -> dict[str, Any]:
         """An Ada version's precedent cap: the licence key's `max_precedents` (Community's without one; null is
-        unlimited) and, with a cap, `precedents_elsewhere`, the other models' total now."""
+        unlimited), the plan's name for the caller's message, and, with a cap, `precedents_elsewhere`, the other
+        models' total now (the node's cap is on its total)."""
         if "ada" not in found.manifest.needs:
             return {}
         plan = self.licence.limits() if self.licence is not None else COMMUNITY
-        out: dict[str, Any] = {"precedents": plan.max_precedents}
+        name = self.licence.plan_name if self.licence is not None else "Community"
+        out: dict[str, Any] = {"precedents": plan.max_precedents, "plan": name}
         if plan.max_precedents is not None:
             out["precedents_elsewhere"] = self._elsewhere(found.model)
         return out

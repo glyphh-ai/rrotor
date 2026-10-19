@@ -492,12 +492,20 @@ def query(ctx, inputs):
   inputs; the model passes `ctx.clearance` to the kernel, which cuts what a reader below a layer's
   `security_weight` may see.
 - **The precedent cap:** the licence key's `max_precedents` ([9](#9-the-licence)): Community's 5,000 with no key,
-  null (unlimited) on Enterprise. rrotor holds the runtime's **total** to it: when an
-  Ada run starts, the runner counts the other Ada models' stores and hands the run `limits.precedents_elsewhere`
-  beside `limits.precedents`, and `record` is refused (`E_LIMIT_PRECEDENTS`) once the model's own count plus that
-  would pass the cap. Nothing is counted on the hot path, so runs of different models at the same time can
-  overshoot by what they record meanwhile; the next run of each is refused. A store that does not read counts none
-  (logged).
+  null (unlimited) on Enterprise, per node across all its Ada models. When an Ada run starts, the runner counts the
+  other Ada models' stores and hands the run `limits.precedents_elsewhere` beside `limits.precedents` and `plan`;
+  `rrotor.ada` wraps the kernel's two paths that grow a store: `record` with a new id is refused once the model's
+  own count plus that has reached the cap (one whose id the store holds replaces its row and goes), and
+  `space.merge(path)` is refused, whole, when the rows it would add pass it. `learn`, `calibrate`, `refresh`,
+  `configure`, a re-encode and a deploy are never checked. Refused, it raises `rrotor.ada.LimitExceeded`, which a
+  model may catch; uncaught, the run ends **`done`**, never `failed`, with `{"status": "limit_exceeded", "indexed":
+  false, "message": "Precedent store capacity limit reached (50,000 max for the Pro plan). Upgrade the key to index
+  further precedents.", "precedents": 50000, "cap": 50000}` as its data (REST 200, MCP's `model_call` result, not a
+  tool error); the precedents recorded earlier in the run stay. Nothing is counted on the hot path, so runs of
+  different models at the same time can overshoot by what they record meanwhile; the next run of each is refused.
+  A store over the cap (after a downgrade) keeps every row and answers queries, `learn` and settings; only growth is
+  refused, `GET /v1/licence` shows `precedents.over: true` and the nine-minute count logs a warning once per change.
+  A store that does not read counts none (logged).
 - **Size:** about 16 KB of RAM per precedent.
 - **The examples,** each with its tests on `rrotor.testing.Harness` and the kernel in `tests/kernel/`:
   `examples/ada_incidents/` (an app's incidents: the fix for a new error, and the nearest precedent's cause, owner
@@ -534,8 +542,8 @@ checked on the node with no network request, lifts those limits to its own (`rro
   and 50,000, Team 10 and 500,000, Enterprise unlimited), `features.sync` as `cluster_sync_enabled`, `expires_at`
   plus `grace_days` as `expires_at`; refused if it names another runtime. A key is preferred to it.
 - **`GET /v1/licence` and the health:** `{tier, community, license_id, customer_id, source, issued_at, expires_at,
-  state (live, grace, expired, bad, none), days_left, max_nodes, max_precedents, cluster_sync_enabled}`, the limits
-  those that apply now.
+  state (live, grace, expired, bad, none), days_left, max_nodes, max_precedents, cluster_sync_enabled, precedents:
+  {held, cap, over}}`, the limits those that apply now, `held` the node's count ([8](#8-ada)).
 
 ## 10. Parts
 

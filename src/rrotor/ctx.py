@@ -72,7 +72,7 @@ class Ctx:
         limits: dict[str, Any] | None = None,
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
-        self.limits: dict[str, Any] = dict(limits or {})  # the plan's limits for the mod whose part this run uses
+        self.limits: dict[str, Any] = dict(limits or {})  # an Ada model's precedent cap, from the licence key
         self.ada: Any = None  # the Ada model, once rrotor.ada.open(ctx) has run
         self.inputs: dict[str, Any] = inputs
         self.answer: Any = answer

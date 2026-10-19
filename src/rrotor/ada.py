@@ -28,13 +28,28 @@ STORE = "precedents.sqlite"
 REENCODE = "__ada_reencode__"  # the maintenance operation rrotor runs in the sandbox on a changed encoding
 
 
+class LimitExceeded(Exception):
+    """A record, or a merge, that would grow the node's precedents past the licence key's cap. A model may catch it;
+    uncaught, the run ends `done` with `data`, never `failed`: `{status: limit_exceeded, indexed: false, message,
+    precedents, cap}`."""
+
+    def __init__(self, held: int, cap: int, plan: str) -> None:
+        message = (
+            f"Precedent store capacity limit reached ({cap:,} max for the {plan} plan). "
+            "Upgrade the key to index further precedents."
+        )
+        super().__init__(message)
+        self.data: dict[str, Any] = {
+            "status": "limit_exceeded",
+            "indexed": False,
+            "message": message,
+            "precedents": held,
+            "cap": cap,
+        }
+
+
 class AdaError(ModelError):
     code = "E_ADA"
-
-    def __init__(self, message: str, code: str | None = None) -> None:
-        super().__init__(message)
-        if code:
-            self.code = code
 
 
 def encoding_of(spec: dict[str, Any]) -> dict[str, Any]:
@@ -95,30 +110,74 @@ def open(
     model = glyphh_spec.Model(
         spec, k=k, min_sim=min_sim, author=author or ctx.caller, path=str(store), tau=tau, refresh_every=refresh_every
     )
-    _cap(model, ctx.limits.get("precedents"), ctx.limits.get("precedents_elsewhere"))
+    _cap(model, store, ctx.limits)
     ctx.ada = model
     return model
 
 
-def _cap(model: Any, precedents: Any, elsewhere: Any) -> None:
-    """The plan's `precedents` limit, on the runtime's total across its Ada models: this model's own, counted live,
-    and the others' (`elsewhere`), as rrotord counted them when the run started. A record that would take the total
-    past it is refused (E_LIMIT_PRECEDENTS); null or absent is unlimited."""
-    if not isinstance(precedents, int) or isinstance(precedents, bool):
-        return
-    others = elsewhere if isinstance(elsewhere, int) and not isinstance(elsewhere, bool) else 0
-    record = model.record
+def _whole(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
-    def capped(*args: Any, **kwargs: Any) -> Any:
-        held = others + len(model)
-        if held >= precedents:
-            raise AdaError(
-                f"This plan allows {precedents} precedents across the runtime's Ada models; they hold {held}.",
-                code="E_LIMIT_PRECEDENTS",
-            )
+
+def _ids(store: Path) -> set[str]:
+    """The precedent ids a store holds, read without writing; none when it is not made yet."""
+    if not store.is_file():
+        return set()
+    db = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+    try:
+        return {str(row[0]) for row in db.execute("SELECT id FROM precedents")}
+    finally:
+        db.close()
+
+
+def _held(store: Path, rid: str) -> bool:
+    """Whether the store already holds a precedent with this id (a record of it replaces the row)."""
+    if not store.is_file():
+        return False
+    db = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+    try:
+        return db.execute("SELECT 1 FROM precedents WHERE id = ?", (rid,)).fetchone() is not None
+    finally:
+        db.close()
+
+
+def _cap(model: Any, store: Path, limits: dict[str, Any]) -> None:
+    """The licence key's `precedents` cap, on the node's total across its Ada models: this model's own, counted
+    live, and the others' (`precedents_elsewhere`), as rrotord counted them when the run started. Only what grows
+    the store is checked, on the kernel's two paths to it: a record whose id is new (one whose id the store holds
+    replaces its row, and goes at the cap), and a merge, all or nothing. Past the cap, LimitExceeded; null or
+    absent is unlimited. learn, calibrate, refresh, configure and a re-encode add nothing and are never checked."""
+    cap = _whole(limits.get("precedents"))
+    if cap is None:
+        return
+    others = _whole(limits.get("precedents_elsewhere")) or 0
+    named = limits.get("plan")
+    plan = named if isinstance(named, str) else "Community"
+    space = model.space
+    record, merge = space.record, space.merge
+
+    def held() -> int:
+        return others + len(space)
+
+    def capped_record(*args: Any, **kwargs: Any) -> Any:
+        now = held()
+        if now >= cap:
+            rid = kwargs.get("rid", args[3] if len(args) > 3 else None)
+            if rid is None or not _held(store, str(rid)):
+                raise LimitExceeded(now, cap, plan)
         return record(*args, **kwargs)
 
-    model.record = capped
+    def capped_merge(other_path: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            adds = len(_ids(Path(str(other_path)).expanduser()) - _ids(store))
+        except sqlite3.Error:
+            adds = 0  # not a store: the kernel's merge says so
+        now = held()
+        if adds and now + adds > cap:
+            raise LimitExceeded(now, cap, plan)
+        return merge(other_path, *args, **kwargs)
+
+    space.record, space.merge = capped_record, capped_merge
 
 
 def count(store: Path) -> int:

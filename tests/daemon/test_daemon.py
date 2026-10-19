@@ -450,6 +450,16 @@ def test_the_environments_key_and_a_legacy_offline_licence_are_read_at_boot(tmp_
     assert keyed.licence.view()["source"] == "GLYPHH_LICENSE_KEY"  # the key preferred to the legacy licence
 
 
+async def test_an_unlinked_node_still_counts_its_precedents_and_warns_when_over_the_cap(tmp_path, short_dir, caplog):
+    d = self_daemon(tmp_path, short_dir, link=False)
+    model(d, "tickets", 7)
+    d.licence.offer(keys().key(tier="free", max_nodes=1, max_precedents=5), "test")
+    await d.report_usage()
+    assert d.precedents.total == 7 and "over the licence key's cap" in caplog.text
+    assert d.link.outbox.pending == [] and d.services().precedents is d.precedents
+    assert d.services().licence.view(d.precedents.current())["precedents"] == {"held": 7, "cap": 5, "over": True}
+
+
 async def test_the_key_file_is_read_again_every_hour_and_a_failure_is_logged(tmp_path, short_dir, monkeypatch, caplog):
     monkeypatch.setattr(daemon, "LICENCE_EVERY", 0.01)
     d = self_daemon(tmp_path, short_dir, link=False)

@@ -171,3 +171,15 @@ async def test_an_ada_model_deploys_and_a_changed_encoding_that_cannot_be_reenco
     assert (status, body["error"]["code"]) == (422, "E_ADA_ENCODING"), body
     active = api.services.models.active("tickets")
     assert active is not None and active.commit_sha == first and api.services.models.by_sha("tickets", second) is None
+
+
+async def test_the_licence_shows_the_nodes_precedents_against_the_cap_and_over_after_a_downgrade(api):
+    from tests.daemon.test_precedents import model
+
+    model(api.services.models, "tickets", ["ada"], 6)
+    status, body = await send(api, "GET", "/v1/licence")
+    assert status == 200 and body["licence"]["precedents"] == {"held": 6, "cap": 5000, "over": False}
+    status, body = await send(api, "PUT", "/v1/licence", data=keys().key(tier="free", max_precedents=5))
+    assert status == 200 and body["licence"]["precedents"] == {"held": 6, "cap": 5, "over": True}  # nothing deleted
+    status, body = await send(api, "GET", "/v1/health")
+    assert status == 200 and body["licence"]["precedents"]["over"] is True

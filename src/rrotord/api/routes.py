@@ -30,6 +30,7 @@ from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
 from rrotord.models import Models, Version
 from rrotord.parts import Parts
+from rrotord.precedents import Precedents
 from rrotord.runner.engine import Runner
 from rrotord.sandbox.probe import Layers
 
@@ -70,6 +71,7 @@ class Services:
     introspect: Introspector | None = None  # hosted: a Glyphh sign-in checked with the Cloud
     report: Report | None = None  # after every deploy, `deployed` up the link; none in tests without a link
     heartbeat: HeartbeatView | None = None  # self, the link on: the last heartbeat
+    precedents: Precedents | None = None  # the daemon's nine-minute count; counted here when there is none
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -96,6 +98,11 @@ def local_only(mode: str, handler: Handler) -> Handler:
 
 
 def setup(app: web.Application, s: Services) -> None:
+    counted = s.precedents or Precedents(s.models)
+
+    def licence() -> dict[str, Any]:
+        return s.licence.view(counted.current())
+
     async def healthz(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
@@ -108,7 +115,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "link": s.link.view(),
                 "sandbox": s.layers.to_json(),
                 "parts": Parts.view(s.parts.installed()),
-                "licence": s.licence.view(),
+                "licence": licence(),
                 "heartbeat": s.heartbeat.view() if s.heartbeat is not None else None,
                 "access": s.access.view() if s.access is not None else None,
                 "approvals": len(s.runner.approvals()),
@@ -179,7 +186,7 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response({"removed": request.match_info["name"]})
 
     async def licence_get(_: web.Request) -> web.Response:
-        return web.json_response({"licence": s.licence.view()})
+        return web.json_response({"licence": licence()})
 
     async def licence_put(request: web.Request) -> web.Response:
         """The licence key as the body (or a JSON string); release N also takes a legacy licence: {payload,
@@ -190,7 +197,7 @@ def setup(app: web.Application, s: Services) -> None:
         except json.JSONDecodeError:
             sent = text
         kept = s.licence.take(sent)
-        return web.json_response({"licence": s.licence.view(), "kept": kept})
+        return web.json_response({"licence": licence(), "kept": kept})
 
     async def resource_metadata(request: web.Request) -> web.Response:
         """RFC 9728: this runtime as an OAuth protected resource, and Glyphh as the server that signs a client in."""

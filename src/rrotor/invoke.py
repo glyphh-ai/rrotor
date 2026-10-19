@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from rrotor.ada import LimitExceeded
 from rrotor.ctx import Ctx
 from rrotor.errors import ModelError, Wait
 from rrotor.result import Result
@@ -39,6 +40,8 @@ def invoke(step: str, fn: Callable[..., Any], ctx: Ctx, *args: Any) -> Outcome:
     except Wait as wait:
         waited = wait.result if isinstance(wait.result, Result) else failure(step, "E_BAD_RESULT", "bad wait")
         return Outcome(waited, wait.pending)
+    except LimitExceeded as full:  # the precedent cap: a finished run that indexed nothing, never a failure
+        return Outcome(Result.done(full.data))
     except ModelError as err:
         return Outcome(failure(step, err.code, err.message))
     except Exception as err:  # noqa: BLE001  (a model's crash is a failed Result, never an exception)
