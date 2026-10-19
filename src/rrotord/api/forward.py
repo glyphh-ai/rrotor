@@ -8,7 +8,8 @@ a run, and what a forwarded request does where it lands.
   way of the head (`E_RUN_LOST`, 410, when that node is gone). `GET /v1/approvals` gathers every node's.
 - **Commit:** a write done on the head (here, or forwarded to it) is answered once committed: at once without HA
   (on the head's disk), with HA (Enterprise) once a majority of voters hold it (503 `E_NOT_COMMITTED` after 5 s, the
-  entry kept); a head deposed meanwhile answers `E_NO_HEAD`, with `Retry-After`.
+  entry kept); a head deposed meanwhile answers `E_HEAD_LOST` (it may have been applied: never retried blindly);
+  a request refused before anything ran answers `E_NO_HEAD`, with `Retry-After`.
 - **Read-your-writes:** a follower that forwarded a write waits (up to 2 s) until it has applied the seq the head
   answered with before it answers; every answer of a member carries `Rrotor-Cluster-Seq` (the head's last seq, a
   follower's applied one). A caller that moves between nodes may send `Rrotor-Min-Seq: <seq>`: a node behind it
@@ -76,7 +77,7 @@ def leading(s: Services) -> int | None:
 
 async def committed(s: Services, term: int | None) -> None:
     """A write done on the head in `term`: answered once committed (with HA, by a majority of voters), refused
-    E_NO_HEAD if the head was deposed meanwhile, E_NOT_COMMITTED if most voters do not hold it within 5 s."""
+    E_HEAD_LOST if the head was deposed meanwhile, E_NOT_COMMITTED if most voters do not hold it within 5 s."""
     if term is not None and s.cluster is not None:
         await s.cluster.committed(term)
 

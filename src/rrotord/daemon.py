@@ -199,7 +199,7 @@ class Daemon:
 
     async def _deposed(self) -> None:
         """This node was the cluster's head and is no longer: its writing runs in flight fail."""
-        await self.runner.stop_writing("E_NO_HEAD", "This node stopped being the cluster's head during the run.")
+        await self.runner.stop_writing("E_HEAD_LOST", "This node stopped being the cluster's head during the run.")
 
     def _keys_changed(self, change: dict[str, Any]) -> None:
         """The runtime keys' list changed: an audit event, and on a cluster's head a `keys` entry."""

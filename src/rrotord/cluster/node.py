@@ -144,7 +144,13 @@ async def _nothing() -> None:
 
 
 def no_head(message: str = "No head answers this node: writes wait for it.") -> Unavailable:
+    """Refused before anything ran: safe to send again (the SDKs retry it)."""
     return Unavailable(message, code="E_NO_HEAD", headers={"Retry-After": RETRY_AFTER})
+
+
+def head_lost(message: str) -> Unavailable:
+    """The head went while a write was with it: it may have been applied, so it is never sent again blindly."""
+    return Unavailable(message, code="E_HEAD_LOST")
 
 
 async def _no_telemetry(node: str, msg: dict[str, Any]) -> dict[str, Any]:
@@ -869,11 +875,11 @@ class Cluster:
     async def committed(self, term: int) -> None:
         """A write done on this head in `term`, answered once it is committed: at once without HA (on its disk);
         with HA once a majority of voters hold it, else E_NOT_COMMITTED after COMMIT_WITHIN (the entry is kept
-        and committed when they come back). E_NO_HEAD when this node stopped being the head meanwhile."""
+        and committed when they come back). E_HEAD_LOST when this node stopped being the head meanwhile."""
         seq = self.replication.log.last
         for _ in range(int(COMMIT_WITHIN / 0.02) + 1):
             if self.role != "head" or self.raft.term != term:
-                raise no_head("This node stopped being the head during the call: what it wrote may be lost.")
+                raise head_lost("This node stopped being the head during the call: what it wrote may be lost.")
             if self.raft.commit >= seq:
                 return
             await asyncio.sleep(0.02)
@@ -1368,8 +1374,13 @@ class Cluster:
         try:
             got = await channel.request("forward", within=within, **msg)
         except ClusterError as err:
-            if err.code in ("E_NO_HEAD", "E_CLUSTER_CLOSED"):
-                raise no_head("The head went while this request was with it: writes wait for the next.") from None
+            if err.code == "E_NO_HEAD":  # the head refused it before running anything
+                raise no_head("The head stepped down before taking this request: writes wait for the next.") from None
+            if err.code == "E_CLUSTER_CLOSED":  # gone with the request in hand: it may have run
+                raise head_lost(
+                    "The head went while this request was with it: it may have been applied; check before sending "
+                    "it again."
+                ) from None
             raise
         return {k: v for k, v in got.items() if k not in ("type", "id", "ok")}
 

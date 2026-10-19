@@ -114,7 +114,7 @@ async def test_a_head_out_of_touch_answers_not_committed_steps_down_and_what_it_
     await until(lambda: heads(ring) == ["n0"] and ready(ring, "n1") and held(one) == 2, within=20.0)
     with pytest.raises(RrotorError) as caught:
         await zero.cluster.committed(zero.cluster.raft.term - 1)  # a write of an earlier term: deposed meanwhile
-    assert caught.value.code == "E_NO_HEAD" and caught.value.headers == {"Retry-After": "2"}
+    assert caught.value.code == "E_HEAD_LOST" and not caught.value.headers  # it may have been applied: not retried
 
 
 async def test_promotion_under_ha_moves_the_head_only_to_an_up_to_date_voter(ring: Ring):
