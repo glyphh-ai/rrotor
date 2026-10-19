@@ -277,8 +277,9 @@ A git repo; a version is a commit.
   "description": "An app's incidents, remembered: the fix for a new error",
   "python": "3.13",
   "functions": {
-    "record": { "inputs": { "type": "object", "required": ["data"] } },
-    "decide": { "inputs": { "type": "object", "required": ["data"] } },
+    "record": { "writes": true, "inputs": { "type": "object", "required": ["data"] } },
+    "query": { "writes": false, "inputs": { "type": "object", "required": ["data"] } },
+    "decide": { "writes": true, "inputs": { "type": "object", "required": ["data"] } },
     "start": {}
   },
   "needs": ["ada"],
@@ -292,7 +293,7 @@ A git repo; a version is a commit.
 | `name` | `^[a-z][a-z0-9_]{0,62}$`; a deploy names the model by it |
 | `version` | Optional, 1 or more |
 | `description`, `python` | Free text; `python` must be `3.13` |
-| `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask). At least one; `load` and `end` are not functions |
+| `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it changes what a cluster syncs: `true` runs it on the cluster's head, `false` on whichever node the call reaches, read-only there; default the model's `data`) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
 | `hosts` | The hosts a run may reach on 443 (`*.example.com` allowed) |
 | `needs` | The parts it imports from, by name (`["ada"]`) ([10](#10-parts)) |
 | `data` | `true` mounts its persistent data folder at `/data` |
@@ -480,6 +481,14 @@ A refusal is a tool error carrying the API's `{error}`.
 A node a cluster refused (past `max_nodes`, removed, or its key no longer allowing sync) answers 503 with the
 refusal's code to everything but `/healthz` and `/readyz` ([14](#14-the-cluster)).
 
+**In a cluster** ([14](#14-the-cluster)) every route and tool answers the same on every node: a follower sends a
+writing call (`"writes": true`, or any call of a model with data but no Ada), a deploy, and anything about a run
+another node holds (run ids are `<node id>~<uuid>`) to its head, which does it as the same caller; `GET
+/v1/approvals` gathers every node's. A member's answers carry `Rrotor-Cluster-Seq` (the head's last seq, a
+follower's applied one); a follower that forwarded a write answers once it has applied it (up to 2 s), and a request
+with `Rrotor-Min-Seq: <seq>` is answered from a node at least that far, or by the head. No head: 503 `E_NO_HEAD`
+for writes, reads go on; a run on a node no longer in the cluster: 410 `E_RUN_LOST`.
+
 ## 8. Ada
 
 An Ada model is a typed spec and a precedent store, run as a model: a repo with `glyphh.json` (`"needs": ["ada"]`,
@@ -540,7 +549,8 @@ def query(ctx, inputs):
 rrotor runs with no key at all, as **Community** (one node, 5,000 precedents, no sync); a signed **licence key**,
 checked on the node with no network request, lifts those limits to its own (`rrotord/licence_key.py`,
 `rrotord/licence.py`). Built as [`specs/licensing.md`](specs/licensing.md) sections 1 to 4 decide: the node cap is
-enforced at join and sync is gated by the key ([14](#14-the-cluster)); HA follows with elections
+enforced at join, sync is gated by the key, and in a cluster the precedent cap is held by the head, the only
+writer, on the synced store every node holds ([14](#14-the-cluster)); HA follows with elections
 ([Not built yet](#not-built-yet)).
 
 - **The plans** (the server's policy for what it signs; rrotor acts on the key's own numbers): Free $0 (1 node,
@@ -628,8 +638,8 @@ container's privileges, the outbound connections, backups and upgrades are in
   health as `sandbox.container_needs`, one sentence each with the fix. Runs are refused until it is fixed; the API
   is served.
 - **Never paused:** a `pause` is ignored in `self` mode.
-- **Several nodes as one runtime:** the cluster's membership is built ([14](#14-the-cluster)); what they share
-  (replication) is not yet ([Not built yet](#not-built-yet)).
+- **Several nodes as one runtime:** the cluster's membership and replication with a fixed head are built
+  ([14](#14-the-cluster)); failover and elections are not yet ([Not built yet](#not-built-yet)).
 
 ## 13. Logs, audit and drains
 
@@ -685,10 +695,12 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
 
 ## 14. The cluster
 
-Built as [`specs/cluster.md`](specs/cluster.md) build order step 5 decides: the skeleton, with nothing replicated yet
-(`rrotord/cluster/`). Several self-hosted rrotors of one runtime find and authenticate each other, one makes the
-cluster and is its **head**, the rest join it as **followers** up to the key's `max_nodes`. Each node still serves
-from its own `/data`; the store, models, keys and licence are not shared between them yet.
+Built as [`specs/cluster.md`](specs/cluster.md) build order steps 5 and 6 decide: membership, and replication with a
+fixed head (`rrotord/cluster/`). Several self-hosted rrotors of one runtime find and authenticate each other, one
+makes the cluster and is its **head**, the rest join it as **followers** up to the key's `max_nodes`. The head is the
+single writer of what syncs (each Ada model's precedent store, the deployed versions, the runtime keys, the licence
+key) and ships it to every follower as one ordered log; followers serve every read from their replica and forward
+every write to the head.
 
 - **On, and gated by the key:** `RROTOR_CLUSTER=on` (a self-hosted rrotor only) starts the cluster's transport only
   while the licence key held has `cluster_sync_enabled`. Under Community, or a key without it, the listener never
@@ -699,7 +711,10 @@ from its own `/data`; the store, models, keys and licence are not shared between
 - **The transport** (`cluster/transport.py`): a WebSocket on aiohttp on its own listener, `RROTOR_CLUSTER_PORT`
   (7778), never the API's port and never behind the public load balancer. JSON frames with `type` and `id`; a
   request (`hello`, `join`, `ping`, `command`) is answered by an `answer` with its id, `ok` or an `error {code,
-  message}`; the head pushes `removed` unasked. Any other type is `E_CLUSTER_MESSAGE` until replication brings it.
+  message, status, detail}`; the head pushes `removed` unasked, and asks a follower `append`, `snapshot` and
+  `forward` over the follower's own connection. `GET /cluster/v1/versions/<model>/<commit>.tar` and `GET
+  /cluster/v1/snapshot` are plain requests on the same listener, for members only. Any other type is
+  `E_CLUSTER_MESSAGE` (`vote` and `telemetry` come with elections and the aggregate drain).
 - **Mutual TLS from one secret** (`cluster/tls.py`): from `RROTOR_CLUSTER_SECRET` (32 bytes or more, base64) every
   node derives, with HKDF-SHA256, the same Ed25519 cluster CA key and the same CA certificate; at start it makes its
   own key and a leaf from that CA naming its node id. TLS 1.3, a certificate from the cluster CA required on both
@@ -738,11 +753,61 @@ from its own `/data`; the store, models, keys and licence are not shared between
 - **What the rest of rrotor sees:** `GET /readyz`, `GET /v1/cluster`, MCP's `cluster_status` and the health's
   `cluster` ([7](#7-the-api)); the heartbeat's `cluster_id` and `role` ([12](#12-self-hosting)); `cluster_id` and
   `role` on every log line and `cluster_id` on every audit event ([13](#13-logs-audit-and-drains)).
-- **The seams left for what comes next:** `commit_seq` and `applied_seq` are 0 and a joined follower is ready at
-  once (catch-up will make it `catching_up` until within a second of the head); `ha` is false and the term stays 1
-  (manual failover and elections); `ping` carries `applied_seq` for the lag; voters are the first five members by
-  join; the link is still opened by every node, not only the head, and the drain's `rrotor.node.role` resource
-  attribute is `standalone`.
+- **Which calls write** (`manifest.py`): each function's `"writes"`, default the model's `data` (the examples
+  and the Ada skill mark `query`, `facts` and `probabilities` false). A follower runs a `false` one itself, with
+  `/files` and `/data` mounted read-only (`--ro-bind`, and Landlock read-only) and the Ada store opened with the
+  kernel's read-only mode (`Model(..., readonly=True)`, kernel 3.10): a function marked `false` that writes fails
+  `E_READ_ONLY`, naming it, and the store is untouched. A model with data but no Ada keeps state no replication
+  carries: every call to it runs on the head. An older kernel cannot open a store read-only: `E_ADA_KERNEL`.
+- **Forwarding** (`api/forward.py`, `cluster/node.py`): a writing call, a deploy, and continue, cancel, status and
+  log of a run another node holds go to the head over the cluster transport (`forward {op, args, who, target,
+  deadline}`), with the caller as data (its actor, address and route), and the head does them as that caller: its
+  audit events name them, and a forwarded call is audited where it runs, never twice. A run held by another
+  follower is passed on by the head (410 `E_RUN_LOST` when that node is not connected). A run's id names its node,
+  `<node id>~<uuid>` (a plain UUID is the head's, or a run the link opened). `GET /v1/approvals` gathers every
+  node's. A follower with no head answers writes 503 `E_NO_HEAD` and serves reads.
+- **Change capture on the head** (`cluster/capture.py`): before every run of an Ada model, after it (and each of its
+  steps), and every second while runs are in hand, the daemon installs in the store a change table
+  (`_rrotor_changes`) and triggers on `precedents` and `meta` (insert, update, delete, a changed key), reads the
+  keys changed and each row as it is now in one read transaction, appends one `rows` entry per model, and deletes
+  what it shipped. A store captured for the first time is shipped whole (`rows` with `reset` and its schema). A
+  record, `learn`'s weights and the rows it rewrites, `calibrate`'s temperature, `configure`'s settings and a
+  re-encode all travel this way, so `learn` on the head changes every follower's answers.
+- **The log** (`cluster/log.py`): `/data/cluster/log/` on every node, JSON-line segments named by their first seq,
+  each entry `{seq, term, kind, ...}`: `rows`, `deploy {model, version, commit_sha, manifest}` (any version made
+  active, by the API, MCP or the link), `remove`, `keys {hashes}`, `licence {key}`. Committed once on the head's
+  disk (fsynced): Pro and Team. Kept until every member has applied it, and never past `RROTOR_CLUSTER_LOG_KEEP`
+  (the oldest segments go; the newest stays).
+- **Applying** (`cluster/replication.py`): the head ships each follower `append {term, entries, commit_seq}` past
+  what it acknowledged, and waits for new entries when it is in step. The follower appends them to its own log and
+  applies them in order: `rows` in one SQLite transaction on the replica (capture off), `deploy` by fetching the
+  version's `src/` and `venv/` from the head as a tar (no GitHub or PyPI on a follower; a head of another
+  architecture is refused, `E_CLUSTER_ARCH`), `remove`, `keys` into the access list, `licence` offered to its own
+  licence, which checks the signature itself. `applied_seq` is kept in `cluster/state.json`. An entry that does not
+  apply stops the applying there, logged, and the node is not ready until it does. **Replicas are kept in
+  `journal_mode=DELETE`:** the kernel's read-only open reads a WAL file that has no `-wal` and `-shm` beside it as
+  immutable, which a writer would make inconsistent; a rollback-journal file is opened plain `mode=ro`, SQLite's
+  locks keep a read whole (the applier waits on `busy_timeout`), and a run reads the store before an entry or after,
+  never half.
+- **Snapshots and catch-up:** a new node, or one behind what the head's log still holds, is sent `snapshot`: it
+  fetches one tar (every Ada store by SQLite's online backup after the head ships what was pending, every version,
+  the keys, the licence key, the seq it stands at), installs it (each store swapped in atomically), and its log
+  starts after that seq. A member that comes back within the log catches up from the log. A follower is
+  `catching_up` (`/readyz` 503) until it has applied what the head had committed, and again once behind it for
+  more than a second.
+- **Read-your-writes:** `Rrotor-Cluster-Seq` on every member's answers, the follower's wait of up to 2 s for a write
+  it forwarded, and `Rrotor-Min-Seq` ([7](#7-the-api)). `commit_seq` and `applied_seq` in `GET /v1/cluster` are
+  real, and each member's `applied_seq` and `lag` are what it last acknowledged.
+- **The head's other jobs:** only the head opens the runtime's link (a follower's stays `follower`, and closes if
+  it was up when it became one); its `hello` names the node, its cluster and its role. Each follower's ping carries
+  its runtime keys' calls since the last one, which the head adds to its own: its `usage` is the cluster's, with
+  the synced store's precedents. Every node still heartbeats. The precedent cap is the head's to hold, on the
+  synced store: every node holds the same precedents, so a Pro cluster holds 50,000 across its nodes, not 50,000 on
+  each ([9](#9-the-licence)).
+- **The seams left for what comes next:** `ha` is false and the term stays 1 (manual failover and elections); there
+  are no `member` entries yet (membership is kept in `cluster/state.json`); voters are the first five members by
+  join; the snapshot is a plain GET on the listener rather than binary frames on the WebSocket; the drain's
+  `rrotor.node.role` resource attribute is `standalone`.
 
 ## Not built yet
 
@@ -750,14 +815,12 @@ from its own `/data`; the store, models, keys and licence are not shared between
   logged and skipped).
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a model's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
-- **Replication, failover and elections** ([`specs/cluster.md`](specs/cluster.md), build order steps 6 to 8): the
-  cluster's membership is built ([14](#14-the-cluster)), but nothing is shared yet. To come: the head as the single
-  writer of the precedent stores, deployed models, runtime keys and the licence, replicated to followers by an
-  ordered log with snapshots and catch-up; the `writes` manifest key, read-only follower runs and writes forwarded
-  to the head; run ids naming their holder; the head-only link and summed `usage`; manual failover for Pro and Team
-  (`rrotord cluster promote`, terms and fencing) and elected heads for Enterprise (HA). Until then each node of a
-  cluster serves from its own `/data`, and every node opens the runtime's link, so a second node takes it over from
-  the first.
+- **Failover and elections** ([`specs/cluster.md`](specs/cluster.md), build order steps 7 and 8): replication with
+  a fixed head is built ([14](#14-the-cluster)). To come: manual failover for Pro and Team (`rrotord cluster
+  promote`, terms and fencing, a rejoining old head discarding its tail) and elected heads for Enterprise (HA,
+  majority commit, `E_NOT_COMMITTED`, `Retry-After` on `E_NO_HEAD` and the SDKs' retries), and membership kept in
+  the log (`member` entries). Until then the head is fixed: while it is down the cluster serves reads and writes
+  wait for it.
 - **The cluster's packages** (build order step 10): Helm's `cluster.enabled`, Compose's cluster files and Terraform's
   `node_count`, with the cluster port, the secret and `/readyz` as the readiness probe.
 - **The cluster's drain and audit log** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains), build

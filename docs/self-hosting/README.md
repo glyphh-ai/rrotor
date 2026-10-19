@@ -20,11 +20,11 @@ no autoscaling; a second copy of the same runtime is not a replica, it takes the
 
 **Built:** the signed licence key that carries these limits, Community (Free's limits) without one, and the
 precedent cap per node ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains, each
-node its own ([Logs, audit and drains](#logs-audit-and-drains)); a cluster's membership: nodes that find and
-authenticate each other, a head, the key's node cap at join and sync gated by the key ([A cluster](#a-cluster)).
-**Not built yet:** what a cluster shares (replication of the stores, models, keys and licence from the head),
-failover, high availability, the head gathering the cluster's drain and audit log, and the packages' cluster
-settings; until then each node of a cluster serves from its own `/data`. The
+node its own ([Logs, audit and drains](#logs-audit-and-drains)); a cluster: nodes that find and authenticate each
+other, a head, the key's node cap at join, sync gated by the key, and replication from a fixed head (the stores,
+models, keys and licence; writes forwarded to it, reads on every node) ([A cluster](#a-cluster)). **Not built
+yet:** failover, high availability, the head gathering the cluster's drain and audit log, and the packages' cluster
+settings. The
 decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
 server's (`glyphh-ai/server`, `docs/architecture.md`).
 
@@ -69,10 +69,13 @@ server-side logging is on.
 
 ## A cluster
 
-Built so far: membership, with nothing shared yet (each node serves from its own `/data`, and every node opens the
-runtime's link). Several self-hosted rrotors of one runtime, each with its own volume, behind your load balancer:
-they find each other, authenticate each other with mutual TLS derived from one secret you make, and one of them,
-the **head**, admits the others up to your key's `max_nodes`. A key without cluster sync (Community, Free) never
+Several self-hosted rrotors of one runtime, each with its own volume, behind your load balancer: they find each
+other, authenticate each other with mutual TLS derived from one secret you make, and one of them, the **head**,
+admits the others up to your key's `max_nodes`. The head is the only writer: it holds the runtime's link, and ships
+the precedent stores, the deployed models, the runtime keys and the licence key to every other node, which serves
+reads from its own copy and sends writes (functions marked `"writes": true`, deploys) to the head. While the head
+is down the others go on serving reads and answer writes 503 `E_NO_HEAD`; failover (moving the head) is not built
+yet, so the head comes back by restarting. A key without cluster sync (Community, Free) never
 starts it: rrotor logs `cluster synchronisation disabled under the Community licence` and runs alone.
 
 - **The port:** **7778** (`RROTOR_CLUSTER_PORT`), node to node only. Open it between the nodes and nowhere else;
@@ -81,7 +84,13 @@ starts it: rrotor logs `cluster synchronisation disabled under the Community lic
   it can join (up to `max_nodes`). To change it, set the new one in `RROTOR_CLUSTER_SECRET` and the old one in
   `RROTOR_CLUSTER_SECRET_PREVIOUS` on each node in turn, then remove the old one.
 - **Readiness:** `GET /readyz` (open) is 200 while a node may take traffic and 503 with the reason (`joining`,
-  `no_cluster`, `refused`) otherwise: point the load balancer's health check at it, and liveness at `/healthz`.
+  `catching_up`, `no_cluster`, `refused`) otherwise: point the load balancer's health check at it, and liveness at
+  `/healthz`. A new node is `catching_up` until it has taken the head's snapshot and log.
+- **One architecture:** every node runs the same image on the same CPU architecture; a node of another refuses the
+  head's models (`E_CLUSTER_ARCH`) and stays not ready.
+- **Mark your functions:** `"writes": false` on each function that only reads (an Ada model's `query`, `facts`,
+  `probabilities`) lets every node answer it; everything else runs on the head. A function marked `false` that
+  writes fails `E_READ_ONLY` on another node.
 - **The node past `max_nodes`** is refused (`E_CLUSTER_FULL`), logged at error, kept out of the load balancer (it
   answers 503 to everything but `/healthz` and `/readyz`), keeps its `/data`, and asks again every minute.
 - **Looking at it:** `GET /v1/cluster` (or the MCP tool `cluster_status`): the cluster's id, the head, every member,
@@ -102,7 +111,7 @@ starts it: rrotor logs `cluster synchronisation disabled under the Community lic
 | `RROTOR_CLUSTER_SECRET_PREVIOUS` | | Trusted too, while a new secret rolls out |
 | `RROTOR_CLUSTER_HEAD` | the lowest node id | The node that makes the cluster the first time. Without it, the lowest id makes it once every peer has answered: set it if a peer may be down at the very first start |
 | `RROTOR_CLUSTER_EVICT_AFTER` | `24h` | A member unseen this long is removed by the head (`s`, `m`, `h`, `d`) |
-| `RROTOR_CLUSTER_LOG_KEEP` | `1g` | The replication log kept for catch-up (`k`, `m`, `g`); read now, used once replication is built |
+| `RROTOR_CLUSTER_LOG_KEEP` | `1g` | The replication log kept for catch-up (`k`, `m`, `g`); a node further behind takes a snapshot |
 
 ## Logs, audit and drains
 
