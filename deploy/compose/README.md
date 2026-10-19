@@ -20,3 +20,14 @@ The runtime's connector is then at `https://<public host>/mcp`. Linux hosts on U
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.airgap.yml up -d
 ```
+
+**A cluster** (a licence key with cluster sync; `RROTOR_CLUSTER_SECRET` in `.env`, `openssl rand -base64 32`): to
+try one, three nodes and Caddy balancing over them on this machine,
+
+```sh
+docker compose -f docker-compose.cluster.yml up -d
+```
+
+For high availability, `docker-compose.node.yml` on each of several machines, with `RROTOR_NODE_ID`,
+`RROTOR_CLUSTER_ADVERTISE` and `RROTOR_CLUSTER_PEERS` in each `.env`, port 7778 open between them only and your load
+balancer in front of port 7777. See `docs/self-hosting/compose.md`, "A cluster".

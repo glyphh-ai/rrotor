@@ -1,0 +1,8 @@
+# A three-node cluster: the chart makes the cluster secret; the NetworkPolicy, the PDB and the spread are on.
+publicHost: rrotor.example.com
+runtime:
+  id: rt_example
+  token: example-token
+cluster:
+  enabled: true
+replicas: 3

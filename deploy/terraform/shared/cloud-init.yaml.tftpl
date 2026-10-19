@@ -16,6 +16,7 @@ write_files:
     permissions: "0644"
     encoding: b64
     content: ${compose}
+%{ if node_compose == "" ~}
   - path: /opt/rrotor/Caddyfile
     permissions: "0644"
     encoding: b64
@@ -29,6 +30,17 @@ write_files:
           volumes:
             - /mnt/rrotor/caddy:/data
       volumes:
+%{ else ~}
+  - path: /opt/rrotor/docker-compose.node.yml
+    permissions: "0644"
+    encoding: b64
+    content: ${node_compose}
+  # rrotor's data on the data disk, so it outlives the instance.
+  - path: /opt/rrotor/docker-compose.override.yml
+    permissions: "0644"
+    content: |
+      volumes:
+%{ endif ~}
         rrotor-data:
           driver: local
           driver_opts:
@@ -55,9 +67,29 @@ write_files:
       mountpoint -q /mnt/rrotor || mount /mnt/rrotor
       mkdir -p /mnt/rrotor/data /mnt/rrotor/caddy
       chown 10001:10001 /mnt/rrotor/data
+%{ if node_compose != "" ~}
+  - path: /opt/rrotor/cluster-secret.sh
+    permissions: "0700"
+    content: |
+      #!/bin/sh
+      # The cluster secret, from the cloud's secret store with this instance's own identity, into .env (root only).
+      set -eu
+      for i in $(seq 1 60); do
+        s=$(${secret_fetch}) && [ -n "$s" ] && break
+        s=; sleep 5
+      done
+      [ -n "$s" ] || { echo "rrotor: the cluster secret could not be read" >&2; exit 1; }
+      sed -i '/^RROTOR_CLUSTER_SECRET=/d' /opt/rrotor/.env
+      printf 'RROTOR_CLUSTER_SECRET=%s\n' "$s" >> /opt/rrotor/.env
+%{ endif ~}
 
 runcmd:
   - sysctl --system
   - /opt/rrotor/mount-data.sh
   - systemctl enable --now docker
+%{ if node_compose == "" ~}
   - cd /opt/rrotor && docker compose up -d
+%{ else ~}
+  - /opt/rrotor/cluster-secret.sh
+  - cd /opt/rrotor && docker compose -f docker-compose.node.yml -f docker-compose.override.yml up -d
+%{ endif ~}

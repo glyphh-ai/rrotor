@@ -5,8 +5,9 @@ machine, cluster or cloud account, at your own address; Glyphh does not host it.
 `ghcr.io/glyphh-ai/rrotor:<version>` (and `:latest`), with the Ada part built in; the licence, not the image, says
 whether Ada runs.
 
-A self-hosted rrotor is **one box**: one container, one `/data`, one public host. There is no high availability and
-no autoscaling; a second copy of the same runtime is not a replica, it takes the link over from the first.
+A self-hosted rrotor is **one box** unless you make it a [cluster](#a-cluster): one container, one `/data`, one
+public host. A second copy of the same runtime outside a cluster is not a replica, it takes the link over from the
+first. There is no autoscaling.
 
 ## The plans
 
@@ -22,9 +23,9 @@ no autoscaling; a second copy of the same runtime is not a replica, it takes the
 precedent cap per node ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains, each
 node its own ([Logs, audit and drains](#logs-audit-and-drains)); a cluster: nodes that find and authenticate each
 other, a head, the key's node cap at join, sync gated by the key, and replication from a fixed head (the stores,
-models, keys and licence; writes forwarded to it, reads on every node) ([A cluster](#a-cluster)). **Not built
-yet:** failover, high availability, the head gathering the cluster's drain and audit log, and the packages' cluster
-settings. The
+models, keys and licence; writes forwarded to it, reads on every node) ([A cluster](#a-cluster)), and each package
+running one. **Not built yet:** failover, high availability, and the head gathering the cluster's drain and audit
+log. The
 decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
 server's (`glyphh-ai/server`, `docs/architecture.md`).
 
@@ -32,9 +33,9 @@ server's (`glyphh-ai/server`, `docs/architecture.md`).
 
 | | What you run | What it needs | Guide |
 |---|---|---|---|
-| **Docker Compose** | rrotor and Caddy (HTTPS) on one machine: `docker compose up -d` | A Linux machine with Docker and Compose v2, ports 80 and 443 reachable, a DNS name pointing at it | [compose.md](compose.md), `deploy/compose/` |
-| **Helm** | A StatefulSet of one replica with its own volume, a Service and an Ingress | Kubernetes 1.33 or later that allows the sandbox's privileges (below), an Ingress controller, a storage class; cert-manager if you want it to issue the certificate | [helm.md](helm.md), `deploy/helm/rrotor/` |
-| **Terraform** | One VM on AWS or Google Cloud running the Compose package, `/data` on its own disk | An AWS account or a Google Cloud project, and a DNS zone (Route 53 or Cloud DNS) or a name you point yourself | [terraform.md](terraform.md), `deploy/terraform/` |
+| **Docker Compose** | rrotor and Caddy (HTTPS) on one machine: `docker compose up -d`. A cluster: three nodes on one machine to try it, or a node file per machine | A Linux machine with Docker and Compose v2, ports 80 and 443 reachable, a DNS name pointing at it | [compose.md](compose.md), `deploy/compose/` |
+| **Helm** | A StatefulSet of one replica with its own volume, a Service and an Ingress; or, with `cluster.enabled`, `replicas` of them | Kubernetes 1.33 or later that allows the sandbox's privileges (below), an Ingress controller, a storage class; cert-manager if you want it to issue the certificate | [helm.md](helm.md), `deploy/helm/rrotor/` |
+| **Terraform** | One VM on AWS or Google Cloud running the Compose package, `/data` on its own disk; or `node_count` of them behind the cloud's load balancer | An AWS account or a Google Cloud project, and a DNS zone (Route 53 or Cloud DNS) or a name you point yourself | [terraform.md](terraform.md), `deploy/terraform/` |
 
 Each starts the same way:
 
@@ -112,6 +113,16 @@ starts it: rrotor logs `cluster synchronisation disabled under the Community lic
 | `RROTOR_CLUSTER_HEAD` | the lowest node id | The node that makes the cluster the first time. Without it, the lowest id makes it once every peer has answered: set it if a peer may be down at the very first start |
 | `RROTOR_CLUSTER_EVICT_AFTER` | `24h` | A member unseen this long is removed by the head (`s`, `m`, `h`, `d`) |
 | `RROTOR_CLUSTER_LOG_KEEP` | `1g` | The replication log kept for catch-up (`k`, `m`, `g`); a node further behind takes a snapshot |
+
+Each package sets these for you; you choose the number of nodes (at most your key's `max_nodes`) and keep the
+secret:
+
+| | Nodes | Found by | The secret | In front |
+|---|---|---|---|---|
+| Compose, one machine ([compose.md](compose.md#a-cluster)) | `rrotor-0..2` in `docker-compose.cluster.yml` | `RROTOR_CLUSTER_PEERS` | `RROTOR_CLUSTER_SECRET` in `.env` | Caddy, over the ready nodes. For trying, not HA |
+| Compose, per machine ([compose.md](compose.md#a-cluster)) | `docker-compose.node.yml` on each | `RROTOR_CLUSTER_PEERS`, private addresses | The same in each `.env` | Your load balancer |
+| Helm ([helm.md](helm.md#a-cluster)) | `cluster.enabled`, `replicas` (default 3) | `RROTOR_CLUSTER_DNS`, the headless Service | Made on install and kept, or `cluster.existingSecret` | The Service and Ingress, ready pods only |
+| Terraform ([terraform.md](terraform.md#a-cluster)) | `node_count`, across zones | `RROTOR_CLUSTER_PEERS`, fixed private addresses | `cluster_secret` (or made), in Secrets Manager or Secret Manager | An AWS NLB or Google's HTTPS load balancer |
 
 ## Logs, audit and drains
 
@@ -197,7 +208,8 @@ an unprivileged user (uid 10001) on a read-only root filesystem, and its own sec
 | Your OpenTelemetry collector | The drain: logs, metrics, traces, audit events | `OTEL_EXPORTER_OTLP_ENDPOINT` set |
 | `api.glyphh.ai:443` (`/v1/otlp/v1/…`) | Server-side logging | `RROTOR_SERVER_LOGS=on` |
 
-Nothing connects in to rrotor except your callers on 443 (and 80 for the certificate and the redirect). The
+Nothing connects in to rrotor except your callers on 443 (and 80 for the certificate and the redirect), and, in a
+cluster, the other nodes on 7778. The
 Glyphh server never connects to it: everything it sends comes down the link rrotor opened. What crosses that link,
 and what the heartbeat carries, is in [licensing.md](licensing.md).
 
@@ -233,7 +245,8 @@ Back that up and you can rebuild rrotor anywhere.
   `docker compose stop rrotor`, then `docker run --rm -v rrotor_rrotor-data:/data:ro -v "$PWD":/out debian:trixie-slim tar czf /out/rrotor-data.tar.gz -C /data .`,
   then `docker compose start rrotor`.
 - **Disk snapshots:** an EBS snapshot (`data_volume_id`), a Compute Engine snapshot (`data_disk`), or a CSI
-  VolumeSnapshot of the claim `data-<name>-0` (`data-rrotor-0` for a release named `rrotor`). A snapshot of a running rrotor is crash-consistent: the
+  VolumeSnapshot of the claim `data-<name>-0` (`data-rrotor-0` for a release named `rrotor`). In a cluster, back up
+  the head's: every node holds the same stores, and a new node takes its copy from the head. A snapshot of a running rrotor is crash-consistent: the
   link's outbox replays what was not acknowledged, and a run that was in flight is lost.
 - **A backup holds the runtime token.** Keep it as you keep the token. Restoring it on a second machine while the
   first still runs makes two of the same runtime: the newer link takes over, the older stops (`replaced`).

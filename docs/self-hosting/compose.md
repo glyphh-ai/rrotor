@@ -48,6 +48,8 @@ docker compose up -d
 | `Caddyfile` | Serve `RROTOR_PUBLIC_HOST` over HTTPS and pass every request to `rrotor:7777` |
 | `.env.example` | The settings: runtime id and token, public host, version, size; commented, a drain to your OpenTelemetry collector (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, …), `RROTOR_SERVER_LOGS`, `RROTOR_LOG_PAYLOADS` and the audit log's retention ([Logs, audit and drains](README.md#logs-audit-and-drains)) |
 | `docker-compose.airgap.yml`, `Caddyfile.airgap` | The air-gapped overlay (below) |
+| `docker-compose.cluster.yml`, `Caddyfile.cluster` | Three nodes and Caddy on one machine, to try a cluster ([below](#a-cluster)) |
+| `docker-compose.node.yml` | One node of a cluster across machines, behind your load balancer ([below](#a-cluster)) |
 
 rrotor's port is not published: only Caddy reaches it, on the Compose network. To put your own load balancer or
 reverse proxy in front instead of Caddy, remove the `caddy` service and publish rrotor's 7777 to it on a private
@@ -84,6 +86,44 @@ docker compose -f docker-compose.yml -f docker-compose.airgap.yml up -d
 
 With the link off there is no Glyphh sign-in to check, so callers use runtime keys. Renew the licence before it
 expires: put the next key in `GLYPHH_LICENSE_KEY` and `docker compose -f docker-compose.yml -f docker-compose.airgap.yml up -d`.
+
+## A cluster
+
+Several nodes of one runtime ([README, A cluster](README.md#a-cluster)). Both files reuse `docker-compose.yml`'s
+rrotor (`extends`) and need a licence key with cluster sync and, in `.env`, the secret:
+
+```sh
+echo "RROTOR_CLUSTER_SECRET=$(openssl rand -base64 32)" >> .env
+```
+
+**To try one, on one machine:** `docker-compose.cluster.yml` runs `rrotor-0`, `rrotor-1` and `rrotor-2`, each with
+its own volume (`rrotor-cluster_rrotor-<n>-data`) and node id, finding each other by
+`RROTOR_CLUSTER_PEERS=rrotor-0:7778,rrotor-1:7778,rrotor-2:7778`, `rrotor-0` the head; Caddy
+(`Caddyfile.cluster`) balances over the nodes whose `/readyz` answers 200. One machine is still one failure: this is
+not high availability. Give the machine three times rrotor's memory.
+
+```sh
+docker compose -f docker-compose.cluster.yml up -d
+docker compose -f docker-compose.cluster.yml ps     # each node healthy; Caddy sends only to the ready ones
+```
+
+**For high availability, one node per machine:** `docker-compose.node.yml` on each of N machines (rrotor alone,
+ports 7777 and 7778 published), the same `.env` on each but for this machine's id and private address:
+
+```sh
+RROTOR_NODE_ID=rrotor-0
+RROTOR_CLUSTER_ADVERTISE=10.0.1.10:7778
+RROTOR_CLUSTER_PEERS=10.0.1.10:7778,10.0.2.10:7778,10.0.3.10:7778
+RROTOR_CLUSTER_HEAD=rrotor-0     # optional: the node that makes the cluster the first time
+```
+
+then `docker compose -f docker-compose.node.yml up -d` on each. Open **7778 between the machines only**, and put a
+load balancer in front of **7777** on every machine: it ends TLS for the public host, passes `Host` through, and
+health-checks `GET /readyz` (the Terraform modules do this for you, [terraform.md](terraform.md#a-cluster)). A
+missing setting stops Compose with its name.
+
+Run the cluster's commands on a node: `docker compose -f docker-compose.node.yml exec rrotor rrotord cluster leave
+rrotor-2` (or `exec rrotor-0` with the cluster file). Upgrade one node at a time: the others serve meanwhile (writes wait while the head restarts).
 
 ## Upgrade, back up, remove
 
