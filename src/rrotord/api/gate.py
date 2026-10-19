@@ -13,7 +13,10 @@ everything but its health. Each request served with a runtime key is counted for
 sign-in is no key and is not counted.
 
 Self-hosted: the hosted gate at the one exact host it was given (RROTOR_PUBLIC_HOST), with nothing replayed and
-never paused (its owner's machine has no hosted hours)."""
+never paused (its owner's machine has no hosted hours).
+
+Whoever the gate lets in is who the audit log names for what the request does (rrotord/audit.py): the local token's
+`local`, a runtime key's SHA-256, a sign-in's subject; with the request's address and its route (rest or mcp)."""
 
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ from aiohttp import web
 from aiohttp.typedefs import Middleware
 
 from rrotord.access import Access
+from rrotord.audit import WHO, Who, client_of
 from rrotord.config import Config
 from rrotord.errors import Forbidden, RrotorError, Unauthorized
 from rrotord.introspect import Introspector
@@ -38,6 +42,11 @@ MACHINE = re.compile(r"^[0-9a-z]{6,32}$")
 REPLAY = "fly-replay"
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
+
+
+def admit(request: web.Request, actor: dict[str, str | None]) -> None:
+    """Who the request is for, from here on (the app's outer middleware forgets it after the request)."""
+    WHO.set(Who(actor, client_of(request), "mcp" if request.path == "/mcp" else "rest"))
 
 
 def same(token: str, digest: str) -> bool:
@@ -123,6 +132,7 @@ def gate(config: Config, access: Access, introspect: Introspector | None = None)
         digest = config.local_token_sha256
         if digest is None or not token or not same(token, digest):
             raise Unauthorized("Send the local token: Authorization: Bearer <local token>.")
+        admit(request, {"type": "local"})
         return await handler(request)
 
     @web.middleware
@@ -138,8 +148,10 @@ def gate(config: Config, access: Access, introspect: Introspector | None = None)
         if not token:
             raise challenge(request, False, config.public_host)
         key = access.match(token)
-        if key is None and not (introspect is not None and await introspect.active(token)):
+        signed, sub = (False, None) if key is not None or introspect is None else await introspect.check(token)
+        if key is None and not signed:
             raise challenge(request, True, config.public_host)
+        admit(request, {"type": "key", "key_sha256": key} if key is not None else {"type": "sign-in", "sub": sub})
         if access.paused is not None and config.mode == "hosted":
             raise RrotorError(
                 "This runtime is paused: its plan's hosted hours for the month are spent.",

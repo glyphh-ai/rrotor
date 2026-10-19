@@ -1,4 +1,5 @@
-"""rrotord, put together: the sandbox checked, the runner, the link and the API, until it is told to stop."""
+"""rrotord, put together: the sandbox checked, the runner, the link and the API, until it is told to stop; its log
+lines naming this node, its audit events (kept on Enterprise), and, when one is set, its drain."""
 
 from __future__ import annotations
 
@@ -13,11 +14,14 @@ import aiohttp
 from aiohttp import web
 
 from rrotord import VERSION
+from rrotord import log as logs
 from rrotord.access import Access
 from rrotord.api.app import make
 from rrotord.api.routes import Services
+from rrotord.audit import SERVER, Audit, current
 from rrotord.config import Config
 from rrotord.deploy import Deployer
+from rrotord.drain import Drain, warning
 from rrotord.errors import RrotorError
 from rrotord.heartbeat import Heartbeat
 from rrotord.introspect import Introspector
@@ -36,6 +40,7 @@ from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
 from rrotord.runner.record import Records
 from rrotord.sandbox.probe import Layers, container_needs, probe
+from rrotord.store import read_json, write_json
 
 log = logging.getLogger("rrotor")
 EXPIRE_EVERY = 30.0
@@ -57,10 +62,13 @@ class Daemon:
     link: LinkClient = field(init=False)
     handler: LinkHandler = field(init=False)
     heartbeat: Heartbeat | None = field(init=False)
+    audit: Audit = field(init=False)
+    drain: Drain | None = field(init=False)
     session: aiohttp.ClientSession | None = None
 
     def __post_init__(self) -> None:
         c = self.config
+        logs.identify(node_id=c.node_id)
         if c.mode == "self" and self.layers.checks.get("bubblewrap", {}).get("ok") is False:
             self.layers.needs = container_needs()  # its owner runs the container: say what it lacks
             log.warning("bwrap cannot start: the container lacks", extra={"needs": self.layers.needs})
@@ -68,10 +76,33 @@ class Daemon:
         self.deployer = Deployer(models, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
         self.licence = Licence(c.data, c.runtime_id)
+        self.audit = Audit(
+            c.data / "audit",
+            c.node_id,
+            tier=lambda: self.licence.limits().tier,
+            retention_days=c.audit_retention_days,
+            max_mb=c.audit_max_mb,
+            payloads=c.log_payloads,
+        )
+        self.licence.on_event = self._licence_event
         self.licence.start(c.licence_env)  # never fatal: a bad key is logged and the node runs as Community
-        self.access = Access(c.data, c.keys_sha256)
+        self.access = Access(
+            c.data, c.keys_sha256, on_change=lambda change: self.audit.emit("keys.changed", who=SERVER, **change)
+        )
+        credentials = Credentials(c.data)
+        if (
+            c.runtime_id
+            and c.runtime_token
+            and (credentials.runtime_id, credentials.token) != (c.runtime_id, c.runtime_token)
+        ):
+            credentials.set(c.runtime_id, c.runtime_token)  # hosted and self: from the environment
+        self.drain = (
+            Drain(c, runtime_id=credentials.runtime_id, audit=self.audit, token=lambda: credentials.token)
+            if Drain.wanted(c)
+            else None
+        )
         self.precedents = Precedents(models, cap=lambda: self.licence.limits().max_precedents)
-        self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access)  # type: ignore[arg-type]
+        self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access, self.audit)  # type: ignore[arg-type]
         self.runner = Runner(
             models=models,
             records=Records(c.data),
@@ -82,15 +113,10 @@ class Daemon:
             notify=handler.notify,
             parts=self.parts,
             licence=self.licence,
+            audit=self.audit,
+            telemetry=self.drain.telemetry if self.drain is not None else None,
         )
         handler.runner = self.runner
-        credentials = Credentials(c.data)
-        if (
-            c.runtime_id
-            and c.runtime_token
-            and (credentials.runtime_id, credentials.token) != (c.runtime_id, c.runtime_token)
-        ):
-            credentials.set(c.runtime_id, c.runtime_token)  # hosted and self: from the environment
         self.link = LinkClient(
             url=c.link_url,
             version=VERSION,
@@ -117,6 +143,34 @@ class Daemon:
             if c.mode == "self" and c.link
             else None
         )
+        if self.drain is not None:
+            self._gauges(self.drain)
+
+    def _gauges(self, drain: Drain) -> None:
+        """What the drain's metrics watch: each model's precedents and the cap, the link's state."""
+        t = drain.telemetry
+        t.gauge("rrotor.precedents", lambda: [(n, {"model": m}) for m, n in self.precedents.by_model.items()])
+        t.gauge(
+            "rrotor.precedents.cap",
+            lambda: [(float(cap), {})] if (cap := self.licence.limits().max_precedents) is not None else [],
+        )
+        t.gauge("rrotor.link.state", lambda: [(1.0, {"state": self.link.state})])
+
+    def _licence_event(self, kind: str, detail: dict[str, Any]) -> None:
+        """A licence key taken, past grace or refused, as the audit log tells it: from the heartbeat or `welcome`,
+        the server's doing; from `PUT /v1/licence`, its caller's; from the environment or a file, rrotor's."""
+        self.audit.emit(kind, who=SERVER if detail.get("source") in ("heartbeat", "welcome") else current(), **detail)
+
+    def server_logs(self) -> None:
+        """At every start: server-side logging's warning while it is on; turning it on or off is an audit event."""
+        on, path = self.config.server_logs, self.config.data / "logging.json"
+        if on:
+            log.warning(warning(self.config.server))
+        saved = read_json(path)
+        before = saved.get("server_logs") if isinstance(saved, dict) else False
+        if before != on:
+            self.audit.emit("config.server_logs", on=on)
+            write_json(path, {"server_logs": on})
 
     async def _fetch(self, url: str) -> bytes:
         """A part's tarball by URL (its release asset), at most 256 MB."""
@@ -165,6 +219,8 @@ class Daemon:
             self.handler.report,
             self.heartbeat,
             self.precedents,
+            self.audit,
+            self.drain,
         )
 
     def install_builtin(self) -> list[str]:
@@ -236,6 +292,9 @@ class Daemon:
                 log.exception("reporting usage failed")
 
     async def serve(self, stop: asyncio.Event) -> None:
+        if self.drain is not None:
+            self.drain.start()
+        self.server_logs()
         for stem in self.install_builtin():
             log.info("built-in part installed", extra={"part": stem})
         await self.runner.recover()
@@ -253,6 +312,8 @@ class Daemon:
         loop.add_signal_handler(signal.SIGHUP, self.reread)
         if self.heartbeat is not None:
             tasks.append(asyncio.create_task(self.heartbeat.run()))
+        if self.drain is not None:
+            tasks.append(asyncio.create_task(self.drain.run()))
         await stop.wait()
         try:
             await self.report_usage()  # the last minute's calls, while the link may still carry them
@@ -267,6 +328,8 @@ class Daemon:
         if self.session is not None:
             await self.session.close()
         log.info("rrotor stopped")
+        if self.drain is not None:
+            await self.drain.stop()  # the last lines, "stopped" with them
 
 
 async def main(config: Config) -> None:  # pragma: no cover  (the process itself: exercised by the image's tests)

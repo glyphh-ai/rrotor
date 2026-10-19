@@ -67,3 +67,10 @@ async def test_the_oldest_answers_go_when_too_many_are_kept(tmp_path):
         now[0] += 0.001
         await i.active(f"t{n}")
     assert len(i.answers) == KEEP - KEEP // 10 + 1
+
+
+async def test_the_subject_signed_in_is_kept_with_the_answer(tmp_path):
+    cloud = Cloud([(200, {"active": True, "sub": "user_1"}), (200, {"active": True, "sub": 7})])
+    i = Introspector("https://c", credentials(tmp_path), cloud.post)
+    assert await i.check("a") == (True, "user_1") and await i.check("a") == (True, "user_1")
+    assert await i.check("b") == (True, None) and len(cloud.calls) == 2

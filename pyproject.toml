@@ -8,6 +8,11 @@ dependencies = [
     "pydantic>=2.10",
     "jsonschema>=4.23",
     "cryptography>=43",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-otlp-proto-http==1.45.1",
+    "opentelemetry-proto==1.45.1",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
 ]
 
 [project.scripts]

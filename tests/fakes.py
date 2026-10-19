@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -317,3 +318,101 @@ def outcome(run: Any) -> dict[str, Any]:
     """A finished run's result: a test reads it only after the run has ended, so it is there."""
     assert run.result is not None, run
     return dict(run.result)
+
+
+class FakeCollector:
+    """An OTLP/HTTP receiver in this process: the customer's collector at /v1/<signal> and Glyphh's at
+    /v1/otlp/v1/<signal>; each request kept as (signal, the decoded request, its headers). `down` answers 503."""
+
+    def __init__(self) -> None:
+        self.got: dict[str, list[tuple[str, Any, dict[str, str]]]] = {"collector": [], "glyphh": []}
+        self.down = False
+        self.server: Any = None
+
+    async def start(self) -> str:
+        from aiohttp import web
+        from aiohttp.test_utils import TestServer
+
+        from rrotord.otel import decoded
+
+        async def take(request: web.Request) -> web.Response:
+            if self.down:
+                return web.Response(status=503)
+            body = await request.read()
+            if body[:2] == b"\x1f\x8b":
+                body = gzip.decompress(body)
+            signal = request.match_info["signal"]
+            who = "glyphh" if request.path.startswith("/v1/otlp/") else "collector"
+            self.got[who].append((signal, decoded(signal, body), dict(request.headers)))
+            return web.Response(status=200, body=b"", content_type="application/x-protobuf")
+
+        app = web.Application()
+        app.router.add_post("/v1/{signal}", take)
+        app.router.add_post("/v1/otlp/v1/{signal}", take)
+        self.server = TestServer(app, host="127.0.0.1")
+        await self.server.start_server(access_log=None)
+        return f"http://127.0.0.1:{self.server.port}"
+
+    async def close(self) -> None:
+        await self.server.close()
+
+    def logs(self, who: str = "collector") -> list[dict[str, Any]]:
+        """Every log record received: its body, event name, severity and attributes."""
+        from rrotord.otel import attributes_of
+
+        return [
+            {
+                "body": r.body.string_value,
+                "event_name": r.event_name,
+                "severity": r.severity_text,
+                "trace_id": r.trace_id.hex(),
+                **attributes_of(r.attributes),
+            }
+            for signal, req, _ in self.got[who]
+            if signal == "logs"
+            for rl in req.resource_logs
+            for sl in rl.scope_logs
+            for r in sl.log_records
+        ]
+
+    def spans(self, who: str = "collector") -> list[dict[str, Any]]:
+        from rrotord.otel import attributes_of
+
+        return [
+            {
+                "name": s.name,
+                "trace_id": s.trace_id.hex(),
+                "parent": s.parent_span_id.hex(),
+                **attributes_of(s.attributes),
+            }
+            for signal, req, _ in self.got[who]
+            if signal == "traces"
+            for rs in req.resource_spans
+            for ss in rs.scope_spans
+            for s in ss.spans
+        ]
+
+    def metrics(self, who: str = "collector") -> set[str]:
+        return {
+            m.name
+            for signal, req, _ in self.got[who]
+            if signal == "metrics"
+            for rm in req.resource_metrics
+            for sm in rm.scope_metrics
+            for m in sm.metrics
+        }
+
+    def resources(self, who: str = "collector") -> list[dict[str, Any]]:
+        from rrotord.otel import attributes_of
+
+        found = []
+        for signal, req, _ in self.got[who]:
+            groups = {"logs": req.resource_logs if signal == "logs" else []}
+            groups["traces"] = req.resource_spans if signal == "traces" else []
+            groups["metrics"] = req.resource_metrics if signal == "metrics" else []
+            found += [attributes_of(g.resource.attributes) for g in groups[signal]]
+        return found
+
+    def raw(self, who: str) -> bytes:
+        """Everything received, serialized again: to grep for what must never be there."""
+        return b"".join(req.SerializeToString() for _, req, _ in self.got[who])

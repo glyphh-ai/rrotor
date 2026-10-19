@@ -91,9 +91,9 @@ class Vouches:
         self.good = set(good)
         self.asked: list[str] = []
 
-    async def active(self, token: str) -> bool:
+    async def check(self, token: str) -> tuple[bool, str | None]:
         self.asked.append(token)
-        return token in self.good
+        return (True, "user_1") if token in self.good else (False, None)
 
 
 async def test_a_glyphh_sign_in_the_cloud_vouches_for_lets_a_call_in_and_a_refusal_says_where_to_sign_in(hosted):

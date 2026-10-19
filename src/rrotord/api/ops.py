@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from rrotord.errors import BadRequest
+from rrotord.errors import BadRequest, RrotorError
 from rrotord.models import Version
 from rrotord.runner.record import Run
 
@@ -58,12 +58,27 @@ async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
     commit, bundle, repo, token = data.get("commit"), data.get("bundle"), data.get("repo"), data.get("token")
     if not isinstance(commit, str):
         raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
-    if isinstance(bundle, str):
-        version, source = await deploy_bundle(s, bundle, commit), None
-    elif isinstance(repo, str) and (token is None or isinstance(token, str)):
-        version, source = await s.deployer.from_repo(repo, commit, token), repo
-    else:
-        raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
+    try:
+        if isinstance(bundle, str):
+            version, source = await deploy_bundle(s, bundle, commit), None
+        elif isinstance(repo, str) and (token is None or isinstance(token, str)):
+            version, source = await s.deployer.from_repo(repo, commit, token), repo
+        else:
+            raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
+    except RrotorError as err:
+        if s.audit is not None:
+            outcome = {"status": "failed", "code": err.code}
+            s.audit.emit("model.deploy_failed", repo=repo, commit_sha=commit, outcome=outcome)
+        raise
+    if s.audit is not None:
+        s.audit.emit(
+            "model.deploy",
+            model=version.model,
+            version=version.version,
+            commit_sha=version.commit_sha,
+            repo=source,
+            outcome={"status": "done", "code": None},
+        )
     if s.report is not None:
         await s.report(version, source)
     return version.to_json()

@@ -1,7 +1,11 @@
 """What the Cloud's messages do here: a welcome's licence key is offered, a call opens a run, continue and cancel go
 to it, deploy, activate and remove change the versions. Every run the Cloud called answers its Results up the link; a
 deploy answers `deployed`, or an event `deploy_failed` (protocol 1 has no refusal of its own). Every other deploy
-(the API's and its MCP's) reports `deployed` through here too."""
+(the API's and its MCP's) reports `deployed` through here too.
+
+What the Cloud asks for is done as `server` (rrotord/audit.py): its calls, continues and cancels are audit events
+like any caller's, and its deploys, activations and removals are `model.deploy`, `model.activate`,
+`model.remove` or `model.deploy_failed`."""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import logging
 from typing import Any
 
 from rrotord.access import Access
+from rrotord.audit import SERVER, Audit, acting
 from rrotord.deploy import Deployer
 from rrotord.errors import RrotorError
 from rrotord.licence import Licence
@@ -29,9 +34,15 @@ class LinkHandler:
         deployer: Deployer,
         licence: Licence | None = None,
         access: Access | None = None,
+        audit: Audit | None = None,
     ) -> None:
         self.models, self.runner, self.deployer, self.licence, self.access = models, runner, deployer, licence, access
+        self.audit = audit
         self.link: LinkClient | None = None
+
+    def _audit(self, kind: str, **detail: Any) -> None:
+        if self.audit is not None:
+            self.audit.emit(kind, who=SERVER, **detail)
 
     def deployed(self) -> list[dict[str, Any]]:
         return self.models.deployed()
@@ -83,6 +94,10 @@ class LinkHandler:
             await self.link.owe(lambda seq: p.result(seq, run_id, outcome, 0))
 
     async def on_call(self, message: p.Call) -> None:
+        with acting(SERVER):
+            await self._call(message)
+
+    async def _call(self, message: p.Call) -> None:
         try:
             await self.runner.call(
                 model=message.model,
@@ -98,6 +113,10 @@ class LinkHandler:
             await self._answer(str(message.run_id), failed("call", err.code, err.message))
 
     async def on_continue(self, message: p.Continue) -> None:
+        with acting(SERVER):
+            await self._continue(message)
+
+    async def _continue(self, message: p.Continue) -> None:
         try:
             await self.runner.resume(str(message.run_id), message.answer)
         except RrotorError as err:
@@ -107,6 +126,10 @@ class LinkHandler:
                 log.warning("continue refused", extra={"run_id": str(message.run_id), "code": err.code})
 
     async def on_cancel(self, message: p.Cancel) -> None:
+        with acting(SERVER):
+            await self._cancel(message)
+
+    async def _cancel(self, message: p.Cancel) -> None:
         try:
             await self.runner.cancel(str(message.run_id))
         except RrotorError as err:
@@ -123,6 +146,13 @@ class LinkHandler:
                 found = self.models.by_sha(message.model, message.commit_sha)
                 if found is not None:
                     self.models.remove(found)
+                    self._audit(
+                        "model.remove",
+                        model=found.model,
+                        version=found.version,
+                        commit_sha=found.commit_sha,
+                        outcome={"status": "done", "code": None},
+                    )
                 return
             repo = message.repo if message.type == "deploy" and message.repo else None
             if repo is not None:
@@ -136,6 +166,13 @@ class LinkHandler:
                 version = await self.deployer.held(message.model, message.commit_sha, message.version)
         except RrotorError as err:
             log.warning("deploy failed", extra={"model": message.model, "code": err.code})
+            self._audit(
+                "model.deploy_failed",
+                model=message.model,
+                version=message.version,
+                commit_sha=message.commit_sha,
+                outcome={"status": "failed", "code": err.code},
+            )
             if self.link is not None:
                 data = {
                     "version": message.version,
@@ -145,4 +182,12 @@ class LinkHandler:
                 }
                 await self.link.owe(lambda seq: p.event(seq, message.model, "deploy_failed", data))
             return
+        self._audit(
+            "model.activate" if message.type == "activate" else "model.deploy",
+            model=version.model,
+            version=version.version,
+            commit_sha=version.commit_sha,
+            repo=repo,
+            outcome={"status": "done", "code": None},
+        )
         await self.report(version, repo)

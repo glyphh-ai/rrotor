@@ -287,3 +287,25 @@ def test_put_takes_a_key_or_a_legacy_licence_and_refuses_a_bad_one(tmp_path):
             lic.take(bad)
         assert (caught.value.code, caught.value.status) == ("E_LICENCE", 400)
         assert caught.value.message == f"The licence key is refused: {why}."
+
+
+def test_a_key_taken_past_grace_or_refused_is_told_for_the_audit_log(tmp_path):
+    clock = Clock()
+    held = licence(tmp_path, clock)
+    told: list[tuple[str, dict[str, Any]]] = []
+    held.on_event = lambda kind, detail: told.append((kind, detail))
+    first = keys().key(issued_at=at(-30), expires_at=at(1))
+    held.offer(first, "heartbeat")
+    held.offer(first, "welcome")  # the same key again: not a change
+    held.offer("junk.junk", "/etc/rrotor/license.key")
+    assert [k for k, _ in told] == ["licence.changed", "licence.bad"]
+    assert told[0][1]["source"] == "heartbeat" and told[0][1]["tier"] == "pro"
+    assert told[1][1] == {"source": "/etc/rrotor/license.key", "reason": told[1][1]["reason"]}
+    clock.now += timedelta(days=20)
+    held.tick()
+    held.tick()  # told once per key
+    assert [k for k, _ in told] == ["licence.changed", "licence.bad", "licence.expired"]
+    newer = keys().key(issued_at=at(10), expires_at=at(60))
+    held.offer(newer, "api")
+    assert told[-1][0] == "licence.changed" and told[-1][1]["source"] == "api"
+    licence(tmp_path / "quiet").offer("junk.junk", "x")  # no one to tell

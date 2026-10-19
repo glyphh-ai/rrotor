@@ -121,9 +121,67 @@ def test_load_from_the_process_environment(monkeypatch):
         {**SELF, "RROTOR_RUNTIME_ID": "r"},
         {**SELF, "RROTOR_NODE_ID": "Rrotor_1"},
         {**SELF, "RROTOR_NODE_ID": "a" * 64},
+        {**SELF, "RROTOR_AUDIT_RETENTION_DAYS": "0"},
+        {**SELF, "RROTOR_AUDIT_MAX_MB": "lots"},
+        {**SELF, "RROTOR_DRAIN_BUFFER": "-1"},
+        {**SELF, "RROTOR_DRAIN_SIGNALS": "logs,events"},
+        {**SELF, "RROTOR_DRAIN_SIGNALS": ","},
+        {**SELF, "RROTOR_DRAIN_AT": "everywhere"},
+        {**SELF, "RROTOR_LOG_PAYLOADS": "yes"},
+        {**SELF, "RROTOR_SERVER_LOGS": "on", "RROTOR_LINK": "off"},
+        {**SELF, "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"},
+        {**SELF, "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json"},
+        {**SELF, "OTEL_EXPORTER_OTLP_ENDPOINT": "collector:4318"},
+        {**SELF, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://c 1/v1/traces"},
+        {**SELF, "OTEL_TRACES_SAMPLER": "jaeger_remote"},
+        {**SELF, "OTEL_TRACES_SAMPLER_ARG": "half"},
+        {**SELF, "OTEL_TRACES_SAMPLER_ARG": "2"},
     ],
 )
 def test_load_refuses_bad_settings(env):
     with pytest.raises(RrotorError) as caught:
         config.load(env)
     assert caught.value.code == "E_CONFIG"
+
+
+def test_logging_audit_and_drain_settings_default_to_everything_kept_here():
+    c = config.load(SELF)
+    assert (c.audit_retention_days, c.audit_max_mb, c.drain_buffer) == (90, 1024, 10000)
+    assert (c.drain_signals, c.drain_at, c.server_logs, c.log_payloads, c.otel) == (
+        ("logs", "metrics", "traces", "audit"),
+        "head",
+        False,
+        False,
+        (),
+    )
+    assert [c.endpoint(s) for s in ("logs", "metrics", "traces")] == [None, None, None]
+
+
+def test_logging_audit_and_drain_settings_are_read():
+    c = config.load(
+        {
+            **SELF,
+            "RROTOR_AUDIT_RETENTION_DAYS": "30",
+            "RROTOR_AUDIT_MAX_MB": "64",
+            "RROTOR_DRAIN_BUFFER": "500",
+            "RROTOR_DRAIN_SIGNALS": " Logs, audit,logs ",
+            "RROTOR_DRAIN_AT": "node",
+            "RROTOR_SERVER_LOGS": "ON",
+            "RROTOR_LOG_PAYLOADS": "on",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otel.acme.com:4318/",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "https://metrics.acme.com/ingest",
+            "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+            "OTEL_TRACES_SAMPLER": "traceidratio",
+            "OTEL_TRACES_SAMPLER_ARG": "0.1",
+            "OTEL_SERVICE_NAME": " ",
+            "PATH": "/bin",
+        }
+    )
+    assert (c.audit_retention_days, c.audit_max_mb, c.drain_buffer) == (30, 64, 500)
+    assert (c.drain_signals, c.drain_at, c.server_logs, c.log_payloads) == (("logs", "audit"), "node", True, True)
+    assert [c.endpoint(s) for s in ("logs", "metrics", "traces")] == [
+        "https://otel.acme.com:4318/v1/logs",
+        "https://metrics.acme.com/ingest",
+        "https://otel.acme.com:4318/v1/traces",
+    ]
+    assert c.otel_env["OTEL_TRACES_SAMPLER_ARG"] == "0.1" and "OTEL_SERVICE_NAME" not in c.otel_env

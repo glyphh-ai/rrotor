@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Any
 
 from rrotord.access import Access, Usage, digest, utcnow
 from tests.fakes import token
@@ -56,3 +57,16 @@ def test_usage_counts_calls_per_key_and_starts_again_when_taken():
     ]
     assert usage.take() == []
     assert utcnow().tzinfo is dt.UTC and Usage().clock is utcnow
+
+
+def test_a_change_to_the_keys_is_told_with_the_hashes_added_and_removed(tmp_path):
+    told: list[dict[str, Any]] = []
+    a = Access(tmp_path, ("a" * 64,), on_change=told.append)
+    a.set_keys(["a" * 64, "b" * 64])
+    a.set_keys(["a" * 64, "b" * 64])  # the same list: nothing told
+    a.set_keys(["b" * 64])
+    assert told == [
+        {"keys": 2, "added": ["b" * 64], "removed": []},
+        {"keys": 1, "added": [], "removed": ["a" * 64]},
+    ]
+    Access(tmp_path / "quiet").set_keys(["c" * 64])  # no one to tell
