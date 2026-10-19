@@ -167,15 +167,19 @@ class Head:
     it): each batch as its export request, in a `telemetry` frame over the follower's connection, with where the head
     is to send it on (`to`: collector, glyphh). Taken once the head holds it; with no head, the batch waits here."""
 
-    def __init__(self, channel: Callable[[], Any], to: dict[str, list[str]]) -> None:
-        self.channel, self.to = channel, to
+    def __init__(
+        self, channel: Callable[[], Any], to: dict[str, list[str]], term: Callable[[], int | None] = lambda: None
+    ) -> None:
+        self.channel, self.to, self.term = channel, to, term  # each frame carries the follower's term (fencing)
 
     async def send(self, signal: str, body: bytes) -> None:
         channel = self.channel()
         if channel is None:
             raise SendFailed("no head")
         try:
-            await channel.request("telemetry", signal=signal, to=self.to[signal], body=base64.b64encode(body).decode())
+            await channel.request(
+                "telemetry", signal=signal, to=self.to[signal], body=base64.b64encode(body).decode(), term=self.term()
+            )
         except (ClusterError, TimeoutError, ConnectionError, aiohttp.ClientError) as err:
             raise SendFailed(f"the head did not take the batch: {getattr(err, 'code', type(err).__name__)}") from None
 
@@ -324,6 +328,7 @@ class Drain:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         place: Place = lambda: (None, "standalone"),
         upstream: Callable[[], Any] | None = None,
+        term: Callable[[], int | None] = lambda: None,
         head: Sender | None = None,
         gathered: Audit | None = None,
     ) -> None:
@@ -365,7 +370,7 @@ class Drain:
         if config.cluster and upward and (head is not None or upstream is not None):
             self.head = Sink(
                 "head",
-                head or Head(upstream or (lambda: None), to),
+                head or Head(upstream or (lambda: None), to, term),
                 upward,
                 config.drain_buffer,
                 res=lambda: self.res,

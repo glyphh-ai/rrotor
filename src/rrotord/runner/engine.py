@@ -101,6 +101,7 @@ class Runner:
         self.parts, self.licence, self.audit, self.telemetry = parts, licence, audit, telemetry
         self.notify = notify
         self.workers: dict[str, Worker] = {}
+        self.stopping: dict[str, dict[str, Any]] = {}  # runs stopped from outside, with the Result they end with
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock(self, run_id: str) -> asyncio.Lock:
@@ -394,7 +395,10 @@ class Runner:
                 if alive
                 else f"The model's process stopped (exit {worker.proc.returncode})."
             )
-            await self._end(run, None, failed(run.function, "E_LIMIT_SECONDS" if alive else "E_WORKER", reason))
+            stopped = self.stopping.pop(run.id, None)
+            await self._end(
+                run, None, stopped or failed(run.function, "E_LIMIT_SECONDS" if alive else "E_WORKER", reason)
+            )
             return
         result = message["result"]
         if result.get("status") in WAITING:
@@ -504,6 +508,23 @@ class Runner:
             for r in self.records.all()
             if r.status == "needs_approval"
         ]
+
+    async def stop_writing(self, code: str, reason: str) -> list[str]:
+        """The runs in flight whose function writes, stopped, each to end `failed` with `code` (a cluster's head
+        that was deposed: what they write would be no one's). Answers their ids."""
+        stopped = []
+        for run_id, worker in list(self.workers.items()):
+            run = self.records.load(run_id)
+            if (
+                run is None
+                or run.status != "running"
+                or not self.models.get(run.model, run.version).manifest.writes(run.function)
+            ):
+                continue
+            self.stopping[run_id] = failed(run.function, code, reason)
+            await worker.stop(grace=0)
+            stopped.append(run_id)
+        return stopped
 
     async def shutdown(self) -> None:
         for worker in list(self.workers.values()):

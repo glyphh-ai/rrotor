@@ -6,6 +6,9 @@ a run, and what a forwarded request does where it lands.
   this node's replica.
 - **A run lives on the node that ran it** (`<node id>~<uuid>`): its continue, cancel, status and log go there, by
   way of the head (`E_RUN_LOST`, 410, when that node is gone). `GET /v1/approvals` gathers every node's.
+- **Commit:** a write done on the head (here, or forwarded to it) is answered once committed: at once without HA
+  (on the head's disk), with HA (Enterprise) once a majority of voters hold it (503 `E_NOT_COMMITTED` after 5 s, the
+  entry kept); a head deposed meanwhile answers `E_NO_HEAD`, with `Retry-After`.
 - **Read-your-writes:** a follower that forwarded a write waits (up to 2 s) until it has applied the seq the head
   answered with before it answers; every answer of a member carries `Rrotor-Cluster-Seq` (the head's last seq, a
   follower's applied one). A caller that moves between nodes may send `Rrotor-Min-Seq: <seq>`: a node behind it
@@ -63,6 +66,19 @@ def elsewhere(s: Services, run_id: str) -> tuple[bool, str | None]:
     if node is None:
         return (c.role != "head" and s.runner.records.load(run_id) is None), None
     return True, node
+
+
+def leading(s: Services) -> int | None:
+    """The term this node is the cluster's head in, when it is: a write it does is answered once committed."""
+    c = s.cluster
+    return c.raft.term if c is not None and c.role == "head" else None
+
+
+async def committed(s: Services, term: int | None) -> None:
+    """A write done on the head in `term`: answered once committed (with HA, by a majority of voters), refused
+    E_NO_HEAD if the head was deposed meanwhile, E_NOT_COMMITTED if most voters do not hold it within 5 s."""
+    if term is not None and s.cluster is not None:
+        await s.cluster.committed(term)
 
 
 @contextlib.contextmanager

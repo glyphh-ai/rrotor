@@ -64,7 +64,7 @@ def pair(tmp_path: Path, tiers: tuple[Tier, Tier]) -> tuple[Aggregate, Aggregate
     follower = Aggregate(
         mine,
         ClusterAudit(mine.folder / "cluster", mine),
-        cast(Any, SimpleNamespace(role="follower", head_channel=link)),
+        cast(Any, SimpleNamespace(role="follower", head_channel=link, raft=SimpleNamespace(term=1))),
     )
     return head, follower, link
 

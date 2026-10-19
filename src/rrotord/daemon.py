@@ -112,6 +112,7 @@ class Daemon:
                 token=lambda: credentials.token,
                 place=self.cluster.identity,
                 upstream=lambda: self.cluster.head_channel,
+                term=lambda: self.cluster.raft.term,
                 gathered=self.gathered,
             )
             if Drain.wanted(c)
@@ -139,6 +140,7 @@ class Daemon:
             changes=self.cluster.replication,
         )
         self.cluster.replication.busy = lambda: bool(self.runner.workers)
+        self.cluster.deposed = self._deposed
         handler.runner = self.runner
         self.link = LinkClient(
             url=c.link_url,
@@ -195,6 +197,10 @@ class Daemon:
             return []
         members = self.cluster.view()["members"]
         return [(float(m["lag"]), {"node": m["node_id"]}) for m in members if m["role"] == "follower"]
+
+    async def _deposed(self) -> None:
+        """This node was the cluster's head and is no longer: its writing runs in flight fail."""
+        await self.runner.stop_writing("E_NO_HEAD", "This node stopped being the cluster's head during the run.")
 
     def _keys_changed(self, change: dict[str, Any]) -> None:
         """The runtime keys' list changed: an audit event, and on a cluster's head a `keys` entry."""

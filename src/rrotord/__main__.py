@@ -1,5 +1,5 @@
-"""rrotord: start the daemon with the settings in its environment; or, as `rrotord cluster join | leave <node>`,
-change this node's cluster (rrotord/cluster/command.py)."""
+"""rrotord: start the daemon with the settings in its environment; or, as `rrotord cluster join | leave <node> |
+promote <node>`, change this node's cluster (rrotord/cluster/command.py)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args[:1] == ["cluster"]:
         from rrotord.cluster import command
 
-        code, said = asyncio.run(command.run(settings, args[1:]))
+        confirm = command.terminal if sys.stdin.isatty() else None
+        code, said = asyncio.run(command.run(settings, args[1:], confirm))
         print(said, file=sys.stdout if code == 0 else sys.stderr)
         return code
     if args:

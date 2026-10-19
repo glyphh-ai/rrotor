@@ -22,10 +22,10 @@ first. There is no autoscaling.
 **Built:** the signed licence key that carries these limits, Community (Free's limits) without one, and the
 precedent cap per node ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains
 ([Logs, audit and drains](#logs-audit-and-drains)); a cluster: nodes that find and authenticate each
-other, a head, the key's node cap at join, sync gated by the key, replication from a fixed head (the stores,
-models, keys and licence; writes forwarded to it, reads on every node), and the cluster's drain and audit log
-gathered at the head ([A cluster](#a-cluster)), and each package running one. **Not built yet:** failover and high
-availability. The
+other, a head, the key's node cap at join, sync gated by the key, replication from the head (the stores, models,
+keys and licence; writes forwarded to it, reads on every node), manual failover (`rrotord cluster promote`), on
+Enterprise high availability (an elected head), and the cluster's drain and audit log gathered at the head
+([A cluster](#a-cluster)), and each package running one. The
 decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
 server's (`glyphh-ai/server`, `docs/architecture.md`).
 
@@ -75,9 +75,12 @@ other, authenticate each other with mutual TLS derived from one secret you make,
 admits the others up to your key's `max_nodes`. The head is the only writer: it holds the runtime's link, and ships
 the precedent stores, the deployed models, the runtime keys and the licence key to every other node, which serves
 reads from its own copy and sends writes (functions marked `"writes": true`, deploys) to the head. While the head
-is down the others go on serving reads and answer writes 503 `E_NO_HEAD`; failover (moving the head) is not built
-yet, so the head comes back by restarting. A key without cluster sync (Community, Free) never
-starts it: rrotor logs `cluster synchronisation disabled under the Community licence` and runs alone.
+is down the others go on serving reads and answer writes 503 `E_NO_HEAD` (with `Retry-After: 2`): on Enterprise
+until another node is elected, in 1.5 to 3 seconds ([High availability](#high-availability-enterprise)); on Pro and
+Team until it restarts (Kubernetes and `restart: unless-stopped` do that in seconds) or you promote another node
+([Failover](#failover-pro-and-team)). A key without
+cluster sync (Community, Free) never starts it: rrotor logs `cluster synchronisation disabled under the Community
+licence` and runs alone.
 
 - **The port:** **7778** (`RROTOR_CLUSTER_PORT`), node to node only. Open it between the nodes and nowhere else;
   never put it behind the public load balancer.
@@ -100,7 +103,9 @@ starts it: rrotor logs `cluster synchronisation disabled under the Community lic
   the nodes refused. The health has a short `cluster`.
 - **Removing a node:** `rrotord cluster leave <node id>` on any node (`docker compose exec rrotor rrotord cluster
   leave rrotor-2`, or `kubectl exec`); it does not ask to join again until `rrotord cluster join` is run on it. These
-  are not on the API: no runtime key can change the cluster.
+  are not on the API: no runtime key can change the cluster. The head cannot leave: promote another node first.
+  Membership changes go one at a time, each once most members hold the last one; with two members a change needs
+  both, so run three or more.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -125,6 +130,57 @@ secret:
 | Compose, per machine ([compose.md](compose.md#a-cluster)) | `docker-compose.node.yml` on each | `RROTOR_CLUSTER_PEERS`, private addresses | The same in each `.env` | Your load balancer |
 | Helm ([helm.md](helm.md#a-cluster)) | `cluster.enabled`, `replicas` (default 3) | `RROTOR_CLUSTER_DNS`, the headless Service | Made on install and kept, or `cluster.existingSecret` | The Service and Ingress, ready pods only |
 | Terraform ([terraform.md](terraform.md#a-cluster)) | `node_count`, across zones | `RROTOR_CLUSTER_PEERS`, fixed private addresses | `cluster_secret` (or made), in Secrets Manager or Secret Manager | An AWS NLB or Google's HTTPS load balancer |
+
+### High availability (Enterprise)
+
+An Enterprise key (`ha: true` in `GET /v1/licence`) makes the cluster elect its own head. The first five members are
+**voters**; any more are learners, which hold everything and serve reads but never vote (so a large cluster's writes
+wait on five, not on all); when a voter leaves, the first learner takes its place.
+
+- **The head lost:** after 1.5 to 3 seconds without hearing from it, a voter stands and a majority of voters elects
+  it. Reads go on throughout; writes answer 503 `E_NO_HEAD` with `Retry-After: 2` until the new head is found.
+- **A write is answered once most voters hold it**, so no acknowledged write is lost when a head dies. If they do not
+  within 5 seconds the write answers 503 `E_NOT_COMMITTED`: it is kept, and committed when they return.
+- **A partition:** the side with a majority of voters keeps (or elects) a head; the other side's head steps down
+  within 1.5 s, and that side serves reads at what it has and refuses writes until the network heals, when it
+  catches up.
+- **A head that comes back** follows the one elected, taking its copy first.
+- **Run three or more voters, an odd number:** a cluster of two cannot survive a loss (no majority is left), and
+  behaves like Pro.
+
+`rrotord cluster promote <node>` still moves the head on purpose, to a voter whose log is as up to date as most
+voters'; `--force` is refused (`E_CLUSTER_HA`): it could lose acknowledged writes.
+
+### Failover (Pro and Team)
+
+Pro and Team move the head by hand; nothing elects one on its own, so there is never a second head unless you make
+one. On any node:
+
+```
+docker compose exec rrotor rrotord cluster promote rrotor-1      # or: kubectl exec rrotor-1 -- rrotord cluster promote rrotor-1
+```
+
+The node named asks every member how far its log goes and shows each one's lag. It is made head only when:
+
+- **most members answer it** (`E_CLUSTER_QUORUM` otherwise): a node cut off with a minority never takes over;
+- **it is not behind another member** (`E_CLUSTER_LAG`, with the lags): promote the one with lag 0. `--force`
+  promotes it anyway and **the writes it lacks are lost** on every node;
+- **the head answers, or you confirm it is down** (`E_CLUSTER_CONFIRM`): at a terminal you are asked; in a script
+  add `--yes`. Make sure the old head is really down or cut off: until it hears of the new head it may still take
+  writes from callers that reach it, and those are lost when it comes back.
+
+Then the members vote, the node is head at the next **term**, writes resume on it, and the others follow it. Terms
+fence the old head: when it restarts or reconnects, the first member it reaches tells it the higher term; it steps
+down there and then, and takes the new head's copy of everything, dropping whatever it wrote that nobody else
+has. A head that answers is
+told to step down as the votes are asked, so `promote` is also how you move the head on purpose (to drain its
+machine, say). Writes that reach a head as it steps down fail `E_NO_HEAD`; retry them. If the votes do not come
+(`E_CLUSTER_VOTES`: another promotion at the same time, say) the term has moved and a head that answered may have
+stepped down: run it again.
+
+How long writes wait while the head is down is up to you: the head's restart, or the time to run `promote`. Writes
+acknowledged by a head that dies before its followers have them are lost if another node is promoted, and kept if
+it restarts; `promote` shows the lag so you can choose.
 
 ## Logs, audit and drains
 

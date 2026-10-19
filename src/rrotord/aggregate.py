@@ -157,6 +157,7 @@ class Aggregate:
             try:
                 got = await channel.request(
                     "telemetry",
+                    term=self.cluster.raft.term,
                     signal="audit",
                     since=list(cursor) if cursor else None,
                     events=[[after[0], after[1], event] for event, after in events],

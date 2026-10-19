@@ -205,5 +205,32 @@ async def test_a_node_without_the_aggregate_takes_no_telemetry(nodes: Nodes):
     await until(lambda: follower.role == "follower" and follower.head_channel is not None)
     assert follower.head_channel is not None
     with pytest.raises(ClusterError) as err:
-        await follower.head_channel.request("telemetry", signal="logs")
+        await follower.head_channel.request("telemetry", signal="logs", term=follower.raft.term)
     assert err.value.code == "E_CLUSTER_MESSAGE"
+
+
+async def test_telemetry_is_fenced_and_the_drain_follows_the_head(fleet: Fleet, fake: FakeCollector):
+    daemons = await fleet.three()
+    old, f1, f2 = daemons
+    assert f1.cluster.head_channel is not None
+    for term in (None, old.cluster.raft.term - 1):  # no term, or a lower one: refused
+        with pytest.raises(ClusterError) as err:
+            await f1.cluster.head_channel.request("telemetry", signal="logs", term=term)
+        assert err.value.code == "E_CLUSTER_TERM"
+    done = await f1.cluster._command({"kind": "command"}, {"name": "promote", "node": "n1"})  # the head moved
+    assert done["head"] == "n1"
+    await until(lambda: old.cluster.role == "follower" and old.cluster.head_channel is not None)
+    await until(lambda: f2.cluster.head_channel is not None and f2.cluster.state.get("head") == "n1")
+    fake.got["collector"].clear()
+    for d in daemons:
+        signals(d, 7)
+    await rounds([f1, old, f2])  # the deposed head sends to the new one, which exports for all
+    assert {f"hello from {n} 7" for n in IDS} <= {r["body"] for r in fake.logs() if not r["event_name"]}
+    roles = {(r["service.instance.id"], r["rrotor.node.role"]) for r in fake.resources()}
+    assert ("n1", "head") in roles and ("n0", "follower") in roles and ("n0", "head") not in roles
+    assert old.drain is not None and old.drain.collector is not None
+    assert {v["state"] for v in old.drain.collector.view().values()} <= {"waiting", "off"}  # it exports no more
+    assert old.cluster.head_channel is not None
+    with pytest.raises(ClusterError) as err:  # a frame of a later term than the head's deposes it
+        await old.cluster.head_channel.request("telemetry", signal="logs", term=f1.cluster.raft.term + 1)
+    assert err.value.code == "E_NOT_HEAD" and f1.cluster.role == "follower"

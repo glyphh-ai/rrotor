@@ -4,6 +4,7 @@ forwarding without a caller or a head, and what a forwarded request may ask."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import tarfile
@@ -35,9 +36,11 @@ def follower(tmp_path: Path, role: str = "follower") -> Replication:
         Access(tmp_path),
         Licence(tmp_path),
         role=lambda: role,
-        term=lambda: 1,
         saved=saved.append,
+        me="f" if role == "follower" else "h",
     )
+    if role == "head":
+        r.raft.bootstrap({"node_id": "h"}, 0.0)
     return r
 
 
@@ -45,28 +48,53 @@ def entry(seq: int, kind: str, **body: Any) -> dict[str, Any]:
     return {"seq": seq, "term": 1, "kind": kind, **body}
 
 
-async def test_a_follower_skips_what_it_had_and_stops_at_what_does_not_apply(tmp_path):
+def append(prev: int, entries: list[dict[str, Any]], commit: int, term: int = 1) -> dict[str, Any]:
+    return {
+        "term": term,
+        "head": "h",
+        "prev_seq": prev,
+        "prev_term": 1 if prev else 0,
+        "entries": entries,
+        "commit_seq": commit,
+    }
+
+
+async def applied(r: Replication, msg: dict[str, Any]) -> int:
+    return int((await r.receive(msg))["applied_seq"])
+
+
+async def test_a_follower_applies_what_is_committed_and_stops_at_what_does_not_apply(tmp_path):
     r = follower(tmp_path)
+    told: list[dict[str, Any]] = []
+    r.member = told.append
     sent = [
-        "not an entry",
-        {"seq": "x"},
         entry(1, "keys", hashes=["a" * 64]),
         entry(2, "licence", key=None),
         entry(3, "remove", model="gone", commit_sha="b" * 40),
+        entry(4, "head", node="h"),
+        entry(5, "member", op="add", node="f", members=[{"node_id": "h"}, {"node_id": "f"}]),
     ]
-    assert await r.receive({"entries": sent, "commit_seq": 3}) == 3
-    assert r.access.keys == ["a" * 64] and r.current()
-    assert await r.receive({"entries": [entry(2, "keys", hashes=[])], "commit_seq": 3}) == 3  # had already
-    assert await r.receive({"entries": [entry(4, "gateway")], "commit_seq": 4}) == 3
+    assert await applied(r, append(0, sent, 3)) == 3  # what is committed, and no further
+    assert r.access.keys == ["a" * 64] and r.raft.ids() == ["h", "f"] and told == []  # members: when held
+    assert await applied(r, append(5, [], 5)) == 5 and told[0]["node"] == "f" and r.current()
+    assert await applied(r, append(1, [entry(2, "keys", hashes=[])], 5)) == 5  # held already
+    stale = await r.receive(append(5, [], 5, term=0))  # a lower term's head: refused with this node's term
+    assert (stale["accepted"], stale["term"]) == (False, 1)
+    assert await applied(r, append(5, [entry(6, "gateway")], 6)) == 5
     assert r.failure is not None and r.failure["code"] == "E_CLUSTER_KIND" and not r.current()
-    # the next append tries it again (it is in the log already) and goes on once it applies
-    assert await r.receive({"entries": [entry(4, "keys", hashes=["c" * 64])], "commit_seq": 5}) == 4
-    assert r.failure is None and r.behind_since is not None and r.current()  # behind, but not for long
+    assert await applied(r, append(6, [], 6)) == 5  # tried again with every append: an upgrade lets it apply
+
+
+async def test_a_follower_behind_its_head_for_long_is_not_ready(tmp_path):
+    r = follower(tmp_path)
+    assert await applied(r, append(0, [entry(1, "keys", hashes=[])], 1)) == 1 and r.current()
+    assert await applied(r, append(1, [], 9)) == 1  # the head has committed more than it sent yet
+    assert r.behind_since is not None and r.current()  # behind, but not for long
     since = r.behind_since
-    assert await r.receive({"entries": [], "commit_seq": 6}) == 4 and r.behind_since == since
+    assert await applied(r, append(1, [], 9)) == 1 and r.behind_since == since
     r.wall = lambda: 10**10
     assert not r.current()
-    assert await r.receive({"entries": [entry(5, "rows", model="m", rows=[{"tbl": "x"}])], "commit_seq": 5}) == 4
+    assert await applied(r, append(1, [entry(2, "rows", model="m", rows=[{"tbl": "x"}])], 2)) == 1
     assert r.failure is not None and r.failure["code"] == "E_CLUSTER_APPLY"
 
 
@@ -74,7 +102,7 @@ async def test_a_version_is_fetched_from_the_head_of_this_architecture_only(tmp_
     r = follower(tmp_path)
     found = manifest("m")
     deploy = entry(1, "deploy", model="m", version=2, commit_sha="a" * 40, manifest=found)
-    assert await r.receive({"entries": [deploy], "commit_seq": 1}) == 0
+    assert await applied(r, append(0, [deploy], 1)) == 0
     assert r.failure is not None and r.failure["code"] == "E_NO_HEAD"
 
     async def foreign(path: str, dest: Path) -> dict[str, str]:
@@ -82,10 +110,10 @@ async def test_a_version_is_fetched_from_the_head_of_this_architecture_only(tmp_
         return {"Rrotor-Arch": "riscv64"}
 
     r.fetch = foreign
-    assert await r.receive({"entries": [deploy], "commit_seq": 1}) == 0
+    assert await applied(r, append(1, [], 1)) == 0
     assert r.failure is not None and r.failure["code"] == "E_CLUSTER_ARCH"
     install(r.models, found, "def start(ctx, inputs): pass\n", sha="a" * 40)  # held already: nothing fetched
-    assert await r.receive({"entries": [deploy], "commit_seq": 1}) == 1
+    assert await applied(r, append(1, [], 1)) == 1
     active = r.models.active("m")
     assert active is not None and active.version == 2
 
@@ -110,14 +138,32 @@ async def test_a_snapshot_that_is_not_one_is_refused_and_one_that_is_replaces_wh
         return {}
 
     r.fetch = fetch
+    asked = {"term": 2, "head": "h", "commit_seq": 5}
     sent["tar"] = tar_of({"other": b"x"})
     with pytest.raises(RrotorError) as caught:
-        await r.install()
+        await r.install(asked)
     assert caught.value.code == "E_CLUSTER_APPLY" and r.failure is not None
-    about = {"seq": 7, "arch": r.arch, "keys": [], "licence": None, "models": {"old": {"active": None, "versions": []}}}
+    about = {
+        "seq": 7,
+        "seq_term": 2,
+        "term": 1,
+        "arch": r.arch,
+        "keys": [],
+        "licence": None,
+        "members": [],
+        "models": {"old": {"active": None, "versions": []}},
+    }
     sent["tar"] = tar_of({"snapshot.json": json.dumps(about).encode()})
-    assert await r.install() == 7
-    assert r.models.versions("old") == [] and r.log.last == 7 and r.current()
+    with pytest.raises(RrotorError) as caught:
+        await r.install(asked)  # a snapshot of another term than the head that asked
+    assert caught.value.code == "E_CLUSTER_TERM"
+    sent["tar"] = tar_of({"snapshot.json": json.dumps(about | {"term": 2}).encode()})
+    got = await r.install(asked)
+    assert (got["accepted"], got["match"], got["applied_seq"]) == (True, 7, 7)
+    assert r.models.versions("old") == [] and r.log.last == 7 and r.log.term_at(7) == 2 and r.current()
+    assert r.raft.commit == 5  # what the head had committed: the rest of the snapshot is not known committed
+    stale = await r.install({"term": 1, "head": "h", "commit_seq": 0})
+    assert (stale["accepted"], stale["term"]) == (False, 2)
 
 
 async def test_the_heads_capture_and_shippers_when_things_go_wrong(tmp_path, caplog):
@@ -152,7 +198,6 @@ async def test_the_heads_capture_and_shippers_when_things_go_wrong(tmp_path, cap
         r.attach("n1", Channel(refused, closed), None)  # type: ignore[arg-type]
         await until(lambda: r.shippers["n1"].done())
         assert "did not take a snapshot" in caplog.text and "shipping to a follower stopped" in caplog.text
-        r.acked["n2"] = 0
         r.attach("n2", Channel(TimeoutError()), 5)  # type: ignore[arg-type]
         await until(lambda: r.shippers["n2"].done())
         assert "did not answer" in caplog.text
@@ -210,3 +255,26 @@ async def test_forwarding_without_a_caller_a_head_or_a_server_and_what_may_be_as
         assert forward.follower(ring.daemons["n1"].services())
     finally:
         await ring.close()
+
+
+async def test_a_shipper_stops_when_its_head_hears_a_higher_term_and_a_head_that_cannot_apply_its_log_does_not_lead(
+    tmp_path, caplog
+):
+    r = follower(tmp_path, role="head")
+    moved: list[str] = []
+    r.moved = lambda: moved.append(r.raft.role)
+
+    class Channel:
+        async def request(self, kind: str, /, **_: Any) -> dict[str, Any]:
+            await asyncio.sleep(0.15)  # long enough for heartbeats: the follower counts as heard from meanwhile
+            return {"term": 7, "accepted": False}
+
+    r.raft.add({"node_id": "n1"}, 0.0)
+    r.attach("n1", Channel(), 1)  # type: ignore[arg-type]
+    await until(lambda: r.raft.heard["n1"] > 0.0)
+    await until(lambda: r.shippers["n1"].done())
+    assert r.raft.role == "follower" and r.raft.term == 7 and moved == ["follower"]
+    other = follower(tmp_path / "other")
+    other.log.append({"term": 1, "kind": "gateway"})
+    assert not await other.own() and "does not lead" in caplog.text
+    await r.stop()

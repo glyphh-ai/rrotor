@@ -12,19 +12,24 @@ entries, commit_seq}` past what the follower acknowledged, and waits for new ent
 that is new, or behind the log the head still holds (`RROTOR_CLUSTER_LOG_KEEP`), is sent `snapshot` instead. The log
 is trimmed to what every member has applied.
 
-**Commit (Pro and Team):** an entry is committed once it is on the head's disk, so `commit_seq` is the head's last
-seq. A majority commit (Enterprise) comes with elections.
+**Raft's rules** (raft.py) decide what is sent and what is taken: each append names the entry before it (`prev_seq`,
+`prev_term`) and the follower takes it only if its log holds that entry; a diverged tail it has not applied is
+dropped, one it applied (a deposed head's) makes it ask for a snapshot. Every request and answer carries the term,
+and a lower one is refused. **Commit:** without HA (Pro, Team) an entry is committed once on the head's disk; with
+HA (Enterprise) once a majority of voters hold it.
 
-**On a follower.** An `append`'s entries are appended to its own log and applied one by one: `rows` in one SQLite
-transaction on the replica (capture.py), `deploy` by fetching the version from the head (`GET
+**On a follower.** An `append`'s entries are appended to its own log, and those committed applied one by one:
+`rows` in one SQLite transaction on the replica (capture.py), `deploy` by fetching the version from the head (`GET
 /cluster/v1/versions/<model>/<commit>.tar`: its `src/` and `venv/`, the head's build; a node of another architecture
 refuses it, `E_CLUSTER_ARCH`) and making it active, `remove`, `keys` (the access list), `licence` (offered to its own
-licence, which checks the signature itself). `applied_seq` is kept in `cluster/state.json`. An entry that does not
-apply (a full disk, an unknown kind) stops the applying there: the node goes not ready, logs it, and tries again with
-the head's next append. `snapshot`: the follower fetches `GET /cluster/v1/snapshot` (one tar: every Ada store by
-SQLite's online backup, every version, the keys, the licence, the seq it stands at), installs it and starts its log
-after that seq. A follower is ready once it has applied all the head had committed when it last heard, and stays
-ready unless it has been behind for more than a second.
+licence, which checks the signature itself), `member` (the members, which Raft took when the entry arrived), `head`
+(nothing). `applied_seq` is kept in `cluster/state.json`. An entry that does not apply (a full disk, an unknown
+kind) stops the applying there: the node goes not ready, logs it, and tries again with the head's next append.
+`snapshot`: the follower fetches `GET /cluster/v1/snapshot` (one tar: every Ada store by SQLite's online backup,
+every version, the keys, the licence, the seq and term it stands at, the members), installs it and starts its log
+after that seq; a snapshot of another term than the head's request is refused. A follower is ready once it has
+applied all the head had committed when it last heard, and stays ready unless it has been behind for more than a
+second. A node made head applies all its log holds before it leads (`own`).
 
 **Never syncs:** runs, sandboxes, parts, `runtime.json`, the link's outbox, audit, and any data-folder file but
 `precedents.sqlite`. A model with data that is not Ada (`head_only`) runs on the head only."""
@@ -51,6 +56,7 @@ from rrotord import manifest as manifests
 from rrotord.access import Access
 from rrotord.cluster import capture
 from rrotord.cluster.log import Log
+from rrotord.cluster.raft import Raft, Timing
 from rrotord.cluster.transport import Channel, ClusterError
 from rrotord.errors import RrotorError
 from rrotord.licence import Licence
@@ -59,11 +65,12 @@ from rrotord.models import Models, Version
 log = logging.getLogger("rrotor.cluster")
 ARCH = platform.machine()
 CAPTURE_EVERY = 1.0  # while runs are in hand, the head ships what they changed this often
-IDLE = 5.0  # a shipper in step looks again at least this often
+IDLE = 5.0  # a shipper in step looks again at least this often (without HA: with it, every heartbeat)
 LAG = 1.0  # a follower behind the head for longer than this is not ready
 APPEND_WITHIN = 120.0  # an append's answer (a deploy entry fetches its version)
 SNAPSHOT_WITHIN = 1800.0
 BATCH = 200
+TIMING = Timing()  # heartbeats every 250 ms, elections after 1.5 to 3 s (tests make them short)
 
 Fetch = Callable[[str, Path], Awaitable[dict[str, str]]]  # a path on the head's listener, into a file; its headers
 
@@ -86,16 +93,22 @@ class Replication:
         access: Access,
         licence: Licence,
         role: Callable[[], str],
-        term: Callable[[], int],
         saved: Callable[[int], None],
         applied: int = 0,
         busy: Callable[[], bool] = lambda: False,
         wall: Callable[[], float] = time.time,
+        *,
+        me: str = "",
+        state: dict[str, Any] | None = None,
+        persist: Callable[[dict[str, Any]], None] = lambda _: None,
+        ha: Callable[[], bool] = lambda: False,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.log = Log(folder, keep)
         self.scratch, self.models, self.access, self.licence = scratch, models, access, licence
-        self.role, self.term, self.saved, self.busy, self.wall = role, term, saved, busy, wall
-        self.applied = applied  # a follower's: the last seq applied
+        self.role, self.saved, self.busy, self.wall, self.clock, self.ha = role, saved, busy, wall, clock, ha
+        self.raft = Raft(me, self.log, state or {}, ha=ha, save=persist, now=clock(), applied=applied, timing=TIMING)
+        self.moved: Callable[[], None] = lambda: None  # Raft's role, term or head may have changed: the node looks
         self.lock = asyncio.Lock()  # the head's capture and snapshots; a follower's applying
         self.acked: dict[str, int | None] = {}  # the head's: each follower's applied seq (None: a snapshot first)
         self.shippers: dict[str, asyncio.Task[None]] = {}
@@ -108,13 +121,23 @@ class Replication:
         self.heard = 0  # a follower's: the head's commit_seq as it last said
         models.on_change = self.version_changed
         self.fetch: Fetch | None = None  # the follower's way to the head's listener (node.py)
+        self.member: Callable[[dict[str, Any]], None] = lambda _: None  # a `member` entry applied (node.py)
         self.arch = ARCH  # this node's machine: one cluster is one architecture
 
     # What the rest reads
 
     @property
+    def applied(self) -> int:
+        """The last seq applied to this node's stores (a head's: every one it holds)."""
+        return self.raft.applied
+
+    @applied.setter
+    def applied(self, seq: int) -> None:
+        self.raft.applied = seq
+
+    @property
     def commit_seq(self) -> int:
-        return self.log.last if self.role() == "head" else max(self.applied, self.heard)
+        return self.raft.commit if self.role() == "head" else max(self.raft.commit, self.heard)
 
     @property
     def applied_seq(self) -> int:
@@ -129,10 +152,14 @@ class Replication:
     # The head: capture
 
     def _append(self, kind: str, **body: Any) -> dict[str, Any]:
-        entry = self.log.append({"term": self.term(), "kind": kind, **body})
+        entry = self.raft.propose({"kind": kind, **body})
+        self.wake()
+        return entry
+
+    def wake(self) -> None:
+        """Every shipper: there is something to send."""
         for event in self.woken.values():
             event.set()
-        return entry
 
     def _store(self, model: str) -> Path:
         return self.models.data(model) / ada.STORE
@@ -140,7 +167,7 @@ class Replication:
     def _capture(self, model: str) -> None:
         """What changed in a model's store, appended as one `rows` entry (the whole store, the first time)."""
         store = self._store(model)
-        if not store.is_file():
+        if not store.is_file() or self.raft.role != "head":
             return
         if capture.install(store):
             whole = capture.everything(store)
@@ -218,10 +245,12 @@ class Replication:
     # The head: shipping
 
     def attach(self, node: str, channel: Channel, applied: Any) -> None:
-        """A follower joined (or came back): its shipper starts from what it says it applied."""
+        """A follower joined (or came back): its shipper starts from what it says it applied (a new node, or one
+        that never applied anything, with a snapshot)."""
         self.detach(node)
-        known = isinstance(applied, int) and not isinstance(applied, bool) and applied > 0
-        self.acked[node] = applied if known else None  # a new node (or one that never applied anything): a snapshot
+        self.raft.attach(node, applied)
+        if isinstance(applied, int) and not isinstance(applied, bool):
+            self.acked[node] = applied
         self.woken[node] = asyncio.Event()
         self.shippers[node] = asyncio.create_task(self._ship(node, channel))
 
@@ -242,38 +271,45 @@ class Replication:
             self.log.trim(min(others))
 
     async def _ship(self, node: str, channel: Channel) -> None:
+        """One follower's shipper: Raft's next request of it (entries past what it holds, a heartbeat when in step,
+        or a snapshot), its answer given back to Raft; at once again while there is more to send, else when woken or
+        a heartbeat (HA) or IDLE has passed."""
         woken = self.woken[node]
         try:
-            while True:
-                at = self.acked.get(node)
-                if at is None or at < self.log.first - 1 or at > self.log.last:
-                    try:
-                        got = await channel.request("snapshot", term=self.term(), within=SNAPSHOT_WITHIN)
-                    except ClusterError as err:
-                        if err.code == "E_CLUSTER_CLOSED":
-                            raise
-                        log.warning(
-                            "cluster: a follower did not take a snapshot", extra={"node": node, "code": err.code}
-                        )
-                        with contextlib.suppress(TimeoutError):
-                            await asyncio.wait_for(woken.wait(), IDLE)
-                        continue
-                    self.acked[node] = int(got["applied_seq"])
-                    continue
+            while self.raft.role == "head":
+                asked = self.raft.message_for(node)
                 woken.clear()
-                entries = self.log.read(at, BATCH)
-                got = await channel.request(
-                    "append", term=self.term(), entries=entries, commit_seq=self.log.last, within=APPEND_WITHIN
-                )
-                applied = int(got["applied_seq"])
-                self.acked[node] = applied
-                if not entries or applied <= at:
-                    with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(woken.wait(), IDLE)
+                kind, body = asked["type"], {k: v for k, v in asked.items() if k != "type"}
+                within = SNAPSHOT_WITHIN if kind == "snapshot" else APPEND_WITHIN
+                alive = asyncio.create_task(self._alive(node))  # a long one (a snapshot, a version): still in touch
+                try:
+                    got: dict[str, Any] | None = await channel.request(kind, within=within, **body)
+                except ClusterError as err:
+                    if err.code == "E_CLUSTER_CLOSED":
+                        raise
+                    log.warning("cluster: a follower did not take a " + kind, extra={"node": node, "code": err.code})
+                    got = None
+                finally:
+                    alive.cancel()
+                if got is not None:
+                    self.raft.answered(node, asked, got, self.clock())
+                    self.heard_from(node, got.get("applied_seq"))
+                    self.moved()
+                    at = self.raft.next.get(node)
+                    if at is None or at <= self.log.last:  # a snapshot to send, or more entries
+                        continue
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(woken.wait(), self.raft.timing.heartbeat if self.ha() else IDLE)
         except ClusterError as err:
             log.warning("cluster: shipping to a follower stopped", extra={"node": node, "code": err.code})
         except TimeoutError:
             log.warning("cluster: a follower did not answer; shipping to it stopped", extra={"node": node})
+
+    async def _alive(self, node: str) -> None:
+        """While a request is with a follower, on a connection still open, the follower counts as heard from."""
+        while True:
+            await asyncio.sleep(self.raft.timing.heartbeat)
+            self.raft.heard[node] = self.clock()
 
     # The head: what a follower fetches
 
@@ -330,7 +366,10 @@ class Replication:
                 held = self.licence.held
                 about = {
                     "seq": seq,
-                    "term": self.term(),
+                    "seq_term": self.log.term_at(seq),
+                    "term": self.raft.term,
+                    "members": self.raft.members,
+                    "members_at": list(self.raft.members_at),
                     "arch": self.arch,
                     "keys": list(self.access.keys),
                     "licence": held.raw if held is not None else None,
@@ -349,28 +388,46 @@ class Replication:
 
     # A follower
 
-    async def receive(self, msg: dict[str, Any]) -> int:
-        """An `append` from the head: its entries kept and applied in order. Answers the seq applied."""
+    async def receive(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """An `append` from the head: Raft's answer (what this log now holds, or why not), once what is committed
+        is applied in order, with the seq applied."""
         async with self.lock:
-            heard = msg.get("commit_seq")
-            self.heard = heard if isinstance(heard, int) else self.heard
-            for entry in msg.get("entries") or []:
-                if not isinstance(entry, dict) or not isinstance(entry.get("seq"), int):
-                    continue
-                if entry["seq"] <= self.applied:
-                    continue  # had already
+            reply = self.raft.on_append(msg, self.clock())
+            self.moved()
+            if reply.get("accepted"):
+                heard = msg.get("commit_seq")
+                self.heard = heard if isinstance(heard, int) else self.heard
+                await self._apply_committed()
+            return {**reply, "applied_seq": self.applied}
+
+    async def _apply_committed(self) -> None:
+        """What is committed and not applied yet, applied in order; an entry that does not apply stops it there."""
+        if await self._apply_upto(min(self.raft.commit, self.log.last)):
+            self.failure = None
+            self._caught_up()
+
+    async def _apply_upto(self, upto: int) -> bool:
+        while self.applied < upto:
+            for entry in self.log.read(self.applied, BATCH):
+                if entry["seq"] > upto:
+                    break
                 try:
-                    if entry["seq"] > self.log.last:
-                        self.log.append(dict(entry))
                     await self._apply(entry)
                 except (RrotorError, OSError, ValueError, KeyError, sqlite3.Error, tarfile.TarError) as err:
                     self._failed(entry, err)
-                    return self.applied
+                    return False
                 self.applied = entry["seq"]
                 self.saved(self.applied)
-            self.failure = None
-            self._caught_up()
-            return self.applied
+        return True
+
+    async def own(self) -> bool:
+        """A node made head: all its log holds applied before it writes (Raft's head commits it all), and the
+        seq kept. False when an entry does not apply: it cannot lead on a store behind its log."""
+        async with self.lock:
+            done = await self._apply_upto(self.log.last)
+        if not done:
+            log.error("cluster: made head, but its log does not apply: it does not lead", extra=self.failure)
+        return done
 
     def _caught_up(self) -> None:
         if self.applied >= self.heard:
@@ -401,7 +458,9 @@ class Replication:
         elif kind == "licence":
             if entry.get("key") is not None:
                 self.licence.offer(entry["key"], "cluster")
-        else:
+        elif kind == "member":
+            self.member(entry)
+        elif kind != "head":  # a head's first entry in its term: nothing to apply
             raise RrotorError(f"An entry of a kind this node does not know: {kind!r}.", code="E_CLUSTER_KIND")
 
     async def _deploy(self, entry: dict[str, Any]) -> None:
@@ -444,30 +503,44 @@ class Replication:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    async def install(self) -> int:
-        """`snapshot` from the head: fetched, installed, and the log begun after its seq. Answers the seq."""
+    async def install(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """`snapshot` from the head: fetched, installed, and the log begun after its seq. Answers as Raft does, with
+        the seq applied; refused (this node's term) from a head of a lower term."""
         async with self.lock:
+            refused = self.raft.on_snapshot(msg, self.clock())
+            self.moved()
+            if refused is not None:
+                return {**refused, "applied_seq": self.applied}
             tar = self._scratch(".tar")
             try:
                 await self._fetch("/cluster/v1/snapshot", tar)
-                seq = await asyncio.to_thread(self._install, tar)
+                about = await asyncio.to_thread(self._install, tar, msg.get("term"))
             except (RrotorError, OSError, ValueError, KeyError, sqlite3.Error, tarfile.TarError) as err:
                 self._failed({"seq": None, "kind": "snapshot"}, err)
                 assert self.failure is not None  # noqa: S101  (just set)
                 raise RrotorError(str(err), code=str(self.failure["code"]), status=503) from None
             finally:
                 tar.unlink(missing_ok=True)
-            self.log.reset(seq)
-            self.applied = self.heard = seq
+            seq = int(about["seq"])
+            reply = self.raft.installed(
+                seq,
+                int(about.get("seq_term") or 0),
+                list(about.get("members") or []),
+                about.get("members_at"),
+                int(msg.get("commit_seq") or 0),
+            )
+            self.heard = max(self.heard, seq)
             self.saved(seq)
             self.failure, self.synced, self.behind_since = None, True, None
             log.info("cluster: snapshot installed", extra={"seq": seq})
-            return seq
+            return {**reply, "applied_seq": seq}
 
-    def _install(self, tar: Path) -> int:
+    def _install(self, tar: Path, term: Any) -> dict[str, Any]:
         with tarfile.open(tar) as t:
             member = t.extractfile("snapshot.json")
-            about = json.loads(member.read() if member is not None else b"")  # a folder of that name: not JSON
+            about: dict[str, Any] = json.loads(member.read() if member is not None else b"")  # a folder: not JSON
+        if about.get("term") != term:
+            raise RrotorError("The snapshot is of another term than the head that asked for it.", code="E_CLUSTER_TERM")
         if about.get("arch") != self.arch:
             raise ArchError(
                 f"The head is {about.get('arch')} and this node {self.arch}: one cluster is one architecture."
@@ -501,4 +574,4 @@ class Replication:
         self.access.set_keys(list(about.get("keys") or []))
         if about.get("licence") is not None:
             self.licence.offer(about["licence"], "cluster")
-        return int(about["seq"])
+        return about

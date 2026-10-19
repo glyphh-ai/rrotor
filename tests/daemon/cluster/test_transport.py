@@ -226,10 +226,18 @@ async def test_what_the_listener_refuses(nodes: Nodes, tmp_path: Path):
             await bad.request("hello", node_id="Bad_Id", kind="node")
         assert err.value.code == "E_CLUSTER_PEER"
         await channel.request("hello", node_id="x", kind="node")
-        for kind in ("vote", "append", "telemetry"):  # telemetry: a member's only
+        asks: list[tuple[str, dict[str, Any]]] = [
+            ("vote", {}),
+            ("vote", {"candidate": "y", "term": 9}),
+            ("append", {}),
+            ("telemetry", {}),  # a member's only
+        ]
+        for kind, fields in asks:
             with pytest.raises(ClusterError) as err:
-                await channel.request(kind)
+                await channel.request(kind, **fields)
             assert err.value.code == "E_CLUSTER_MESSAGE"
+        vote: dict[str, Any] = {"candidate": "x", "term": 1, "last_seq": 0, "last_term": 0}
+        assert (await channel.request("vote", **vote))["granted"] is False  # a head's term already holds its vote
         with pytest.raises(ClusterError) as err:
             await channel.request("ping")
         assert err.value.code == "E_CLUSTER_MEMBER"
