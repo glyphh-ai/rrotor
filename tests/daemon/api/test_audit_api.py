@@ -179,7 +179,7 @@ async def test_the_health_says_where_logs_go(api):
 class Holds:
     """A destination that takes nothing: what was sent stays in the buffers, to be read."""
 
-    async def send(self, signal: str, batch: list[Any]) -> None:
+    async def send(self, signal: str, body: bytes) -> None:
         raise SendFailed("held")
 
     async def close(self) -> None:

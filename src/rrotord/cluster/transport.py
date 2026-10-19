@@ -10,8 +10,9 @@ listener's answer names the listener, which the dialer checks against the listen
 Replication's (replication.py, node.py): the head's `append` and `snapshot`, asked of a follower over the follower's
 own connection and answered with the seq applied; `forward`, either way; and two plain GETs on the same listener with
 the same mutual TLS (`fetch`), `/cluster/v1/versions/<model>/<commit>.tar` and `/cluster/v1/snapshot`. A refusal
-carries its HTTP status and detail, so a forwarded request's caller sees what the head said. `vote` and `telemetry`
-come with elections and the aggregate drain: an unknown type is answered E_CLUSTER_MESSAGE."""
+carries its HTTP status and detail, so a forwarded request's caller sees what the head said. A member's `telemetry`
+(its drain's batches and kept audit events) goes to its head the same way. `vote` comes with elections: an unknown
+type is answered E_CLUSTER_MESSAGE."""
 
 from __future__ import annotations
 

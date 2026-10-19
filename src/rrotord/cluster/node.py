@@ -39,8 +39,11 @@ answers with the seq its log stands at. A follower with no head answers `E_NO_HE
 the API's own operations (`rrotord/api/forward.py`, `serve_forward`). Each ping of a follower carries its applied
 seq and its runtime keys' calls since the last, which the head adds to its own `usage`.
 
+**Telemetry** (`telemetry`): a follower's drain batches and kept audit events, to its head, over its own connection;
+what the head does with them is rrotord/aggregate.py's (`on_telemetry`).
+
 **Not built yet:** terms past 1, fencing and promotion (manual failover), elections and majority commit (`ha` is
-false), `member` entries (membership is kept in `cluster/state.json`), and the followers' telemetry to the head."""
+false), and `member` entries (membership is kept in `cluster/state.json`)."""
 
 from __future__ import annotations
 
@@ -87,6 +90,10 @@ READ_YOUR_WRITES = 2.0  # a node waits this long to have applied a seq it was as
 REFUSALS = frozenset({"E_CLUSTER_FULL", "E_CLUSTER_NODE_ID", "E_CLUSTER_LEFT", "E_CLUSTER_ID"})
 NODE = Who({"type": "rrotor"}, None, "cluster")
 OPERATOR = Who({"type": "local"}, None, "cluster")  # `rrotord cluster ...`, on a node, with the cluster secret
+
+
+async def _no_telemetry(node: str, msg: dict[str, Any]) -> dict[str, Any]:
+    raise ClusterError("This node takes no telemetry.", code="E_CLUSTER_MESSAGE")
 
 
 def names(members: Any) -> list[str]:
@@ -181,6 +188,8 @@ class Cluster:
         self.usage: Callable[[list[dict[str, Any]]], None] = lambda _: None  # the head: a follower's key calls
         self.taken: Callable[[], list[dict[str, Any]]] = list  # a follower: its key calls since the last ping
         self.roled: Callable[[], None] = lambda: None  # this node's role changed (the link looks again)
+        # a member's telemetry at the head: rrotord/aggregate.py, set by the daemon
+        self.on_telemetry: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] = _no_telemetry
 
     # What the rest of rrotor reads
 
@@ -783,6 +792,8 @@ class Cluster:
             return answer(msg, **self._ping(peer, msg))
         if kind == "command":
             return answer(msg, **await self._command(peer, msg))
+        if kind == "telemetry" and peer.get("member"):
+            return answer(msg, **await self.on_telemetry(str(peer["member"]), msg))
         raise ClusterError(f"There is no message {kind!r} here.", code="E_CLUSTER_MESSAGE")
 
     def _greet(self, channel: Channel, peer: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any]:
