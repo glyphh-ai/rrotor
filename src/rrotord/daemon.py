@@ -1,6 +1,7 @@
 """rrotord, put together: the sandbox checked, the runner, the link and the API, until it is told to stop; its log
 lines naming this node, its audit events (kept on Enterprise), and, when one is set, its drain; with the cluster on,
-its place in the cluster (rrotord/cluster/node.py), gated by the licence key."""
+its place in the cluster (rrotord/cluster/node.py), gated by the licence key, and its part in the cluster's drain and
+audit store at the head (rrotord/aggregate.py)."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from aiohttp import web
 from rrotord import VERSION
 from rrotord import log as logs
 from rrotord.access import Access
+from rrotord.aggregate import Aggregate, ClusterAudit
 from rrotord.api.app import make
 from rrotord.api.routes import Services
 from rrotord.audit import SERVER, Audit, current
@@ -65,6 +67,8 @@ class Daemon:
     handler: LinkHandler = field(init=False)
     heartbeat: Heartbeat | None = field(init=False)
     audit: Audit = field(init=False)
+    gathered: ClusterAudit = field(init=False)
+    aggregate: Aggregate = field(init=False)
     drain: Drain | None = field(init=False)
     cluster: Cluster = field(init=False)
     session: aiohttp.ClientSession | None = None
@@ -99,11 +103,23 @@ class Daemon:
             and (credentials.runtime_id, credentials.token) != (c.runtime_id, c.runtime_token)
         ):
             credentials.set(c.runtime_id, c.runtime_token)  # hosted and self: from the environment
+        self.gathered = ClusterAudit(c.data / "audit" / "cluster", self.audit)
         self.drain = (
-            Drain(c, runtime_id=credentials.runtime_id, audit=self.audit, token=lambda: credentials.token)
+            Drain(
+                c,
+                runtime_id=credentials.runtime_id,
+                audit=self.audit,
+                token=lambda: credentials.token,
+                place=self.cluster.identity,
+                upstream=lambda: self.cluster.head_channel,
+                gathered=self.gathered,
+            )
             if Drain.wanted(c)
             else None
         )
+        self.aggregate = Aggregate(self.audit, self.gathered, self.cluster)
+        self.aggregate.drain = self.drain
+        self.cluster.on_telemetry = self.aggregate.received
         self.precedents = Precedents(models, cap=lambda: self.licence.limits().max_precedents)
         self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access, self.audit)  # type: ignore[arg-type]
         self.runner = Runner(
@@ -166,6 +182,19 @@ class Daemon:
             lambda: [(float(cap), {})] if (cap := self.licence.limits().max_precedents) is not None else [],
         )
         t.gauge("rrotor.link.state", lambda: [(1.0, {"state": self.link.state})])
+        t.gauge("rrotor.cluster.term", self._term)
+        t.gauge("rrotor.cluster.lag", self._lag)
+
+    def _term(self) -> list[tuple[float, dict[str, str]]]:
+        """The cluster's term, on a member."""
+        return [(float(self.cluster.state.get("term") or 1), {})] if self.cluster.member else []
+
+    def _lag(self) -> list[tuple[float, dict[str, str]]]:
+        """On the head: each follower's seqs behind it, as it last acknowledged."""
+        if self.cluster.role != "head":
+            return []
+        members = self.cluster.view()["members"]
+        return [(float(m["lag"]), {"node": m["node_id"]}) for m in members if m["role"] == "follower"]
 
     def _keys_changed(self, change: dict[str, Any]) -> None:
         """The runtime keys' list changed: an audit event, and on a cluster's head a `keys` entry."""
@@ -239,6 +268,7 @@ class Daemon:
             self.audit,
             self.drain,
             self.cluster,
+            self.gathered,
         )
 
     def install_builtin(self) -> list[str]:
@@ -338,6 +368,8 @@ class Daemon:
             tasks.append(asyncio.create_task(self.heartbeat.run()))
         if self.drain is not None:
             tasks.append(asyncio.create_task(self.drain.run()))
+        if self.config.cluster:
+            tasks.append(asyncio.create_task(self.aggregate.run()))
         await stop.wait()
         try:
             await self.report_usage()  # the last minute's calls, while the link may still carry them

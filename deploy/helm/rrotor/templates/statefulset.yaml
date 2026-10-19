@@ -104,6 +104,8 @@ spec:
               value: {{ .Values.drain.signals | quote }}
             - name: RROTOR_DRAIN_BUFFER
               value: {{ .Values.drain.buffer | quote }}
+            - name: RROTOR_DRAIN_AT
+              value: {{ .Values.drain.at | quote }}
             - name: RROTOR_LOG_PAYLOADS
               value: {{ .Values.drain.payloads | quote }}
             {{- with .Values.drain.endpoint }}

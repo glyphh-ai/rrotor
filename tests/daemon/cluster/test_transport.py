@@ -226,7 +226,7 @@ async def test_what_the_listener_refuses(nodes: Nodes, tmp_path: Path):
             await bad.request("hello", node_id="Bad_Id", kind="node")
         assert err.value.code == "E_CLUSTER_PEER"
         await channel.request("hello", node_id="x", kind="node")
-        for kind in ("vote", "append"):
+        for kind in ("vote", "append", "telemetry"):  # telemetry: a member's only
             with pytest.raises(ClusterError) as err:
                 await channel.request(kind)
             assert err.value.code == "E_CLUSTER_MESSAGE"
@@ -260,3 +260,14 @@ async def test_a_join_the_head_cannot_answer_now_is_tried_again(nodes: Nodes):
     assert await c._join(address) == cluster_node.RETRY and c.status == "joining" and c.refusal is None
     await runner.cleanup()
     await c._shut()
+
+
+async def test_a_fetch_nobody_answers_is_unreachable(tmp_path: Path):
+    from tests.daemon.cluster.conftest import free_port
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(ClusterError) as err:
+            await transport.fetch(
+                session, Credentials([SECRET], "a", tmp_path / "a"), f"127.0.0.1:{free_port()}", "/x", tmp_path / "x", 2
+            )
+    assert err.value.code == "E_CLUSTER_UNREACHABLE"

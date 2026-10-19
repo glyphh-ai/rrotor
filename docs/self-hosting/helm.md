@@ -103,6 +103,7 @@ helm install rrotor deploy/helm/rrotor -n rrotor --set publicHost=rrotor.acme.co
 | `drain.resourceAttributes`, `drain.serviceName` | | `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_SERVICE_NAME` |
 | `drain.tracesSampler`, `drain.tracesSamplerArg` | | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` (other `OTEL_*` variables, such as a CA certificate, in `extraEnv`) |
 | `drain.signals`, `drain.buffer` | `logs,metrics,traces,audit`, `10000` | `RROTOR_DRAIN_SIGNALS`, `RROTOR_DRAIN_BUFFER` |
+| `drain.at` | `head` | `RROTOR_DRAIN_AT`: in a cluster, `head` sends every pod's signals by the head (one egress, from the head's pod); `node`, each pod exports itself |
 | `drain.payloads` | `off` | `RROTOR_LOG_PAYLOADS`: inputs and results in your drain |
 | `serverLogs` | `off` | `RROTOR_SERVER_LOGS`: the same signals to Glyphh too; the chart refuses it with `link: "off"` |
 | `audit.retentionDays`, `audit.maxMb` | `90`, `1024` | The audit log (Enterprise) on the volume ([Logs, audit and drains](README.md#logs-audit-and-drains)) |

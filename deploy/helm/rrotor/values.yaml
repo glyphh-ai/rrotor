@@ -55,6 +55,9 @@ drain:
   # oldest dropped past it (RROTOR_DRAIN_BUFFER). Audit events are never dropped: they wait on disk.
   signals: logs,metrics,traces,audit
   buffer: 10000
+  # In a cluster (RROTOR_DRAIN_AT): head, the followers' signals go by the head, which exports for every node (one
+  # egress, from the head); node, each pod exports itself.
+  at: head
   # "on": models' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS), never anywhere else.
   payloads: "off"
 

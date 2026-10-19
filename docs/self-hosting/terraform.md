@@ -80,8 +80,9 @@ reachable by Let's Encrypt), and `name` for the resources. AWS adds `vpc_id`, `s
 Logs, audit and drains ([README](README.md#logs-audit-and-drains)), in both modules: `otel_endpoint` (your
 OpenTelemetry collector, `OTEL_EXPORTER_OTLP_ENDPOINT`; empty, no drain), `otel_headers` (sensitive,
 `OTEL_EXPORTER_OTLP_HEADERS`), `otel_resource_attributes`, `server_logs` (default `false`: `RROTOR_SERVER_LOGS`),
-`log_payloads` (default `false`) and `audit_retention_days` (default `90`). Each is written to the VM's `.env`; any
-other setting can be added there.
+`log_payloads` (default `false`), `audit_retention_days` (default `90`) and, for a cluster, `drain_at` (default
+`head`: `RROTOR_DRAIN_AT`, the followers' signals exported by the head, so only it needs the egress; `node`, each VM
+exports itself). Each is written to the VM's `.env`; any other setting can be added there.
 
 ## A cluster
 

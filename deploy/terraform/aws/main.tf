@@ -50,6 +50,7 @@ locals {
       otel_resource = var.otel_resource_attributes
       server_logs   = var.server_logs ? "on" : "off"
       log_payloads  = var.log_payloads ? "on" : "off"
+      drain_at      = var.drain_at
       audit_days    = var.audit_retention_days
       node_id       = local.cluster ? n.id : ""
       advertise     = local.cluster ? "${n.ip}:7778" : ""

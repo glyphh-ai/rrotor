@@ -19,6 +19,7 @@ from rrotord import log
 from rrotord.audit import Audit, Who, acting
 from rrotord.config import Config
 from rrotord.drain import Buffer, Collector, Drain, Glyphh, SendFailed, Sink, warning
+from rrotord.otel import unwrapped
 from tests.fakes import FakeCollector
 
 TOKEN = "tok_" + "r" * 40
@@ -173,15 +174,15 @@ async def test_glyphh_failing_is_shown_and_tried_again(tmp_path, fake):
     token: list[str | None] = [None]
     sender = Glyphh(fake.url, lambda: token[0], timeout=2)
     with pytest.raises(SendFailed, match="no runtime token"):
-        await sender.send("logs", [])
+        await sender.send("logs", b"")
     token[0] = TOKEN
     fake.down = True
     with pytest.raises(SendFailed, match="answered 503"):
-        await sender.send("metrics", [])
+        await sender.send("metrics", b"")
     await sender.close()
     gone = Glyphh("http://127.0.0.1:9", lambda: TOKEN, timeout=2)
     with pytest.raises(SendFailed, match="ClientConnectorError"):
-        await gone.send("traces", [])
+        await gone.send("traces", b"")
     await gone.close()
     await Glyphh(fake.url, lambda: None).close()  # never opened: nothing to close
 
@@ -200,15 +201,20 @@ def test_a_full_buffer_drops_its_oldest_and_a_failed_batch_goes_back_in_front():
     assert (list(b.items), b.dropped, len(b)) == ([3, 4, 5], 3, 3)
 
 
+def count(signal: str, body: bytes) -> int:
+    """The records in an export request."""
+    return len(unwrapped(signal, body))
+
+
 class Refuses:
     def __init__(self) -> None:
         self.sent: list[tuple[str, int]] = []
         self.down = True
 
-    async def send(self, signal: str, batch: list[Any]) -> None:
+    async def send(self, signal: str, body: bytes) -> None:
         if self.down:
             raise SendFailed("down")
-        self.sent.append((signal, len(batch)))
+        self.sent.append((signal, count(signal, body)))
 
     async def close(self) -> None:
         pass
@@ -217,7 +223,7 @@ class Refuses:
 async def test_audit_events_wait_on_disk_and_a_lost_files_cursor_moves_on(tmp_path):
     audit = Audit(tmp_path / "audit", tier=lambda: "enterprise")
     sender = Refuses()
-    sink = Sink("t", sender, ("audit",), 2, audit, tmp_path / "audit" / ".cursor")
+    sink = Sink("t", sender, ("audit",), 2, lambda: (audit, tmp_path / "audit" / ".cursor"))
     assert await sink.flush() is True  # nothing kept yet
     for n in range(3):
         audit.emit("run.call", n=n)

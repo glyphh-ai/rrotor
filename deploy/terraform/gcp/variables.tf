@@ -104,6 +104,17 @@ variable "server_logs" {
   default     = false
 }
 
+variable "drain_at" {
+  description = "In a cluster (RROTOR_DRAIN_AT): head, the followers' logs, metrics, traces and audit events go by the head, which exports for every node (one egress); node, each node exports itself."
+  type        = string
+  default     = "head"
+
+  validation {
+    condition     = contains(["head", "node"], var.drain_at)
+    error_message = "drain_at is head or node."
+  }
+}
+
 variable "log_payloads" {
   description = "Models' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS=on); never anywhere else."
   type        = bool
