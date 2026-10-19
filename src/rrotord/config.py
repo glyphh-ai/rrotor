@@ -1,6 +1,6 @@
-"""rrotord's settings, from its environment (set by whoever starts the container: the mod, or the hosted
-provisioning). Locally no secret comes through here: the runtime token is handed in over the local API, and the
-local token arrives only as its SHA-256. A hosted rrotor has no mod to hand anything in: its runtime id and token
+"""rrotord's settings, from its environment (set by whoever starts the container: the hosted
+provisioning, a self-hosting package, or a local caller). Locally no secret comes through here: the runtime token is
+handed in over the local API, and the local token arrives only as its SHA-256. A hosted rrotor's runtime id and token
 are in its machine's secrets, and the parts it ships with are installed from the image at boot. A self-hosted one
 (`self`) is a hosted one its owner runs: the same, at the one exact host it is given, with Glyphh's server as the
 default and, air-gapped, no link at all."""
@@ -45,7 +45,7 @@ class Config:
 
     @property
     def public(self) -> bool:
-        """Reached by anyone with a key or a Glyphh sign-in, not by a mod on loopback: hosted and self."""
+        """Reached by anyone with a key or a Glyphh sign-in, not on loopback only: hosted and self."""
         return self.mode in ("hosted", "self")
 
     @property

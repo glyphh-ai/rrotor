@@ -14,6 +14,8 @@ alert or a log, is answered from the incidents closest to it.
 | `facts` `{data, top?}` | The closest past incidents, best first, cut to what the caller may see |
 | `probabilities` `{data}` | P(fix \| incident) over the nearest precedents |
 | `decide` `{data}` | The fix when confident, with the nearest precedent's cause, owner and runbook (`last_time`) for a caller cleared to see them; else asks how it was fixed (`needs_input`) and records it |
+| `learn` `{sample?}` | Weighs the roles, the words and the pairs from the store's own precedents and calibrates; needs ten graded precedents of two outcomes |
+| `settings` `{changes?}` | Reads the model's levers, or changes them live |
 | `start` | How many incidents the model holds |
 
 An incident, as the spec reads it:
@@ -40,5 +42,8 @@ becomes an answer for the next one, deterministic and offline, in their own
 runtime, callable from their alerting (`POST /v1/runs` with a runtime key) or
 from Claude (`model_call` on the runtime's MCP).
 
-Its tests run with `pytest examples/ada_incidents -o addopts=""` from the repo
-(the kernel the tests use is `tests/kernel/`).
+Its tests, from the repo (the kernel is `tests/kernel/`):
+
+```sh
+uv run pytest examples/ada_incidents -o addopts="" -p no:cacheprovider --import-mode=importlib
+```

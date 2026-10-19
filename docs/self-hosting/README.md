@@ -1,9 +1,10 @@
 # Self-hosting rrotor
 
-rrotor is the runtime Ada installs into (`../architecture.md`). Glyphh hosts one for you on Pro and Team; you can
-also run it yourself, on your own machine, cluster or cloud account, and reach it at your own address. It is the
-same image either way, `ghcr.io/glyphh-ai/rrotor:<version>` (and `:latest`), with the Ada part built in; what Ada
-may do is set by your plan's licence, not by the image.
+rrotor is the runtime your Ada models run in ([architecture](../architecture.md)). Glyphh hosts it on Pro, Team
+and Enterprise; you can also run it yourself, on your own machine, cluster or cloud account, at your own address,
+on every plan, free and with no limit on runtimes or precedents. It is the same image either way,
+`ghcr.io/glyphh-ai/rrotor:<version>` (and `:latest`), with the Ada part built in; the licence, not the image, says
+whether Ada runs.
 
 A self-hosted rrotor is **one box**: one container, one `/data`, one public host. There is no high availability and
 no autoscaling; a second copy of the same runtime is not a replica, it takes the link over from the first.

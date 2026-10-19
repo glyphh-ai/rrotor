@@ -1,4 +1,4 @@
-"""The API's routes (docs/architecture.md, 7): on loopback for a local rrotor's mod, at `<machine>.<domain>` for a
+"""The API's routes (docs/architecture.md, 7): on loopback for a local rrotor's caller, at `<machine>.<domain>` for a
 hosted one's callers, at its one public host for a self-hosted one's. The operations themselves are in ops.py, shared
 with the MCP server (mcp.py).
 

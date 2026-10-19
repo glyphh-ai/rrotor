@@ -1,20 +1,32 @@
 # rrotor
 
-The isolated runtime Ada installs into. It runs models: deterministic Python jobs (`load`, `start`, custom functions, `end`) that Claude and Claude's routines call; an Ada model is one. One locked-down, headless Linux image, run locally on every plan and hosted (one per person, on Fly) on Pro and Team.
+The runtime a person's Ada models run in: one locked-down, headless Linux image that deploys a model by commit, runs
+each call in a sandbox, and answers over REST and MCP at its own address. Hosted by Glyphh at
+`https://<machine>.glyphh.app/mcp`, or self-hosted at `https://<host>/mcp`; either is added to Claude as a
+connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh` SDKs (`glyphh-ai/glyphh`). Image:
+`ghcr.io/glyphh-ai/rrotor`.
 
-The design is in `glyphh-ai/server`, `docs/architecture.md` ("`ada`: models and rrotor", and "rrotor"); how the parts call each other is in this repo's `docs/architecture.md`.
+| Where | What |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, Ada, the licence, parts, CI |
+| [`docs/self-hosting/`](docs/self-hosting/README.md) | Running your own: Docker Compose, Helm, Terraform; privileges, licensing, backups |
+| `src/rrotord/`, `src/rrotor/` | The daemon; the model SDK every sandbox imports |
+| `examples/` | `ada_incidents`, `ada_tickets` (Ada models) and `daily_sales` (the base alone), each with tests |
+| `parts/ada/`, `scripts/part.py` | The Ada part's recipe; building and signing a part |
+| `deploy/` | The self-hosting packages |
+| `benchmarks/` | Ada measured against LLMs and classic models |
 
-## Self-hosting
+## Develop
 
-The same image, run on your own machine, cluster or cloud account and reached at your own address: Docker Compose (`deploy/compose/`), a Helm chart (`deploy/helm/rrotor/`) or Terraform for AWS and Google Cloud (`deploy/terraform/`), one rrotor each. `docs/self-hosting/` has the guides, the container's privileges and why, and the licence's heartbeat, exactly.
+```sh
+uv sync
+uv run ruff check src tests examples && uv run ruff format --check src tests examples
+uv run mypy
+uv run pytest      # 100% line and branch coverage of rrotor and rrotord
+```
 
-## Ada
-
-An Ada model is a program rrotor runs: `rrotor.ada` opens its spec and precedent store on the Ada part; a changed encoding re-encodes the store on deploy or refuses it (`docs/architecture.md`, section 9). `examples/ada_tickets/` is one, with its tests.
-
-## Parts
-
-What a mod installs into rrotor beyond the base, signed with Glyphh's release key and licensed by the plan (`docs/architecture.md`, section 10). `scripts/part.py` builds and signs one; `parts/ada/` is the Ada part's recipe, built in CI.
+The sandbox's own tests run inside the image (`image/Dockerfile`, target `sandbox-test`); CI runs them
+(`.github/workflows/ci.yml`).
 
 ## Benchmarks
 
@@ -24,4 +36,10 @@ What a mod installs into rrotor beyond the base, signed with Glyphh's release ke
 | Support messages: 200 routed to 77 intents | 90.0% | 96.5% | **97.5%**, the LLM seeing 22%, at $0.22 against $300 |
 | A session's memory: what a turn needs from earlier turns | recall by request 14%; recency 36%; a per-file ledger recovers it by construction | | history is 89% of every call's context: ~70% of the bill |
 
-`benchmarks/credit/`: an Ada model against an LLM and a classic model on real loan decisions, the same hold-out for all, with cost and time (2026-10-16; Ada first on the bank's cost since 2026-10-17). `benchmarks/banking77/`: routing a customer's message to one of 77 intents from its text alone: Ada 88%, two points from a tuned classic text model, Fable and Opus at 96%, Sonnet 86%, Haiku 81%; Ada and Fable together 97.5% with the LLM seeing a fifth of the traffic, a thousand times cheaper than the LLM alone. `benchmarks/session/`: what a Claude Code turn needs from the turns before it, measured on 180 real sessions: history is 89% of every call's context and ~70% of the bill; a per-file ledger plus recency recovers the need, similarity over the request does not. `benchmarks/issues/`: free-text issue triage, kept as the counter-example.
+- [`benchmarks/credit/`](benchmarks/credit/README.md): 200 real loan decisions, Ada against Claude and a classic
+  model on the same hold-out, with cost and time.
+- [`benchmarks/banking77/`](benchmarks/banking77/README.md): a customer's message routed to one of 77 intents from
+  its text alone; Ada and Claude together.
+- [`benchmarks/session/`](benchmarks/session/README.md): what a Claude Code turn needs from the turns before it, on
+  180 real sessions; why the `glyphh` plugin's file ledger.
+- [`benchmarks/issues/`](benchmarks/issues/README.md): free-text issue triage, the counter-example.

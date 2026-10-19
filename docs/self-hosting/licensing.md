@@ -15,8 +15,9 @@ by one byte is refused.
 |---|---|
 | `user_id`, `org_id` | The account and organisation that registered the runtime |
 | `install_id` | Always `null` for a runtime's licence |
-| `plan`, `limits` | The plan and its limits for runs |
-| `mods` | Each mod the organisation has, with its limits: Ada's being here is what lets Ada models run |
+| `plan`, `limits` | The plan, and its hosted machines (`machines`) |
+| `features` | The plan's flags: `sync`, `ha`, `offline`, `sso` (shown; nothing acts on them yet) |
+| `mods` | What the plan includes, with its limits: `ada` being here is what lets Ada models run; its `precedents` is null (unlimited) for a self-hosted runtime |
 | `expires_at` | When it stops being current (UTC) |
 | `runtime_id` | The one runtime it is for |
 | `licence_id` | This licence's own id (a UUID) |
@@ -65,7 +66,7 @@ Content-Type: application/json
 |---|---|---|
 | `machine` | SHA-256 (hex) of `<runtime id>:<machine id>`, where the machine id is the host's `/etc/machine-id` when the container can read one, else a random id rrotor makes once and keeps in `/data` | To tell apart two machines running the same runtime. It is a hash: the machine id cannot be read back from it |
 | `licence_id` | The id of the licence rrotor holds now, or `null` | To see which licence is in use |
-| `version` | rrotor's version, e.g. `0.4.0` | To show it on the platform |
+| `version` | rrotor's version, e.g. `0.1.0` | To show it on the platform |
 | `active_runs` | How many runs are in progress, a number | A count only, nothing about the runs |
 
 The answer is `200 {"licence": {"payload": …, "signature": …}}`: a licence of kind `heartbeat`, current for 24
@@ -87,13 +88,11 @@ goes up it:
 |---|---|
 | `hello` | The protocol, rrotor's version, its mode, the runtime id, the model versions deployed |
 | `deployed` | After each deploy: the model, the version, the commit SHA, the repo it came from (if any) and its `glyphh.json` manifest |
-| `result` | The result of a run **the Glyphh server started** (a call through the Glyphh connector at `api.glyphh.ai/mcp`) |
-| `event` | A model's own events, e.g. to start a routine |
-| `usage` | Once a minute at most: for each runtime key used, its SHA-256, a count of calls and when it was last used |
+| `event` | A deploy the server asked for that could not be done: the model, version, commit and why |
+| `usage` | Once a minute at most: for each runtime key used, its SHA-256, a count of calls and when it was last used; and the total number of precedents across the Ada models |
 | `ack`, `pong` | Acknowledgements and keep-alives |
 
-Runs called at your rrotor's own address (`https://<public host>/mcp`) stay on it: their inputs and results never
-go up the link. When a caller signs in to Glyphh rather than using a runtime key, rrotor asks the server whether
+The server calls no model over the link: a run's inputs and results stay on your rrotor. When a caller signs in to Glyphh rather than using a runtime key, rrotor asks the server whether
 that sign-in is good for it (`POST /v1/runtime/introspect`, with the token the caller presented) and keeps the
 answer a minute. With `RROTOR_LINK=off` none of this happens, and callers use runtime keys.
 
@@ -111,10 +110,10 @@ keeps everything running for 15 days on a daily licence (24 hours plus 14 days),
 
 1. On the platform, open the runtime and issue an offline licence for up to 365 days (the API:
    `POST /v1/runtimes/{id}/offline-licence {"days": 365}` answers `{token, expires_at}`).
-2. Carry the token across, and give it to rrotor in one of three ways: the environment `RROTOR_LICENCE`, the file
-   `/data/licence.token` (both read when rrotor starts). `PUT /v1/licence` is refused on a self-hosted rrotor
-   (403 `E_LOCAL_ONLY`): anyone with a runtime key could otherwise hand it a licence, an older or smaller plan's
-   that runs longer, and rrotor would keep it over the daily ones.
+2. Carry the token across, and give it to rrotor in the environment `RROTOR_LICENCE` or the file
+   `/data/licence.token`, both read when rrotor starts. `PUT /v1/licence` is refused on a self-hosted rrotor
+   (403 `E_LOCAL_ONLY`): anyone with a runtime key could otherwise hand it an older or smaller plan's licence that
+   runs longer, and rrotor would keep it over the daily ones.
 3. Set `RROTOR_LINK=off`. rrotor makes no network request for its licence, or for anything else of Glyphh's.
 4. Before it expires, issue the next one, put it in the same place and restart rrotor; it keeps the one that
    expires last.

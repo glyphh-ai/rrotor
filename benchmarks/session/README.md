@@ -53,13 +53,12 @@ median 12 turns, the ninetieth percentile 141.
   where a semantic recall could still earn its place; measuring that needs a person to say what was needed, not a
   script.
 
-This page reverses the design I had argued for before measuring it: the memory tree keyed by request text. The
-data says keep a file ledger and the recent turns, and put the semantic store to work on decisions, which is a
-different and smaller store.
+So: a file ledger and the recent turns, not a memory keyed by the request; a semantic store, if any, for
+decisions, which is a different and smaller store.
 
 ## The ledger, deployed, and the measurement that follows
 
-Built from this page: the file ledger, now in the Glyphh plugin (`glyphh-ai/glyphh`,
+Built from this page: the file ledger, in the `glyphh` plugin (`glyphh-ai/glyphh`,
 `plugins/glyphh/hooks/ledger.py`), installed on this machine on 2026-10-17. Every change to a file is recorded with
 the request it served; when the file is read again the last changes come back as context; every prompt lists the files
 the session changed in its last turns. Local SQLite, nothing sent.

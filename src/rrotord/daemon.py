@@ -1,4 +1,4 @@
-"""rrotord, put together: the sandbox checked, the runner, the link and the local API, until it is told to stop."""
+"""rrotord, put together: the sandbox checked, the runner, the link and the API, until it is told to stop."""
 
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ class Daemon:
             and c.runtime_token
             and (credentials.runtime_id, credentials.token) != (c.runtime_id, c.runtime_token)
         ):
-            credentials.set(c.runtime_id, c.runtime_token)  # hosted and self: from the environment, not a mod
+            credentials.set(c.runtime_id, c.runtime_token)  # hosted and self: from the environment
         self.link = LinkClient(
             url=c.link_url,
             version=VERSION,
@@ -165,7 +165,7 @@ class Daemon:
 
     def install_builtin(self) -> list[str]:
         """The parts the image carries (<name>-<version>-<arch>.tar.gz with its .sha256 and .sig beside it), each
-        installed once; a hosted or self-hosted rrotor has no mod to install any. Answers what was installed now."""
+        installed once, at boot. Answers what was installed now."""
         done: list[str] = []
         folder = self.config.builtin_parts
         if not folder.is_dir():

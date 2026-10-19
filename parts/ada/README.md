@@ -1,16 +1,11 @@
 # The Ada part
 
-What the Ada mod installs into rrotor: the Ada kernel (`glyphh_kernel.py`,
-`glyphh_spec.py`, `glyphh_nsm.py`, from `glyphh-ai/ada-private`,
-branch `main`) and numpy, under `lib/`, mounted read-only at
-`/opt/parts/ada` in a model's sandbox with `lib/` on its `PYTHONPATH`. A model
-whose manifest says `"needs": ["ada"]` imports them as `glyphh_spec` and
-`glyphh_kernel`.
+The Ada kernel (`glyphh_kernel.py`, `glyphh_spec.py`, `glyphh_nsm.py`, `glyphh_lexicon.py` and `lexicon/`, from
+`glyphh-ai/ada-private`, branch `main`) and numpy, under `lib/`. A model whose manifest says `"needs": ["ada"]` gets
+it read-only at `/opt/parts/ada`, with `lib/` on its `PYTHONPATH`, and imports `glyphh_spec` and `glyphh_kernel`.
 
-`build.sh` builds it per architecture; CI builds both and signs them with
-Glyphh's release key (`scripts/part.py`), and the Ada mod's release carries
-the tarballs, their SHA-256 and their signatures. rrotor checks the hash and
-the signature with the release public key it was started with
-(`RROTOR_RELEASE_PUBLIC_KEY`) before it unpacks anything, and installs the part
-only while the plan's licence (`PUT /v1/licence`, checked with
-`RROTOR_LICENCE_PUBLIC_KEY`) includes `ada`.
+`build.sh --arch amd64|arm64 --kernel <checkout> --out <dir>` builds it and signs it with Glyphh's release key
+(`scripts/part.py`, `RROTOR_RELEASE_KEY`). CI builds both architectures on main, publishes them as the release
+`part-ada-<kernel version>`, and builds them into the published image, which installs this architecture's at boot.
+rrotor checks the hash and the signature with `RROTOR_RELEASE_PUBLIC_KEY` before it unpacks anything, and runs a
+model that needs it only while the licence includes `ada` (`docs/architecture.md`, sections 9 and 10).
