@@ -167,16 +167,13 @@ once.
 - **The LLM is in its element.** Routing a short message to a named intent is reading comprehension, and the
   judges leaned on the training file for the near-neighbour pairs (card_arrival against card_delivery_estimate,
   the three top-up intents). They were also consistent with each other, which they were not on the loans.
-- **Ada is still deterministic, free per call and gives receipts**, and 77% from one role and no learning is not
-  nothing; but a developer with this case should use the classic model or the LLM today.
+- **Alone, Ada is two points under the tuned classic model and six under the best LLM;** in front of the LLM it
+  is ahead of both, deterministic and with receipts for the share it decides.
 
 ## What would move Ada
 
 1. **Phrases, not pairs.** "top up" is one token to a person; a tokenizer that keeps the set's own phrases
    would do what word pairs were meant to.
-
-Done on this page: learned word weights (kernel 3.6.0), 77% to 83%; the seeded lexicon and word pairs as
-levers (3.8.0), measured and kept; word evidence (3.9.0), 83% to 88%.
 
 ## Reproduce
 
@@ -187,7 +184,7 @@ uv run python benchmarks/banking77/tune_words.py   # how a word's weight became 
 uv run python benchmarks/banking77/tune_reading.py # the lexicon and word pairs, on and off, inside the training set
 uv run python benchmarks/banking77/tune_evidence.py # word_evidence from 0 to 3, inside the training set
 uv run python benchmarks/banking77/hybrid.py        # Ada and Claude together, at each confidence bar, on the 200
-uv run python benchmarks/banking77/score.py benchmarks/banking77/results/llm_run1.json   # a judge's answers
+uv run python benchmarks/banking77/score.py benchmarks/banking77/results/clean/fable1.json   # a judge's answers
 ```
 
 `results/` holds the 200 sample (opaque ids, shuffled) and its labels, the five judges' answers in `clean/`, the

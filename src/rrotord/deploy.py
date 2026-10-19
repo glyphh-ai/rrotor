@@ -1,7 +1,8 @@
-"""Deploying a version: exactly one commit, from a git bundle the mod sends, from a GitHub repo with a short-lived
-token (the Cloud mints it per deploy), or one this rrotor already holds. The commit's SHA is checked, the manifest
-read, a venv made and `requirements.lock` installed (binary wheels only, with hashes: no model code runs outside
-the sandbox, not even a package's setup), and the version becomes active (docs/architecture.md, 2.2 and 5)."""
+"""Deploying a version: exactly one commit, from a git bundle sent to the API, from a GitHub repo (with a token for
+a private one; the Cloud mints a short-lived one per deploy), or one this rrotor already holds. The commit's SHA is
+checked, the manifest read, a venv made and `requirements.lock` installed (binary wheels only, with hashes: no model
+code runs outside the sandbox, not even a package's setup), and the version becomes active (docs/architecture.md,
+2.2 and 5)."""
 
 from __future__ import annotations
 

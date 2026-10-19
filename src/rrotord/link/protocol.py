@@ -36,8 +36,8 @@ class Limits(BaseModel):
 
 
 class Signed(BaseModel):
-    """The plan's licence as the server signed it: what the mod hands a local rrotor over its local API, and what a
-    hosted one, with no mod, gets in its welcome."""
+    """The plan's licence as the server signed it: what a hosted or self-hosted rrotor gets in its
+    welcome, and what `PUT /v1/licence` takes."""
 
     payload: dict[str, Any]
     signature: str

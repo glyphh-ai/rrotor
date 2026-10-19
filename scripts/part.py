@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build and sign a part: a folder with part.json at its top becomes <name>-<version>-<arch>.tar.gz beside
-<...>.sha256 and <...>.sig (Ed25519 over the tarball, by Glyphh's release key), which is what a mod's release carries
+<...>.sha256 and <...>.sig (Ed25519 over the tarball, by Glyphh's release key), which is what a part's release carries
 and rrotor checks before it unpacks (rrotord/parts.py). The private key is base64 of its raw 32 bytes, in the
 environment (RROTOR_RELEASE_KEY) or a file; `keygen` makes a pair.
 

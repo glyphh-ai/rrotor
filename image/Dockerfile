@@ -22,7 +22,7 @@ RUN uv pip install -q --no-cache --no-deps --python /opt/rrotord/bin/python . \
 FROM os AS base
 ARG VERSION=dev
 # The two public keys rrotor checks signatures with: Glyphh's release key (parts) and its licence key (the plan's
-# licence). Neither is a secret; the mod can also hand them in as environment when it starts the container.
+# licence). Neither is a secret; either can also be set in the environment.
 ARG RELEASE_PUBLIC_KEY=
 ARG LICENCE_PUBLIC_KEY=
 LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/rrotor" \
@@ -44,7 +44,7 @@ CMD ["rrotord"]
 
 # The published image, ghcr.io/glyphh-ai/rrotor (and Fly's registry for the hosted machines): the base with the Ada
 # part built in (dist/parts, from parts/ada/build.sh; this architecture's kept), installed at boot. One image for
-# every rrotor: the environment decides which it is (RROTOR_MODE: local, the default, as the mod starts it; hosted,
+# every rrotor: the environment decides which it is (RROTOR_MODE: local, the default; hosted,
 # as the server provisions it; self, as the deploy packages run it), and the licence decides whether Ada runs.
 FROM base AS hosted
 ARG TARGETARCH

@@ -75,8 +75,10 @@ helm install rrotor deploy/helm/rrotor -n rrotor --set publicHost=rrotor.acme.co
 | `publicHost` | (required) | The exact host rrotor answers at |
 | `runtime.id`, `runtime.token` | | The runtime, unless `existingSecret` is set |
 | `runtime.licence` | | An offline licence token, optional |
+| `runtime.keysSha256` | `[]` | Air-gapped: the SHA-256 of each runtime key that may call it; with the link on, the keys come down the link |
 | `existingSecret` | | A Secret with `RROTOR_RUNTIME_ID`, `RROTOR_RUNTIME_TOKEN` and optionally `RROTOR_LICENCE` |
 | `image.repository`, `image.tag` | `ghcr.io/glyphh-ai/rrotor`, the chart's `appVersion` | The image |
+| `pullSecrets` | `[]` | Image pull secrets, for a mirror |
 | `server` | `https://api.glyphh.ai` | The Glyphh server |
 | `link` | `on` | `off` for air-gapped |
 | `size` | `small` | `small`: 1 CPU (shared: 250m requested), 1 GiB, 3 GiB disk; `medium`: 2 CPU, 4 GiB, 10 GiB; `large`: 2 CPU, 8 GiB, 20 GiB |

@@ -12,6 +12,8 @@ answered from the precedents closest to it.
 | `facts` `{data, top?}` | The closest precedents, best first, cut to what the caller may see |
 | `probabilities` `{data}` | P(outcome \| ticket) over the nearest precedents |
 | `decide` `{data}` | The outcome when confident; else asks for it (`needs_input`) and records it |
+| `learn` `{sample?}` | Weighs the roles, the words and the pairs from the store's own precedents and calibrates; needs ten graded precedents of two outcomes |
+| `settings` `{changes?}` | Reads the model's levers, or changes them live |
 | `start` | How many precedents the model holds |
 
 The manifest names the part `ada` and asks for a data folder: the store,
@@ -19,5 +21,8 @@ The manifest names the part `ada` and asks for a data folder: the store,
 (0 to 1, from who calls) cuts what the answers show: the `meta` layer weighs
 0.8, so a caller below that sees no team or time.
 
-Its tests run with `pytest examples/ada_tickets` from the repo (the kernel the
-tests use is `tests/kernel/`).
+Its tests, from the repo (the kernel is `tests/kernel/`):
+
+```sh
+uv run pytest examples/ada_tickets -o addopts="" -p no:cacheprovider --import-mode=importlib
+```

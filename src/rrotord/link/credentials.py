@@ -1,4 +1,4 @@
-"""The runtime's id and token: handed in by the mod over the local API (or by the hosted provisioning), kept in
+"""The runtime's id and token: from the environment (hosted and self-hosted) or handed in over the API, kept in
 /data/runtime.json (0600), never logged. A new token restarts the link's counter and its connection."""
 
 from __future__ import annotations
