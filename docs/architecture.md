@@ -486,8 +486,8 @@ writing call (`"writes": true`, or any call of a model with data but no Ada), a 
 another node holds (run ids are `<node id>~<uuid>`) to its head, which does it as the same caller; `GET
 /v1/approvals` gathers every node's. A member's answers carry `Rrotor-Cluster-Seq` (the head's last seq, a
 follower's applied one); a follower that forwarded a write answers once it has applied it (up to 2 s), and a request
-with `Rrotor-Min-Seq: <seq>` is answered from a node at least that far, or by the head. No head: 503 `E_NO_HEAD`
-for writes, reads go on; a run on a node no longer in the cluster: 410 `E_RUN_LOST`.
+with `Rrotor-Min-Seq: <seq>` is answered from a node at least that far, or by the head. No head (or a head that
+was deposed): 503 `E_NO_HEAD` for writes, reads go on; a run on a node no longer in the cluster: 410 `E_RUN_LOST`.
 
 ## 8. Ada
 
@@ -638,8 +638,8 @@ container's privileges, the outbound connections, backups and upgrades are in
   health as `sandbox.container_needs`, one sentence each with the fix. Runs are refused until it is fixed; the API
   is served.
 - **Never paused:** a `pause` is ignored in `self` mode.
-- **Several nodes as one runtime:** the cluster's membership and replication with a fixed head are built
-  ([14](#14-the-cluster)); failover and elections are not yet ([Not built yet](#not-built-yet)).
+- **Several nodes as one runtime:** the cluster's membership, replication and manual failover are built
+  ([14](#14-the-cluster)); elections are not yet ([Not built yet](#not-built-yet)).
 
 ## 13. Logs, audit and drains
 
@@ -657,7 +657,8 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
   code) and `run.end`, by any route (REST, MCP, the link); `model.deploy`, `model.activate`, `model.remove`,
   `model.deploy_failed`; `keys.changed` (counts, hashes added and removed); `licence.changed`, `licence.expired`,
   `licence.bad`; `access.denied` (a 401 or 403, with the code); `config.server_logs`; `cluster.head`,
-  `cluster.join`, `cluster.refused` and `cluster.leave` (the node, the code or the reason, the term; on the head). `actor.type` is `key` (its
+  `cluster.join`, `cluster.refused` and `cluster.leave` (the node, the code or the reason, the term; on the head;
+  `cluster.head` with its reason: `bootstrap`, `promoted` by an operator, `deposed`). `actor.type` is `key` (its
   SHA-256), `sign-in` (`sub` from the introspection's answer), `local`, `server` (the link), `rrotor` (its own work)
   or `anonymous` (a 401: the SHA-256 of the bearer sent, if any). `client` is the last `X-Forwarded-For` hop, else
   the connection's address; `via` is `rest`, `mcp` or `link`.
@@ -695,8 +696,8 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
 
 ## 14. The cluster
 
-Built as [`specs/cluster.md`](specs/cluster.md) build order steps 5 and 6 decide: membership, and replication with a
-fixed head (`rrotord/cluster/`). Several self-hosted rrotors of one runtime find and authenticate each other, one
+Built as [`specs/cluster.md`](specs/cluster.md) build order steps 5 to 7 decide: membership, replication, and manual
+failover (`rrotord/cluster/`). Several self-hosted rrotors of one runtime find and authenticate each other, one
 makes the cluster and is its **head**, the rest join it as **followers** up to the key's `max_nodes`. The head is the
 single writer of what syncs (each Ada model's precedent store, the deployed versions, the runtime keys, the licence
 key) and ships it to every follower as one ordered log; followers serve every read from their replica and forward
@@ -738,18 +739,47 @@ every write to the head.
   audited (`cluster.refused`) on the head and logged at error on the node, which keeps its `/data`, answers 503
   with the code to everything but `/healthz` and `/readyz`, and asks again every minute. A member that reconnects
   (a restart, a lost connection) is let back in without counting again. A follower pings its head every 5
-  seconds and is told the members; while the head is away it keeps serving and asks again.
+  seconds and is told how far each member is; while the head is away it keeps serving and asks again.
 - **Leaving:** `rrotord cluster leave <node>` and `rrotord cluster join` (`cluster/command.py`), run on a node
   (`docker compose exec`, `kubectl exec`), authenticated by the cluster secret: the command makes its own leaf from
   the cluster CA and asks the node's listener on loopback; a follower passes a leave to its head. The node removed is
   told (`removed`, `E_CLUSTER_LEFT`) and does not ask again until `rrotord cluster join` is run on it. The head
-  cannot leave (`E_CLUSTER_HEAD`). Not on the API, so no runtime key can change the cluster. A member unseen for
-  `RROTOR_CLUSTER_EVICT_AFTER` (24 hours) is removed by the head, and may join again when it is back. A key with a
-  smaller `max_nodes` makes the head remove the members joined last (never itself) until the cluster fits; they
-  become refused (`E_CLUSTER_FULL`). Each removal is `cluster.leave` with its reason.
-- **State:** `/data/cluster/state.json`: this node's random instance id, the cluster id, term, head and its address,
-  the members (id, address, version, instance, joined at) and the nodes that left. A restarted node finds its head
-  again from it.
+  cannot leave (`E_CLUSTER_HEAD`: promote another node first). Not on the API, so no runtime key can change the
+  cluster. A member unseen for `RROTOR_CLUSTER_EVICT_AFTER` (24 hours) is removed by the head, and may join again
+  when it is back. A key with a smaller `max_nodes` makes the head remove the members joined last (never itself),
+  one at a time, until the cluster fits; they become refused (`E_CLUSTER_FULL`). Each removal is `cluster.leave`
+  with its reason.
+- **Membership is in the log** (`cluster/raft.py`): the head commits a `member` entry for each node it admits,
+  removes or evicts, and for a member whose address, version or instance changed, each carrying the members after
+  it in order of joining, each a **voter** (the first five) or a **learner**; a node takes the members as soon as it
+  holds the entry, and goes back to the ones before if that entry is dropped. Changes go one at a time: the next
+  waits until the last, and an entry of the head's own term, are held by a majority (a join meanwhile is
+  `E_CLUSTER_BUSY` and asked again; `rrotord cluster leave` waits up to 5 s). A voter removed is replaced by the
+  first learner in a change of its own, so no change moves more than one vote. With two members a change needs
+  both: a node lost from a two-node cluster stays a member until it returns.
+- **State:** `/data/cluster/state.json`: this node's random instance id, the cluster id, the term and the vote
+  given in it, the head and its address, the members (id, address, version, instance, joined at, voter), the
+  configuration's (seq, term) and the one before it, the nodes that left, the seq applied, and `stale` (a deposed
+  head's stores may hold writes no log has). A restarted node finds its head again from it.
+- **Terms and fencing** (Raft's rules, `cluster/raft.py`, on our own log and transport): every `append`,
+  `snapshot`, `vote`, `join` and `forward` carries the sender's term. A node refuses anything of a lower term,
+  answering its own, and takes a higher one at once. A head that sees a higher term (in an answer, a vote, a forward
+  or a join, or in a member's hello when it has lost its followers and looks every 5 s) steps down there and then
+  (`cluster.head`, `deposed`): its shippers stop, its followers' connections close and they find the new head, its
+  writing runs in flight fail `E_NO_HEAD`, and it marks itself `stale`, so it takes the new head's snapshot before it
+  follows: what it wrote that nobody else holds, logged or not, is discarded. A head takes over with a `head` entry
+  in its term, and applies all its log holds before it writes.
+- **Manual failover, Pro and Team** (`rrotord cluster promote <node> [--force] [--yes]`, `cluster/command.py`): on
+  any node, passed to the node named. It asks every member who it is (term, last seq, last term) and shows each one's
+  lag behind the longest log; it refuses with fewer than a majority of members reachable (`E_CLUSTER_QUORUM`), a node
+  behind another reachable one (`E_CLUSTER_LAG`, unless `--force`: the writes it lacks are lost), and a head that
+  does not answer (`E_CLUSTER_CONFIRM`: at a terminal the operator is asked whether it is down; else `--yes`). Then it
+  asks each member for its vote at the next term: a vote is given once a term, to a log at least as up to date as the
+  voter's own, or, forced, by a member with the same members as the candidate (so two heads never share a term
+  whatever is forced); a majority of members makes it head (`cluster.head`, `promoted`, the operator as actor), and
+  `E_CLUSTER_VOTES` otherwise (the term has moved, and a head that answered may have stepped down: run it again). A
+  head that answers steps down when asked for its vote, so a promotion is also how the head is moved. A head
+  restarted leads again in its term unless a member it reaches knows a higher one.
 - **What the rest of rrotor sees:** `GET /readyz`, `GET /v1/cluster`, MCP's `cluster_status` and the health's
   `cluster` ([7](#7-the-api)); the heartbeat's `cluster_id` and `role` ([12](#12-self-hosting)); `cluster_id` and
   `role` on every log line and `cluster_id` on every audit event ([13](#13-logs-audit-and-drains)).
@@ -775,12 +805,16 @@ every write to the head.
   re-encode all travel this way, so `learn` on the head changes every follower's answers.
 - **The log** (`cluster/log.py`): `/data/cluster/log/` on every node, JSON-line segments named by their first seq,
   each entry `{seq, term, kind, ...}`: `rows`, `deploy {model, version, commit_sha, manifest}` (any version made
-  active, by the API, MCP or the link), `remove`, `keys {hashes}`, `licence {key}`. Committed once on the head's
-  disk (fsynced): Pro and Team. Kept until every member has applied it, and never past `RROTOR_CLUSTER_LOG_KEEP`
-  (the oldest segments go; the newest stays).
-- **Applying** (`cluster/replication.py`): the head ships each follower `append {term, entries, commit_seq}` past
-  what it acknowledged, and waits for new entries when it is in step. The follower appends them to its own log and
-  applies them in order: `rows` in one SQLite transaction on the replica (capture off), `deploy` by fetching the
+  active, by the API, MCP or the link), `remove`, `keys {hashes}`, `licence {key}`, `member {op, node, members}`,
+  `head {node}`. Committed once on the head's disk (fsynced): Pro and Team. Kept until every member has applied it,
+  and never past `RROTOR_CLUSTER_LOG_KEEP` (the oldest segments go; the newest stays; `base` keeps the seq and term
+  of the last one gone). Each entry's term is known (runs of one term, read again at start), and a tail that
+  diverged from the head's is dropped (`truncate`).
+- **Applying** (`cluster/replication.py`): the head ships each follower `append {term, head, prev_seq, prev_term,
+  entries, commit_seq}` past what it holds, and waits for new entries when it is in step. The follower takes them
+  only if its log holds the entry before them at that term (else it answers where to begin again, its applied seq);
+  an entry that conflicts is dropped with all after it, unless it was applied, when it asks for a snapshot. It
+  applies what is committed in order: `rows` in one SQLite transaction on the replica (capture off), `deploy` by fetching the
   version's `src/` and `venv/` from the head as a tar (no GitHub or PyPI on a follower; a head of another
   architecture is refused, `E_CLUSTER_ARCH`), `remove`, `keys` into the access list, `licence` offered to its own
   licence, which checks the signature itself. `applied_seq` is kept in `cluster/state.json`. An entry that does not
@@ -804,10 +838,16 @@ every write to the head.
   the synced store's precedents. Every node still heartbeats. The precedent cap is the head's to hold, on the
   synced store: every node holds the same precedents, so a Pro cluster holds 50,000 across its nodes, not 50,000 on
   each ([9](#9-the-licence)).
-- **The seams left for what comes next:** `ha` is false and the term stays 1 (manual failover and elections); there
-  are no `member` entries yet (membership is kept in `cluster/state.json`); voters are the first five members by
-  join; the snapshot is a plain GET on the listener rather than binary frames on the WebSocket; the drain's
-  `rrotor.node.role` resource attribute is `standalone`.
+- **The seams left for what comes next:** `ha` is false: Raft's elections, majority commit and the head's step down
+  without a majority are in `cluster/raft.py` and shown by the simulation, but no node elects yet; the snapshot is a
+  plain GET on the listener rather than binary frames on the WebSocket; the drain's `rrotor.node.role` resource
+  attribute is `standalone`.
+- **Proven by simulation** (`tests/daemon/cluster/sim.py`): the nodes' Raft over a seeded network in one thread, no
+  clock but the scheduler's: messages delayed, reordered, lost and doubled, partitions, crashes and restarts (log,
+  term, vote and store kept), writes, members joining and leaving, compaction, and an operator's promotions, forced
+  or not. After every event it checks at most one head per term and that no node's term goes down or takes an append
+  of a lower one; at the end it heals everything, lets a head emerge, writes once more and checks every member holds
+  the head's store and log. CI runs 1,500 seeds (`RROTOR_SIM_SEEDS` for more), and a test shows a broken rule caught.
 
 ## Not built yet
 
@@ -815,12 +855,10 @@ every write to the head.
   logged and skipped).
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a model's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
-- **Failover and elections** ([`specs/cluster.md`](specs/cluster.md), build order steps 7 and 8): replication with
-  a fixed head is built ([14](#14-the-cluster)). To come: manual failover for Pro and Team (`rrotord cluster
-  promote`, terms and fencing, a rejoining old head discarding its tail) and elected heads for Enterprise (HA,
-  majority commit, `E_NOT_COMMITTED`, `Retry-After` on `E_NO_HEAD` and the SDKs' retries), and membership kept in
-  the log (`member` entries). Until then the head is fixed: while it is down the cluster serves reads and writes
-  wait for it.
+- **Elections** ([`specs/cluster.md`](specs/cluster.md), build order step 8): replication and manual failover are
+  built ([14](#14-the-cluster)). To come: elected heads for Enterprise (HA: votes on timeouts, majority commit,
+  `E_NOT_COMMITTED`, the head's step down without a majority, `Retry-After` on `E_NO_HEAD`). Until then a head is
+  moved by `rrotord cluster promote`; while it is down the cluster serves reads and writes wait for it.
 - **The cluster's packages** (build order step 10): Helm's `cluster.enabled`, Compose's cluster files and Terraform's
   `node_count`, with the cluster port, the secret and `/readyz` as the readiness probe.
 - **The cluster's drain and audit log** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains), build
