@@ -609,8 +609,8 @@ A **part** is what a model needs beside the base. One is built: **ada**, the Ada
 | Job | What |
 |---|---|
 | `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the examples' tests |
-| `deploy` | Compose (and the air-gapped overlay) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file, `terraform fmt -check` and `validate` for both modules and their examples. Nothing is started |
-| `image` | Builds the base and runs the sandbox tests inside it; starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off` |
+| `deploy` | Compose (the air-gapped overlay, the cluster file and the per-node file, which refuses to render without its node's settings) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file (one replica, and two clusters of three), `terraform fmt -check` and `validate` for both modules and their examples (one node and a cluster). Nothing is started |
+| `image` | Builds the base and runs the sandbox tests inside it; starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off`; with the secret `CI_CLUSTER_LICENSE_KEY` (a key with cluster sync), brings up the three-node Compose cluster and checks every node ready, `rrotor-0` the head of three |
 | `part-ada` (main) | Clones `glyphh-ai/ada-private` at `main` (`ADA_KERNEL_TOKEN`), builds and signs the Ada part for amd64 and arm64 (`RROTOR_RELEASE_KEY`), publishes the release `part-ada-<version>` |
 | `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with the release public key baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |
 
@@ -639,7 +639,8 @@ container's privileges, the outbound connections, backups and upgrades are in
   is served.
 - **Never paused:** a `pause` is ignored in `self` mode.
 - **Several nodes as one runtime:** the cluster's membership and replication with a fixed head are built
-  ([14](#14-the-cluster)); failover and elections are not yet ([Not built yet](#not-built-yet)).
+  ([14](#14-the-cluster)), and the packages run one; failover and elections are not yet
+  ([Not built yet](#not-built-yet)).
 
 ## 13. Logs, audit and drains
 
@@ -695,8 +696,8 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
 
 ## 14. The cluster
 
-Built as [`specs/cluster.md`](specs/cluster.md) build order steps 5 and 6 decide: membership, and replication with a
-fixed head (`rrotord/cluster/`). Several self-hosted rrotors of one runtime find and authenticate each other, one
+Built as [`specs/cluster.md`](specs/cluster.md) build order steps 5, 6 and 10 decide: membership, replication with a
+fixed head (`rrotord/cluster/`), and the packages that run it. Several self-hosted rrotors of one runtime find and authenticate each other, one
 makes the cluster and is its **head**, the rest join it as **followers** up to the key's `max_nodes`. The head is the
 single writer of what syncs (each Ada model's precedent store, the deployed versions, the runtime keys, the licence
 key) and ships it to every follower as one ordered log; followers serve every read from their replica and forward
@@ -804,6 +805,16 @@ every write to the head.
   the synced store's precedents. Every node still heartbeats. The precedent cap is the head's to hold, on the
   synced store: every node holds the same precedents, so a Pro cluster holds 50,000 across its nodes, not 50,000 on
   each ([9](#9-the-licence)).
+- **The packages** (`deploy/`, [`self-hosting/`](self-hosting/README.md#a-cluster)): Helm's `cluster.enabled` and
+  `replicas` (a Parallel StatefulSet, `RROTOR_NODE_ID` from the pod name, `RROTOR_CLUSTER_DNS` at the headless
+  Service with port 7778 and `publishNotReadyAddresses`, the advertised address the pod's name under it, the head
+  `<name>-0`, the secret made once and kept with `lookup` or `cluster.existingSecret`, readiness on `/readyz`, a
+  NetworkPolicy for 7778 between the release's pods, `maxUnavailable: 1`, a spread across machines and zones);
+  Compose's `docker-compose.cluster.yml` (three nodes and Caddy on one machine, to try) and
+  `docker-compose.node.yml` (one per machine, peers by private address); Terraform's `node_count` (nodes across
+  zones at fixed private addresses, the secret in the cloud's secret store and read at boot with the instance's own
+  identity, 7778 between the nodes only, an AWS NLB with ACM or Google's external HTTPS load balancer checking
+  `/readyz`, no Caddy). `replicas` and `node_count` of 1 are the single box as before.
 - **The seams left for what comes next:** `ha` is false and the term stays 1 (manual failover and elections); there
   are no `member` entries yet (membership is kept in `cluster/state.json`); voters are the first five members by
   join; the snapshot is a plain GET on the listener rather than binary frames on the WebSocket; the drain's
@@ -821,8 +832,6 @@ every write to the head.
   majority commit, `E_NOT_COMMITTED`, `Retry-After` on `E_NO_HEAD` and the SDKs' retries), and membership kept in
   the log (`member` entries). Until then the head is fixed: while it is down the cluster serves reads and writes
   wait for it.
-- **The cluster's packages** (build order step 10): Helm's `cluster.enabled`, Compose's cluster files and Terraform's
-  `node_count`, with the cluster port, the secret and `/readyz` as the readiness probe.
 - **The cluster's drain and audit log** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains), build
   order step 9): followers sending their telemetry to the head, `RROTOR_DRAIN_AT=head` exporting it there, the
   cluster's audit store under `/data/audit/cluster/` and `GET /v1/audit` answered by the head; the
