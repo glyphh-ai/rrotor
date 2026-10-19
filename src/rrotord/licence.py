@@ -230,6 +230,7 @@ class Licence:
             "max_nodes": limits.max_nodes,
             "max_precedents": limits.max_precedents,
             "cluster_sync_enabled": limits.cluster_sync_enabled,
+            "ha": limits.ha,
             "precedents": {
                 "held": precedents,
                 "cap": cap,

@@ -51,6 +51,11 @@ class Plan:
     max_precedents: int | None
     cluster_sync_enabled: bool
 
+    @property
+    def ha(self) -> bool:
+        """High availability, a cluster electing its own head: Enterprise's (Pro and Team fail over by command)."""
+        return self.tier == "enterprise" and self.cluster_sync_enabled
+
 
 COMMUNITY = Plan("free", 1, 5000, False)  # no key, or one that has stopped counting
 PLANS = {  # the server's table, used only to map a legacy licence: a key's own numbers are what rrotor acts on

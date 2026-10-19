@@ -280,14 +280,17 @@ class Replication:
                 asked = self.raft.message_for(node)
                 woken.clear()
                 kind, body = asked["type"], {k: v for k, v in asked.items() if k != "type"}
+                within = SNAPSHOT_WITHIN if kind == "snapshot" else APPEND_WITHIN
+                alive = asyncio.create_task(self._alive(node))  # a long one (a snapshot, a version): still in touch
                 try:
-                    within = SNAPSHOT_WITHIN if kind == "snapshot" else APPEND_WITHIN
                     got: dict[str, Any] | None = await channel.request(kind, within=within, **body)
                 except ClusterError as err:
                     if err.code == "E_CLUSTER_CLOSED":
                         raise
                     log.warning("cluster: a follower did not take a " + kind, extra={"node": node, "code": err.code})
                     got = None
+                finally:
+                    alive.cancel()
                 if got is not None:
                     self.raft.answered(node, asked, got, self.clock())
                     self.heard_from(node, got.get("applied_seq"))
@@ -301,6 +304,12 @@ class Replication:
             log.warning("cluster: shipping to a follower stopped", extra={"node": node, "code": err.code})
         except TimeoutError:
             log.warning("cluster: a follower did not answer; shipping to it stopped", extra={"node": node})
+
+    async def _alive(self, node: str) -> None:
+        """While a request is with a follower, on a connection still open, the follower counts as heard from."""
+        while True:
+            await asyncio.sleep(self.raft.timing.heartbeat)
+            self.raft.heard[node] = self.clock()
 
     # The head: what a follower fetches
 

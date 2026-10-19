@@ -17,9 +17,10 @@ import pytest
 
 import rrotor
 from rrotord.audit import Audit
-from rrotord.cluster import discovery
+from rrotord.cluster import discovery, replication
 from rrotord.cluster import node as cluster_node
 from rrotord.cluster.node import Cluster
+from rrotord.cluster.raft import Timing
 from rrotord.config import Config
 from rrotord.licence import Licence
 from tests.fakes import keys
@@ -43,6 +44,8 @@ def quick(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in (("RETRY", 0.05), ("PING", 0.05), ("GATE", 0.05), ("HEAD_EVERY", 0.05), ("REJOIN", 0.1)):
         monkeypatch.setattr(cluster_node, name, value)
     monkeypatch.setattr(cluster_node, "ASKED_WITHIN", 2.0)
+    monkeypatch.setattr(cluster_node, "TICK", 0.01)
+    monkeypatch.setattr(replication, "TIMING", Timing(heartbeat=0.05, election_min=1.0, election_max=2.0))
     monkeypatch.setattr(discovery, "RESOLVE_EVERY", 0.0)
 
 

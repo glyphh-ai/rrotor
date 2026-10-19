@@ -36,7 +36,7 @@ def cluster(*ids: str, ha: bool = True) -> dict[str, Node]:
     head = node(ids[0], ha)
     head.bootstrap({"node_id": ids[0]}, 0.0)
     for n in ids[1:]:
-        head.add({"node_id": n})
+        head.add({"node_id": n}, 0.0)
         head.commit = head.log.last  # as if each change were held by the others at once
     rafts: dict[str, Node] = {ids[0]: head}
     for n in ids[1:]:
@@ -293,7 +293,7 @@ def test_membership_changes_one_vote_at_a_time():
     a = r["a"]
     assert a.voters() == ["a", "b", "c", "d", "e"] and not a.members[-1]["voter"]
     assert a.fill() is None  # five voters already
-    a.add({"node_id": "b", "address": "b:7778"})  # a member's details: its vote kept
+    a.add({"node_id": "b", "address": "b:7778"}, 0.0)  # a member's details: its vote kept
     assert a.members[1] == {"node_id": "b", "address": "b:7778", "voter": True}
     a.remove("e", left=True)
     assert a.voters() == ["a", "b", "c", "d"] and a.log.read(a.log.last - 1)[-1]["left"] is True

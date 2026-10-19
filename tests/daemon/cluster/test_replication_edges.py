@@ -4,6 +4,7 @@ forwarding without a caller or a head, and what a forwarded request may ask."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import tarfile
@@ -265,10 +266,12 @@ async def test_a_shipper_stops_when_its_head_hears_a_higher_term_and_a_head_that
 
     class Channel:
         async def request(self, kind: str, /, **_: Any) -> dict[str, Any]:
+            await asyncio.sleep(0.15)  # long enough for heartbeats: the follower counts as heard from meanwhile
             return {"term": 7, "accepted": False}
 
-    r.raft.add({"node_id": "n1"})
+    r.raft.add({"node_id": "n1"}, 0.0)
     r.attach("n1", Channel(), 1)  # type: ignore[arg-type]
+    await until(lambda: r.raft.heard["n1"] > 0.0)
     await until(lambda: r.shippers["n1"].done())
     assert r.raft.role == "follower" and r.raft.term == 7 and moved == ["follower"]
     other = follower(tmp_path / "other")

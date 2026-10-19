@@ -70,6 +70,7 @@ def test_no_key_anywhere_is_community_said_once(tmp_path, caplog):
         "max_nodes": 1,
         "max_precedents": 5000,
         "cluster_sync_enabled": False,
+        "ha": False,
         "precedents": {"held": None, "cap": 5000, "over": False},
     }
     assert not (tmp_path / "data" / "licence.json").exists()
@@ -118,6 +119,7 @@ def test_a_good_key_sets_its_own_limits_and_shows_as_the_spec_says(tmp_path):
         "max_nodes": 3,
         "max_precedents": 50000,
         "cluster_sync_enabled": True,
+        "ha": False,
         "precedents": {"held": None, "cap": 50000, "over": False},
     }
     assert lic.plan_name == "Pro"
@@ -125,7 +127,7 @@ def test_a_good_key_sets_its_own_limits_and_shows_as_the_spec_says(tmp_path):
     enterprise = keys().key(tier="enterprise", max_nodes=None, max_precedents=None, issued_at=at(-1))
     lic.offer(enterprise, "heartbeat")
     assert lic.view(10**9)["precedents"] == {"held": 10**9, "cap": None, "over": False}
-    assert lic.plan_name == "Enterprise"
+    assert lic.plan_name == "Enterprise" and lic.view()["ha"] is True  # Enterprise elects its cluster's head
 
 
 def test_an_expired_key_holds_its_limits_through_14_days_of_grace_warned_daily_then_community(tmp_path, caplog):

@@ -59,7 +59,14 @@ answers `E_NO_HEAD` (503). What a forward does is the API's own operations (`rro
 `serve_forward`). Each ping of a follower carries its applied seq and its runtime keys' calls since the last, which
 the head adds to its own `usage`.
 
-**Not built yet:** elections and majority commit (`ha` is false), and the followers' telemetry to the head."""
+**Elected heads (HA, Enterprise: `ha` in the licence).** A ticker looks at Raft's clock: a voter whose head has been
+silent for its election timeout stands (`vote` asked of every other voter on a connection of its own) and, elected,
+leads (`cluster.head`, `elected`); a head out of touch with a majority of voters steps down (`no_majority`). A write
+done on the head is answered once a majority of voters hold it (`committed`: `E_NOT_COMMITTED` after 5 s, the entry
+kept), and `E_NO_HEAD` carries `Retry-After: 2`. An elected head restarted follows whoever is elected, its stores
+taken again first. Under HA `promote` moves the head only to a voter, never forced (`E_CLUSTER_HA`).
+
+**Not built yet:** the followers' telemetry to the head."""
 
 from __future__ import annotations
 
@@ -101,7 +108,10 @@ HEAD_EVERY = 5.0  # the head checks the cap and the members unseen
 SHUTDOWN = 5.0  # seconds the listener waits for its connections' handlers when it stops
 ASKED_WITHIN = 10.0  # `rrotord cluster join` waits this long for the outcome
 REFUSED_KEPT = 50
-VOTE_WITHIN = 5.0  # a vote's answer
+VOTE_WITHIN = 5.0  # a vote's answer, asked by `rrotord cluster promote`
+TICK = 0.05  # with HA, Raft's clock looked at this often: an election timeout passed, a head out of touch
+COMMIT_WITHIN = 5.0  # with HA, a write is answered once a majority of voters hold it, or E_NOT_COMMITTED
+RETRY_AFTER = "2"  # E_NO_HEAD's Retry-After: an election takes 1.5 to 3 s
 CHANGE_WITHIN = 5.0  # `rrotord cluster leave` waits this long for the last membership change to be committed
 FORWARD_WITHIN = 3630.0  # a forwarded request's answer: a run's longest seconds (3600) and its end
 READ_YOUR_WRITES = 2.0  # a node waits this long to have applied a seq it was asked to be at
@@ -115,7 +125,7 @@ async def _nothing() -> None:
 
 
 def no_head(message: str = "No head answers this node: writes wait for it.") -> Unavailable:
-    return Unavailable(message, code="E_NO_HEAD")
+    return Unavailable(message, code="E_NO_HEAD", headers={"Retry-After": RETRY_AFTER})
 
 
 def names(members: Any) -> list[str]:
@@ -193,7 +203,7 @@ class Cluster:
         self.asked = False
         self.telling: set[asyncio.Task[None]] = set()  # the head telling removed nodes so; a follower answering
         self.access = access or Access(config.data)
-        self.ha: Callable[[], bool] = lambda: False  # elected heads (Enterprise): not built yet
+        self.ha: Callable[[], bool] = lambda: licence.limits().ha  # Enterprise: the cluster elects its head
         self.replication = Replication(
             config.data / "cluster" / "log",
             config.run_dir / "cluster" / "scratch",
@@ -221,6 +231,9 @@ class Cluster:
         self.leading = asyncio.Lock()
         self.said: dict[str, dict[str, str]] = {}  # the head's: each member's address, version, instance at join
         self.promoting = False  # `rrotord cluster promote` in hand: it leads, as the operator
+        self.led = 0  # the term this node last led in
+        self.ticking: asyncio.Task[None] | None = None
+        self.campaigning: asyncio.Task[None] | None = None
         self.deposed: Callable[[], Awaitable[None]] = _nothing  # a head that steps down: its writing runs fail
         # what a forwarded request does: the API's operations, set by rrotord/api/app.py
         self.serve_forward: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
@@ -424,6 +437,7 @@ class Cluster:
         await web.TCPSite(self.listener, BIND, self.port, ssl_context=self.credentials.server).start()
         log.info("cluster: listening", extra={"port": self.port, "address": self.address})
         self.membership = asyncio.create_task(self._membership())
+        self.ticking = asyncio.create_task(self._elections())
 
     async def _close(self) -> None:
         log.warning(self._reason())
@@ -443,10 +457,11 @@ class Cluster:
 
     async def _shut(self) -> None:
         await self.replication.stop()
-        if self.membership is not None:
-            self.membership.cancel()
-            await asyncio.gather(self.membership, return_exceptions=True)
-            self.membership = None
+        for task in (self.membership, self.ticking, self.campaigning):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.membership = self.ticking = self.campaigning = None
         for channel in [*self.accepted, *([self.head_channel] if self.head_channel else [])]:
             await channel.close()
         self.links.clear()
@@ -480,8 +495,12 @@ class Cluster:
             elif self.raft.role == "head" and not self.promoting:  # elected, or a head the gate closed and opens
                 await self._lead("elected" if self.raft.via == "votes" else "resumed")
                 return HEAD_EVERY
-            elif self.state.get("head") == self.node_id and self.refusal is None and await self._resume():
-                return HEAD_EVERY
+            elif self.state.get("head") == self.node_id and self.refusal is None:
+                if not self.ha():
+                    if await self._resume():
+                        return HEAD_EVERY
+                else:  # an elected head restarted follows whoever is elected, its stores taken again first
+                    self.raft.forget()
         if self.refusal is not None and self.refusal["code"] == "E_CLUSTER_LEFT" and not self.asked:
             return REJOIN  # it left: it asks again only when `rrotord cluster join` says so
         answers, everyone = await self._survey()
@@ -521,9 +540,9 @@ class Cluster:
         return True
 
     async def _fence(self) -> None:
-        """A head with members it is not connected to asks each who it is: a higher term deposes it."""
-        if all(m.node_id == self.node_id or m.node_id in self.links for m in self.members()):
-            return
+        """Without HA, a head with members it is not connected to asks each who it is: a higher term deposes it."""
+        if self.ha() or all(m.node_id == self.node_id or m.node_id in self.links for m in self.members()):
+            return  # with HA a head out of touch steps down by itself, and a candidate's term would only disrupt
         answers, _ = await self._survey()
         self._observe(answers)
 
@@ -655,6 +674,8 @@ class Cluster:
             reply = failed(msg, err)
         except (KeyError, TypeError, ValueError):
             reply = failed(msg, ClusterError("Not a request this node can read.", code="E_CLUSTER_MESSAGE"))
+        except OSError as err:  # its log could not be written (a full disk): the head asks again
+            reply = failed(msg, ClusterError(f"This node could not keep the entries: {err}", code="E_CLUSTER_APPLY"))
         with contextlib.suppress(Exception):
             await channel.send(reply)
 
@@ -680,13 +701,16 @@ class Cluster:
         ):
             self.following = None
             self._spawn(self.head_channel.close())
+        if raft.role == "head" and self.role != "head" and not self.promoting:
+            self.wake.set()  # elected: the membership loop leads
 
     def _step_down(self) -> None:
-        log.warning("cluster: a higher term: this node is no longer the head", extra={"term": self.raft.term})
+        reason = "deposed" if self.raft.term > self.led else "no_majority"
+        log.warning("cluster: this node is no longer the head", extra={"term": self.raft.term, "reason": reason})
         self.role = "follower"
         self.replication.saved(self.replication.applied)
         self._identify()
-        self.audit.emit("cluster.head", who=NODE, node=self.node_id, term=self.raft.term, reason="deposed")
+        self.audit.emit("cluster.head", who=NODE, node=self.node_id, term=self.raft.term, reason=reason)
         self._spawn(self._resign())
 
     async def _resign(self) -> None:
@@ -705,6 +729,51 @@ class Cluster:
             left.discard(str(entry.get("node")))
         self.state["left"] = sorted(left)
         self._save()
+
+    # Elections (HA)
+
+    async def _elections(self) -> None:
+        """With HA, Raft's clock: a voter whose head has been silent for its election timeout stands; a head out
+        of touch with a majority of voters steps down before anyone else can be elected."""
+        while True:
+            await asyncio.sleep(TICK)
+            if not self.ha() or not self.state.get("cluster_id") or self.refusal is not None:
+                continue
+            if self.replication.lock.locked():  # taking the head's entries or snapshot: it has a head
+                self.raft.deadline = max(self.raft.deadline, self.clock() + self.raft.timing.election_min)
+                continue
+            if self.raft.tick(self.clock()) == "campaign" and self.campaigning is None:
+                self.campaigning = asyncio.create_task(self._campaign())
+            self._reconcile()
+
+    async def _campaign(self) -> None:
+        """One election: the next term, this node's own vote, and every other voter asked for its own."""
+        try:
+            asked = self.raft.campaign(self.clock())
+            self._reconcile()
+            members = {m.node_id: m for m in self.members()}
+            within = self.raft.timing.election_min
+            voters = [members[n] for n in self.raft.quorum() if n != self.node_id and n in members]
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.gather(*(self._vote(m, asked, within) for m in voters)), within)
+        finally:
+            self.campaigning = None
+
+    async def committed(self, term: int) -> None:
+        """A write done on this head in `term`, answered once it is committed: at once without HA (on its disk);
+        with HA once a majority of voters hold it, else E_NOT_COMMITTED after COMMIT_WITHIN (the entry is kept
+        and committed when they come back). E_NO_HEAD when this node stopped being the head meanwhile."""
+        seq = self.replication.log.last
+        for _ in range(int(COMMIT_WITHIN / 0.02) + 1):
+            if self.role != "head" or self.raft.term != term:
+                raise no_head("This node stopped being the head during the call: what it wrote may be lost.")
+            if self.raft.commit >= seq:
+                return
+            await asyncio.sleep(0.02)
+        raise Unavailable(
+            "Most voters do not hold this write yet: it is kept, and committed when they come back.",
+            code="E_NOT_COMMITTED",
+        )
 
     # The head
 
@@ -729,7 +798,7 @@ class Cluster:
             self.seen.setdefault(m.node_id, self.wall())
         self.state.update(head=self.node_id, head_address=self.address)
         self._save()
-        self.role, self.status, self.refusal = "head", "ready", None
+        self.role, self.status, self.refusal, self.led = "head", "ready", None, self.raft.term
         self._identify()
         self.replication.lead()
         if reason not in ("restarted", "resumed"):
@@ -745,7 +814,7 @@ class Cluster:
         for m in self.raft.members:
             said = self.said.get(str(m["node_id"]))
             if said is not None and any(m.get(k) != v for k, v in said.items()):
-                self.raft.add({**m, **said})
+                self.raft.add({**m, **said}, self.clock())
                 break
         else:
             self.raft.fill()
@@ -806,7 +875,7 @@ class Cluster:
                 )
             if not self.raft.ready_for_change():
                 raise self._busy()
-            self.raft.add(Member(node, address, version, instance, stamp(self.wall())).to_json())
+            self.raft.add(Member(node, address, version, instance, stamp(self.wall())).to_json(), self.clock())
             self.replication.wake()
             self.state["left"] = [n for n in left if n != node]
             self._save()
@@ -1017,6 +1086,13 @@ class Cluster:
             return {k: v for k, v in got.items() if k not in ("type", "id", "ok")}
         if self.role == "head":
             return {"head": self.node_id, "term": self.raft.term, "promoted": False, "reason": "already the head"}
+        if self.ha() and (force or node not in self.raft.voters()):
+            raise ClusterError(
+                "This cluster elects its head (HA): only a voter with a log as up to date as most voters' can be "
+                "promoted, and --force, which could lose acknowledged writes, is refused.",
+                code="E_CLUSTER_HA",
+                status=409,
+            )
         others = [m for m in members.values() if m.node_id != self.node_id]
         found = await asyncio.gather(*(self._ask(m.address) for m in others))
         reached = {
@@ -1084,7 +1160,7 @@ class Cluster:
             self.promoting = False
         return {"head": self.node_id, "term": self.raft.term, "promoted": True, "forced": force, "members": lags}
 
-    async def _vote(self, member: Member, asked: dict[str, Any]) -> None:
+    async def _vote(self, member: Member, asked: dict[str, Any], within: float = VOTE_WITHIN) -> None:
         """A vote asked of one member, on a connection of its own; its answer given to Raft."""
         assert self.session is not None and self.credentials is not None  # noqa: S101  (opened first)
         try:
@@ -1093,7 +1169,7 @@ class Cluster:
             return
         try:
             body = {k: v for k, v in asked.items() if k != "type"}
-            got = await channel.request("vote", within=VOTE_WITHIN, **body)
+            got = await channel.request("vote", within=within, **body)
         except (ClusterError, TimeoutError):
             return
         finally:

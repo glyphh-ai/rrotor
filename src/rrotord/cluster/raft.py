@@ -179,6 +179,12 @@ class Raft:
         self.term, self.voted, self.role, self.head = term, None, "follower", None
         self._persist()
 
+    def forget(self) -> None:
+        """A head restarted with HA: it follows whoever is elected, its stores taken again first (a run in flight
+        when it stopped may have written what no log has)."""
+        self.head, self.stale = None, True
+        self._persist()
+
     def observe(self, term: int) -> None:
         """A term heard some other way (a hello's answer, a forward): taken if it is higher."""
         if term > self.term:
@@ -218,6 +224,7 @@ class Raft:
 
     def _become_head(self, now: float, via: str) -> None:
         self.role, self.head, self.votes, self.via = "head", self.me, set(), via
+        self.stale = False  # what its stores hold beyond its log (changes not yet captured) ships as it leads
         self.next, self.match = {}, {}
         self.heard = dict.fromkeys(self.ids(), now)
         self.head_seq = self.propose({"kind": "head", "node": self.me})["seq"]
@@ -230,10 +237,12 @@ class Raft:
         self._advance()
         return entry
 
-    def add(self, member: dict[str, Any]) -> dict[str, Any]:
+    def add(self, member: dict[str, Any], now: float) -> dict[str, Any]:
         """A `member` entry adding a node (a voter while there are fewer than VOTERS, else a learner), or changing
-        a member's details (its address, its version) with its vote kept."""
+        a member's details (its address, its version) with its vote kept. A node added counts as heard from now:
+        its first answer may be a while (a snapshot)."""
         node = str(member["node_id"])
+        self.heard.setdefault(node, now)
         found = next((m for m in self.members if m["node_id"] == node), None)
         voter = bool(found.get("voter")) if found is not None else len(self.voters()) < VOTERS
         made = {**member, "voter": voter}

@@ -264,3 +264,33 @@ async def test_a_bare_node_that_is_deposed_has_no_runs_to_stop(nodes: Nodes):
     a._reconcile()
     assert got["granted"] and a.role == "follower"
     await until(lambda: not a.telling)
+    a._spawn(asyncio.sleep(60))  # whatever it is still telling when it stops is cancelled
+    await a.stop()
+    assert not a.telling
+
+
+async def test_a_head_restarted_leads_again_in_its_term_and_a_follower_that_cannot_keep_entries_says_so(
+    ring: Ring, monkeypatch: pytest.MonkeyPatch
+):
+    ids = await three(ring)
+    await ring.stop("n0")
+    zero = await ring.add("n0", ids)  # no member knows a later term: it leads again, as it was
+    two = ring.daemons["n2"]
+    await until(lambda: zero.cluster.role == "head" and two.cluster.head_channel is not None and ready(ring, "n2"))
+    assert zero.cluster.raft.term == 1 and heads(ring) == ["n0"]
+    status, body, _ = await ring.call("n2", "record", ticket(2), outcome="x")
+    assert (status, body["status"]) == (200, "done") and body["run_id"].startswith("n0~"), body
+    one = ring.daemons["n1"]
+
+    async def full(msg: dict[str, Any]) -> dict[str, Any]:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(one.cluster.replication, "receive", full)
+    sent: list[dict[str, Any]] = []
+
+    class Channel:
+        async def send(self, msg: dict[str, Any]) -> None:
+            sent.append(msg)
+
+    await one.cluster._answer_head(Channel(), {"type": "append", "id": "1"})  # type: ignore[arg-type]
+    assert sent[0]["error"]["code"] == "E_CLUSTER_APPLY" and "No space left" in sent[0]["error"]["message"]

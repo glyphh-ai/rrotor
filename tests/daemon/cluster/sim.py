@@ -160,7 +160,7 @@ class World:
             return False
         if nid not in self.nodes:
             self.add(nid)
-        head.core.add({"node_id": nid})
+        head.core.add({"node_id": nid}, self.now)
         self.settle(head)
         return True
 

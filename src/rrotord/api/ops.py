@@ -58,6 +58,7 @@ async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
     the link either way (the repo only for a repo deploy). A follower sends it to its head."""
     if forward.follower(s):
         return await forward.relayed(s, "deploy", {"data": data})
+    term = forward.leading(s)
     commit, bundle, repo, token = data.get("commit"), data.get("bundle"), data.get("repo"), data.get("token")
     if not isinstance(commit, str):
         raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
@@ -82,6 +83,7 @@ async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
             repo=source,
             outcome={"status": "done", "code": None},
         )
+    await forward.committed(s, term)
     if s.report is not None:
         await s.report(version, source)
     return version.to_json()
@@ -108,9 +110,11 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dic
         and (forward.writes(s, model, function, version) or not await c.caught_up(forward.MIN_SEQ.get()))
     ):
         return await forward.relayed(s, "call", {"data": data, "caller": caller})
+    term = forward.leading(s) if forward.writes(s, model, function, version) else None
     run = await s.runner.call(
         model=model, function=function, inputs=inputs, version=version, caller=caller, clearance=float(clearance)
     )
+    await forward.committed(s, term)
     return answer(run)
 
 
@@ -118,7 +122,10 @@ async def resume(s: Services, run_id: str, value: Any) -> dict[str, Any]:
     far, node = forward.elsewhere(s, run_id)
     if far:
         return await forward.relayed(s, "resume", {"run_id": run_id, "answer": value}, node)
-    return answer(await s.runner.resume(run_id, value))
+    term = forward.leading(s)
+    run = await s.runner.resume(run_id, value)
+    await forward.committed(s, term)
+    return answer(run)
 
 
 async def cancel(s: Services, run_id: str) -> dict[str, Any]:
