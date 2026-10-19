@@ -6,7 +6,7 @@ services:
   rrotor:
     environment:
       RROTOR_LINK: "off"
-      GLYPHH_LICENSE_KEY: ${GLYPHH_LICENSE_KEY:-${RROTOR_LICENCE:?an air-gapped rrotor needs GLYPHH_LICENSE_KEY, the licence key, in .env}}
+      GLYPHH_LICENSE_KEY: ${GLYPHH_LICENSE_KEY:-${RROTOR_LICENCE:-}}  # set it in .env: without a key an air-gapped rrotor runs as Community
 
   caddy:
     volumes:
