@@ -19,12 +19,12 @@ no autoscaling; a second copy of the same runtime is not a replica, it takes the
 | Audit log | no | no | no | yes |
 
 **Built:** the signed licence key that carries these limits, Community (Free's limits) without one, and the
-precedent cap per node ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains, each
-node its own ([Logs, audit and drains](#logs-audit-and-drains)); a cluster: nodes that find and authenticate each
-other, a head, the key's node cap at join, sync gated by the key, and replication from a fixed head (the stores,
-models, keys and licence; writes forwarded to it, reads on every node) ([A cluster](#a-cluster)). **Not built
-yet:** failover, high availability, the head gathering the cluster's drain and audit log, and the packages' cluster
-settings. The
+precedent cap per node ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains
+([Logs, audit and drains](#logs-audit-and-drains)); a cluster: nodes that find and authenticate each
+other, a head, the key's node cap at join, sync gated by the key, replication from a fixed head (the stores,
+models, keys and licence; writes forwarded to it, reads on every node), and the cluster's drain and audit log
+gathered at the head ([A cluster](#a-cluster)). **Not built yet:** failover, high availability, and the packages'
+cluster settings. The
 decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
 server's (`glyphh-ai/server`, `docs/architecture.md`).
 
@@ -91,6 +91,8 @@ starts it: rrotor logs `cluster synchronisation disabled under the Community lic
 - **Mark your functions:** `"writes": false` on each function that only reads (an Ada model's `query`, `facts`,
   `probabilities`) lets every node answer it; everything else runs on the head. A function marked `false` that
   writes fails `E_READ_ONLY` on another node.
+- **Logs, metrics, traces and audit:** the head exports the whole cluster's to your collector, each node's with its
+  own identity, and keeps the cluster's audit log ([below](#logs-audit-and-drains)); only the head needs the egress.
 - **The node past `max_nodes`** is refused (`E_CLUSTER_FULL`), logged at error, kept out of the load balancer (it
   answers 503 to everything but `/healthz` and `/readyz`), keeps its `/data`, and asks again every minute.
 - **Looking at it:** `GET /v1/cluster` (or the MCP tool `cluster_status`): the cluster's id, the head, every member,
@@ -135,13 +137,24 @@ fields.
 - **A drain** to your own OpenTelemetry collector: logs, metrics, traces and audit events by OTLP over HTTP with
   protobuf, never through Glyphh. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (and OpenTelemetry's other variables as you need
   them); with none, there is no drain. Metrics: `rrotor.runs`, `rrotor.run.seconds`, `rrotor.precedents` and
-  `rrotor.precedents.cap`, `rrotor.link.state`, `rrotor.drain.dropped`; traces: a span per API request (your
-  `traceparent` honoured), with the sandbox's start and the function under it. While the collector is down, logs,
+  `rrotor.precedents.cap`, `rrotor.link.state`, `rrotor.drain.dropped`, and in a cluster `rrotor.cluster.term` and
+  `rrotor.cluster.lag` (each follower's seqs behind the head); traces: a span per API request (your `traceparent`
+  honoured), with the sandbox's start and the function under it, and in a cluster the forward to the head, the
+  head's work (one trace across the nodes) and the wait for the write to arrive. While the collector is down, logs,
   metrics and traces wait in memory, `RROTOR_DRAIN_BUFFER` per signal, the oldest dropped and counted; audit events
   are never dropped: the drain reads them from `/data/audit` from its cursor, so a collector down for a day gets
   the day's events when it is back.
+- **In a cluster, one endpoint** (`RROTOR_DRAIN_AT=head`, the default): the followers send their logs, metrics,
+  traces and audit events to the head over the cluster's own port, and the head exports them with its own, each
+  with its node's identity (`service.instance.id` the node id, `rrotor.node.role` head or follower,
+  `rrotor.cluster.id`): your collector sees one sender and you open one egress, from the head. A follower without its
+  head holds its signals as for a collector that is down (the oldest dropped and counted), and its audit events stay
+  in its own `/data/audit` until the head has them. The head keeps the cluster's audit log under
+  `/data/audit/cluster/` (Enterprise; each node keeps its own as well), and `GET /v1/audit` on any node reads it.
+  `RROTOR_DRAIN_AT=node`: each node exports itself, to the same settings; give every node the egress.
 - **Server-side logging** (`RROTOR_SERVER_LOGS=on`): the same signals also go to Glyphh, so the platform can show
-  them. rrotor says so plainly at every start and in its health. Refused with the link off.
+  them. rrotor says so plainly at every start and in its health. Refused with the link off. In a cluster only the
+  head sends it, for every node, whatever `RROTOR_DRAIN_AT` says; set it on every node alike.
 - **Never sent anywhere, never logged:** a model's inputs and outputs, `ctx.log`'s fields, secrets, tokens and keys,
   request bodies. `RROTOR_LOG_PAYLOADS=on` adds inputs and results (4 KB each) to the run's spans and its `run.end`
   audit event, for your own drain only; Glyphh never gets them, nor your callers' addresses.
@@ -151,15 +164,15 @@ fields.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | | Your collector, e.g. `http://otel-collector:4318` (`/v1/logs`, `/v1/metrics`, `/v1/traces` are added); or per signal, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `…_METRICS_ENDPOINT`, `…_TRACES_ENDPOINT`, as given. None: no drain |
 | `OTEL_EXPORTER_OTLP_HEADERS`, `…_CERTIFICATE`, `…_CLIENT_CERTIFICATE`, `…_CLIENT_KEY`, `…_COMPRESSION`, `…_TIMEOUT` | | As OpenTelemetry defines them (and their per-signal forms) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | The only one offered: `grpc` stops rrotor at start (`E_CONFIG`); a collector takes HTTP and forwards gRPC |
-| `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_SERVICE_NAME` | , `rrotor` | Added to every signal; rrotor adds `service.version`, `service.instance.id` (the node id), `rrotor.runtime.id`, `rrotor.node.role` and `rrotor.mode` |
+| `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_SERVICE_NAME` | , `rrotor` | Added to every signal; rrotor adds `service.version`, `service.instance.id` (the node id), `rrotor.runtime.id`, `rrotor.cluster.id` (in a cluster), `rrotor.node.role` (`standalone`, `head` or `follower`) and `rrotor.mode` |
 | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | `always_on`, `always_off`, `traceidratio` or their `parentbased_` forms, and the ratio |
 | `RROTOR_DRAIN_SIGNALS` | `logs,metrics,traces,audit` | What the drain sends |
 | `RROTOR_DRAIN_BUFFER` | `10000` | Records held per signal while the collector is down |
-| `RROTOR_DRAIN_AT` | `head` | `head` or `node`. Each node exports itself for now; once the head gathers the cluster's signals (not built yet), `head` exports for every node |
+| `RROTOR_DRAIN_AT` | `head` | In a cluster: `head`, the followers' signals go by the head, which exports for every node; `node`, each node exports itself. A node on its own exports itself either way. Set it, and the drain's other settings, the same on every node: the head's say where the cluster's go |
 | `RROTOR_LOG_PAYLOADS` | `off` | `on`: inputs and results in your drain |
 | `RROTOR_SERVER_LOGS` | `off` | `on`: also to Glyphh (`{RROTOR_SERVER}/v1/otlp/v1/…`, with the runtime token). Not with `RROTOR_LINK=off` |
-| `RROTOR_AUDIT_RETENTION_DAYS` | `90` | Days of audit log kept (Enterprise) |
-| `RROTOR_AUDIT_MAX_MB` | `1024` | The most the audit log may take; past it the oldest day goes (never today's). Each deletion is logged |
+| `RROTOR_AUDIT_RETENTION_DAYS` | `90` | Days of audit log kept (Enterprise); on a cluster's head, of the cluster's too |
+| `RROTOR_AUDIT_MAX_MB` | `1024` | The most the audit log may take; past it the oldest day goes (never today's). Each deletion is logged. On a cluster's head the cluster's log has the same again |
 | `RROTOR_LOG_LEVEL` | `INFO` | The log level |
 
 ## The container's privileges, and why
