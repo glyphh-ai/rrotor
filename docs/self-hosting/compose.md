@@ -59,7 +59,7 @@ Set `RROTOR_CPUS` and `RROTOR_MEMORY` in `.env`: `1` and `1g` (small), `2` and `
 
 ## Air-gapped
 
-No route to Glyphh, Let's Encrypt or a registry. rrotor runs on an offline licence, with the link off; Caddy
+No route to Glyphh, Let's Encrypt or a registry. rrotor runs on its licence key, with the link off; Caddy
 serves a certificate you supply.
 
 1. **Bring the images in.** On a machine with access, pin a version and save both images:

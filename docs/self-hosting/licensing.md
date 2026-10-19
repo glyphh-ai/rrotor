@@ -5,6 +5,9 @@ without a licence key at Community's limits; it checks a signed key on the machi
 gets the next key over the link or a small daily HTTPS call whose whole body is shown below; and an air-gapped
 rrotor never calls out at all.
 
+Built as [`specs/licensing.md`](../specs/licensing.md) decides (its node cap and cluster sync come with the cluster);
+the plans are in the [README](README.md#the-plans).
+
 ## The licence key
 
 rrotor runs without one, as **Community**: one node, 5,000 precedents across its Ada models, no cluster sync. A

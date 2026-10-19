@@ -4,8 +4,8 @@ rrotor is the runtime a person's Ada models run in: one headless Linux image tha
 each call in a sandbox with no network but the hosts it declares, and answers over REST and MCP at its own address.
 This document is how its parts work and call each other. The system around it (accounts, plans, the data model,
 provisioning) is in `glyphh-ai/server`, `docs/architecture.md`; running your own is in
-[`self-hosting/`](self-hosting/README.md). What is decided but not built is in [Not built yet](#not-built-yet) and
-nowhere else.
+[`self-hosting/`](self-hosting/README.md). What is decided but not built is in [Not built yet](#not-built-yet), with its build specs in
+[`specs/`](specs/), and nowhere else.
 
 ## 1. The parts
 
@@ -14,11 +14,11 @@ nowhere else.
 | **Claude** | Claude Code, the Claude apps or any MCP client. It has the runtime as a connector and, with the `glyphh` plugin (`glyphh-ai/glyphh`), the Ada skill: how to write, deploy and call an Ada model with the runtime's own tools |
 | **Apps** | Anyone's software, calling the runtime's REST API with a runtime key, directly or through the SDKs (`glyphh` on PyPI, `@glyphh-ai/glyphh` on npm, both in `glyphh-ai/glyphh`) |
 | **rrotor** | This repo: the daemon `rrotord` and the model SDK `rrotor`, in the image `ghcr.io/glyphh-ai/rrotor`. One per volume |
-| **The Glyphh server** | `https://api.glyphh.ai`: provisions hosted machines, makes runtime keys and runtime tokens, signs the licence, vouches for a Glyphh sign-in, and holds the runtime's link. Never on the data path |
-| **The platform** | `https://platform.glyphh.ai`: where a person makes and starts machines, makes runtime keys, registers a self-hosted runtime and issues an offline licence |
+| **The Glyphh server** | `https://api.glyphh.ai`: provisions hosted machines, makes runtime keys and runtime tokens, signs the licence key, vouches for a Glyphh sign-in, and holds the runtime's link. Never on the data path |
+| **The platform** | `https://platform.glyphh.ai`: where a person makes and starts machines, makes runtime keys, registers a self-hosted runtime and shows its licence key |
 | **Fly** | Hosts the hosted machines: one app, `*.glyphh.app`, a machine and a volume per runtime, and the doorman |
 
-One image, five modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
+One image, four modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
 
 | Mode | Where | Reached at | Callers authenticate with |
 |---|---|---|---|
@@ -30,6 +30,11 @@ One image, five modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
 rrotor has no sign-in of its own and nothing to log into. It connects out to the server (the link, [6](#6-the-link-protocol-1));
 the server never connects in. A call goes from the caller to the runtime and back: nothing of Glyphh's sees its
 inputs or its answer.
+
+**Glyphh-run hosting is off.** The server's `GLYPHH_HOSTING` flag (default off) decides whether it makes hosted
+machines; `hosted` and `doorman` stay in the code, used only if Glyphh turns it on ([3](#3-hosted-machines)).
+Customers run rrotor themselves, in `self` mode at their own address ([12](#12-self-hosting),
+[`self-hosting/`](self-hosting/README.md)).
 
 ## 2. A model, end to end
 
@@ -118,6 +123,8 @@ sequenceDiagram
   ledger.
 
 ## 3. Hosted machines
+
+Built, and off while the server's `GLYPHH_HOSTING` is off ([1](#1-the-parts)).
 
 A person's hosted runtimes are machines on Fly, made and run from the platform (or the Glyphh connector's
 `create_runtime` and `start_runtime`), each named and of a size (small, medium, large). The server makes them; the
@@ -518,7 +525,12 @@ def query(ctx, inputs):
 
 rrotor runs with no key at all, as **Community** (one node, 5,000 precedents, no sync); a signed **licence key**,
 checked on the node with no network request, lifts those limits to its own (`rrotord/licence_key.py`,
-`rrotord/licence.py`).
+`rrotord/licence.py`). Built as [`specs/licensing.md`](specs/licensing.md) sections 1 and 2 decide; its node cap,
+sync gating and HA follow with the cluster ([Not built yet](#not-built-yet)).
+
+- **The plans** (the server's policy for what it signs; rrotor acts on the key's own numbers): Free $0 (1 node,
+  5,000 precedents), Pro $99/month (3, 50,000), Team $299/month (10, 500,000), Enterprise by contract (unlimited,
+  HA, the audit log). Keys expire at the end of the paid month and the next arrives at the heartbeat.
 
 - **The key:** `<base64url payload>.<base64url signature>`, base64url without padding; Ed25519 over the payload's
   exact bytes. The payload is UTF-8 JSON: `license_id` (UUID), `tier` (`free`, `pro`, `team`, `enterprise`),
@@ -586,7 +598,7 @@ volume, on HTTP `:7777` behind whatever ends TLS. It is registered on the platfo
 shows its id and token once; it links out as `hello {mode: self}` unless its link is off, and is gated as
 [7](#7-the-api) says. The packages (Docker Compose, the Helm chart, the Terraform modules), the environment, the
 container's privileges, the outbound connections, backups and upgrades are in
-[`self-hosting/`](self-hosting/README.md); the licence's three paths and the heartbeat's exact body in
+[`self-hosting/`](self-hosting/README.md); where the licence key is read and the heartbeat's exact body in
 [`self-hosting/licensing.md`](self-hosting/licensing.md). A setting missing or malformed stops it at start with
 `E_CONFIG`, naming the variable.
 
@@ -600,6 +612,8 @@ container's privileges, the outbound connections, backups and upgrades are in
   health as `sandbox.container_needs`, one sentence each with the fix. Runs are refused until it is fixed; the API
   is served.
 - **Never paused:** a `pause` is ignored in `self` mode.
+- **One box:** several nodes as one runtime, with a head, are decided and specified in
+  [`specs/cluster.md`](specs/cluster.md) ([Not built yet](#not-built-yet)).
 
 ## Not built yet
 
@@ -607,9 +621,18 @@ container's privileges, the outbound connections, backups and upgrades are in
   logged and skipped).
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a model's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
-- **Precedent-store sync across instances, and high availability:** a self-hosted rrotor is one box; a second copy
-  of the same runtime takes the link over from the first. The key's `cluster_sync_enabled` and `tier` gate them
-  when they are built.
-- **SSO and SAML, roles (RBAC) and audit logs.**
-- **Programs:** coding-agent CLIs run on the runtime.
-- **The gateway.**
+- **Clusters: sync, a head and HA** ([`specs/cluster.md`](specs/cluster.md)): N nodes of one runtime behind the
+  customer's load balancer. With the key's sync on, one node is the **head**: the single writer of the precedent
+  stores, deployed models, runtime keys and the licence, replicated to followers by an ordered log; it holds the
+  link and the cluster's drain. Reads are local on every node. `max_nodes` is enforced at join. Pro and Team fail
+  over by restart or by hand; Enterprise elects a new head (HA). Today a self-hosted rrotor is one box, and a
+  second copy of the same runtime takes the link over from the first.
+- **Audit logs** (Enterprise) **and log drains** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains)):
+  logs, metrics, traces and audit events stay on the rrotor by default; a drain streams them by OTLP to the
+  customer's own collector, never via Glyphh; opt-in server-side logging sends them to Glyphh, with a plain warning.
+  Inputs and outputs are never sent unless the customer turns that on, and then only to their own drain.
+- **SSO and SAML, roles (RBAC).**
+- **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
+  ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
+- **The gateway:** models behind OpenAI- and Anthropic-compatible endpoints, configured at the head
+  ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
