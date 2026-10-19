@@ -150,7 +150,13 @@ jobs:
           $c up -d rrotor-0 rrotor-1 rrotor-2
           ready() { $c exec -T "$1" /opt/rrotord/bin/python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:7777/readyz', timeout=2)" 2>/dev/null; }
           for i in $(seq 1 90); do ready rrotor-0 && ready rrotor-1 && ready rrotor-2 && break; sleep 2; done
-          $c exec -T rrotor-2 /opt/rrotord/bin/python -c "import json, urllib.request as u; r = u.Request('http://127.0.0.1:7777/v1/cluster', headers={'Host': 'rrotor.example.com', 'Authorization': 'Bearer $key'}); print(json.dumps(json.load(u.urlopen(r, timeout=5))))" | tee cluster.json
+          # The head holds the membership; a follower's view can trail it by a ping.
+          for i in $(seq 1 30); do
+            $c exec -T rrotor-0 /opt/rrotord/bin/python -c "import json, urllib.request as u; r = u.Request('http://127.0.0.1:7777/v1/cluster', headers={'Host': 'rrotor.example.com', 'Authorization': 'Bearer $key'}); print(json.dumps(json.load(u.urlopen(r, timeout=5))))" > cluster.json || true
+            python3 -c "import json; c=json.load(open('cluster.json')); assert (c['head'], len(c['members'])) == ('rrotor-0', 3)" 2>/dev/null && break
+            sleep 2
+          done
+          cat cluster.json
           python3 -c "import json; c=json.load(open('cluster.json')); assert (c['head'], len(c['members'])) == ('rrotor-0', 3), c"
           $c logs --no-color | tail -50
           $c down -v
