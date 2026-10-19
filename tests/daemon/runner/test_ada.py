@@ -28,7 +28,7 @@ def ticket(i: int, title: str, area: str, severity: int) -> dict[str, Any]:
 def ada_ready(root: Path, sock: Path) -> tuple[Env, Parts]:
     store = Parts(root, keys().public, "arm64")
     data, sha, sig = ada_part(root)
-    store.install("ada", "3.9.0", data, sha, sig)
+    store.install("ada", "3.10.0", data, sha, sig)
     lic = Licence(root)
     lic.offer(keys().key(), "test")
     env = Env(root, sock)

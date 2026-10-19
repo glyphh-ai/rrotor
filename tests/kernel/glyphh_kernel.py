@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import time
 import uuid
@@ -108,6 +109,11 @@ THE TWO CONSTRUCTS.
       answers from 87% to 94% right.
       refresh() pulls rows other agents wrote to a shared WAL file;
       merge(other_path) unions another Space file by id, authors kept.
+      Space(path=..., readonly=True) opens the file read-only (a
+      follower's copy, a read-only disk): every read works, every write
+      (record, merge, calibrate, set_meta, rewrite) raises ReadOnlyError
+      (code E_READ_ONLY) before touching the file, and nothing is ever
+      created beside it.
 
 THE CONTRACT: NOTHING UNGRADED. Route every domain decision through
 decide(wins, vetoes, situation, events) -> Decision. It is:
@@ -165,6 +171,21 @@ were stored re-encode without their trajectory).
 """
 
 
+class ReadOnlyError(Exception):
+    """A write asked of a store opened read-only (Space(path,
+    readonly=True)). Raised before the file is touched. `code` is
+    "E_READ_ONLY"; `operation` names the write refused; `path` is the
+    store's."""
+
+    code = "E_READ_ONLY"
+
+    def __init__(self, operation: str, path: str | None = None):
+        where = f" ({path})" if path else ""
+        super().__init__(f"E_READ_ONLY: {operation} writes, and the store is open read-only{where}")
+        self.operation = operation
+        self.path = path
+
+
 def spec() -> str:
     """The substrate guidance. An agent that imports this kernel cold
     should read spec() before recording or querying anything."""
@@ -181,8 +202,12 @@ def reencode_store(
     seed or decay). Returns rows re-encoded.
 
     Rows recorded before events were persisted re-encode without their
-    trajectory component."""
-    db = sqlite3.connect(str(Path(path).expanduser()))
+    trajectory component. A store that cannot be written (the file or
+    its folder read-only) raises ReadOnlyError before it is opened."""
+    p = Path(path).expanduser()
+    if (p.parent.is_dir() and not os.access(p.parent, os.W_OK)) or (p.exists() and not os.access(p, os.W_OK)):
+        raise ReadOnlyError("reencode_store", str(p))
+    db = sqlite3.connect(str(p))
     _ensure_schema(db)
     space = Space(dim=dim, k=k, min_sim=min_sim, seed=seed, decay=decay)
     n = _reencode_rows(db, space)
@@ -737,7 +762,13 @@ class Space:
         author: str = "anon",
         path: str | None = None,
         tau: float | None = None,
+        readonly: bool = False,
     ):
+        """readonly: open the file read-only. Reads work as ever; every write raises ReadOnlyError before the
+        file is touched; nothing is created (no schema, no folder, no journal or WAL files); a store from an older
+        encoding is re-encoded in memory only. A path with no file yet reads as an empty store."""
+        self.readonly = bool(readonly)
+        self.path = str(Path(path).expanduser()) if path else None
         self.dim, self.k, self.min_sim, self.seed = dim, k, min_sim, seed
         # temperature for probabilities: given, else the file's
         # calibrated one (calibrate()), else TAU
@@ -921,6 +952,10 @@ class Space:
         self._leaf_add(situation)
         self._n += 1
 
+    def _writes(self, operation: str) -> None:
+        if self.readonly:
+            raise ReadOnlyError(operation, self.path)
+
     def _drop(self, i: int) -> None:
         for column in (self._ids, self._situations, self._trajs, self._outcomes, self._authors, self._ts, self._glyphs):
             del column[i]
@@ -936,6 +971,7 @@ class Space:
         rid: str | None = None,
         ts: float | None = None,
     ) -> str:
+        self._writes("record")
         rid = rid or str(uuid.uuid4())[:12]
         ts = time.time() if ts is None else float(ts)
         glyph = self.encode(situation, events)
@@ -1220,6 +1256,7 @@ class Space:
         probabilities would cost when `true` is the outcome: given, the
         temperature with the least total cost wins, log-loss breaking
         ties, so the fit serves the decision rather than the curve."""
+        self._writes("calibrate")
         graded = [i for i in range(self._n) if self._outcomes[i] is not None]
         if len(graded) < 10:
             raise ValueError("calibrate needs at least 10 precedents with an outcome")
@@ -1252,12 +1289,19 @@ class Space:
     def __len__(self) -> int:
         return self._n
 
-    def rewrite(self, fn: Callable[[dict[str, Any]], dict[str, Any]]) -> int:
+    def rewrite(self, fn: Callable[[dict[str, Any]], dict[str, Any]], persist: bool = True) -> int:
         """Every precedent's situation passed through fn and stored again, glyph and leaf tables rebuilt (its
-        events kept). For a spec that has changed what a situation carries. Returns how many were rewritten."""
+        events kept). For a spec that has changed what a situation carries. Returns how many were rewritten.
+        persist=False changes the copy in memory only, the file untouched (the one rewrite a read-only store
+        allows)."""
+        if persist:
+            self._writes("rewrite")
         blobs: dict[str, bytes | None] = {}
         if self._db is not None:
-            blobs = dict(self._db.execute("SELECT id, events FROM precedents").fetchall())
+            try:
+                blobs = dict(self._db.execute("SELECT id, events FROM precedents").fetchall())
+            except sqlite3.OperationalError:  # a read-only store from before events were kept
+                blobs = {}
         changed = 0
         for i in range(self._n):
             new = fn(self._situations[i])
@@ -1272,7 +1316,7 @@ class Space:
             glyph = bundle(parts, ws)
             self._situations[i], self._glyphs[i] = new, glyph
             self._matrix[i] = glyph.astype(np.float32)
-            if self._db is not None:
+            if self._db is not None and persist:
                 self._db.execute(
                     "UPDATE precedents SET situation = ?, glyph = ? WHERE id = ?",
                     (json.dumps(new, ensure_ascii=False), glyph.tobytes(), self._ids[i]),
@@ -1284,7 +1328,7 @@ class Space:
             for i in range(n):
                 self._leaf_add(self._situations[i])
                 self._n += 1
-            if self._db is not None:
+            if self._db is not None and persist:
                 self._db.commit()
         return changed
 
@@ -1296,10 +1340,13 @@ class Space:
         """A value kept with the store (JSON), or None: what a model learned from it, for one."""
         if self._db is None:
             return self._meta.get(key)
+        if self.readonly and not _has_meta(self._db):
+            return None
         row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return json.loads(row[0]) if row else None
 
     def set_meta(self, key: str, value: Any) -> None:
+        self._writes("set_meta")
         if self._db is None:
             self._meta[key] = value
             return
@@ -1308,6 +1355,8 @@ class Space:
 
     # persistence: one portable file; WAL so several agents can share it
     def _open(self, path: str) -> None:
+        if self.readonly:
+            return self._open_readonly(path)
         p = Path(path).expanduser()
         p.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(p), timeout=10.0)
@@ -1322,24 +1371,75 @@ class Space:
             self.tau = float(saved[0])
         self.refresh()
 
+    def _open_readonly(self, path: str) -> None:
+        self._ro_connect()
+        if self._db is not None and _has_meta(self._db):
+            saved = self._db.execute("SELECT value FROM meta WHERE key = 'tau'").fetchone()
+            if saved and not self._tau_given:
+                self.tau = float(saved[0])
+        self.refresh()
+
+    def _ro_connect(self) -> None:
+        """(Re)connect a read-only store: mode=ro, no journal_mode pragma, no schema. A WAL store whose -wal and
+        -shm are not beside it (no writer has it open) is read immutable, since SQLite would otherwise make them,
+        or fail on a read-only folder; reconnecting on every refresh keeps that read current."""
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+        p = Path(self.path or "")
+        if not self.path or not p.is_file():
+            return  # no store yet: an empty one, made nowhere
+        with open(p, "rb") as f:
+            header = f.read(20)
+        wal = len(header) == 20 and header[18] == 2
+        live = Path(f"{p}-wal").exists() and Path(f"{p}-shm").exists()
+        flags = "mode=ro&immutable=1" if wal and not live else "mode=ro"
+        self._db = sqlite3.connect(f"{p.resolve().as_uri()}?{flags}", uri=True, timeout=10.0)
+        self._db.execute("PRAGMA busy_timeout=10000")
+
     def refresh(self) -> int:
         """Pull in rows other agents wrote to this file since open.
-        Returns how many new precedents arrived."""
+        Returns how many new precedents arrived. A read-only store
+        written under an older encoding is re-encoded on the way in, in
+        memory only."""
+        if self.readonly:
+            self._ro_connect()
         if self._db is None:
             return 0
+        stale = False
+        select = "SELECT id, situation, outcome, dim, glyph, author, ts, events FROM precedents ORDER BY ts, rowid"
+        if self.readonly:  # the file as it is: no schema made, no migration written
+            cols = [r[1] for r in self._db.execute("PRAGMA table_info(precedents)")]
+            if not cols:
+                return 0
+            stale = _file_encoding(self._db) < ENCODING
+            select = "SELECT id, situation, outcome, dim, glyph, {a}, {t}, {e} FROM precedents ORDER BY {o}rowid".format(
+                a="author" if "author" in cols else "'anon'",
+                t="ts" if "ts" in cols else "0.0",
+                e="events" if "events" in cols else "NULL",
+                o="ts, " if "ts" in cols else "",
+            )
         known = set(self._ids)
         added = 0
-        for rid, situation, outcome, dim, blob, author, ts, ev in self._db.execute(
-            "SELECT id, situation, outcome, dim, glyph, author, ts, events FROM precedents ORDER BY ts, rowid"
-        ):
+        for rid, situation, outcome, dim, blob, author, ts, ev in self._db.execute(select):
             if rid in known:
                 continue
-            if dim != self.dim:
+            if dim != self.dim and not stale:
                 raise ValueError(f"precedent {rid} has dim {dim}, space is {self.dim}")
+            glyph = None
+            if stale:
+                try:
+                    glyph = self.encode(json.loads(situation), _events_from_blob(ev, self.dim))
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    glyph = None  # no usable situation stored: keep the old glyph
+            if glyph is None:
+                if dim != self.dim:
+                    raise ValueError(f"precedent {rid} has dim {dim}, space is {self.dim}")
+                glyph = np.frombuffer(blob, dtype=np.int8).copy()
             self._append(
                 rid,
                 outcome,
-                np.frombuffer(blob, dtype=np.int8).copy(),
+                glyph,
                 author,
                 ts,
                 _situation_of(situation),
@@ -1355,6 +1455,7 @@ class Space:
         file written under an older encoding are re-encoded from their
         situations on the way in. Returns how many precedents were
         new."""
+        self._writes("merge")
         other = sqlite3.connect(str(Path(other_path).expanduser()))
         cols = [r[1] for r in other.execute("PRAGMA table_info(precedents)")]
         stale = _file_encoding(other) < ENCODING
@@ -1511,6 +1612,10 @@ def _file_encoding(db: sqlite3.Connection) -> int:
     except sqlite3.Error:
         rows = 0
     return ENCODING if rows == 0 else 1
+
+
+def _has_meta(db: sqlite3.Connection) -> bool:
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").fetchone() is not None
 
 
 def _situation_of(text: str | None) -> Any:
