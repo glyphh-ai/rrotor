@@ -126,6 +126,7 @@ class Worker:
             clearance=float(start.get("clearance", 1.0)),
             caller=str(start.get("caller", "claude")),
             limits=dict(start.get("limits") or {}),
+            readonly=bool(start.get("readonly")),
         )
         try:
             model = import_model(str(start.get("model", "/model")))

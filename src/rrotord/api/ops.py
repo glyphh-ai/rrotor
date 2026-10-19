@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rrotord.api import forward
 from rrotord.errors import BadRequest, RrotorError
 from rrotord.models import Version
 from rrotord.runner.record import Run
@@ -54,7 +55,9 @@ async def deploy_bundle(s: Services, encoded: str, commit: str) -> Version:
 
 async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
     """A version from a git bundle of the commit (base64) or from a GitHub repo at the commit; `deployed` goes up
-    the link either way (the repo only for a repo deploy)."""
+    the link either way (the repo only for a repo deploy). A follower sends it to its head."""
+    if forward.follower(s):
+        return await forward.relayed(s, "deploy", {"data": data})
     commit, bundle, repo, token = data.get("commit"), data.get("bundle"), data.get("repo"), data.get("token")
     if not isinstance(commit, str):
         raise BadRequest("Send {bundle, commit} (a git bundle, base64) or {repo, commit, token}.")
@@ -98,6 +101,13 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dic
         or not 0 <= clearance <= 1
     ):
         raise BadRequest("Send {model, function, inputs, version?, clearance? (0 to 1)}.")
+    c = s.cluster
+    if (
+        c is not None
+        and c.role == "follower"
+        and (forward.writes(s, model, function, version) or not await c.caught_up(forward.MIN_SEQ.get()))
+    ):
+        return await forward.relayed(s, "call", {"data": data, "caller": caller})
     run = await s.runner.call(
         model=model, function=function, inputs=inputs, version=version, caller=caller, clearance=float(clearance)
     )
@@ -105,20 +115,53 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dic
 
 
 async def resume(s: Services, run_id: str, value: Any) -> dict[str, Any]:
+    far, node = forward.elsewhere(s, run_id)
+    if far:
+        return await forward.relayed(s, "resume", {"run_id": run_id, "answer": value}, node)
     return answer(await s.runner.resume(run_id, value))
 
 
 async def cancel(s: Services, run_id: str) -> dict[str, Any]:
+    far, node = forward.elsewhere(s, run_id)
+    if far:
+        return await forward.relayed(s, "cancel", {"run_id": run_id}, node)
     return answer(await s.runner.cancel(run_id))
 
 
-def run_status(s: Services, run_id: str) -> dict[str, Any]:
+async def run_status(s: Services, run_id: str) -> dict[str, Any]:
+    far, node = forward.elsewhere(s, run_id)
+    if far:
+        return await forward.relayed(s, "status", {"run_id": run_id}, node)
     return s.runner.get(run_id).view()
 
 
-def run_log(s: Services, run_id: str) -> dict[str, Any]:
+async def run_log(s: Services, run_id: str) -> dict[str, Any]:
+    far, node = forward.elsewhere(s, run_id)
+    if far:
+        return await forward.relayed(s, "log", {"run_id": run_id}, node)
     run = s.runner.get(run_id)
     return {"run_id": run.id, "lines": s.runner.records.lines(run.id)}
+
+
+async def approvals(s: Services) -> list[dict[str, Any]]:
+    """The runs waiting for an approval: in a cluster, every node's (a node that does not answer is left out)."""
+    here = s.runner.approvals()
+    c = s.cluster
+    if c is None or not c.member:
+        return here
+    if c.role == "follower":
+        try:
+            return list((await c.forward("approvals", {})).get("result", {}).get("approvals") or [])
+        except RrotorError:
+            return here
+    found = list(here)
+    for node in list(c.links):
+        try:
+            got = await c.forward("approvals_here", {}, node)
+        except RrotorError:
+            continue
+        found += list((got.get("result") or {}).get("approvals") or [])
+    return found
 
 
 def run_id_of(data: dict[str, Any]) -> str:

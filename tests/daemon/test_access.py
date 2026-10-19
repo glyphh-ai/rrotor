@@ -70,3 +70,18 @@ def test_a_change_to_the_keys_is_told_with_the_hashes_added_and_removed(tmp_path
         {"keys": 1, "added": [], "removed": ["a" * 64]},
     ]
     Access(tmp_path / "quiet").set_keys(["c" * 64])  # no one to tell
+
+
+def test_a_followers_calls_are_added_to_the_heads():
+    usage = Usage(clock=lambda: dt.datetime(2026, 10, 19, 9, tzinfo=dt.UTC))
+    usage.count("a" * 64)
+    usage.merge(
+        [
+            {"key_sha256": "a" * 64, "calls": 2, "last_used_at": "2026-10-19T10:00:00+00:00"},
+            {"key_sha256": "b" * 64, "calls": 1, "last_used_at": "2026-10-19T08:00:00+00:00"},
+            {"key_sha256": "c" * 64, "calls": "x", "last_used_at": "2026-10-19T08:00:00+00:00"},
+            {"key_sha256": "d" * 64, "calls": 1, "last_used_at": "yesterday"},
+        ]
+    )
+    taken = {t["key_sha256"][0]: (t["calls"], t["last_used_at"]) for t in usage.take()}
+    assert taken == {"a": (3, "2026-10-19T10:00:00+00:00"), "b": (1, "2026-10-19T08:00:00+00:00")}

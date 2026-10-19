@@ -66,3 +66,12 @@ def test_command_with_proxy_and_data():
 def test_command_checks_the_real_filesystem_by_default():
     argv = bwrap.command(MOUNTS, Limits(256, 10), 7, 9)
     assert ["/usr", "/usr"] in after(argv, "--ro-bind")
+
+
+def test_a_followers_run_has_its_folder_and_data_read_only():
+    mounts = Mounts(Path("/s"), Path("/v"), Path("/k"), Path("/f"), None, Path("/data/x"), readonly=True)
+    rules = bwrap.landlock_rules(mounts)
+    assert rules["write"] == ["/tmp", "/dev"] and {"/files", "/data"} <= set(rules["read"])  # type: ignore[call-overload]
+    argv = bwrap.command(mounts, Limits(256, 10), 7, 9, exists=lambda p: False)
+    assert ["/f", "/files"] in after(argv, "--ro-bind") and ["/data/x", "/data"] in after(argv, "--ro-bind")
+    assert after(argv, "--bind") == []

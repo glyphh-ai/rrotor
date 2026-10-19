@@ -16,11 +16,11 @@ words it uses. Ported from rrotor's primes.ts (glyphh_rotor/primes).
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Dict, List
 
 from glyphh_spec import Spec
 
-PRIMES: dict[str, list[str]] = {
+PRIMES: Dict[str, List[str]] = {
     "substantives": ["I", "YOU", "SOMEONE", "SOMETHING", "PEOPLE", "BODY"],
     "relational": ["KIND", "PART"],
     "determiners": ["THIS", "SAME", "OTHER"],
@@ -38,10 +38,10 @@ PRIMES: dict[str, list[str]] = {
     "intensifier": ["VERY", "MORE"],
     "similarity": ["LIKE"],
 }
-GROUP_OF: dict[str, str] = {p: g for g, ps in PRIMES.items() for p in ps}
+GROUP_OF: Dict[str, str] = {p: g for g, ps in PRIMES.items() for p in ps}
 
 # A hit means the word plausibly RELATES to the prime, nothing stronger.
-KEYWORDS: dict[str, str] = {
+KEYWORDS: Dict[str, str] = {
     # mental predicates
     **dict.fromkeys(["know", "knew", "remember", "recall", "forget", "learn", "understand"], "KNOW"),
     **dict.fromkeys(["think", "thought", "believe", "idea", "plan", "decide", "consider"], "THINK"),
@@ -61,24 +61,8 @@ KEYWORDS: dict[str, str] = {
     **dict.fromkeys(["i", "me", "my", "mine", "myself"], "I"),
     **dict.fromkeys(["you", "your"], "YOU"),
     **dict.fromkeys(["people", "family", "team", "children"], "PEOPLE"),
-    **dict.fromkeys(
-        [
-            "person",
-            "who",
-            "someone",
-            "somebody",
-            "wife",
-            "husband",
-            "friend",
-            "kid",
-            "child",
-            "son",
-            "daughter",
-            "mother",
-            "father",
-        ],
-        "SOMEONE",
-    ),
+    **dict.fromkeys(["person", "who", "someone", "somebody", "wife", "husband", "friend", "kid", "child", "son",
+                     "daughter", "mother", "father"], "SOMEONE"),
     **dict.fromkeys(["something", "thing", "what"], "SOMETHING"),
     **dict.fromkeys(["body", "hand", "head", "health"], "BODY"),
     # evaluation and description
@@ -104,8 +88,7 @@ KEYWORDS: dict[str, str] = {
     **dict.fromkeys(["live", "life", "born"], "LIVE"),
     **dict.fromkeys(["die", "died", "death", "dead"], "DIE"),
     # quantity
-    "one": "ONE",
-    "two": "TWO",
+    "one": "ONE", "two": "TWO",
     **dict.fromkeys(["some", "few"], "SOME"),
     **dict.fromkeys(["all", "every", "everything"], "ALL"),
     **dict.fromkeys(["many", "much", "most", "lot", "count", "number"], "MUCH"),
@@ -140,10 +123,10 @@ def _lookup(word: str) -> str | None:
     return None
 
 
-def decompose(text: str) -> list[str]:
+def decompose(text: str) -> List[str]:
     """The primes a text relates to, in order of first appearance. A digit
     anywhere relates to MUCH. Deterministic: the same text, the same primes."""
-    seen: dict[str, None] = {}
+    seen: Dict[str, None] = {}
     for word in _WORD.findall(text.lower()):
         prime = _lookup(word)
         if prime:
@@ -153,35 +136,25 @@ def decompose(text: str) -> list[str]:
     return list(seen)
 
 
-SPEC: Spec = Spec.from_json(
-    {
-        "name": "nsm",
-        "layers": [
-            {
-                "name": "nsm",
-                "similarity_weight": 1.0,
-                "segments": [
-                    {"name": group, "roles": [{"name": p} for p in primes]} for group, primes in PRIMES.items()
-                ],
-            },
-            {
-                "name": "text",
-                "similarity_weight": 0.5,
-                "segments": [{"name": "words", "roles": [{"name": "words", "text_encoding": "bag_of_words"}]}],
-            },
-        ],
-    }
-)
+SPEC: Spec = Spec.from_json({
+    "name": "nsm",
+    "layers": [
+        {"name": "nsm", "similarity_weight": 1.0, "segments": [
+            {"name": group, "roles": [{"name": p} for p in primes]} for group, primes in PRIMES.items()]},
+        {"name": "text", "similarity_weight": 0.5, "segments": [
+            {"name": "words", "roles": [{"name": "words", "text_encoding": "bag_of_words"}]}]},
+    ],
+})
 
 
-def data(text: str) -> dict[str, Any]:
+def data(text: str) -> Dict[str, Any]:
     """A text as data in the NSM spec's shape."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text is a non-empty string")
-    meaning: dict[str, dict[str, bool]] = {}
+    meaning: Dict[str, Dict[str, bool]] = {}
     for prime in decompose(text):
         meaning.setdefault(GROUP_OF[prime], {})[prime] = True
-    out: dict[str, Any] = {"text": {"words": {"words": text}}}
+    out: Dict[str, Any] = {"text": {"words": {"words": text}}}
     if meaning:
         out["nsm"] = meaning
     return out

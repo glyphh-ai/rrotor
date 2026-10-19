@@ -154,7 +154,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "cluster": s.cluster.short() if s.cluster is not None else {"role": "standalone"},
                 "access": s.access.view() if s.access is not None else None,
                 **drains.view(s.drain),
-                "approvals": len(s.runner.approvals()),
+                "approvals": len(s.runner.approvals()),  # this node's
                 "models": len(s.models.names()),
             }
         )
@@ -181,13 +181,13 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response(await ops.cancel(s, request.match_info["run_id"]))
 
     async def run_status(request: web.Request) -> web.Response:
-        return web.json_response(ops.run_status(s, request.match_info["run_id"]))
+        return web.json_response(await ops.run_status(s, request.match_info["run_id"]))
 
     async def run_log(request: web.Request) -> web.Response:
-        return web.json_response(ops.run_log(s, request.match_info["run_id"]))
+        return web.json_response(await ops.run_log(s, request.match_info["run_id"]))
 
     async def approvals(_: web.Request) -> web.Response:
-        return web.json_response({"approvals": s.runner.approvals()})
+        return web.json_response({"approvals": await ops.approvals(s)})
 
     async def parts_list(_: web.Request) -> web.Response:
         return web.json_response({"parts": Parts.view(s.parts.installed())})

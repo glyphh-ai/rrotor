@@ -220,7 +220,7 @@ def ready() -> Layers:
 KERNEL = Path(__file__).parent / "kernel"
 
 
-def ada_part(tmp: Path, version: str = "3.9.0") -> tuple[bytes, str, str]:
+def ada_part(tmp: Path, version: str = "3.10.0") -> tuple[bytes, str, str]:
     """The Ada part as the tests build it: the vendored kernel and its lexicon (the two seeds) under lib/ (numpy
     comes from the test's own Python)."""
     files: dict[str, str | bytes] = {

@@ -110,3 +110,34 @@ def test_lifecycle_that_fails_answers_the_failure(tmp_path):
     result = lifecycle("end", lambda c: 1 / 0, ctx(tmp_path))
     assert result is not None
     assert (result.status, result.step) == ("failed", "end")
+
+
+def test_a_write_on_a_read_only_run_is_e_read_only_naming_the_function(tmp_path):
+    import errno
+    import sqlite3
+
+    class ReadOnlyError(Exception):  # the kernel's, as 3.10 defines it
+        code = "E_READ_ONLY"
+
+    def raising(err: BaseException):
+        def fn(_ctx, _inputs):
+            raise err
+
+        return fn
+
+    plain, ro = ctx(tmp_path), ctx(tmp_path)
+    ro.readonly = True
+    for err in (
+        ReadOnlyError("record writes"),
+        sqlite3.OperationalError("attempt to write a readonly database"),
+        OSError(errno.EROFS, "Read-only file system"),
+    ):
+        result = invoke("sneak", raising(err), ro, {}).result
+        assert result.data["code"] == "E_READ_ONLY" and result.data["reason"].startswith(
+            'sneak is marked "writes": false'
+        )
+    assert invoke("q", raising(ReadOnlyError("x")), plain, {}).result.data["code"] == "E_READ_ONLY"
+    for err in (sqlite3.OperationalError("readonly"), OSError(errno.EROFS, "ro")):
+        assert invoke("q", raising(err), plain, {}).result.data["code"] == "E_CRASH"  # not a read-only run
+    for other in (sqlite3.OperationalError("no such table"), OSError(errno.ENOENT, "gone"), ValueError("x")):
+        assert invoke("q", raising(other), ro, {}).result.data["code"] == "E_CRASH"

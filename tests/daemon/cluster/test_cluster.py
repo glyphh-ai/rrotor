@@ -380,15 +380,16 @@ async def test_what_the_listener_refuses(nodes: Nodes):
         lone._admit(None, {"node_id": "q"}, {})  # type: ignore[arg-type]
     assert err.value.code == "E_NOT_HEAD"
     with pytest.raises(ClusterError) as err:
-        lone._ping({"member": "q"})
+        lone._ping({"member": "q"}, {})
     assert err.value.code == "E_CLUSTER_MEMBER"
 
 
 def test_what_a_follower_is_pushed(nodes: Nodes):
     a = nodes.make("a", ["a"])
-    a._pushed({"type": "something"})
+    a._pushed({"type": "something"}, {})
+    a._pushed({"type": "append"}, {})  # no head connection yet: nothing to answer on
     assert a.refusal is None
-    a._pushed({"type": "removed"})
+    a._pushed({"type": "removed"}, {})
     assert a.refusal is not None and a.refusal["code"] == "E_CLUSTER_FULL" and a.status == "refused"
     assert cluster_node.Member.of({"node_id": "x"}) is None and cluster_node.names(None) == []
 

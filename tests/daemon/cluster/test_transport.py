@@ -212,7 +212,12 @@ async def test_what_the_listener_refuses(nodes: Nodes, tmp_path: Path):
         with pytest.raises(ClusterError) as err:
             await channel.request("ping")
         assert err.value.code == "E_CLUSTER_HELLO"
-        for hello in ({"node_id": "y", "kind": "node"}, {"node_id": "x", "kind": "other"}, {"kind": "node"}):
+        hellos: list[dict[str, Any]] = [
+            {"node_id": "y", "kind": "node"},
+            {"node_id": "x", "kind": "other"},
+            {"kind": "node"},
+        ]
+        for hello in hellos:
             with pytest.raises(ClusterError) as err:
                 await channel.request("hello", **hello)
             assert err.value.code == "E_CLUSTER_PEER"

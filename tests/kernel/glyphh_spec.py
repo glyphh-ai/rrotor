@@ -61,6 +61,7 @@ from datetime import datetime
 from typing import Any
 
 import glyphh_kernel as kernel
+from glyphh_kernel import ReadOnlyError  # noqa: F401  (a read-only model's writes raise it)
 
 SPEC_VERSION = 1
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]{0,63}$")
@@ -1091,12 +1092,24 @@ class Model:
         k: int | None = None,
         min_sim: float | None = None,
         refresh_every: int | None = None,
+        readonly: bool = False,
     ):
         """The levers come from the spec's `settings`, then from what configure() kept with the store, then from
-        the arguments given here (k, min_sim, refresh_every), each over the last."""
+        the arguments given here (k, min_sim, refresh_every), each over the last. readonly opens the store
+        read-only (kernel.Space's readonly): query, facts, probabilities, decide and the settings read as ever;
+        record, learn, calibrate, refresh and configure raise kernel.ReadOnlyError (E_READ_ONLY) before
+        anything is written, and a restatement on open stays in memory."""
         self.given = spec
+        self.readonly = bool(readonly)
         self.space = kernel.Space(
-            dim=spec.dimension, k=spec.settings.k, min_sim=spec.settings.min_sim, seed=spec.seed, author=author, path=path, tau=tau
+            dim=spec.dimension,
+            k=spec.settings.k,
+            min_sim=spec.settings.min_sim,
+            seed=spec.seed,
+            author=author,
+            path=path,
+            tau=tau,
+            readonly=readonly,
         )
         kept = self.space.meta("settings")
         self.overrides: dict[str, Any] = dict(kept) if isinstance(kept, dict) else {}
@@ -1110,7 +1123,8 @@ class Model:
             self.evidence = learned.get("~evidence", {})
         self._apply()
         if len(self.space):
-            self.space.rewrite(self.spec.restate)  # a store recorded under other settings: its bags brought to these
+            # a store recorded under other settings: its bags brought to these (in memory only, read-only)
+            self.space.rewrite(self.spec.restate, persist=not self.readonly)
 
     def _apply(self) -> None:
         self.space.k, self.space.min_sim = self.settings.k, self.settings.min_sim
@@ -1125,7 +1139,11 @@ class Model:
     def configure(self, **changes: Any) -> dict[str, Any]:
         """Change the levers live: checked, kept with the store (over the spec's `settings`, until changed again),
         and a learning lever moved relearns the store there and then (when it has learned). Returns every
-        setting as it now stands."""
+        setting as it now stands. Read-only, configure() with no changes reads them; any change is refused."""
+        if self.readonly:
+            if changes:
+                raise kernel.ReadOnlyError("configure", self.space.path)
+            return self.settings.to_json(all=True)
         new = self.settings.with_changes(changes)
         moved = [name for name in Settings.LEARNING if getattr(new, name) != getattr(self.settings, name)]
         self.settings = new
@@ -1137,7 +1155,12 @@ class Model:
             self.learn()
         return self.settings.to_json(all=True)
 
+    def _writes(self, operation: str) -> None:
+        if self.readonly:
+            raise kernel.ReadOnlyError(operation, self.space.path)
+
     def record(self, data: Any, outcome: str | None = None, ts: float | None = None) -> str:
+        self._writes("record")
         situation = self.spec.situation(data)
         stamp = ts if ts is not None else self.spec.timestamp(data)
         rid = self.space.record(situation, outcome, rid=self.spec.key(situation), ts=stamp)
@@ -1152,6 +1175,7 @@ class Model:
         """Learn the weights from the store's own graded precedents (every role's similarity_weight and
         value_weights, as Spec.learned does) and keep them with the store, over the spec file's, until the next
         learn. Needs at least ten graded precedents with two outcomes. Returns the learned table."""
+        self._writes("learn")
         graded = self.space.graded()
         if len(graded) < 10:
             raise SpecError("", "learn needs at least 10 precedents with an outcome")
@@ -1166,6 +1190,7 @@ class Model:
 
     def refresh(self, sample: int | None = None, clearance: float = 1.0, by: str | None = None) -> dict[str, Any]:
         """learn() then calibrate(): the weights and the temperature follow the store. Returns both."""
+        self._writes("refresh")
         learned = self.learn()
         return {"learned": learned, "tau": self.calibrate(sample, clearance, by)}
 
@@ -1224,6 +1249,7 @@ class Model:
         weights the spec gives its situation. `by` is "loss" (the least log-loss: probabilities that mean what
         they say) or "cost" (the least cost of deciding by output.costs, log-loss breaking ties: probabilities
         that decide best). Kept in the store. Returns tau."""
+        self._writes("calibrate")
         by = by or self.settings.calibrate_by
         sample = sample or self.settings.calibrate_sample
         if by not in ("loss", "cost"):

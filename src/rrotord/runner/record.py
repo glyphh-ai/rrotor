@@ -4,6 +4,7 @@ state. Inputs stay here, on the machine; nothing of them goes to the Cloud."""
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -14,6 +15,7 @@ from rrotord.store import append_line, read_json, read_lines, write_json
 FINAL = frozenset({"done", "failed", "expired", "cancelled"})
 WAITING = frozenset({"needs_input", "needs_approval"})
 LOG_LINE_MAX = 2000
+NODE = re.compile(r"^[a-z0-9-]{1,63}$")
 
 
 def now() -> str:
@@ -63,8 +65,28 @@ class Run:
         }
 
 
-def new_id() -> str:
-    return str(uuid.uuid4())
+def new_id(node: str | None = None) -> str:
+    """A run's id: a UUID, and in a cluster the node that holds the run before it, `<node id>~<uuid>`
+    (docs/specs/cluster.md, 3)."""
+    made = str(uuid.uuid4())
+    return f"{node}~{made}" if node else made
+
+
+def holder(run_id: str) -> str | None:
+    """The node a run's id names, or None for a plain UUID (a standalone node's run, or one the link opened)."""
+    node, sep, _ = run_id.rpartition("~")
+    return node if sep else None
+
+
+def well_formed(run_id: str) -> bool:
+    node, sep, rest = run_id.rpartition("~")
+    if sep and not NODE.match(node):
+        return False
+    try:
+        uuid.UUID(rest)
+    except ValueError:
+        return False
+    return True
 
 
 class Records:
@@ -79,9 +101,7 @@ class Records:
         write_json(self.folder(run.id) / "run.json", asdict(run))
 
     def load(self, run_id: str) -> Run | None:
-        try:
-            uuid.UUID(run_id)
-        except ValueError:
+        if not well_formed(run_id):
             return None
         data = read_json(self.folder(run_id) / "run.json")
         return Run(**data) if data else None

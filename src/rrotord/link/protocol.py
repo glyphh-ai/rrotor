@@ -129,7 +129,16 @@ DOWN: TypeAdapter[Down] = TypeAdapter(Down)
 # rrotor → Cloud
 
 
-def hello(version: str, mode: str, runtime_id: str, deployed: list[dict[str, Any]]) -> dict[str, Any]:
+def hello(
+    version: str,
+    mode: str,
+    runtime_id: str,
+    deployed: list[dict[str, Any]],
+    node_id: str | None = None,
+    cluster_id: str | None = None,
+    role: str = "standalone",
+) -> dict[str, Any]:
+    """The link's first message; a node of a cluster (only its head links) names itself, its cluster and its role."""
     return {
         "type": "hello",
         "id": new_id(),
@@ -138,6 +147,9 @@ def hello(version: str, mode: str, runtime_id: str, deployed: list[dict[str, Any
         "mode": mode,
         "runtime_id": runtime_id,
         "deployed": deployed,
+        "node_id": node_id,
+        "cluster_id": cluster_id,
+        "role": role,
     }
 
 

@@ -161,3 +161,11 @@ async def test_a_declared_host_on_443_goes_through(box):
     except OSError:
         pytest.skip(f"{DECLARED} does not resolve from here")
     assert (await checks(box))["proxy_declared_443"].startswith("HTTP/1.1 200")
+
+
+async def test_a_followers_run_cannot_write_its_own_folder(box):
+    """On a cluster's follower the head is the only writer: the model's folder (and data folder) are read-only."""
+    box.runner.readonly = lambda: True
+    found = await checks(box)
+    assert found["write_own_folder"] == "blocked" and found["write_model"] == "blocked"
+    assert not (box.models.files("hostile") / "mine.txt").exists()

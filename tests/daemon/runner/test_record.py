@@ -47,3 +47,16 @@ def test_log_lines_are_cut_and_read_back(tmp_path, monkeypatch):
     lines = records.lines("r")
     assert lines[0]["message"] == "12345…" and lines[0]["line"] == "ok" and lines[1]["line"] == "abcde…"
     assert records.lines("r", limit=1) == lines[1:]
+
+
+def test_in_a_cluster_a_run_id_names_the_node_that_holds_it(tmp_path):
+    from rrotord.runner.record import holder
+
+    made = new_id("rrotor-1")
+    assert made.startswith("rrotor-1~") and holder(made) == "rrotor-1" and holder(new_id()) is None
+    records = Records(tmp_path)
+    r = Run(made, "p", 1, "a" * 40, "start", {}, "claude", "local")
+    records.save(r)
+    assert records.load(made) == r
+    assert records.load("Bad Node~" + made.split("~")[1]) is None
+    assert records.load("rrotor-1~not-a-uuid") is None

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ class Version:
 class Models:
     def __init__(self, data: Path) -> None:
         self.root = data / "models"
+        self.on_change: Callable[[str, Version], None] | None = None  # a version activated or removed (the head's)
 
     def folder(self, name: str) -> Path:
         return self.root / name
@@ -126,12 +128,16 @@ class Models:
 
     def activate(self, found: Version) -> None:
         write_json(self.root / found.model / "active.json", {"commit_sha": found.commit_sha})
+        if self.on_change is not None:
+            self.on_change("activate", found)
 
     def remove(self, found: Version) -> None:
         active = self.active(found.model)
         if active is not None and active.commit_sha == found.commit_sha:
             (self.root / found.model / "active.json").unlink()
         shutil.rmtree(found.root)
+        if self.on_change is not None:
+            self.on_change("remove", found)
 
     def deployed(self) -> list[dict[str, Any]]:
         """The active version of each model, for the link's hello."""

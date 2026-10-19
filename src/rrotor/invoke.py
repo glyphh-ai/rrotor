@@ -3,7 +3,9 @@ tests (`rrotor.testing`). Every call answers a Result, never an exception (docs/
 
 from __future__ import annotations
 
+import errno
 import json
+import sqlite3
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,6 +36,27 @@ def crash(step: str, err: BaseException) -> Result:
     return failure(step, "E_CRASH", f"{type(err).__name__}: {err}{where}")
 
 
+def wrote(err: BaseException, ctx: Ctx) -> bool:
+    """Whether a failure is a write refused because this run is read-only (a cluster's follower): the kernel's
+    ReadOnlyError (`code` E_READ_ONLY) anywhere, and on a read-only run SQLite's or the file system's refusal."""
+    if getattr(err, "code", None) == "E_READ_ONLY":
+        return True
+    if not ctx.readonly:
+        return False
+    if isinstance(err, sqlite3.OperationalError):
+        return "readonly" in str(err) or "read-only" in str(err)
+    return isinstance(err, OSError) and err.errno in (errno.EROFS, errno.EACCES, errno.EPERM)
+
+
+def read_only(step: str, err: BaseException) -> Result:
+    return failure(
+        step,
+        "E_READ_ONLY",
+        f'{step} is marked "writes": false in glyphh.json, and it wrote ({err}): on a cluster\'s follower its store '
+        'and folders are read-only. Mark it "writes": true, and the cluster\'s head runs it.',
+    )
+
+
 def invoke(step: str, fn: Callable[..., Any], ctx: Ctx, *args: Any) -> Outcome:
     try:
         value = fn(ctx, *args)
@@ -45,7 +68,7 @@ def invoke(step: str, fn: Callable[..., Any], ctx: Ctx, *args: Any) -> Outcome:
     except ModelError as err:
         return Outcome(failure(step, err.code, err.message))
     except Exception as err:  # noqa: BLE001  (a model's crash is a failed Result, never an exception)
-        return Outcome(crash(step, err))
+        return Outcome(read_only(step, err) if wrote(err, ctx) else crash(step, err))
     if not isinstance(value, Result):
         return Outcome(failure(step, "E_BAD_RESULT", f"{step} returned {type(value).__name__}, not a Result."))
     try:
