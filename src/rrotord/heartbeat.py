@@ -3,7 +3,8 @@ nothing else out. At boot and every 24 hours it posts `{server}/v1/license/verif
 `{machine, licence_id, version, active_runs, node_id, cluster_id, role, precedents}`, and offers the licence key the
 server answers (`license_key`; release N also takes the legacy `licence`, and prefers the key) to rrotord/licence.py.
 The machine is a SHA-256 of the runtime id and /etc/machine-id (or, where there is none, a random id kept on /data);
-`node_id` is the operator's own name for the node; `precedents` the node's count across its Ada models. Never an IP
+`node_id` is the operator's own name for the node, `cluster_id` and `role` (standalone, head or follower) its
+cluster's; `precedents` the node's count across its Ada models. Never an IP
 address, a prompt, a model's inputs or outputs, or anyone's data. A failure is logged and tried again with backoff,
 a minute doubling to an hour; it never stops rrotor (docs/architecture.md, 12)."""
 
@@ -59,13 +60,14 @@ class Heartbeat:
         version: str,
         node_id: str = "rrotor",
         precedents: Callable[[], int | None] = lambda: None,
+        cluster: Callable[[], tuple[str | None, str]] = lambda: (None, "standalone"),
         machine_id: Path = MACHINE_ID,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.url = server.rstrip("/") + "/v1/license/verify"
         self.credentials, self.licence, self.post, self.active_runs = credentials, licence, post, active_runs
         self.data, self.version, self.machine_id, self.sleep = data, version, machine_id, sleep
-        self.node_id, self.precedents = node_id, precedents
+        self.node_id, self.precedents, self.cluster = node_id, precedents, cluster
         self.machines: dict[str, str] = {}  # runtime id: its machine hash, worked out once
         self.last: dict[str, Any] | None = None
 
@@ -73,14 +75,15 @@ class Heartbeat:
         """Exactly what goes to the server, and nothing else."""
         if runtime_id not in self.machines:
             self.machines[runtime_id] = machine_hash(runtime_id, self.data, self.machine_id)
+        cluster_id, role = self.cluster()
         return {
             "machine": self.machines[runtime_id],
             "licence_id": self.licence.licence_id,
             "version": self.version,
             "active_runs": self.active_runs(),
             "node_id": self.node_id,
-            "cluster_id": None,  # no cluster yet: every node is standalone
-            "role": "standalone",
+            "cluster_id": cluster_id,
+            "role": role,
             "precedents": self.precedents(),
         }
 

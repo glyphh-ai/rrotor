@@ -53,6 +53,7 @@ async def test_initialize_discover_ping_and_the_tools_listed(api):
         "approvals",
         "model_deploy",
         "audit_query",
+        "cluster_status",
     ]
     assert tools[0]["annotations"]["readOnlyHint"] is True and tools[1]["inputSchema"]["required"] == ["model"]
 

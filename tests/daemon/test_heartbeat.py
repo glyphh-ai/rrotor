@@ -195,3 +195,20 @@ async def test_the_heartbeat_reaches_a_real_server_through_the_daemons_post(tmp_
         if d.session is not None:
             await d.session.close()
         await server.close()
+
+
+def test_in_a_cluster_the_heartbeat_names_the_cluster_and_this_nodes_role(tmp_path):
+    beat = beating(tmp_path, Server())
+    beat.cluster = lambda: ("7d1e0c2a-0000-4000-8000-000000000009", "follower")
+    body = beat.body(RUNTIME)
+    assert (body["cluster_id"], body["role"]) == ("7d1e0c2a-0000-4000-8000-000000000009", "follower")
+    assert set(body) == {
+        "machine",
+        "licence_id",
+        "version",
+        "active_runs",
+        "node_id",
+        "cluster_id",
+        "role",
+        "precedents",
+    }

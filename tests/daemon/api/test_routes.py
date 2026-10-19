@@ -203,3 +203,10 @@ async def test_a_call_carries_clearance_and_refuses_one_out_of_range(api):
     for bad in (2, -0.1, "1", True):
         status, body = await send(api, "POST", "/v1/runs", json={"model": "sample", "clearance": bad})
         assert (status, body["error"]["code"]) == (400, "E_BAD_REQUEST"), bad
+
+
+async def test_a_node_with_no_cluster_is_ready_and_standalone(api):
+    res = await api.client.get("/readyz")
+    assert (res.status, await res.json()) == (200, {"ready": True})
+    assert await send(api, "GET", "/v1/cluster") == (200, {"role": "standalone"})
+    assert (await send(api, "GET", "/v1/health"))[1]["cluster"] == {"role": "standalone"}

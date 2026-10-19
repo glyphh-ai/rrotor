@@ -7,16 +7,24 @@ default and, air-gapped, no link at all.
 
 What it logs and where that goes (docs/specs/cluster.md, 7 and 10): the audit store's retention, the drain (the
 OpenTelemetry variables, as OpenTelemetry defines them: only OTLP over HTTP with protobuf), opt-in server-side
-logging (never with the link off) and payloads in the customer's drain."""
+logging (never with the link off) and payloads in the customer's drain.
+
+The cluster (docs/specs/cluster.md, 4, 6 and 10): `RROTOR_CLUSTER=on` (a self-hosted rrotor only), how the nodes find
+each other (a static `RROTOR_CLUSTER_PEERS` or a Kubernetes headless Service's `RROTOR_CLUSTER_DNS`, one of them), the
+listener's port (never the API's) and the address the others reach it at, the one secret its mutual TLS comes from
+(and the previous one while a new one rolls out), the bootstrap head, the log kept for catch-up and how long a member
+may go unseen. Any of them malformed stops rrotor at start with E_CONFIG, naming it, the cluster on or not."""
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 import socket
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rrotord.errors import RrotorError
@@ -38,6 +46,11 @@ PROTOCOLS = tuple(
 )  # each, when set, http/protobuf
 ENDPOINTS = tuple(f"OTEL_EXPORTER_OTLP_{signal}ENDPOINT" for signal in ("", "LOGS_", "METRICS_", "TRACES_"))
 SERVER = "https://api.glyphh.ai"  # Glyphh's server: a self-hosted rrotor's default
+CLUSTER_PORT = 7778
+SECRET_MIN = 32  # the cluster secret's bytes, at least
+HOST = re.compile(r"^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)$")
+SIZES = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
+SPANS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +82,15 @@ class Config:
     server_logs: bool = False  # on: the same signals to Glyphh too, never payloads or client addresses
     log_payloads: bool = False  # on: inputs and results in the customer's drain (run spans, run.end)
     otel: tuple[tuple[str, str], ...] = ()  # the OTEL_* variables as set: the drain's endpoint, headers, sampler
+    cluster: bool = False  # on: join or make a cluster (and only with a key whose cluster_sync_enabled is true)
+    cluster_peers: tuple[str, ...] = ()  # host:port of every member, the same list on every node
+    cluster_dns: str | None = None  # a name whose A/AAAA records are the members (a headless Service)
+    cluster_port: int = CLUSTER_PORT  # the cluster listener, node to node only: never the API's port
+    cluster_advertise: str | None = None  # host:port the others reach this node at; None: <node id>:<port>
+    cluster_secrets: tuple[bytes, ...] = field(default=(), repr=False)  # the secret, then the previous one if set
+    cluster_head: str | None = None  # the node that makes the cluster at bootstrap; None: the lowest node id
+    cluster_log_keep: int = 1 << 30  # bytes of replication log kept for catch-up (replication: not built yet)
+    cluster_evict_after: float = 24 * 3600.0  # seconds a member may go unseen before the head removes it
 
     @property
     def public(self) -> bool:
@@ -88,6 +110,11 @@ class Config:
             return own
         base = env.get("OTEL_EXPORTER_OTLP_ENDPOINT")
         return f"{base.rstrip('/')}/v1/{signal}" if base else None
+
+    @property
+    def advertise(self) -> str:
+        """How the other nodes reach this one: RROTOR_CLUSTER_ADVERTISE, else `<node id>:<port>`."""
+        return self.cluster_advertise or f"{self.node_id}:{self.cluster_port}"
 
     @property
     def link_url(self) -> str:
@@ -158,6 +185,90 @@ def signals(env: Mapping[str, str]) -> tuple[str, ...]:
             "RROTOR_DRAIN_SIGNALS is a comma-separated list of logs, metrics, traces and audit.", code="E_CONFIG"
         )
     return chosen
+
+
+def address(text: str, name: str) -> str:
+    """host:port, the host a name or an address (an IPv6 one in brackets), the port 1 to 65535."""
+    host, _, port = text.strip().rpartition(":")
+    if not HOST.match(host) or not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise RrotorError(f"{name} is host:port (rrotor-0:7778).", code="E_CONFIG")
+    return f"{host}:{int(port)}"
+
+
+def secret(env: Mapping[str, str], name: str) -> bytes | None:
+    """The cluster secret: base64 (standard or URL-safe, padded or not) of 32 bytes or more."""
+    text = env.get(name, "").strip()
+    if not text:
+        return None
+    try:
+        raw = base64.b64decode(text.replace("-", "+").replace("_", "/") + "=" * (-len(text) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        raw = b""
+    if len(raw) < SECRET_MIN:
+        raise RrotorError(
+            f"{name} is {SECRET_MIN} or more random bytes in base64 (openssl rand -base64 32).", code="E_CONFIG"
+        )
+    return raw
+
+
+def amount(env: Mapping[str, str], name: str, units: dict[str, int], default: float, example: str) -> float:
+    """A number with a unit (`1g`, `24h`): the number times the unit's size; at least 1."""
+    text = env.get(name, "").strip().lower()
+    if not text:
+        return default
+    match = re.match(r"^(\d+)([a-z]?)$", text)
+    if match is None or match.group(2) not in units or int(match.group(1)) < 1:
+        raise RrotorError(f"{name} is a whole number and a unit, as {example}.", code="E_CONFIG")
+    return float(int(match.group(1)) * units[match.group(2)])
+
+
+def cluster(env: Mapping[str, str], mode: str, node_id: str, local_port: int) -> dict[str, object]:
+    """The cluster's settings, each checked whether the cluster is on or not."""
+    on = on_off(env, "RROTOR_CLUSTER")
+    if on and mode != "self":
+        raise RrotorError("RROTOR_CLUSTER=on is for a self-hosted rrotor (RROTOR_MODE=self).", code="E_CONFIG")
+    port_text = env.get("RROTOR_CLUSTER_PORT", "").strip() or str(CLUSTER_PORT)
+    if not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
+        raise RrotorError("RROTOR_CLUSTER_PORT is a port, 1 to 65535.", code="E_CONFIG")
+    port = int(port_text)
+    if on and port == local_port:
+        raise RrotorError("RROTOR_CLUSTER_PORT is not the API's port: the cluster has its own.", code="E_CONFIG")
+    peers = tuple(
+        address(p, "RROTOR_CLUSTER_PEERS") for p in env.get("RROTOR_CLUSTER_PEERS", "").split(",") if p.strip()
+    )
+    dns = env.get("RROTOR_CLUSTER_DNS", "").strip().lower().rstrip(".") or None
+    if dns is not None and not HOST.match(dns):
+        raise RrotorError(
+            "RROTOR_CLUSTER_DNS is a DNS name (rrotor-headless.rrotor.svc.cluster.local).", code="E_CONFIG"
+        )
+    if on and (not peers) == (dns is None):
+        raise RrotorError(
+            "A cluster needs one of RROTOR_CLUSTER_PEERS (host:port,...) and RROTOR_CLUSTER_DNS (a headless Service).",
+            code="E_CONFIG",
+        )
+    advertise = env.get("RROTOR_CLUSTER_ADVERTISE", "").strip()
+    current, previous = secret(env, "RROTOR_CLUSTER_SECRET"), secret(env, "RROTOR_CLUSTER_SECRET_PREVIOUS")
+    if on and current is None:
+        raise RrotorError(
+            "A cluster needs RROTOR_CLUSTER_SECRET: 32 or more random bytes in base64, the same on every node.",
+            code="E_CONFIG",
+        )
+    if previous is not None and current is None:
+        raise RrotorError("RROTOR_CLUSTER_SECRET_PREVIOUS goes with RROTOR_CLUSTER_SECRET.", code="E_CONFIG")
+    head = env.get("RROTOR_CLUSTER_HEAD", "").strip() or None
+    if head is not None and not NODE_ID.match(head):
+        raise RrotorError("RROTOR_CLUSTER_HEAD is a node id: 1 to 63 of a-z, 0-9 and -.", code="E_CONFIG")
+    return {
+        "cluster": on,
+        "cluster_peers": peers,
+        "cluster_dns": dns,
+        "cluster_port": port,
+        "cluster_advertise": address(advertise, "RROTOR_CLUSTER_ADVERTISE") if advertise else None,
+        "cluster_secrets": tuple(s for s in (current, previous) if s is not None),
+        "cluster_head": head,
+        "cluster_log_keep": int(amount(env, "RROTOR_CLUSTER_LOG_KEEP", SIZES, 1 << 30, "1g or 512m")),
+        "cluster_evict_after": amount(env, "RROTOR_CLUSTER_EVICT_AFTER", SPANS, 24 * 3600.0, "24h or 90m"),
+    }
 
 
 def load(env: Mapping[str, str] | None = None) -> Config:
@@ -252,4 +363,5 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         server_logs=server_logs,
         log_payloads=on_off(env, "RROTOR_LOG_PAYLOADS"),
         otel=otel(env),
+        **cluster(env, mode, node_id, port),  # type: ignore[arg-type]
     )

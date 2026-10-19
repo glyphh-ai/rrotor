@@ -1,0 +1,164 @@
+"""The cluster's transport (docs/specs/cluster.md, 6): a WebSocket on aiohttp, on its own listener (`:7778`), never the
+API's port and never behind the public load balancer, with mutual TLS from the cluster secret (tls.py).
+
+Frames are JSON objects with a `type` and an `id`, as on the link. A request (`hello`, `join`, `ping`, `command`) is
+answered by an `answer` with the request's id: `ok` true and the answer's fields, or `ok` false and an `error`
+{code, message}. The head may also push to a follower without being asked (`removed`). The first frame on every
+connection is the dialer's `hello`, naming the node (or `rrotord cluster`'s command) its certificate names; the
+listener's answer names the listener, which the dialer checks against the listener's certificate the same way.
+
+Replication's messages (`append`, `ack`, `snapshot`, `forward`, `vote`, `telemetry`) and `GET /cluster/v1/versions`
+come with replication, election and the aggregate drain: an unknown type is answered E_CLUSTER_MESSAGE."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import ssl
+import uuid
+from collections.abc import AsyncIterator, Callable
+from typing import Any
+
+import aiohttp
+
+from rrotord.cluster.tls import Credentials, peer_name
+from rrotord.errors import RrotorError
+
+log = logging.getLogger("rrotor.cluster")
+PATH = "/cluster/v1/link"
+ANSWER_WITHIN = 10.0  # seconds a request waits for its answer
+CONNECT_WITHIN = 5.0
+FOREIGN = "cluster: peer certificate not from this cluster"
+
+
+class ClusterError(RrotorError):
+    code, status = "E_CLUSTER", 503
+
+
+def frame(kind: str, /, **fields: Any) -> dict[str, Any]:
+    return {"type": kind, "id": uuid.uuid4().hex, **fields}
+
+
+def answer(asked: dict[str, Any], /, **fields: Any) -> dict[str, Any]:
+    return {"type": "answer", "id": asked.get("id"), "ok": True, **fields}
+
+
+def failed(asked: dict[str, Any], err: RrotorError) -> dict[str, Any]:
+    return {"type": "answer", "id": asked.get("id"), "ok": False, "error": {"code": err.code, "message": err.message}}
+
+
+def decoded(text: str) -> dict[str, Any] | None:
+    try:
+        msg = json.loads(text)
+    except ValueError:
+        return None
+    return msg if isinstance(msg, dict) and isinstance(msg.get("type"), str) else None
+
+
+class Channel:
+    """One WebSocket between two nodes (or `rrotord cluster` and its node), either end of it: send a frame, ask and
+    wait for the answer, read what arrives. `peer` is the name the other end's certificate carries."""
+
+    def __init__(self, ws: aiohttp.ClientWebSocketResponse | Any, peer: str | None) -> None:
+        self.ws, self.peer = ws, peer
+        self.pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+
+    async def send(self, msg: dict[str, Any]) -> None:
+        await self.ws.send_str(json.dumps(msg, separators=(",", ":")))
+
+    async def request(self, kind: str, /, **fields: Any) -> dict[str, Any]:
+        """A request and its answer; a refusal raises ClusterError with the code the other end gave. Someone must be
+        reading this channel (`pump`) for the answer to arrive."""
+        msg = frame(kind, **fields)
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self.pending[msg["id"]] = future
+        try:
+            await self.send(msg)
+            got = await asyncio.wait_for(future, ANSWER_WITHIN)
+        finally:
+            self.pending.pop(msg["id"], None)
+        if not got.get("ok"):
+            error = got["error"] if isinstance(got.get("error"), dict) else {}
+            raise ClusterError(str(error.get("message", "refused")), code=str(error.get("code", "E_CLUSTER")))
+        return got
+
+    async def frames(self) -> AsyncIterator[dict[str, Any]]:
+        """Every frame that arrives, answers to this end's requests given to their waiters instead; until it
+        closes. A frame that is not a JSON object with a type is dropped."""
+        async for raw in self.ws:
+            if raw.type != aiohttp.WSMsgType.TEXT:
+                continue
+            msg = decoded(raw.data)
+            if msg is None:
+                continue
+            waiter = self.pending.get(str(msg.get("id"))) if msg["type"] == "answer" else None
+            if waiter is not None:
+                if not waiter.done():
+                    waiter.set_result(msg)
+                continue
+            yield msg
+
+    async def pump(self, pushed: Callable[[dict[str, Any]], Any] = lambda _: None) -> None:
+        """Read until the channel closes, each frame not an answer handed to `pushed`; then every waiter fails."""
+        try:
+            async for msg in self.frames():
+                pushed(msg)
+        finally:
+            for waiter in self.pending.values():
+                if not waiter.done():
+                    waiter.set_exception(ClusterError("The connection closed.", code="E_CLUSTER_CLOSED"))
+
+    async def close(self) -> None:
+        with contextlib.suppress(Exception):
+            await self.ws.close()
+
+
+async def dial(
+    session: aiohttp.ClientSession,
+    credentials: Credentials,
+    address: str,
+    hello: dict[str, Any],
+    pushed: Callable[[dict[str, Any]], Any] = lambda _: None,
+) -> tuple[Channel, dict[str, Any], asyncio.Task[None]]:
+    """Connect to a node at host:port with each identity in turn (the current secret's, then the previous one's),
+    say hello, and check that its answer names the node its certificate does. Answers the channel, the hello's answer
+    and the task reading it. Raises ClusterError: E_CLUSTER_UNREACHABLE, E_CLUSTER_FOREIGN (a certificate not from
+    this cluster's CA, logged as such), E_CLUSTER_PEER (a hello naming another node), or what the other end refused."""
+    foreign = False
+    for identity in credentials.identities:
+        try:
+            ws = await session.ws_connect(
+                f"https://{address}{PATH}",
+                ssl=identity.client,
+                server_hostname=identity.server_name,
+                timeout=aiohttp.ClientWSTimeout(ws_close=CONNECT_WITHIN),
+                autoping=True,
+                heartbeat=None,
+            )
+        except aiohttp.ClientConnectorCertificateError:
+            foreign = True
+            continue
+        except (aiohttp.ClientError, OSError, TimeoutError, ssl.SSLError):
+            continue  # unreachable, or our certificate refused: the next identity, if any
+        channel = Channel(ws, peer_name(ws.get_extra_info("ssl_object")))
+        reader = asyncio.create_task(channel.pump(pushed))
+        try:
+            answered = await channel.request("hello", **hello)
+        except ClusterError as err:
+            reader.cancel()
+            await channel.close()
+            if err.code == "E_CLUSTER_CLOSED":
+                continue  # closed at once: our certificate was refused; the next identity, if any
+            raise
+        if answered.get("node_id") != channel.peer:
+            reader.cancel()
+            await channel.close()
+            log.warning("cluster: peer certificate names another node", extra={"address": address})
+            raise ClusterError(f"The node at {address} is not the one its certificate names.", code="E_CLUSTER_PEER")
+        return channel, answered, reader
+    if foreign:
+        log.error(FOREIGN, extra={"address": address})
+        raise ClusterError(f"{address}: {FOREIGN}.", code="E_CLUSTER_FOREIGN")
+    raise ClusterError(f"No node answered at {address}.", code="E_CLUSTER_UNREACHABLE")

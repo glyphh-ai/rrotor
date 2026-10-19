@@ -28,7 +28,7 @@ INSTRUCTIONS = (
     "model_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
     "model_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
     "waiting for the person; model_deploy deploys a commit of a model's GitHub repo; audit_query reads the audit log "
-    "(Enterprise)."
+    "(Enterprise); cluster_status shows the runtime's cluster."
 )
 
 
@@ -89,6 +89,12 @@ async def audit_query(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return audited(s, args)
 
 
+async def cluster_status(s: Services, _: dict[str, Any]) -> dict[str, Any]:
+    from rrotord.api.routes import clustered
+
+    return clustered(s)
+
+
 RUN = _obj({"run_id": {"type": "string"}}, ["run_id"])
 TOOLS: tuple[Tool, ...] = (
     Tool(
@@ -147,6 +153,14 @@ TOOLS: tuple[Tool, ...] = (
             }
         ),
         audit_query,
+        True,
+    ),
+    Tool(
+        "cluster_status",
+        "This runtime's cluster as this node sees it: its id, the head, the term, the members and the nodes refused; "
+        "a standalone node says so.",
+        _obj({}),
+        cluster_status,
         True,
     ),
 )
