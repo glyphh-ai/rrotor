@@ -210,3 +210,36 @@ async def test_a_self_hosted_rrotor_names_its_public_host_as_the_resource_and_is
         assert (await client.get("/v1/models", headers=self_hosted.auth())).status == 200
     finally:
         await client.close()
+
+
+CHANGES = [
+    ("PUT", "/v1/runtime/token", {"runtime_id": "8f8f8f8f-8f8f-4f8f-8f8f-8f8f8f8f8f8f", "token": "t" * 32}),
+    ("POST", "/v1/parts", {"name": "ada", "version": "0.1.0", "sha256": "0" * 64, "signature": "x", "url": "u"}),
+    ("DELETE", "/v1/parts/ada", None),
+    ("PUT", "/v1/licence", {"token": "x"}),
+]
+
+
+async def refuses_every_change(api: Api) -> None:
+    """A runtime key (or a Glyphh sign-in) runs and deploys models; the runtime itself is not its to change."""
+    creds = api.services.credentials
+    before = (creds.runtime_id, creds.token)
+    for method, path, sent in CHANGES:
+        res = await api.client.request(method, path, headers=api.auth(), json=sent)
+        body = await res.json()
+        assert (res.status, body["error"]["code"]) == (403, "E_LOCAL_ONLY"), path
+        assert api.services.config.mode in body["error"]["message"]
+    assert (creds.runtime_id, creds.token) == before and not creds.changed.is_set()
+    assert not (api.services.config.data / "runtime.json").exists()
+    for path in ("/v1/parts", "/v1/licence"):  # reading them stays open to a key
+        assert (await api.client.get(path, headers=api.auth())).status == 200
+    res = await api.client.put("/v1/runtime/token", json=CHANGES[0][2])
+    assert res.status == 401  # the gate first: no key, no answer at all
+
+
+async def test_a_key_never_changes_a_hosted_runtimes_link_parts_or_licence(hosted):
+    await refuses_every_change(hosted)
+
+
+async def test_a_key_never_changes_a_self_hosted_runtimes_link_parts_or_licence(self_hosted):
+    await refuses_every_change(self_hosted)

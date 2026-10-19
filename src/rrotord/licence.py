@@ -1,9 +1,10 @@
 """The plan's licence: the server's signed {payload, signature}, checked with Glyphh's licence key and kept on /data.
 It comes three ways: down the link (`welcome`), from the heartbeat (rrotord/heartbeat.py), or offline, as a token
-(base64url of the same JSON) in RROTOR_LICENCE, the file /data/licence.token or `PUT /v1/licence`. A licence is live
-until `expires_at` plus its `grace_days`: past `expires_at` it is in grace, past grace it has expired. Of the valid
-licences handed in, the one live longest is kept. A part installs and a run that needs one goes only while the
-licence names the part's mod (docs/architecture.md, 10); an expired licence refuses those, and nothing else."""
+(base64url of the same JSON) in RROTOR_LICENCE, the file /data/licence.token or, on a local rrotor only,
+`PUT /v1/licence`. A licence is live until `expires_at` plus its `grace_days`: past `expires_at` it is in grace, past
+grace it has expired. Of the valid licences handed in, the one live longest is kept. A part installs and a run that
+needs one goes only while the licence names the part's mod (docs/architecture.md, 10); an expired licence refuses
+those, and nothing else."""
 
 from __future__ import annotations
 
