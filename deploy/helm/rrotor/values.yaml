@@ -34,6 +34,38 @@ runtime:
   keysSha256: []
 existingSecret: ""
 
+# Where rrotor's logs, metrics, traces and audit events go. By default nowhere but here: its JSON log lines on stdout
+# (the kubelet rotates them) and, on Enterprise, its audit log on its volume (/data/audit).
+drain:
+  # Your OpenTelemetry collector, OTLP over HTTP with protobuf (OTEL_EXPORTER_OTLP_ENDPOINT), e.g.
+  # http://otel-collector.observability:4318. Empty: no drain. gRPC is not offered: a collector forwards it.
+  endpoint: ""
+  # OTEL_EXPORTER_OTLP_HEADERS (key=value,...), e.g. a backend's API key. Kept in the Secret (or set the key
+  # OTEL_EXPORTER_OTLP_HEADERS in your existingSecret).
+  headers: ""
+  # OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME (default rrotor); empty: not set.
+  resourceAttributes: ""
+  serviceName: ""
+  # OTEL_TRACES_SAMPLER (default parentbased_always_on) and OTEL_TRACES_SAMPLER_ARG; empty: not set. Other OTEL_*
+  # variables (a CA certificate, a timeout) go in extraEnv.
+  tracesSampler: ""
+  tracesSamplerArg: ""
+  # What the drain sends (RROTOR_DRAIN_SIGNALS), and the records per signal held while the collector is down, the
+  # oldest dropped past it (RROTOR_DRAIN_BUFFER). Audit events are never dropped: they wait on disk.
+  signals: logs,metrics,traces,audit
+  buffer: 10000
+  # "on": models' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS), never anywhere else.
+  payloads: "off"
+
+# "on": the same logs, metrics, traces and audit events also go to Glyphh (RROTOR_SERVER_LOGS), so the platform can
+# show them. They then leave your cluster (never inputs, results or callers' addresses). Not with link "off".
+serverLogs: "off"
+
+# Enterprise: days of audit log kept, and the most it may take on the volume, the oldest day deleted first.
+audit:
+  retentionDays: 90
+  maxMb: 1024
+
 # small: shared 1 CPU, 1 GiB, 3 GiB disk; medium: 2 CPU, 4 GiB, 10 GiB; large: 2 CPU, 8 GiB, 20 GiB.
 size: small
 # Set to override the preset's requests and limits.

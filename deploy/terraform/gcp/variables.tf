@@ -74,6 +74,53 @@ variable "server" {
   default     = "https://api.glyphh.ai"
 }
 
+variable "otel_endpoint" {
+  description = "Your OpenTelemetry collector, OTLP over HTTP with protobuf (OTEL_EXPORTER_OTLP_ENDPOINT), e.g. http://otel-collector:4318. Empty: no drain; logs, metrics, traces and audit events stay on the VM."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.otel_endpoint == "" || can(regex("^https?://[^/\\s]+(/\\S*)?$", var.otel_endpoint))
+    error_message = "otel_endpoint is the collector's http(s) URL."
+  }
+}
+
+variable "otel_headers" {
+  description = "OTEL_EXPORTER_OTLP_HEADERS (key=value,...), e.g. your backend's API key."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "otel_resource_attributes" {
+  description = "OTEL_RESOURCE_ATTRIBUTES (key=value,...) added to every signal."
+  type        = string
+  default     = ""
+}
+
+variable "server_logs" {
+  description = "Also send the logs, metrics, traces and audit events to Glyphh (RROTOR_SERVER_LOGS=on), so the platform can show them. They then leave your infrastructure (never inputs, results or callers' addresses)."
+  type        = bool
+  default     = false
+}
+
+variable "log_payloads" {
+  description = "Models' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS=on); never anywhere else."
+  type        = bool
+  default     = false
+}
+
+variable "audit_retention_days" {
+  description = "Enterprise: days of audit log kept on the data disk (RROTOR_AUDIT_RETENTION_DAYS)."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.audit_retention_days >= 1 && floor(var.audit_retention_days) == var.audit_retention_days
+    error_message = "audit_retention_days is a whole number of days, 1 or more."
+  }
+}
+
 variable "size" {
   description = "small (1 CPU, 1 GiB, 3 GiB disk), medium (2, 4 GiB, 10 GiB) or large (2, 8 GiB, 20 GiB)."
   type        = string

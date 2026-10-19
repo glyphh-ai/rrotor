@@ -244,3 +244,44 @@ async def test_keys_and_the_pause_reach_the_access_store(env, tmp_path):
     assert env.handler.access.paused == {"reason": "runtime_hours"}
     await env.handler.on_access(p.Resume(type="resume"))
     assert env.handler.access.paused is None
+
+
+async def test_what_the_cloud_asks_for_is_audited_as_the_servers(env, tmp_path):
+    from rrotord.audit import Audit
+
+    audit = Audit(tmp_path / "audit", tier=lambda: "enterprise")
+    env.handler.audit = env.runner.audit = audit
+    install(env.models, manifest("sample"), WAITS, sha="c" * 40)
+    message = call()
+    await env.handler.on_call(message)
+    await env.handler.on_continue(p.Continue(type="continue", run_id=message.run_id, answer="x"))
+    await env.handler.on_cancel(p.Cancel(type="cancel", run_id=message.run_id))
+    await env.handler.on_deploy(deploy("activate", "c" * 40))
+    await env.handler.on_deploy(deploy("deploy", "d" * 40))
+    await env.handler.on_deploy(deploy("remove", "c" * 40))
+    events = audit.read(None, 100)[0]
+    assert [e["kind"] for e in events] == [
+        "run.call",
+        "run.continue",
+        "run.end",
+        "run.cancel",
+        "model.activate",
+        "model.deploy_failed",
+        "model.remove",
+    ]
+    assert {(e["actor"]["type"], e["via"]) for e in events} == {("server", "link")}
+    assert events[5]["outcome"] == {"status": "failed", "code": "E_COMMIT_MISSING"}
+    assert (events[4]["model"], events[4]["version"], events[6]["commit_sha"]) == ("sample", 4, "c" * 40)
+
+
+async def test_a_repo_deploy_from_the_cloud_is_model_deploy(env, tmp_path):
+    from rrotord.audit import Audit
+
+    audit = Audit(tmp_path / "audit", tier=lambda: "enterprise")
+    env.handler.audit = audit
+    repo = GitRepo(tmp_path / "src")
+    sha = repo.model(manifest("sample"))
+    repo.bare(tmp_path / "github", "owner/sample")
+    await env.handler.on_deploy(deploy("deploy", sha, repo="owner/sample"))
+    event = audit.read(None, 10)[0][0]
+    assert (event["kind"], event["repo"], event["commit_sha"]) == ("model.deploy", "owner/sample", sha)

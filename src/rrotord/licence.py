@@ -8,7 +8,10 @@ error with its source (never fatal), and of the good ones the newest (`issued_at
 the later `expires_at`; when none is within grace the newest is still held, so the health can say what expired.
 Release N also takes the plan's legacy `{payload, signature}` licence wherever one arrives, mapped, and prefers a
 key to it. The key held is kept in /data/licence.json as {key, source}, so a restart without the environment keeps
-it. Nothing here refuses a run: the worst case is Community's limits."""
+it. Nothing here refuses a run: the worst case is Community's limits.
+
+A key taken, past grace or refused is an audit event (`licence.changed`, `licence.expired`, `licence.bad`), told to
+`on_event` with where it came from."""
 
 from __future__ import annotations
 
@@ -48,7 +51,13 @@ class Licence:
         self.found: dict[tuple[str, bool], Key] = {}  # (source, legacy): the best good key found there
         self.refused: dict[str, str] = {}  # source: why its key was refused, while it is
         self.warned: date | None = None
+        self.on_event: Callable[[str, dict[str, Any]], object] | None = None  # audit: changed, expired, bad
+        self.expired_told: str | None = None  # the key whose expiry was told
         self._saved()
+
+    def _tell(self, kind: str, **detail: Any) -> None:
+        if self.on_event is not None:
+            self.on_event(kind, detail)
 
     def _saved(self) -> None:
         """The key held before the restart, checked again."""
@@ -87,13 +96,23 @@ class Licence:
         except Refused as why:
             self.refused[source] = why.reason
             log.error(f"licence key refused: {why.reason}", extra={"source": source})
+            self._tell("licence.bad", source=source, reason=why.reason)
             return None
         self.refused.pop(source, None)
+        before = self.held
         kept = self.found.get((source, key.legacy))
         if kept is None or self._rank(key) >= self._rank(kept):  # each source keeps the best it has given
             self.found[(source, key.legacy)] = key
         if self.held is key:
             write_json(self.path, {"key" if not key.legacy else "licence": key.raw, "source": source})
+            if before is None or before.raw != key.raw:
+                self._tell(
+                    "licence.changed",
+                    source=source,
+                    license_id=key.license_id,
+                    tier=key.plan.tier,
+                    expires_at=stamp(key.expires_at),
+                )
         return key
 
     def take(self, sent: Any, source: str = "api") -> bool:
@@ -143,6 +162,9 @@ class Licence:
     def warn(self) -> None:
         """Once a day while the key held has expired: when it did, and when Community's limits apply."""
         held, now = self.held, self.clock()
+        if held is not None and held.state(now) == "expired" and self.expired_told != held.raw:
+            self.expired_told = held.raw
+            self._tell("licence.expired", license_id=held.license_id, expires_at=stamp(held.expires_at))
         if held is None or held.state(now) == "live" or self.warned == now.date():
             return
         self.warned = now.date()

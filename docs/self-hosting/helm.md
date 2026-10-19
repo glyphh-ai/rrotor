@@ -91,6 +91,14 @@ helm install rrotor deploy/helm/rrotor -n rrotor --set publicHost=rrotor.acme.co
 | `ingress.annotations` | | More annotations, for your controller |
 | `podDisruptionBudget.enabled` | `false` | `minAvailable: 1`: a node drain then waits until you move rrotor by hand |
 | `nodeSelector`, `tolerations`, `affinity` | | Where it runs: e.g. a node group that meets the requirements above |
+| `drain.endpoint` | | Your OpenTelemetry collector, OTLP over HTTP (`OTEL_EXPORTER_OTLP_ENDPOINT`), e.g. `http://otel-collector.observability:4318`; empty: no drain |
+| `drain.headers` | | `OTEL_EXPORTER_OTLP_HEADERS` (an API key), into the Secret; or that key in `existingSecret` |
+| `drain.resourceAttributes`, `drain.serviceName` | | `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_SERVICE_NAME` |
+| `drain.tracesSampler`, `drain.tracesSamplerArg` | | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` (other `OTEL_*` variables, such as a CA certificate, in `extraEnv`) |
+| `drain.signals`, `drain.buffer` | `logs,metrics,traces,audit`, `10000` | `RROTOR_DRAIN_SIGNALS`, `RROTOR_DRAIN_BUFFER` |
+| `drain.payloads` | `off` | `RROTOR_LOG_PAYLOADS`: inputs and results in your drain |
+| `serverLogs` | `off` | `RROTOR_SERVER_LOGS`: the same signals to Glyphh too; the chart refuses it with `link: "off"` |
+| `audit.retentionDays`, `audit.maxMb` | `90`, `1024` | The audit log (Enterprise) on the volume ([Logs, audit and drains](README.md#logs-audit-and-drains)) |
 | `extraEnv` | | More environment, e.g. `RROTOR_LOG_LEVEL` |
 
 The probes (`startupProbe`, `livenessProbe`, `readinessProbe`) check `/healthz` and can be changed. The Ingress must

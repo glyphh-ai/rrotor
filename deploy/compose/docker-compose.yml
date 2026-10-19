@@ -3,11 +3,20 @@
 #   docker compose up -d
 name: rrotor
 
+# Docker keeps each container's JSON log lines, rotated: 10 MB a file, five files. Where else they go (an
+# OpenTelemetry collector, or Glyphh) is set in .env.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
 services:
   rrotor:
     image: ghcr.io/glyphh-ai/rrotor:${RROTOR_VERSION:-latest}
     restart: unless-stopped
     env_file: .env
+    logging: *logging
     environment:
       RROTOR_MODE: self
       RROTOR_DATA: /data
@@ -40,6 +49,7 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    logging: *logging
     depends_on:
       - rrotor
     environment:

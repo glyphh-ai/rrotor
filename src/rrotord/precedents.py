@@ -18,14 +18,18 @@ log = logging.getLogger("rrotor")
 READ_EVERY = 540.0
 
 
-def total(models: Models, skip: str | None = None) -> int:
-    """The precedents in every model one of whose versions needs Ada (but `skip`); raises sqlite3.Error when a store
+def counts(models: Models, skip: str | None = None) -> dict[str, int]:
+    """The precedents in each model one of whose versions needs Ada (but `skip`); raises sqlite3.Error when a store
     does not read."""
-    found = 0
-    for name in models.names():
-        if name != skip and any("ada" in v.manifest.needs for v in models.versions(name)):
-            found += ada.count(models.data(name) / ada.STORE)
-    return found
+    return {
+        name: ada.count(models.data(name) / ada.STORE)
+        for name in models.names()
+        if name != skip and any("ada" in v.manifest.needs for v in models.versions(name))
+    }
+
+
+def total(models: Models, skip: str | None = None) -> int:
+    return sum(counts(models, skip).values())
 
 
 class Precedents:
@@ -39,15 +43,17 @@ class Precedents:
         self.warned: int | None = None  # the total last warned of as over the cap
         self.read_at: float | None = None
         self.total: int | None = None  # the last reading; None until one has read
+        self.by_model: dict[str, int] = {}  # the last reading, each model's (the drain's `rrotor.precedents`)
         self.reported: int | None = None
 
     def count(self) -> int | None:
         """The runtime's total; None when a store does not read."""
         try:
-            return total(self.models)
+            self.by_model = counts(self.models)
         except sqlite3.Error as err:
             log.warning("a precedent store did not read", extra={"reason": str(err)})
             return None
+        return sum(self.by_model.values())
 
     def current(self) -> int | None:
         """The last reading; read now when none has yet (the heartbeat at boot comes before the first tick)."""

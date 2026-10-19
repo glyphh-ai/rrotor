@@ -2,7 +2,8 @@
 the Cloud set when the plan's hours ran out, both kept in /data/access.json so a restart keeps them. The keys arrive
 in the machine's environment at first, then in `welcome` and as `keys` down the link whenever they change (one
 revoked is one gone from the list). Which key let each request in is counted here too, in memory, and reported up the
-link as `usage` once a minute (docs/architecture.md, section 6)."""
+link as `usage` once a minute (docs/architecture.md, section 6). A change to the list is an audit event,
+`keys.changed`, with the counts and the hashes added and removed (`on_change`)."""
 
 from __future__ import annotations
 
@@ -50,7 +51,10 @@ class Usage:
 
 
 class Access:
-    def __init__(self, data: Path, keys: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, data: Path, keys: tuple[str, ...] = (), on_change: Callable[[dict[str, Any]], object] | None = None
+    ) -> None:
+        self.on_change = on_change
         self.path = data / "access.json"
         saved = read_json(self.path)
         saved = saved if isinstance(saved, dict) else {}
@@ -66,8 +70,12 @@ class Access:
 
     def set_keys(self, hashes: list[str]) -> None:
         """The whole list, as the Cloud holds it; a hash that is not one is dropped."""
+        before = set(self.keys)
         self.keys = [h for h in hashes if isinstance(h, str) and HEX64.match(h)]
         self._save()
+        added, removed = sorted(set(self.keys) - before), sorted(before - set(self.keys))
+        if (added or removed) and self.on_change is not None:
+            self.on_change({"keys": len(self.keys), "added": added, "removed": removed})
 
     def match(self, token: str) -> str | None:
         """Which key this bearer is (its SHA-256), or None: every hash compared, in constant time, so timing says

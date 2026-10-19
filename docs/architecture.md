@@ -207,6 +207,7 @@ flowchart TB
 | **model runner** | Launches each run in its sandbox, keeps a waiting run's worker up to 15 minutes, runs `end` always, counts each run's seconds |
 | **egress proxy** | A run's only network: an HTTP `CONNECT` proxy on a unix socket per run; lets through port 443 of the hosts the manifest declares when the TLS SNI matches, refuses addresses that resolve to loopback, private or link-local ranges, and records what it refuses |
 | **part store** | Checks a part's hash and signature, unpacks it, switches it in one rename ([10](#10-parts)) |
+| **logs, audit, drain** | JSON log lines naming the node and the run; audit events, kept on Enterprise; OTLP to the customer's collector and, opt-in, to Glyphh ([13](#13-logs-audit-and-drains)) |
 
 There is no s6 and no other process: everything is `rrotord` under `tini`.
 
@@ -245,9 +246,12 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 | `models/<name>/data/` | Its persistent data, outside git (an Ada model's `precedents.sqlite`) |
 | `runs/<run_id>/` | Each run's `run.json` (with its checkpoints) and `log.jsonl` |
 | `parts/<name>/<version>/`, `parts/<name>/current` | An installed part, and the version in use |
+| `audit/<YYYY-MM-DD>.jsonl`, `audit/.cursor`, `audit/.cursor-glyphh` | Enterprise: the audit log, a file a day; how far the customer's drain and server-side logging have read it ([13](#13-logs-audit-and-drains)) |
+| `logging.json` | Whether server-side logging was on at the last start (turning it on or off is an audit event) |
 
 **The image** (`image/Dockerfile`): Debian 13 (trixie) slim, amd64 and arm64; `tini`, Python 3.13 (Debian's),
-Node 22, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates. No browser, no database. It runs as
+Node 22, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates; in rrotord's venv, the OpenTelemetry
+SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests). No browser, no database. It runs as
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
 is the `hosted` target: the base with the Ada part in `/opt/parts-builtin`, installed at boot ([11](#11-the-image-and-ci)).
 
@@ -415,7 +419,9 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 One API, REST and MCP, behind one gate (`api/gate.py`). Refusals are `{"error": {"code", "message"}}` with a
 stable code. What changes the runtime itself (`PUT /v1/runtime/token`, `POST /v1/parts`, `DELETE /v1/parts/{name}`,
 `PUT /v1/licence`) answers only on a local rrotor; hosted and self-hosted it is 403 `E_LOCAL_ONLY`, whoever calls:
-those take their token, parts and licence from their environment, their image and Glyphh.
+those take their token, parts and licence from their environment, their image and Glyphh. Whoever the gate lets in
+is who the audit log names for what the request does, and every 401 and 403 is an audit event
+([13](#13-logs-audit-and-drains)).
 
 **The gate, by mode:**
 
@@ -437,7 +443,7 @@ those take their token, parts and licence from their environment, their image an
 | Call | Does |
 |---|---|
 | `GET /healthz` | `{ok: true}` while the process is up |
-| `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of models |
+| `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of models, `drains` (per signal: `state` (`off`, `waiting`, `ok`, `failing`), `buffered`, `dropped`, `last_export_at`) and `server_logs` (`on`, and the warning while it is) |
 | `GET /v1/models` | Each model, its versions (number, commit, when), the active one, its functions |
 | `POST /v1/models/deploy` | `{repo, commit, token?}` or `{bundle, commit}` ([2.2](#22-build-deploy-and-call)): `201 {model, version, commit_sha, deployed_at}` |
 | `POST /v1/runs` | `{model, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, model, version, function, status, data, step, prompt, seconds}` |
@@ -448,6 +454,7 @@ those take their token, parts and licence from their environment, their image an
 | `GET /v1/approvals` | Runs waiting for approval: run, model, step, prompt, when |
 | `GET /v1/parts`, `POST /v1/parts`, `DELETE /v1/parts/{name}` | The parts installed; install one (`{name, version, sha256, signature, archive \| url}`); remove one ([10](#10-parts)); installing and removing are local only |
 | `GET /v1/licence`, `PUT /v1/licence` | `{licence}`: the key held, its state and the limits that apply ([9](#9-the-licence)); hand one in as the body (release N: or a legacy `{payload, signature}`, `{token}` or offline token), `{licence, kept}`, `kept: false` when another is held; a bad one is 400 `E_LICENCE`; handing one in is local only |
+| `GET /v1/audit` | `?since&until&kind&actor&model&run_id&limit&cursor`: the audit log, newest first, `{events, cursor}` (`limit` 100, at most 1000; `cursor` null at the end); Enterprise only, 403 `E_NOT_IN_PLAN` otherwise ([13](#13-logs-audit-and-drains)) |
 | `PUT /v1/runtime/token` | `{runtime_id, token}`: a runtime token handed in (a local runtime's way to get one); kept in `/data/runtime.json`, and the link reconnects with it; local only |
 
 **MCP:** `POST /mcp`, Streamable HTTP, stateless, one JSON-RPC message per POST; MCP 2026-07-28 (`server/discover`,
@@ -463,6 +470,7 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `model_cancel` `{run_id}` | Stops a run |
 | `run_status`, `run_log` `{run_id}` | A run's status and last `Result`; its log lines |
 | `approvals` | The runs waiting for the person's approval |
+| `audit_query` `{since?, until?, kind?, model?, run_id?, limit?}` | `GET /v1/audit` |
 
 A refusal is a tool error carrying the API's `{error}`.
 
@@ -615,6 +623,57 @@ container's privileges, the outbound connections, backups and upgrades are in
 - **One box:** several nodes as one runtime, with a head, are decided and specified in
   [`specs/cluster.md`](specs/cluster.md) ([Not built yet](#not-built-yet)).
 
+## 13. Logs, audit and drains
+
+Built as [`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains) section 7 decides, for one node (build
+order steps 3 and 4); the head gathering a cluster's follows with the cluster ([Not built yet](#not-built-yet)).
+**Everything stays on the rrotor by default:** nothing leaves it unless the customer sets a drain or turns on
+server-side logging. The heartbeat and the link's `usage` are licensing, not telemetry, and keep their fixed fields.
+
+- **Log lines** (`rrotord/log.py`): JSON on stdout, `RROTOR_LOG_LEVEL`, tokens masked; every line has `at`, `level`,
+  `logger`, `message` and its fields, `node_id`, the run's `run_id`, `model`, `version` and `function` while one is
+  handled, and `trace_id` and `span_id` while a span is recorded. The packages rotate them (Docker's `json-file`,
+  10 MB, five files; the kubelet). A run's `ctx.log` lines stay in `runs/<id>/log.jsonl`.
+- **Audit events** (`rrotord/audit.py`): `{id, at, node_id, cluster_id, kind, actor, client, via, …, outcome,
+  seconds}`, one per `run.call`, `run.continue`, `run.cancel` (refused ones too, `outcome.status: refused` with the
+  code) and `run.end`, by any route (REST, MCP, the link); `model.deploy`, `model.activate`, `model.remove`,
+  `model.deploy_failed`; `keys.changed` (counts, hashes added and removed); `licence.changed`, `licence.expired`,
+  `licence.bad`; `access.denied` (a 401 or 403, with the code); `config.server_logs`. `actor.type` is `key` (its
+  SHA-256), `sign-in` (`sub` from the introspection's answer), `local`, `server` (the link), `rrotor` (its own work)
+  or `anonymous` (a 401: the SHA-256 of the bearer sent, if any). `client` is the last `X-Forwarded-For` hop, else
+  the connection's address; `via` is `rest`, `mcp` or `link`.
+- **Kept on Enterprise only** (the key's tier while it counts): `/data/audit/<YYYY-MM-DD>.jsonl`, each event appended
+  and fsynced; days past `RROTOR_AUDIT_RETENTION_DAYS` (90) deleted, then, past `RROTOR_AUDIT_MAX_MB` (1024), the
+  oldest day first, never today's, each deletion logged. `GET /v1/audit` and `audit_query` read it backwards,
+  filtered and paged. Below Enterprise each event is a log line (`logger: rrotor.audit`) and nothing is kept.
+- **The drain** (`rrotord/drain.py`, `rrotord/otel.py`): with `OTEL_EXPORTER_OTLP_ENDPOINT` (or a per-signal
+  endpoint) set, logs, metrics, traces and audit events go by OTLP over HTTP with protobuf to the customer's
+  collector, through OpenTelemetry's own exporters, so `OTEL_EXPORTER_OTLP_*` mean what OpenTelemetry says;
+  `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` is `E_CONFIG` at start. `RROTOR_DRAIN_SIGNALS` picks what goes. The resource:
+  `service.name` (`OTEL_SERVICE_NAME`, default `rrotor`), `service.version`, `service.instance.id` (the node id),
+  `rrotor.runtime.id`, `rrotor.node.role` (`standalone`), `rrotor.mode`, and `OTEL_RESOURCE_ATTRIBUTES`. Log lines
+  are log records (the line's fields as attributes); audit events are log records named
+  `rrotor.audit.<kind>`. Metrics: `rrotor.runs` (model, function, status), `rrotor.run.seconds`,
+  `rrotor.precedents` (per model) and `rrotor.precedents.cap`, `rrotor.link.state`, `rrotor.drain.dropped`. Traces
+  (`OTEL_TRACES_SAMPLER`, default `parentbased_always_on`): a span per API request, a child of the caller's
+  `traceparent`, with `rrotor.sandbox.start` and `rrotor.function` under it. Each node exports itself
+  (`RROTOR_DRAIN_AT` is read; with no cluster a node is its own head).
+- **Buffer and drop:** logs, metrics and traces wait in memory, `RROTOR_DRAIN_BUFFER` (10,000) per signal per
+  destination, sent every 5 s in batches of 512, a failure tried again after 10 s doubling to a minute; past the
+  buffer the oldest go, counted (`rrotor.drain.dropped`, the health) and logged at most once a minute. Audit events
+  are never dropped: each destination reads `/data/audit` from its own cursor and moves it only when a batch is
+  taken. Below Enterprise they are log records and follow the log rule.
+- **Server-side logging** (`RROTOR_SERVER_LOGS=on`, `E_CONFIG` with the link off): the same four signals also go to
+  `{RROTOR_SERVER}/v1/otlp/v1/{logs,metrics,traces}`, OTLP protobuf, gzipped, with the runtime token, and never the
+  customer's OTLP headers or certificates. rrotor logs at every start, and the health shows: "Server-side logging is
+  on: this rrotor's logs, metrics, traces and audit events are sent to Glyphh (api.glyphh.ai) and leave your
+  infrastructure. Set RROTOR_SERVER_LOGS=off to keep them here." Turning it on or off is an audit event.
+- **Redaction:** never in a log line, audit event, span or metric: a model's inputs or outputs, `ctx.log`'s fields,
+  secrets, tokens or keys (keys as SHA-256 only), request bodies; a drain sends each line exactly as stdout masks it.
+  `RROTOR_LOG_PAYLOADS=on` adds inputs and `Result.data` (4 KB each) to the `rrotor.function` span and the kept
+  `run.end` event, for the customer's drain only: before anything goes to Glyphh, `client`, `inputs`, `data`,
+  `rrotor.inputs` and `rrotor.data` are stripped.
+
 ## Not built yet
 
 - **Secrets:** a vault for a model's `secrets` (`ctx.secrets` answers `E_NOT_BUILT`; `secret_set` on the link is
@@ -627,10 +686,12 @@ container's privileges, the outbound connections, backups and upgrades are in
   link and the cluster's drain. Reads are local on every node. `max_nodes` is enforced at join. Pro and Team fail
   over by restart or by hand; Enterprise elects a new head (HA). Today a self-hosted rrotor is one box, and a
   second copy of the same runtime takes the link over from the first.
-- **Audit logs** (Enterprise) **and log drains** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains)):
-  logs, metrics, traces and audit events stay on the rrotor by default; a drain streams them by OTLP to the
-  customer's own collector, never via Glyphh; opt-in server-side logging sends them to Glyphh, with a plain warning.
-  Inputs and outputs are never sent unless the customer turns that on, and then only to their own drain.
+- **The cluster's drain and audit log** ([`specs/cluster.md`](specs/cluster.md#7-logging-audit-and-drains), build
+  order step 9): followers sending their telemetry to the head, `RROTOR_DRAIN_AT=head` exporting it there, the
+  cluster's audit store under `/data/audit/cluster/` and `GET /v1/audit` answered by the head; the
+  `rrotor.cluster.lag` and `rrotor.cluster.term` metrics and the forward and commit-wait spans. Each node logs,
+  audits and drains itself today ([13](#13-logs-audit-and-drains)). Server-side logging also needs the server's
+  OTLP receiver (`glyphh-ai/server`).
 - **SSO and SAML, roles (RBAC).**
 - **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
   ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).

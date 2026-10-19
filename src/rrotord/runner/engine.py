@@ -1,26 +1,36 @@
 """Runs: a call opens one, each continue resumes it, cancel and expiry end it; `end` always runs. The worker stays
 up while a run waits (up to 15 minutes); if it is gone (rrotor restarted), a continue starts a new one that loads
 again and reads its checkpoints back (docs/architecture.md, 5.4). Every call answers a Result, never an exception:
-the errors raised here are about the call itself (no such model, inputs refused), never about the model."""
+the errors raised here are about the call itself (no such model, inputs refused), never about the model.
+
+Every call, continue and cancel is an audit event with its outcome, and every run's end one with its final status
+(rrotord/audit.py); while a run is handled its id, model, version and function are on every log line; with a drain,
+its sandbox's start and its function are spans, and its end counted (rrotord/otel.py)."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from opentelemetry.trace import Span
+
 from rrotor.ctx import RunState
+from rrotord import log as logs
 from rrotord import precedents
-from rrotord.errors import Conflict, NotFound, Unavailable
+from rrotord.audit import Audit
+from rrotord.errors import Conflict, NotFound, RrotorError, Unavailable
 from rrotord.licence import Licence
 from rrotord.licence_key import COMMUNITY
 from rrotord.manifest import check_inputs
 from rrotord.models import Models, Version
+from rrotord.otel import Telemetry
 from rrotord.parts import KNOWN, Parts
 from rrotord.proxy import EgressProxy
 from rrotord.runner.launch import Launcher, Spec
@@ -41,6 +51,18 @@ def failed(step: str, code: str, reason: str) -> dict[str, Any]:
     return {"status": "failed", "data": {"reason": reason, "code": code}, "step": step, "prompt": None}
 
 
+def about(run: Run) -> dict[str, Any]:
+    """A run as its log lines and audit events name it."""
+    return {"run_id": run.id, "model": run.model, "version": run.version, "function": run.function}
+
+
+def outcome(run: Run) -> dict[str, Any]:
+    """How a call ended, for its audit event: the status, and a failure's code (never the Result's data)."""
+    data = (run.result or {}).get("data")
+    code = data.get("code") if run.status == "failed" and isinstance(data, dict) else None
+    return {"status": run.status, "code": code}
+
+
 class Runner:
     def __init__(
         self,
@@ -55,16 +77,30 @@ class Runner:
         wait_limit: float = WAIT_LIMIT,
         parts: Parts | None = None,
         licence: Licence | None = None,
+        audit: Audit | None = None,
+        telemetry: Telemetry | None = None,
     ) -> None:
         self.models, self.records, self.proxy, self.launcher = models, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
-        self.parts, self.licence = parts, licence
+        self.parts, self.licence, self.audit, self.telemetry = parts, licence, audit, telemetry
         self.notify = notify
         self.workers: dict[str, Worker] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock(self, run_id: str) -> asyncio.Lock:
         return self._locks.setdefault(run_id, asyncio.Lock())
+
+    def _audit(self, kind: str, **detail: Any) -> None:
+        if self.audit is not None:
+            self.audit.emit(kind, **detail)
+
+    @contextlib.contextmanager
+    def _span(self, name: str, run: Run) -> Iterator[Span | None]:
+        if self.telemetry is None:
+            yield None
+            return
+        with self.telemetry.span(name, {f"rrotor.{k}": v for k, v in about(run).items()}) as span:
+            yield span
 
     def get(self, run_id: str) -> Run:
         run = self.records.load(run_id)
@@ -84,6 +120,28 @@ class Runner:
         run_id: str | None = None,
         clearance: float = 1.0,
     ) -> Run:
+        """A run opened and its first Result; the call is an audit event either way (`refused` with its code when it
+        never became a run)."""
+        try:
+            run = await self._call(model, function, inputs, version, caller, origin, run_id, clearance)
+        except RrotorError as err:
+            asked = {"model": model, "version": version, "function": function, "run_id": run_id}
+            self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
+            raise
+        self._audit("run.call", **about(run), outcome=outcome(run), seconds=round(run.seconds, 3))
+        return run
+
+    async def _call(
+        self,
+        model: str,
+        function: str,
+        inputs: dict[str, Any],
+        version: int | None,
+        caller: str,
+        origin: str,
+        run_id: str | None,
+        clearance: float,
+    ) -> Run:
         if not self.layers.ready:
             raise Unavailable(
                 f"The sandbox is not ready, so no model runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
@@ -97,12 +155,13 @@ class Runner:
         run.clearance = clearance
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
-        async with self._lock(run.id):
-            refused = self._parts_refused(model, found)
-            if refused:
-                await self._finish(run, refused)
-            else:
-                await self._go(run, found, None)
+        with logs.bind(**about(run)):
+            async with self._lock(run.id):
+                refused = self._parts_refused(model, found)
+                if refused:
+                    await self._finish(run, refused)
+                else:
+                    await self._go(run, found, None)
         return run
 
     def _parts_refused(self, model: str, found: Version) -> dict[str, Any] | None:
@@ -121,27 +180,49 @@ class Runner:
         return None
 
     async def resume(self, run_id: str, answer: Any) -> Run:
+        """The answer a waiting run asked for, and its next Result; an audit event either way."""
+        try:
+            run = await self._resume(run_id, answer)
+        except RrotorError as err:
+            self._audit("run.continue", run_id=run_id, outcome={"status": "refused", "code": err.code})
+            raise
+        self._audit("run.continue", **about(run), outcome=outcome(run), seconds=round(run.seconds, 3))
+        return run
+
+    async def _resume(self, run_id: str, answer: Any) -> Run:
         async with self._lock(run_id):
             run = self.get(run_id)
             if run.status not in WAITING:
                 raise Conflict("This run is not waiting for an answer.", code="E_RUN_STATE", run_status=run.status)
-            state = RunState.from_json(run.state)
-            state.record(run.pending or {}, answer)
-            run.state, run.status, run.waiting_since = state.to_json(), "running", None
-            self.records.save(run)
-            self.records.log(run.id, {"event": "continued", "pending": run.pending})
-            found = self.models.by_sha(run.model, run.commit_sha)
-            worker = self.workers.get(run.id)
-            if found is None:
-                await self._finish(run, failed("deploy", "E_VERSION_MISSING", "This run's version is no longer here."))
-            elif worker is not None and worker.alive:
-                await worker.send("continue", answer=answer, state=run.state, seconds_left=self._left(run, found))
-                await self._await_result(run, worker, found)
-            else:
-                await self._go(run, found, answer)
+            with logs.bind(**about(run)):
+                state = RunState.from_json(run.state)
+                state.record(run.pending or {}, answer)
+                run.state, run.status, run.waiting_since = state.to_json(), "running", None
+                self.records.save(run)
+                self.records.log(run.id, {"event": "continued", "pending": run.pending})
+                found = self.models.by_sha(run.model, run.commit_sha)
+                worker = self.workers.get(run.id)
+                if found is None:
+                    reason = "This run's version is no longer here."
+                    await self._finish(run, failed("deploy", "E_VERSION_MISSING", reason))
+                elif worker is not None and worker.alive:
+                    await worker.send("continue", answer=answer, state=run.state, seconds_left=self._left(run, found))
+                    await self._await_result(run, worker, found)
+                else:
+                    await self._go(run, found, answer)
             return run
 
     async def cancel(self, run_id: str) -> Run:
+        """A run stopped, its `end` run; an audit event either way."""
+        try:
+            run = await self._cancel(run_id)
+        except RrotorError as err:
+            self._audit("run.cancel", run_id=run_id, outcome={"status": "refused", "code": err.code})
+            raise
+        self._audit("run.cancel", **about(run), outcome=outcome(run), seconds=round(run.seconds, 3))
+        return run
+
+    async def _cancel(self, run_id: str) -> Run:
         run = self.get(run_id)
         if run.final:
             raise Conflict("This run has ended.", code="E_RUN_STATE", run_status=run.status)
@@ -151,9 +232,9 @@ class Runner:
         async with self._lock(run_id):
             run = self.get(run_id)
             if not run.final:
-                await self._end(
-                    run, self.workers.get(run_id), self._stopped("cancelled", "cancel", "The run was cancelled.")
-                )
+                with logs.bind(**about(run)):
+                    stopped = self._stopped("cancelled", "cancel", "The run was cancelled.")
+                    await self._end(run, self.workers.get(run_id), stopped)
             return run
 
     @staticmethod
@@ -236,9 +317,10 @@ class Runner:
         mounts = self._mounts(run.model, found, socket)
         limits = bwrap.Limits(manifest.limits.memory_mb, manifest.limits.seconds + 5)
         try:
-            worker = await Worker.start(
-                self.launcher, lambda fd: Spec(mounts, limits, fd), lambda m: self._note(run, m)
-            )
+            with self._span("rrotor.sandbox.start", run):
+                worker = await Worker.start(
+                    self.launcher, lambda fd: Spec(mounts, limits, fd), lambda m: self._note(run, m)
+                )
         except OSError as err:
             await self.proxy.close(run.id)
             await self._finish(run, failed("sandbox", "E_SANDBOX", f"The sandbox did not start: {err}"))
@@ -265,7 +347,12 @@ class Runner:
 
     async def _await_result(self, run: Run, worker: Worker, found: Version) -> None:
         began = time.monotonic()
-        message = await worker.next(self._left(run, found) + GRACE)
+        with self._span("rrotor.function", run) as span:
+            message = await worker.next(self._left(run, found) + GRACE)
+            if span is not None and self.telemetry is not None:
+                result = message.get("result") if message is not None else None
+                span.set_attribute("rrotor.status", str((result or {}).get("status", "stopped")))
+                self.telemetry.payload(span, inputs=run.inputs, data=(result or {}).get("data"))
         run.seconds += time.monotonic() - began
         if message is None or message.get("op") != "result":
             alive = worker.alive and not worker.closed  # a closed channel is a worker that stopped, reaped or not
@@ -313,6 +400,10 @@ class Runner:
         )
         self.records.save(run)
         self.records.log(run.id, {"event": "ended", "status": run.status, "seconds": round(run.seconds, 3)})
+        payload = {"inputs": run.inputs, "data": result.get("data")}
+        self._audit("run.end", **about(run), outcome=outcome(run), seconds=round(run.seconds, 3), payload=payload)
+        if self.telemetry is not None:
+            self.telemetry.ended(run.model, run.function, run.status, run.seconds)
         await self._tell(run)
 
     async def _tell(self, run: Run) -> None:

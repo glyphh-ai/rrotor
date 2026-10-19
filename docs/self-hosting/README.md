@@ -19,8 +19,10 @@ no autoscaling; a second copy of the same runtime is not a replica, it takes the
 | Audit log | no | no | no | yes |
 
 **Built:** the signed licence key that carries these limits, Community (Free's limits) without one, and the
-precedent cap per node ([Licensing](#licensing)). **Not built yet:** the node cap and clusters (several nodes as one
-runtime, sync, a head, high availability, audit logs, log drains); today a self-hosted rrotor is one box. The
+precedent cap per node ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains, each
+node its own ([Logs, audit and drains](#logs-audit-and-drains)). **Not built yet:** the node cap and clusters
+(several nodes as one runtime, sync, a head, high availability, and the head gathering the cluster's drain and audit
+log); today a self-hosted rrotor is one box. The
 decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
 server's (`glyphh-ai/server`, `docs/architecture.md`).
 
@@ -56,9 +58,59 @@ What rrotor reads in `self` mode. Each package sets these for you.
 | `RROTOR_KEYS_SHA256` | air-gapped | The SHA-256 of each runtime key that may call it, comma-separated (`printf %s "$KEY" \| sha256sum`). With the link on, the keys come down the link and this is not needed. With the link off there is no Glyphh sign-in either: runtime keys are the only way in |
 | `RROTOR_DATA` | no, default `/data` | The persistent volume. One rrotor writes it, never two |
 
+What it logs and where that goes are [below](#logs-audit-and-drains).
+
 rrotor listens on port **7777**, plain HTTP: TLS is ended in front of it (Caddy, an Ingress, a load balancer), which
 must pass the `Host` header through unchanged. `GET /healthz` is open and answers while the process is up;
-`GET /v1/health` (authenticated) reports the link, each sandbox layer and the licence.
+`GET /v1/health` (authenticated) reports the link, each sandbox layer, the licence, each drain and whether
+server-side logging is on.
+
+## Logs, audit and drains
+
+**Everything stays on rrotor by default.** Nothing leaves it unless you set a drain (your own collector) or turn on
+server-side logging (Glyphh). The heartbeat and the link's usage are licensing, not telemetry, and keep their fixed
+fields.
+
+- **Logs:** JSON lines on stdout, one per event, tokens masked; every line names the node (`node_id`), and the run
+  (`run_id`, `model`, `version`, `function`) and the trace (`trace_id`, `span_id`) where there is one. Docker keeps
+  them rotated (the Compose package: 10 MB a file, five files); on Kubernetes the kubelet rotates them. A run's own
+  `ctx.log` lines stay in its log on `/data` (`GET /v1/runs/{id}/log`).
+- **The audit log** (Enterprise): one event per call (REST, MCP or the link) and its end, deploy, change to the
+  runtime keys, licence key taken, expired or refused, 401 or 403, and server-side logging turned on or off; who did
+  it (a runtime key's SHA-256, never the key; a Glyphh sign-in's subject; the local token; Glyphh; rrotor itself),
+  from which address, and how it ended. Kept in `/data/audit/<YYYY-MM-DD>.jsonl`, one file a day, each event fsynced;
+  read with `GET /v1/audit` (`since`, `until`, `kind`, `actor`, `model`, `run_id`, `limit`, `cursor`; newest first)
+  or the MCP tool `audit_query`. Below Enterprise the same events are log lines (`logger: rrotor.audit`), not kept,
+  and `GET /v1/audit` is 403 `E_NOT_IN_PLAN`.
+- **A drain** to your own OpenTelemetry collector: logs, metrics, traces and audit events by OTLP over HTTP with
+  protobuf, never through Glyphh. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (and OpenTelemetry's other variables as you need
+  them); with none, there is no drain. Metrics: `rrotor.runs`, `rrotor.run.seconds`, `rrotor.precedents` and
+  `rrotor.precedents.cap`, `rrotor.link.state`, `rrotor.drain.dropped`; traces: a span per API request (your
+  `traceparent` honoured), with the sandbox's start and the function under it. While the collector is down, logs,
+  metrics and traces wait in memory, `RROTOR_DRAIN_BUFFER` per signal, the oldest dropped and counted; audit events
+  are never dropped: the drain reads them from `/data/audit` from its cursor, so a collector down for a day gets
+  the day's events when it is back.
+- **Server-side logging** (`RROTOR_SERVER_LOGS=on`): the same signals also go to Glyphh, so the platform can show
+  them. rrotor says so plainly at every start and in its health. Refused with the link off.
+- **Never sent anywhere, never logged:** a model's inputs and outputs, `ctx.log`'s fields, secrets, tokens and keys,
+  request bodies. `RROTOR_LOG_PAYLOADS=on` adds inputs and results (4 KB each) to the run's spans and its `run.end`
+  audit event, for your own drain only; Glyphh never gets them, nor your callers' addresses.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | | Your collector, e.g. `http://otel-collector:4318` (`/v1/logs`, `/v1/metrics`, `/v1/traces` are added); or per signal, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `…_METRICS_ENDPOINT`, `…_TRACES_ENDPOINT`, as given. None: no drain |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `…_CERTIFICATE`, `…_CLIENT_CERTIFICATE`, `…_CLIENT_KEY`, `…_COMPRESSION`, `…_TIMEOUT` | | As OpenTelemetry defines them (and their per-signal forms) |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | The only one offered: `grpc` stops rrotor at start (`E_CONFIG`); a collector takes HTTP and forwards gRPC |
+| `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_SERVICE_NAME` | , `rrotor` | Added to every signal; rrotor adds `service.version`, `service.instance.id` (the node id), `rrotor.runtime.id`, `rrotor.node.role` and `rrotor.mode` |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | `always_on`, `always_off`, `traceidratio` or their `parentbased_` forms, and the ratio |
+| `RROTOR_DRAIN_SIGNALS` | `logs,metrics,traces,audit` | What the drain sends |
+| `RROTOR_DRAIN_BUFFER` | `10000` | Records held per signal while the collector is down |
+| `RROTOR_DRAIN_AT` | `head` | `head` or `node`. One box exports itself either way; in a cluster (not built yet) the head will export for every node |
+| `RROTOR_LOG_PAYLOADS` | `off` | `on`: inputs and results in your drain |
+| `RROTOR_SERVER_LOGS` | `off` | `on`: also to Glyphh (`{RROTOR_SERVER}/v1/otlp/v1/…`, with the runtime token). Not with `RROTOR_LINK=off` |
+| `RROTOR_AUDIT_RETENTION_DAYS` | `90` | Days of audit log kept (Enterprise) |
+| `RROTOR_AUDIT_MAX_MB` | `1024` | The most the audit log may take; past it the oldest day goes (never today's). Each deletion is logged |
+| `RROTOR_LOG_LEVEL` | `INFO` | The log level |
 
 ## The container's privileges, and why
 
@@ -92,6 +144,8 @@ an unprivileged user (uid 10001) on a read-only root filesystem, and its own sec
 | Let's Encrypt (`acme-v02.api.letsencrypt.org:443`) | Caddy's certificate | Compose and Terraform, unless you bring your own |
 | `github.com:443` | Fetching a model's commit when one is deployed from its repo | Deploys from git |
 | The hosts a model declares | A run's own egress, port 443 only, through rrotor's proxy | Runs whose manifest asks for them |
+| Your OpenTelemetry collector | The drain: logs, metrics, traces, audit events | `OTEL_EXPORTER_OTLP_ENDPOINT` set |
+| `api.glyphh.ai:443` (`/v1/otlp/v1/…`) | Server-side logging | `RROTOR_SERVER_LOGS=on` |
 
 Nothing connects in to rrotor except your callers on 443 (and 80 for the certificate and the redirect). The
 Glyphh server never connects to it: everything it sends comes down the link rrotor opened. What crosses that link,
@@ -121,7 +175,8 @@ nothing is running. Go forwards only: to go back, restore the backup you took be
 ## Backups
 
 Everything rrotor keeps is on `/data`: the runtime's id and token (`runtime.json`), each model's deployed versions,
-its own files and data (Ada's precedent store), each run's record and log, the parts installed, the licence held.
+its own files and data (Ada's precedent store), each run's record and log, the parts installed, the licence held,
+and, on Enterprise, the audit log (`/data/audit`).
 Back that up and you can rebuild rrotor anywhere.
 
 - **The simplest consistent copy:** stop rrotor, copy the volume, start it.

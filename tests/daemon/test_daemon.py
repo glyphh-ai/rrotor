@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import os
 import signal
 import sqlite3
@@ -538,3 +539,81 @@ def test_a_self_hosted_daemon_whose_bwrap_cannot_start_says_what_the_container_l
     Daemon(dataclasses.replace(c, mode="hosted", data=tmp_path / "h"), hosted, launcher=LocalLauncher())
     assert hosted.needs == [] and "container_needs" not in hosted.to_json()
     assert Daemon(dataclasses.replace(c, data=tmp_path / "ok"), ready(), launcher=LocalLauncher()).layers.needs == []
+
+
+def enterprise() -> str:
+    return keys().key(tier="enterprise", max_nodes=None, max_precedents=None, issued_at="2026-10-01T00:00:00Z")
+
+
+async def test_an_enterprise_node_keeps_its_audit_events_naming_who_did_each(tmp_path, short_dir):
+    c = dataclasses.replace(
+        self_daemon(tmp_path / "first", short_dir).config,
+        data=tmp_path / "data",
+        licence_env=(("GLYPHH_LICENSE_KEY", enterprise()),),
+    )
+    d = Daemon(c, ready(), launcher=LocalLauncher())
+    assert d.audit.kept and d.services().audit is d.audit and d.runner.audit is d.audit and d.handler.audit is d.audit
+    d.access.set_keys(["c" * 64])
+    d.licence.offer("junk.junk", "heartbeat")
+    kinds = [(e["kind"], e["actor"]["type"]) for e in d.audit.read(None, 100)[0]]
+    assert kinds == [("licence.changed", "rrotor"), ("keys.changed", "server"), ("licence.bad", "server")]
+    assert d.drain is None and d.runner.telemetry is None and d.services().drain is None
+
+
+def drained(tmp_path: Path, short_dir: Path, url: str, **kw: Any) -> Daemon:
+    given: dict[str, Any] = {"data": tmp_path / "data", "server": url, "otel": (("OTEL_EXPORTER_OTLP_ENDPOINT", url),)}
+    c = dataclasses.replace(self_daemon(tmp_path / "first", short_dir).config, **(given | kw))
+    return Daemon(c, ready(), launcher=LocalLauncher())
+
+
+async def test_a_drain_is_wired_with_its_gauges_and_flushed_at_stop(tmp_path, short_dir, monkeypatch):
+    from tests.fakes import FakeCollector
+
+    monkeypatch.setattr(precedents, "counts", lambda models, skip=None: {"incidents": 12})
+    fake = FakeCollector()
+    url = await fake.start()
+    root = logging.getLogger()
+    level, handlers = root.level, root.handlers[:]
+    root.setLevel(logging.INFO)
+    try:
+        d = drained(tmp_path, short_dir, url, licence_env=(("GLYPHH_LICENSE_KEY", keys().key()),))
+        assert d.drain is not None and d.runner.telemetry is d.drain.telemetry and d.services().drain is d.drain
+        stop = asyncio.Event()
+        stop.set()
+        await d.serve(stop)
+        assert d.drain.handler not in root.handlers
+    finally:
+        root.setLevel(level)
+        root.handlers[:] = handlers
+        await fake.close()
+    lines = [r["body"] for r in fake.logs()]
+    assert "rrotor up" in lines and "rrotor stopped" in lines
+    assert all(r["node_id"] == "rrotor-1" for r in fake.logs())
+    assert {"rrotor.precedents", "rrotor.precedents.cap", "rrotor.link.state"} <= fake.metrics()
+    unlimited = drained(tmp_path / "e", short_dir, url, licence_env=(("GLYPHH_LICENSE_KEY", enterprise()),))
+    assert unlimited.drain is not None
+    data = unlimited.drain.telemetry.collect()
+    assert data is not None
+    names = {m.name for rm in data.resource_metrics for sm in rm.scope_metrics for m in sm.metrics}
+    assert "rrotor.precedents.cap" not in names and "rrotor.link.state" in names  # no cap: none to show
+    unlimited.drain.telemetry.shutdown()
+
+
+async def test_server_side_logging_is_said_at_every_start_and_turning_it_on_or_off_is_audited(
+    tmp_path, short_dir, caplog
+):
+    on = drained(tmp_path, short_dir, "http://127.0.0.1:1", server_logs=True, otel=())
+    assert on.drain is not None and on.drain.glyphh is not None and on.drain.collector is None
+    on.audit.tier = lambda: "enterprise"
+    with caplog.at_level(logging.WARNING, logger="rrotor"):
+        on.server_logs()
+        on.server_logs()  # still on: said again, not audited again
+    said = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Server-side logging is on")]
+    assert len(said) == 2 and "(127.0.0.1)" in said[0]
+    assert [(e["kind"], e["on"]) for e in on.audit.read(None, 10)[0]] == [("config.server_logs", True)]
+    on.config = dataclasses.replace(on.config, server_logs=False)
+    on.server_logs()
+    assert [e["on"] for e in on.audit.read(None, 10)[0]] == [True, False]
+    health = on.services()
+    assert health.drain is on.drain
+    await on.drain.stop()

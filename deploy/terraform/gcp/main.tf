@@ -27,6 +27,12 @@ locals {
       memory        = local.size.memory
       licence       = var.license_key != "" ? var.license_key : var.offline_licence
       keys          = join(",", var.runtime_keys_sha256)
+      otel_endpoint = var.otel_endpoint
+      otel_headers  = var.otel_headers
+      otel_resource = var.otel_resource_attributes
+      server_logs   = var.server_logs ? "on" : "off"
+      log_payloads  = var.log_payloads ? "on" : "off"
+      audit_days    = var.audit_retention_days
     }))
     data_device = "/dev/disk/by-id/google-rrotor-data"
   })

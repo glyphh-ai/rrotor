@@ -19,12 +19,15 @@ from typing import Any, Protocol
 from aiohttp import web
 
 from rrotord import VERSION
+from rrotord import drain as drains
 from rrotord.access import Access
 from rrotord.api import mcp, ops
 from rrotord.api.gate import METADATA, SCOPE, public_url
+from rrotord.audit import Audit
 from rrotord.config import Config
 from rrotord.deploy import Deployer
-from rrotord.errors import BadRequest, Forbidden
+from rrotord.drain import Drain
+from rrotord.errors import BadRequest, Forbidden, RrotorError
 from rrotord.introspect import Introspector
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
@@ -72,6 +75,8 @@ class Services:
     report: Report | None = None  # after every deploy, `deployed` up the link; none in tests without a link
     heartbeat: HeartbeatView | None = None  # self, the link on: the last heartbeat
     precedents: Precedents | None = None  # the daemon's nine-minute count; counted here when there is none
+    audit: Audit | None = None  # the audit events: kept (Enterprise) and read by GET /v1/audit, or logged
+    drain: Drain | None = None  # the customer's collector and server-side logging, when either is on
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -97,6 +102,17 @@ def local_only(mode: str, handler: Handler) -> Handler:
     return handler if mode == "local" else refused
 
 
+def audited(s: Services, query: dict[str, Any]) -> dict[str, Any]:
+    """`GET /v1/audit` and `audit_query`: the kept audit events, Enterprise only."""
+    if s.audit is None or not s.audit.kept:
+        raise RrotorError(
+            "The audit log is part of the Enterprise plan; below it audit events are log lines (logger rrotor.audit).",
+            code="E_NOT_IN_PLAN",
+            status=403,
+        )
+    return s.audit.query(query)
+
+
 def setup(app: web.Application, s: Services) -> None:
     counted = s.precedents or Precedents(s.models)
 
@@ -118,6 +134,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "licence": licence(),
                 "heartbeat": s.heartbeat.view() if s.heartbeat is not None else None,
                 "access": s.access.view() if s.access is not None else None,
+                **drains.view(s.drain),
                 "approvals": len(s.runner.approvals()),
                 "models": len(s.models.names()),
             }
@@ -185,6 +202,9 @@ def setup(app: web.Application, s: Services) -> None:
         s.parts.remove(request.match_info["name"])
         return web.json_response({"removed": request.match_info["name"]})
 
+    async def audit(request: web.Request) -> web.Response:
+        return web.json_response(audited(s, dict(request.query)))
+
     async def licence_get(_: web.Request) -> web.Response:
         return web.json_response({"licence": licence()})
 
@@ -227,6 +247,7 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/v1/parts", parts_list)
     app.router.add_post("/v1/parts", local_only(s.config.mode, part_install))
     app.router.add_delete("/v1/parts/{name}", local_only(s.config.mode, part_remove))
+    app.router.add_get("/v1/audit", audit)
     app.router.add_get("/v1/licence", licence_get)
     app.router.add_put("/v1/licence", local_only(s.config.mode, licence_put))
     app.router.add_post("/mcp", mcp.route(s))

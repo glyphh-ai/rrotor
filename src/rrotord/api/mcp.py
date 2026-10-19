@@ -27,7 +27,8 @@ INSTRUCTIONS = (
     "This person's Glyphh runtime (rrotor): their Ada models, deployed by commit and run here. models_list shows them; "
     "model_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
     "model_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
-    "waiting for the person; model_deploy deploys a commit of a model's GitHub repo."
+    "waiting for the person; model_deploy deploys a commit of a model's GitHub repo; audit_query reads the audit log "
+    "(Enterprise)."
 )
 
 
@@ -82,6 +83,12 @@ async def model_deploy(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.deploy(s, args)
 
 
+async def audit_query(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    from rrotord.api.routes import audited
+
+    return audited(s, args)
+
+
 RUN = _obj({"run_id": {"type": "string"}}, ["run_id"])
 TOOLS: tuple[Tool, ...] = (
     Tool(
@@ -125,6 +132,22 @@ TOOLS: tuple[Tool, ...] = (
             {"repo": {"type": "string"}, "commit": {"type": "string"}, "token": {"type": "string"}}, ["repo", "commit"]
         ),
         model_deploy,
+    ),
+    Tool(
+        "audit_query",
+        "The audit log, newest first: who called what and how it ended, deploys, key and licence changes (Enterprise).",
+        _obj(
+            {
+                "since": {"type": "string", "format": "date-time"},
+                "until": {"type": "string", "format": "date-time"},
+                "kind": {"type": "string"},
+                "model": {"type": "string"},
+                "run_id": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+            }
+        ),
+        audit_query,
+        True,
     ),
 )
 BY_NAME = {t.name: t for t in TOOLS}
