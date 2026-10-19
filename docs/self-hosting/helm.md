@@ -3,7 +3,8 @@
 One rrotor per release: a StatefulSet of **one** replica with its own volume for `/data`, a Service, an Ingress at
 your public host, and a Secret for the runtime's token. It is one box, as everywhere: there is no high availability
 and no autoscaling, and the chart does not let you set replicas. For a second rrotor, register a second runtime and
-install a second release. The chart is `deploy/helm/rrotor/`.
+install a second release. The chart is `deploy/helm/rrotor/`. A cluster of N replicas with a head is decided, not
+built ([`specs/cluster.md`](../specs/cluster.md#12-the-packages)).
 
 ## What the cluster must allow
 

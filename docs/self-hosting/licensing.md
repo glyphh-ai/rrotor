@@ -4,6 +4,10 @@ Written for the people who review what a piece of software sends out of their ne
 signed licence on the machine, with no network request; it renews that licence over the link or a small daily
 HTTPS call whose whole body is shown below; and an air-gapped rrotor never calls out at all.
 
+This is the licence as built. Decided and **not built yet**: a signed licence key (`GLYPHH_LICENSE_KEY`) carrying
+each plan's node and precedent limits, with Free's limits when there is none
+([`specs/licensing.md`](../specs/licensing.md); the plans are in the [README](README.md#the-plans)).
+
 ## The licence
 
 A licence is a JSON object `{payload, signature}`. The signature is Ed25519 over the payload's canonical JSON (keys
@@ -15,9 +19,9 @@ by one byte is refused.
 |---|---|
 | `user_id`, `org_id` | The account and organisation that registered the runtime |
 | `install_id` | Always `null` for a runtime's licence |
-| `plan`, `limits` | The plan, and its hosted machines (`machines`) |
+| `plan`, `limits` | The plan, and its hosted machines (`machines`, unused while Glyphh does not host) |
 | `features` | The plan's flags: `sync`, `ha`, `offline`, `sso` (shown; nothing acts on them yet) |
-| `mods` | What the plan includes, with its limits: `ada` being here is what lets Ada models run; its `precedents` is null (unlimited) for a self-hosted runtime |
+| `mods` | What the plan includes, with its limits: `ada` being here is what lets Ada models run; its `precedents` is null for a self-hosted runtime today, so nothing caps it until the licence key is built |
 | `expires_at` | When it stops being current (UTC) |
 | `runtime_id` | The one runtime it is for |
 | `licence_id` | This licence's own id (a UUID) |

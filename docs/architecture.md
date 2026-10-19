@@ -31,6 +31,11 @@ rrotor has no sign-in of its own and nothing to log into. It connects out to the
 the server never connects in. A call goes from the caller to the runtime and back: nothing of Glyphh's sees its
 inputs or its answer.
 
+**Glyphh-run hosting is off.** The server's `GLYPHH_HOSTING` flag (default off) decides whether it makes hosted
+machines; `hosted` and `doorman` stay in the code, used only if Glyphh turns it on ([3](#3-hosted-machines)).
+Customers run rrotor themselves, in `self` mode at their own address ([12](#12-self-hosting),
+[`self-hosting/`](self-hosting/README.md)).
+
 ## 2. A model, end to end
 
 ### 2.1 Adding the runtime to Claude
@@ -118,6 +123,8 @@ sequenceDiagram
   ledger.
 
 ## 3. Hosted machines
+
+Built, and off while the server's `GLYPHH_HOSTING` is off ([1](#1-the-parts)).
 
 A person's hosted runtimes are machines on Fly, made and run from the platform (or the Glyphh connector's
 `create_runtime` and `start_runtime`), each named and of a size (small, medium, large). The server makes them; the
