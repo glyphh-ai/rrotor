@@ -7,7 +7,7 @@ import asyncio
 import base64
 import os
 import socket
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -144,3 +144,16 @@ async def until(check: Callable[[], bool], within: float = 10.0) -> None:
             return
         await asyncio.sleep(0.02)
     raise AssertionError("not reached in time")
+
+
+def settled(head: Cluster, followers: Sequence[Cluster]) -> bool:
+    """The cluster settled from both sides: each follower holds a channel to the head, and the head is head in the
+    same term with every follower's link registered. A follower's own view alone is not enough: a head still
+    electing, or without the follower's link, refuses what the follower sends it (telemetry, a command)."""
+    return head.role == "head" and all(
+        f.role == "follower"
+        and f.head_channel is not None
+        and f.raft.term == head.raft.term
+        and f.node_id in head.links
+        for f in followers
+    )
