@@ -8,8 +8,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from rrotor import ada
 from tests.daemon.api.conftest import open_api
 from tests.daemon.api.test_routes import send
+from tests.daemon.test_precedents import model, store
 from tests.fakes import keys, part_archive
 
 
@@ -29,6 +31,15 @@ async def test_no_key_is_community_and_a_key_is_handed_in_as_the_body_and_shown(
     assert (body["licence"]["state"], body["licence"]["max_precedents"], body["parts"]) == ("live", 500000, [])
     status, body = await send(api, "PUT", "/v1/licence", data=keys().key(drop=("tier",)))
     assert (status, body["error"]["code"]) == (400, "E_LICENCE") and "tier missing" in body["error"]["message"]
+
+
+async def test_the_licence_shows_the_precedents_the_stores_hold_now_not_a_stale_reading(api):
+    model(api.services.models, "incidents", ["ada"], 2)
+    status, body = await send(api, "GET", "/v1/licence")
+    assert (status, body["licence"]["precedents"]) == (200, {"held": 2, "cap": 5000, "over": False})
+    store(api.services.models.data("incidents") / ada.STORE, 5001)
+    status, body = await send(api, "GET", "/v1/health")
+    assert body["licence"]["precedents"] == {"held": 5001, "cap": 5000, "over": True}
 
 
 async def test_a_legacy_licence_is_still_handed_in_as_json_its_token_or_token_in_release_n(api):

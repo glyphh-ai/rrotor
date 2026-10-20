@@ -57,5 +57,5 @@
       "inputs": { "type": "object", "additionalProperties": false }
     }
   },
-  "limits": { "seconds": 60, "memory_mb": 512 }
+  "limits": { "seconds": 60, "memory_mb": 1024 }
 }

@@ -134,7 +134,7 @@ def setup(app: web.Application, s: Services) -> None:
     counted = s.precedents or Precedents(s.models)
 
     def licence() -> dict[str, Any]:
-        return s.licence.view(counted.current())
+        return s.licence.view(counted.now())
 
     async def healthz(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
