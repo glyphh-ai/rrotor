@@ -342,7 +342,8 @@ class Spec:
         """This spec with its weights learned from graded cases: each role's similarity_weight is how much knowing
         its value tells about the outcome (information gain, scaled so the most telling role weighs 1), and each
         value's weight how far that value moves the outcome from the base rate (scaled so the most telling value
-        of a role weighs 1). Layers' and segments' weights are left as they are; so are security weights."""
+        of a role weighs 1). Key parts, text roles and roles that carry sets keep their weights (a set has no one
+        value to weigh). Layers' and segments' weights are left as they are; so are security weights."""
         return self.with_weights(self.learn([(self.situation(data), outcome) for data, outcome in cases]))
 
     def learn(self, situations: Sequence[tuple[Mapping[str, Any], str]]) -> dict[str, dict[str, Any]]:
@@ -368,10 +369,17 @@ class Spec:
                             if learned_words:
                                 words_learned[path] = learned_words
                         continue
+                    if role.key_part:
+                        continue
+                    graded = [
+                        (situation.get(layer.name, {}).get(seg.name, {}).get(role.name), outcome)
+                        for situation, outcome in situations
+                    ]
+                    if role.numeric_config is None and any(isinstance(v, list) for v, _ in graded):
+                        continue  # a role of sets: no one value to weigh; left alone, as a text role is
                     groups: dict[str, Counter] = defaultdict(Counter)
-                    for situation, outcome in situations:
-                        value = situation.get(layer.name, {}).get(seg.name, {}).get(role.name)
-                        if value is None or role.key_part:
+                    for value, outcome in graded:
+                        if value is None:
                             continue
                         key = kernel._text(value[-1]) if role.numeric_config is not None else kernel._text(value)
                         groups[key][outcome] += 1
