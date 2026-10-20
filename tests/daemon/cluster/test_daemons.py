@@ -172,7 +172,8 @@ async def test_an_unlicensed_cluster_serves_from_one_node_a_key_clusters_it_and_
     key = keys().key()
     for d in daemons:  # a key with sync dropped in: read within seconds, no restart
         (d.config.data / "licence.token").write_text(key)
-    await until(lambda: all(d.cluster.status == "ready" for d in daemons) and len(daemons[0].cluster.members()) == 3)
+    # ready as /readyz tells it: a follower that joined is `catching_up` until it has applied what the head committed
+    await until(lambda: all(d.cluster.ready()[0] for d in daemons) and len(daemons[0].cluster.members()) == 3)
     assert daemons[0].cluster.role == "head" and all(d.cluster.listener is not None for d in daemons)
     for api in apis:
         assert await get(api, "/readyz", auth=False) == (200, {"ready": True})
