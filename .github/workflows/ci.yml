@@ -11,10 +11,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  # glyphh-ai/ada-private's part.yml, on every push to its main: the kernel changed, so the Ada part and the hosted
-  # image that carries it are built again from it (on this repository's main, as a push is).
-  repository_dispatch:
-    types: [ada-kernel]
 
 permissions:
   contents: read
@@ -184,7 +180,7 @@ jobs:
   image-hosted:
     runs-on: ubuntu-24.04
     needs: [image, part-ada]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
     permissions:
       contents: read
       packages: write
@@ -241,7 +237,7 @@ jobs:
   part-ada:
     runs-on: ubuntu-latest
     needs: checks
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
     steps:
