@@ -41,13 +41,14 @@ def context(telemetry: Telemetry | None) -> Middleware:
 
 
 def refused(cluster: Cluster | None) -> Middleware:
-    """A node the cluster refused (past max_nodes, removed, or its key no longer allowing sync) serves nothing but
-    `/healthz` and `/readyz`: 503 with the refusal's code, its /data kept, until it is let in."""
+    """A node the cluster refused (past max_nodes, removed), or one an unlicensed cluster does not serve from, serves
+    nothing but `/healthz`, `/readyz`, the health and `GET /v1/cluster` (which say why): 503 with the refusal's code,
+    its /data kept, until it is let in."""
 
     @web.middleware
     async def middleware(request: web.Request, handler: Handler) -> web.StreamResponse:
-        refusal = cluster.refusal if cluster is not None and cluster.status == "refused" else None
-        if refusal is None or request.path in ("/healthz", "/readyz"):
+        refusal = cluster.refusal if cluster is not None and cluster.status in ("refused", "unlicensed") else None
+        if refusal is None or request.path in ("/healthz", "/readyz", "/v1/health", "/v1/cluster"):
             return await handler(request)
         raise Unavailable(str(refusal["message"]), code=str(refusal["code"]))
 

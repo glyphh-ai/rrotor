@@ -444,7 +444,7 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | Call | Does |
 |---|---|
 | `GET /healthz` | `{ok: true}` while the process is up |
-| `GET /readyz` | `200 {ready: true}` while this node may take traffic: standalone and up, or a cluster's member in step with its head; else `503 {ready: false, reason, code}`, the reason `joining`, `catching_up`, `refused` or `no_cluster` ([14](#14-the-cluster)) |
+| `GET /readyz` | `200 {ready: true}` while this node may take traffic: standalone and up, or a cluster's member in step with its head; else `503 {ready: false, reason, code}`, the reason `joining`, `catching_up`, `refused`, `no_cluster` or `unlicensed` ([14](#14-the-cluster)) |
 | `GET /v1/cluster` | This node's cluster: `{cluster_id, node_id, role, status, head, term, commit_seq, applied_seq, tier, max_nodes, ha, members: [{node_id, address, role, voter, applied_seq, lag, last_seen, connected, version, instance, joined_at}], refused: [{node_id, at, code}], refusal}`; `{role: standalone}` with the cluster off, and the reason when the key does not allow it ([14](#14-the-cluster)) |
 | `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of models, `cluster` (`{role: standalone}`, or the cluster's id, this node's role and status, whether it is ready, the head, the term and the members' count), `drains` (per signal: `state` (`off`, `waiting`, `ok`, `failing`), `buffered`, `dropped`, `last_export_at`) and `server_logs` (`on`, and the warning while it is) |
 | `GET /v1/models` | Each model, its versions (number, commit, when), the active one, its functions |
@@ -478,8 +478,9 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 
 A refusal is a tool error carrying the API's `{error}`.
 
-A node a cluster refused (past `max_nodes`, removed, or its key no longer allowing sync) answers 503 with the
-refusal's code to everything but `/healthz` and `/readyz` ([14](#14-the-cluster)).
+A node a cluster refused (past `max_nodes`, removed), or one an unlicensed cluster does not serve from, answers 503
+with the refusal's code to everything but `/healthz`, `/readyz`, `/v1/health` and `GET /v1/cluster`
+([14](#14-the-cluster)).
 
 **In a cluster** ([14](#14-the-cluster)) every route and tool answers the same on every node: a follower sends a
 writing call (`"writes": true`, or any call of a model with data but no Ada), a deploy, and anything about a run
@@ -737,9 +738,21 @@ every write to the head.
 - **On, and gated by the key:** `RROTOR_CLUSTER=on` (a self-hosted rrotor only) starts the cluster's transport only
   while the licence key held has `cluster_sync_enabled`. Under Community, or a key without it, the listener never
   starts: rrotor logs `cluster synchronisation disabled under the Community licence` (or `under this licence`) at
-  warning and runs standalone. The gate is looked at every 10 seconds and on every licence change: when a key stops
-  allowing it (past grace, a downgrade to Free), the head runs on standalone and tells its followers, which become
-  refused (`E_LICENCE_CLUSTER`, `/data` kept); a key that allows it again resumes the cluster.
+  warning.
+- **An unlicensed cluster serves from one node, never from divergent stores.** Without sync each node would keep its
+  own store behind the one load balancer, and an answer would depend on the node it reached. So with the cluster on
+  and no key that allows sync (none, Free, a key without `cluster_sync_enabled`, or past grace) exactly one node
+  serves, the **designated head**: the cluster's head as the node last knew it; else `RROTOR_CLUSTER_HEAD`; else the
+  lowest node id among the peers (an address's host or its first label; an IP address stands for itself, matched
+  against the node's advertised address). Every other node is `unlicensed`: `/readyz` 503 `{reason: "unlicensed",
+  code: "E_LICENCE_CLUSTER"}`, so the load balancer leaves it out; everything but `/healthz`, `/readyz`,
+  `/v1/health` and `GET /v1/cluster` 503 `E_LICENCE_CLUSTER`, "This cluster has no licence key with sync: only
+  `<head>` serves; add a Pro, Team or Enterprise key."; its link down (one link per runtime); its `/data` kept;
+  logged at error once. The health's `cluster` and `GET /v1/cluster` show `status` (`standalone` or `unlicensed`)
+  and `serving`, the node that serves. The listener still never starts. The gate is looked at every 10 seconds and on
+  every licence change, and while it is closed the key files are read again each time (when their text changed): a
+  key with sync dropped in clusters the nodes within seconds, from where their logs stand. A head whose key stops
+  allowing sync runs on standalone and tells its followers, which become `unlicensed` at once.
 - **The transport** (`cluster/transport.py`): a WebSocket on aiohttp on its own listener, `RROTOR_CLUSTER_PORT`
   (7778), never the API's port and never behind the public load balancer. JSON frames with `type` and `id`; a
   request (`hello`, `join`, `ping`, `command`) is answered by an `answer` with its id, `ok` or an `error {code,

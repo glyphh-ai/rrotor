@@ -151,7 +151,7 @@ class Daemon:
             handler=handler,
             connect=self._connect,
             enabled=c.link,
-            held=lambda: self.cluster.role == "follower",
+            held=lambda: self.cluster.unlinked,
             identity=lambda: (c.node_id, *self.cluster.identity()),
         )
         self.cluster.roled = self.link.regate.set

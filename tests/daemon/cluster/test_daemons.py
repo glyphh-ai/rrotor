@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from rrotord.api.app import make
+from rrotord.cluster import node as cluster_node
 from rrotord.daemon import Daemon
 from tests.daemon.cluster.conftest import Nodes, node_config, until
 from tests.fakes import LocalLauncher, keys, ready
@@ -117,7 +119,75 @@ async def test_community_never_listens_and_the_daemon_serves_standalone(fleet: F
     assert d.cluster.listener is None
     assert await get(api, "/readyz", auth=False) == (200, {"ready": True})
     assert (await get(api, "/v1/cluster"))[1]["role"] == "standalone"
-    assert (await get(api, "/v1/health"))[1]["cluster"] == {"role": "standalone"}
+    assert (await get(api, "/v1/health"))[1]["cluster"] == {
+        "node_id": "solo",
+        "role": "standalone",
+        "status": "standalone",
+        "ready": True,
+        "serving": "solo",
+        "reason": None,
+    }
+
+
+async def test_an_unlicensed_cluster_serves_from_one_node_a_key_clusters_it_and_past_grace_one_serves_again(
+    fleet: Fleet, caplog
+):
+    ids = ["n0", "n1", "n2"]
+    added = [await fleet.add(i, ids, None) for i in ids]
+    daemons, apis = [d for d, _ in added], [api for _, api in added]
+    await until(lambda: all(d.cluster.serving is not None for d in daemons))
+    lowest = min(fleet.nodes.peers(ids))  # no RROTOR_CLUSTER_HEAD and the peers by address: the lowest address
+    one = next(i for i, d in enumerate(daemons) if d.cluster.address == lowest)
+    others = [i for i in range(3) if i != one]
+    assert all(d.cluster.listener is None and d.cluster.serving == lowest for d in daemons)  # nothing listens
+    message = f"This cluster has no licence key with sync: only {lowest} serves; add a Pro, Team or Enterprise key."
+    assert await get(apis[one], "/readyz", auth=False) == (200, {"ready": True})
+    assert (await get(apis[one], "/v1/models"))[0] == 200
+    for i in others:
+        assert await get(apis[i], "/readyz", auth=False) == (
+            503,
+            {"ready": False, "reason": "unlicensed", "code": "E_LICENCE_CLUSTER"},
+        )
+        status, body = await get(apis[i], "/v1/models")
+        assert (status, body["error"]["code"], body["error"]["message"]) == (503, "E_LICENCE_CLUSTER", message)
+        status, health = await get(apis[i], "/v1/health")
+        assert status == 200 and health["cluster"] == {
+            "node_id": ids[i],
+            "role": "standalone",
+            "status": "unlicensed",
+            "ready": False,
+            "serving": lowest,
+            "reason": "unlicensed",
+        }
+        status, view = await get(apis[i], "/v1/cluster")
+        assert status == 200 and (view["status"], view["serving"], view["refusal"]["message"]) == (
+            "unlicensed",
+            lowest,
+            message,
+        )
+        assert daemons[i].link.held()  # one link per runtime: the node that serves holds it
+    assert not daemons[one].link.held()
+    assert caplog.text.count(f"cluster: this node does not serve. {message}") == 2  # once each
+
+    key = keys().key()
+    for d in daemons:  # a key with sync dropped in: read within seconds, no restart
+        (d.config.data / "licence.token").write_text(key)
+    # ready as /readyz tells it: a follower that joined is `catching_up` until it has applied what the head committed
+    await until(lambda: all(d.cluster.ready()[0] for d in daemons) and len(daemons[0].cluster.members()) == 3)
+    assert daemons[0].cluster.role == "head" and all(d.cluster.listener is not None for d in daemons)
+    for api in apis:
+        assert await get(api, "/readyz", auth=False) == (200, {"ready": True})
+
+    later = datetime.now(UTC) + timedelta(days=2000 * 365)  # past the key's expiry and its grace
+    for d in daemons:
+        d.licence.clock = lambda: later
+        d.cluster.licence_changed()
+    await until(lambda: all(d.cluster.listener is None and d.cluster.serving == "n0" for d in daemons))
+    assert await get(apis[0], "/readyz", auth=False) == (200, {"ready": True})
+    for api in apis[1:]:
+        assert (await get(api, "/readyz", auth=False))[1]["reason"] == "unlicensed"
+        status, body = await get(api, "/v1/models")
+        assert (status, body["error"]["message"]) == (503, cluster_node.unlicensed("n0"))
 
 
 async def test_serving_starts_and_stops_the_cluster_and_the_heartbeat_names_it(nodes: Nodes):
