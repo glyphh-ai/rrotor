@@ -1,5 +1,7 @@
 # rrotor with Docker Compose
 
+> The public copy customers use lives in [glyphh-ai/glyphh/deploy](https://github.com/glyphh-ai/glyphh/tree/main/deploy) (compose, helm, terraform): every change to `deploy/` here must be made there too, kept in step.
+
 One machine: rrotor, and Caddy in front of it for HTTPS. The full guide is `docs/self-hosting/compose.md`.
 
 1. Register the runtime on the platform (Getting started, Docker Compose) and copy the `.env` it shows; or copy
