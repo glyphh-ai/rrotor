@@ -35,7 +35,15 @@ done
 cp -R "$kernel/lexicon" "$stage/part/lib/lexicon"   # the two seeds: WordNet words, Moby parts of speech
 cp "$kernel/LICENSE" "$stage/part/LICENSE" 2>/dev/null || true
 version="$(python3 -c "import re,sys; print(re.search(r'^version = \"([^\"]+)\"', open('$kernel/pyproject.toml').read(), re.M).group(1))")"
-sed -e "s/\"ARCH\"/\"$arch\"/" -e "s/\"3.9.0\"/\"$version\"/" "$here/part.json" > "$stage/part/part.json"
+# The part's version is the kernel's and its arch this build's, set as fields (not by matching part.json's text,
+# which went stale at each bump and labelled every part with part.json's own version).
+python3 - "$here/part.json" "$stage/part/part.json" "$version" "$arch" <<'PY'
+import json, sys
+src, dst, version, arch = sys.argv[1:]
+part = json.load(open(src))
+part["version"], part["arch"] = version, arch
+json.dump(part, open(dst, "w"), indent=2)
+PY
 
 # numpy, as a wheel for the image's Python and this arch, unpacked into lib/ (no pip inside the sandbox).
 uv pip install --quiet --target "$stage/part/lib" --python-platform "$platform" --python-version 3.13 \
