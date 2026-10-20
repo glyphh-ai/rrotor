@@ -239,6 +239,8 @@ class Output:
     # the cost of asking a person instead of deciding; set, decide() asks whenever every outcome's expected cost
     # is above it (the band where either answer is costly). Unset, decide() never asks.
     ask: float | None = None
+    # a named output's closed set of outcomes (spec `outputs`); empty: any outcome
+    values: tuple[str, ...] = ()
 
     def cost(self, decided: str, true: str) -> float:
         table = dict((d, dict(t)) for d, t in self.costs)
@@ -259,9 +261,28 @@ class Spec:
     output: Output = field(default_factory=Output)
     interactions: tuple[Interaction, ...] = ()
     settings: Settings = field(default_factory=Settings)
+    # named outputs (spec `outputs`): each a decision of its own about the same case; none: the one default output
+    outputs: tuple[tuple[str, Output], ...] = ()
 
     def with_settings(self, settings: Settings) -> Spec:
         return dataclasses.replace(self, settings=settings)
+
+    def output_of(self, output: str | None) -> Output:
+        """An output's costs, ask and values: a named one's from `outputs`, the default's from `output`. An output
+        the spec does not name raises SpecError (E_OUTPUT)."""
+        name = kernel.DEFAULT if output is None else output
+        if name == kernel.DEFAULT:
+            return self.output
+        found = dict(self.outputs).get(name)
+        if found is None:
+            raise SpecError(f"outputs.{name}", "E_OUTPUT: the spec names no such output")
+        return found
+
+    def check_outcome(self, output: str | None, value: str) -> None:
+        """Refuse an outcome outside its output's closed set (E_OUTPUT_VALUE)."""
+        values = self.output_of(output).values
+        if values and value not in values:
+            raise SpecError(f"outputs.{output}", f"E_OUTPUT_VALUE: {value!r} is not one of {', '.join(values)}")
 
     # -- JSON in and out --------------------------------------------
 
@@ -303,6 +324,20 @@ class Spec:
                 **({"costs": {d: dict(t) for d, t in self.output.costs}} if self.output.costs else {}),
                 **({"ask": self.output.ask} if self.output.ask is not None else {}),
             },
+            **(
+                {
+                    "outputs": {
+                        name: {
+                            **({"values": list(o.values)} if o.values else {}),
+                            **({"costs": {d: dict(t) for d, t in o.costs}} if o.costs else {}),
+                            **({"ask": o.ask} if o.ask is not None else {}),
+                        }
+                        for name, o in self.outputs
+                    }
+                }
+                if self.outputs
+                else {}
+            ),
             **({"settings": self.settings.to_json()} if self.settings.to_json() else {}),
             **(
                 {
@@ -988,7 +1023,18 @@ def _parse_spec(obj: Any) -> Spec:
         obj,
         "",
         ["name", "layers"],
-        ["version", "dimension", "seed", "similarity_weight", "security_weight", "temporal_source", "output", INTERACTIONS, "settings"],
+        [
+            "version",
+            "dimension",
+            "seed",
+            "similarity_weight",
+            "security_weight",
+            "temporal_source",
+            "output",
+            "outputs",
+            INTERACTIONS,
+            "settings",
+        ],
     )
     if o.get("version", SPEC_VERSION) != SPEC_VERSION:
         raise SpecError("version", f"this kernel reads spec version {SPEC_VERSION}")
@@ -1038,16 +1084,32 @@ def _parse_spec(obj: Any) -> Spec:
     report = out.get("report", [])
     if not isinstance(report, list) or not all(isinstance(x, str) for x in report):
         raise SpecError("output.report", "must be a list of paths")
-    costs_in = out.get("costs", {})
-    if not isinstance(costs_in, dict) or not all(isinstance(t, dict) for t in costs_in.values()):
-        raise SpecError("output.costs", "must be an object: decided outcome -> {true outcome: cost}")
-    costs = tuple(
-        (str(d), tuple((str(t), _number(c, f"output.costs.{d}.{t}")) for t, c in sorted(table.items())))
-        for d, table in sorted(costs_in.items())
-    )
-    ask = out.get("ask")
-    if ask is not None:
-        ask = _number(ask, "output.ask")
+    costs, ask = _costs_and_ask(out, "output")
+    outputs_in = o.get("outputs", {})
+    if not isinstance(outputs_in, dict):
+        raise SpecError("outputs", "must be an object: output name -> {values, costs, ask}")
+    outputs = []
+    for name, spec_of in sorted(outputs_in.items()):
+        at = f"outputs.{name}"
+        try:
+            kernel._output_name(name)
+        except ValueError as e:
+            raise SpecError(at, str(e)) from None
+        if name == kernel.DEFAULT:
+            raise SpecError(at, 'the default output is the spec\'s "output"; name the others')
+        od = _fields(spec_of, at, [], ["values", "costs", "ask"])
+        values = od.get("values", [])
+        if (
+            not isinstance(values, list)
+            or not all(isinstance(v, str) and v for v in values)
+            or len(set(values)) != len(values)
+        ):
+            raise SpecError(f"{at}.values", "must be a list of distinct, non-empty outcomes")
+        o_costs, o_ask = _costs_and_ask(od, at)
+        named = [d for d, _ in o_costs] + [t for _, table in o_costs for t, _ in table]
+        if values and any(v not in values for v in named):
+            raise SpecError(f"{at}.costs", "names an outcome outside the output's values")
+        outputs.append((name, Output((), o_costs, o_ask, tuple(values))))
     spec = Spec(
         _name(o["name"], "name"),
         tuple(layers),
@@ -1059,6 +1121,7 @@ def _parse_spec(obj: Any) -> Spec:
         Output(tuple(report), costs, ask),
         _parse_interactions(o.get(INTERACTIONS, [])),
         Settings().with_changes(_fields(o.get("settings", {}), "settings", [], list(Settings.RANGES))),
+        tuple(outputs),
     )
     for path in report:
         _resolve(spec, path, "output.report")
@@ -1070,6 +1133,19 @@ def _parse_spec(obj: Any) -> Spec:
             raise SpecError("temporal_source", 'is "auto" or a layer.segment.role path')
         _resolve(spec, spec.temporal_source, "temporal_source")
     return spec
+
+
+def _costs_and_ask(obj: Mapping[str, Any], at: str) -> tuple[tuple[tuple[str, tuple[tuple[str, float], ...]], ...], float | None]:
+    """An output's costs (decided -> {true: cost}) and ask, checked."""
+    costs_in = obj.get("costs", {})
+    if not isinstance(costs_in, dict) or not all(isinstance(t, dict) for t in costs_in.values()):
+        raise SpecError(f"{at}.costs", "must be an object: decided outcome -> {true outcome: cost}")
+    costs = tuple(
+        (str(d), tuple((str(t), _number(c, f"{at}.costs.{d}.{t}")) for t, c in sorted(table.items())))
+        for d, table in sorted(costs_in.items())
+    )
+    ask = obj.get("ask")
+    return costs, (None if ask is None else _number(ask, f"{at}.ask"))
 
 
 def _resolve(spec: Spec, path: str, at: str) -> None:
@@ -1129,6 +1205,16 @@ class Model:
         if isinstance(learned, dict):
             self.spec = self.spec.with_weights(learned)
             self.evidence = learned.get("~evidence", {})
+        # each named output's own learned spec and word evidence, and the in-memory view of the store it reads
+        # through (its word weights and interactions), made when first read
+        self._specs: dict[str, Spec] = {}
+        self._evidences: dict[str, dict[str, Any]] = {}
+        self._views: dict[str, kernel.Space] = {}
+        for name, _ in spec.outputs:
+            own = self.space.meta(f"learned:{name}")
+            if isinstance(own, dict):
+                self._specs[name] = spec.with_settings(self.settings).with_weights(own)
+                self._evidences[name] = own.get("~evidence", {})
         self._apply()
         if len(self.space):
             # a store recorded under other settings: its bags brought to these (in memory only, read-only)
@@ -1158,8 +1244,10 @@ class Model:
         self.overrides.update(changes)
         self.space.set_meta("settings", self.overrides)
         self.spec = self.spec.with_settings(new)
+        self._specs = {name: s.with_settings(new) for name, s in self._specs.items()}
+        self._views.clear()
         self._apply()
-        if moved and self.space.meta("learned") is not None:
+        if moved and (self.space.meta("learned") is not None or self._specs):
             self.learn()
         return self.settings.to_json(all=True)
 
@@ -1167,27 +1255,100 @@ class Model:
         if self.readonly:
             raise kernel.ReadOnlyError(operation, self.space.path)
 
-    def record(self, data: Any, outcome: str | None = None, ts: float | None = None) -> str:
+    # -- outputs: the default one (the spec's `output`) and the named ones (its `outputs`) --
+
+    def _name(self, output: str | None) -> str:
+        """An output's name, checked against the spec (E_OUTPUT for one it does not name)."""
+        if output is None or output == kernel.DEFAULT:
+            return kernel.DEFAULT
+        self.spec.output_of(output)
+        return output
+
+    def outputs(self) -> list[str]:
+        """The outputs this model decides: the spec's named ones, or the default one when it names none."""
+        return [name for name, _ in self.spec.outputs] or [kernel.DEFAULT]
+
+    def _spec_for(self, name: str) -> Spec:
+        """The spec an output reads by: the default's own, or a named output's learned one (until it learns: the
+        spec as given)."""
+        if name == kernel.DEFAULT:
+            return self.spec
+        return self._specs.get(name) or self.given.with_settings(self.settings)
+
+    def _space_for(self, name: str) -> kernel.Space:
+        """The store as this output reads it: the store itself when the output's word weights and interactions are
+        the ones the store holds; else the output's view of it (Space.view), kept current."""
+        spec = self._spec_for(name)
+        if name == kernel.DEFAULT or (
+            spec.interactions == self.spec.interactions and _word_tables(spec) == _word_tables(self.spec)
+        ):
+            return self.space
+        self._views[name] = self.space.view(spec.restate, into=self._views.get(name))
+        return self._views[name]
+
+    def record(
+        self,
+        data: Any,
+        outcome: str | None = None,
+        ts: float | None = None,
+        outcomes: Mapping[str, str] | None = None,
+    ) -> str:
+        """One case, recorded once: its outcome (the default output's) and/or its named outputs' (`outcomes`,
+        {output: value}), each checked against the spec's outputs (E_OUTPUT, E_OUTPUT_VALUE). Returns its id."""
         self._writes("record")
+        named = dict(outcomes or {})
+        for name, value in named.items():
+            if isinstance(value, str):
+                self.spec.check_outcome(self._name(name), value)
         situation = self.spec.situation(data)
         stamp = ts if ts is not None else self.spec.timestamp(data)
-        rid = self.space.record(situation, outcome, rid=self.spec.key(situation), ts=stamp)
-        if outcome is not None and self.refresh_every and len(self.space.graded()) % self.refresh_every == 0:
+        rid = self.space.record(situation, outcome, rid=self.spec.key(situation), ts=stamp, outcomes=named or None)
+        graded = len(self.space.graded()) if outcome is not None else len(self.space) if named else 0
+        if graded and self.refresh_every and graded % self.refresh_every == 0:
             try:
                 self.refresh()
             except SpecError:  # one outcome so far: nothing to learn yet
                 pass
         return rid
 
-    def learn(self) -> dict[str, dict[str, Any]]:
+    def grade(self, rid: str, output: str | None, value: str | None) -> None:
+        """One output's outcome on a case already recorded: added, replaced or (None) taken away."""
+        self._writes("grade")
+        name = self._name(output)
+        if isinstance(value, str):
+            self.spec.check_outcome(name, value)
+        self.space.grade(rid, name, value)
+
+    def learn(self, output: str | None = None) -> dict[str, Any]:
         """Learn the weights from the store's own graded precedents (every role's similarity_weight and
         value_weights, as Spec.learned does) and keep them with the store, over the spec file's, until the next
-        learn. Needs at least ten graded precedents with two outcomes. Returns the learned table."""
+        learn. Needs at least ten graded precedents with two outcomes. Returns the learned table.
+        A spec with named outputs learns each on its own (kept as 'learned:<output>'; its word weights and
+        interactions read through its view of the store, which stays as recorded): `output` names one and returns
+        its table; none learns every output that can (ten graded precedents, two outcomes) and returns
+        {output: table}."""
         self._writes("learn")
-        graded = self.space.graded()
+        if output is not None or not self.spec.outputs:
+            return self._learn(self._name(output))
+        out: dict[str, Any] = {}
+        for name in ([kernel.DEFAULT] if self.space.graded() else []) + self.outputs():
+            try:
+                out[name] = self._learn(name)
+            except SpecError:  # not enough graded for this output yet
+                continue
+        return out
+
+    def _learn(self, name: str) -> dict[str, Any]:
+        graded = self.space.graded(name)
         if len(graded) < 10:
-            raise SpecError("", "learn needs at least 10 precedents with an outcome")
+            raise SpecError("" if name == kernel.DEFAULT else f"outputs.{name}", "learn needs at least 10 precedents with an outcome")
         learned = self.given.with_settings(self.settings).learn(graded)
+        if name != kernel.DEFAULT:
+            self._specs[name] = self.given.with_settings(self.settings).with_weights(learned)
+            self._evidences[name] = learned.get("~evidence", {})
+            self._views.pop(name, None)
+            self.space.set_meta(f"learned:{name}", learned)
+            return learned
         before = self.spec
         self.spec = self.given.with_settings(self.settings).with_weights(learned)
         self.evidence = learned.get("~evidence", {})
@@ -1196,22 +1357,33 @@ class Model:
             self.space.rewrite(self.spec.restate)  # every precedent gets the words' weights and the pairs the spec now reads
         return learned
 
-    def refresh(self, sample: int | None = None, clearance: float = 1.0, by: str | None = None) -> dict[str, Any]:
-        """learn() then calibrate(): the weights and the temperature follow the store. Returns both."""
+    def refresh(
+        self, sample: int | None = None, clearance: float = 1.0, by: str | None = None, output: str | None = None
+    ) -> dict[str, Any]:
+        """learn() then calibrate(): the weights and the temperature follow the store. Returns both. A spec with
+        named outputs refreshes each (or the one named): {output: {learned, tau}}."""
         self._writes("refresh")
-        learned = self.learn()
-        return {"learned": learned, "tau": self.calibrate(sample, clearance, by)}
+        if output is not None or not self.spec.outputs:
+            name = self._name(output)
+            learned = self._learn(name)
+            return {"learned": learned, "tau": self._calibrate(name, sample, clearance, by)}
+        return {
+            name: {"learned": learned, "tau": self._calibrate(name, sample, clearance, by)}
+            for name, learned in self.learn().items()
+        }
 
-    def bias(self, situation: Mapping[str, Any]) -> Callable[[str], float] | None:
+    def bias(self, situation: Mapping[str, Any], output: str | None = None) -> Callable[[str], float] | None:
         """What the situation's words say of each outcome, as a factor on a vote: exp(word_evidence × the mean
         pointwise mutual information of the words with the outcome), over the text roles the store has evidence
-        for; None when there is none or the lever is 0."""
+        for (the output's own); None when there is none or the lever is 0."""
         strength = self.settings.word_evidence
-        if strength <= 0 or not self.evidence:
+        name = self._name(output)
+        evidence = self.evidence if name == kernel.DEFAULT else self._evidences.get(name, {})
+        if strength <= 0 or not evidence:
             return None
         totals: dict[str, float] = defaultdict(float)
         seen = 0
-        for path, table in self.evidence.items():
+        for path, table in evidence.items():
             lname, sname, rname = path.split(".")
             value = situation.get(lname, {}).get(sname, {}).get(rname)
             if value is None or not table.get("total"):
@@ -1231,71 +1403,109 @@ class Model:
         factor = {o: math.exp(strength * max(min(t / seen, 3.0), -3.0)) for o, t in totals.items()}
         return lambda outcome: factor.get(outcome, 1.0)
 
-    def query(self, data: Any, clearance: float = 1.0) -> kernel.Answer:
-        situation = self.spec.situation(data)
-        return self.space.query(situation, weights=self.spec.weights(clearance, situation), bias=self.bias(situation))
+    def query(self, data: Any, clearance: float = 1.0, output: str | None = None) -> kernel.Answer:
+        name = self._name(output)
+        spec = self._spec_for(name)
+        situation = spec.situation(data)
+        return self._space_for(name).query(
+            situation, weights=spec.weights(clearance, situation), bias=self.bias(situation, name), output=name
+        )
 
     def facts(
-        self, data: Any, clearance: float = 1.0, top: int | None = None, min_score: float | None = None
+        self,
+        data: Any,
+        clearance: float = 1.0,
+        top: int | None = None,
+        min_score: float | None = None,
+        output: str | None = None,
     ) -> list[dict[str, Any]]:
-        """The fact trees, best first, each cut to what the reader may see."""
-        situation = self.spec.situation(data)
-        trees = self.space.facts(
-            situation, weights=self.spec.weights(clearance, situation), top=top, min_score=min_score
+        """The fact trees, best first, each cut to what the reader may see; outcomes and probabilities the
+        output's."""
+        name = self._name(output)
+        spec = self._spec_for(name)
+        situation = spec.situation(data)
+        trees = self._space_for(name).facts(
+            situation, weights=spec.weights(clearance, situation), top=top, min_score=min_score, output=name
         )
-        return [{**t.to_json(), "tree": self.spec.report(t.to_json()["tree"], clearance)} for t in trees]
+        return [{**t.to_json(), "tree": spec.report(t.to_json()["tree"], clearance)} for t in trees]
 
-    def probabilities(self, data: Any, clearance: float = 1.0) -> dict[str, float]:
-        """P(outcome | data) over the nearest precedents, at the store's temperature (calibrate() fits it)."""
-        situation = self.spec.situation(data)
-        return self.space.probabilities(
-            situation, weights=self.spec.weights(clearance, situation), bias=self.bias(situation)
+    def probabilities(self, data: Any, clearance: float = 1.0, output: str | None = None) -> dict[str, float]:
+        """P(outcome | data) over the nearest precedents, at the output's temperature (calibrate() fits it)."""
+        name = self._name(output)
+        spec = self._spec_for(name)
+        situation = spec.situation(data)
+        return self._space_for(name).probabilities(
+            situation, weights=spec.weights(clearance, situation), bias=self.bias(situation, name), output=name
         )
 
-    def calibrate(self, sample: int | None = None, clearance: float = 1.0, by: str | None = None) -> float:
+    def calibrate(
+        self, sample: int | None = None, clearance: float = 1.0, by: str | None = None, output: str | None = None
+    ) -> Any:
         """Fit the store's temperature on its own newest precedents, each held out in turn and scored with the
         weights the spec gives its situation. `by` is "loss" (the least log-loss: probabilities that mean what
         they say) or "cost" (the least cost of deciding by output.costs, log-loss breaking ties: probabilities
-        that decide best). Kept in the store. Returns tau."""
+        that decide best). Kept in the store. Returns tau. A spec with named outputs fits each its own (or the
+        one named) and returns {output: tau}, every output with ten graded precedents."""
         self._writes("calibrate")
+        if output is not None or not self.spec.outputs:
+            return self._calibrate(self._name(output), sample, clearance, by)
+        names = ([kernel.DEFAULT] if self.space.graded() else []) + self.outputs()
+        return {name: self._calibrate(name, sample, clearance, by) for name in names if len(self.space.graded(name)) >= 10}
+
+    def _calibrate(self, name: str, sample: int | None, clearance: float, by: str | None) -> float:
         by = by or self.settings.calibrate_by
         sample = sample or self.settings.calibrate_sample
         if by not in ("loss", "cost"):
             raise SpecError("", 'calibrate by "loss" or "cost"')
-        return self.space.calibrate(
+        spec, space = self._spec_for(name), self._space_for(name)
+        costs = self.spec.output_of(name)
+        tau = space.calibrate(
             sample,
-            weights_for=lambda s: self.spec.weights(clearance, s),
-            cost=(lambda p, true: self.spec.output.cost(self._least(p), true)) if by == "cost" else None,
-            bias_for=self.bias,
+            weights_for=lambda s: spec.weights(clearance, s),
+            cost=(lambda p, true: costs.cost(self._least(p, name), true)) if by == "cost" else None,
+            bias_for=lambda s: self.bias(s, name),
+            output=name,
         )
+        if space is not self.space:
+            self.space.set_tau(name, tau)  # fitted on the view; kept by the store
+        return tau
 
-    def _least(self, probabilities: Mapping[str, float]) -> str:
+    def _least(self, probabilities: Mapping[str, float], output: str | None = None) -> str:
+        costs = self.spec.output_of(output)
         expected = {
-            decided: sum(p * self.spec.output.cost(decided, true) for true, p in probabilities.items())
+            decided: sum(p * costs.cost(decided, true) for true, p in probabilities.items())
             for decided in probabilities
         }
         return min(expected, key=lambda o: (expected[o], o))
 
-    def decide(self, data: Any, clearance: float = 1.0) -> dict[str, Any]:
-        """The outcome with the least expected cost under the spec's output.costs (every mistake costs 1 when the
+    def decide(self, data: Any, clearance: float = 1.0, output: str | None = None) -> dict[str, Any]:
+        """The outcome with the least expected cost under the output's costs (every mistake costs 1 when the
         spec names none), from the calibrated probabilities. `ask` is true when a person should answer instead:
-        nothing is known, or the spec prices asking (output.ask) below every outcome's expected cost; the outcome
-        is then still the best guess, for the person to see."""
-        probabilities = self.probabilities(data, clearance)
+        nothing is known, or the spec prices asking (the output's ask) below every outcome's expected cost; the
+        outcome is then still the best guess, for the person to see."""
+        name = self._name(output)
+        probabilities = self.probabilities(data, clearance, name)
         if not probabilities:
             return {"outcome": None, "expected_cost": None, "probabilities": {}, "ask": True}
+        costs = self.spec.output_of(name)
         expected = {
-            decided: sum(p * self.spec.output.cost(decided, true) for true, p in probabilities.items())
+            decided: sum(p * costs.cost(decided, true) for true, p in probabilities.items())
             for decided in probabilities
         }
-        best = self._least(probabilities)
-        ask = self.spec.output.ask
+        best = self._least(probabilities, name)
         return {
             "outcome": best,
             "expected_cost": round(expected[best], 4),
             "probabilities": {o: round(p, 4) for o, p in probabilities.items()},
-            "ask": ask is not None and expected[best] > ask,
+            "ask": costs.ask is not None and expected[best] > costs.ask,
         }
+
+    def decide_all(
+        self, data: Any, clearance: float = 1.0, outputs: Sequence[str] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Every output's decision about one case (or the named outputs'), in one call: {output: decide()}."""
+        names = [self._name(o) for o in outputs] if outputs is not None else self.outputs()
+        return {name: self.decide(data, clearance, name) for name in names}
 
     def __len__(self) -> int:
         return len(self.space)

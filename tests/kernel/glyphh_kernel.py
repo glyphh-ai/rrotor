@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -29,6 +30,31 @@ TAU = 0.12  # default softmax temperature (fit on Kubernetes issues; calibrate()
 POOL = 25  # nearest precedents a probability is spread over
 TAUS = (0.01, 0.015, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2, 0.3, 0.5, 0.7, 1.0, 1.5)
 ENCODING = 3  # bump when encode() changes; stores re-encode on open
+DEFAULT = "default"  # the output a precedent's own `outcome` is: every read without output= reads it
+_OUTPUT = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]{0,63}$")
+
+
+def _output_name(output: str | None) -> str:
+    """An output's name, checked: None is the default output."""
+    if output is None:
+        return DEFAULT
+    if not isinstance(output, str) or not _OUTPUT.match(output):
+        raise ValueError(f"an output is named by letters, digits, _ and - (64 at most), not {output!r}")
+    return output
+
+
+def _named_outcomes(outcomes: Any) -> dict[str, str]:
+    """A record's named outcomes, checked: {output: non-empty string}."""
+    if outcomes is None:
+        return {}
+    if not isinstance(outcomes, dict):
+        raise ValueError("outcomes is an object of output: outcome")
+    out: dict[str, str] = {}
+    for name, value in outcomes.items():
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"outcomes[{name!r}] is a non-empty string")
+        out[_output_name(name)] = value
+    return out
 
 SPEC = """\
 Ada kernel — substrate guidance for the agent using it
@@ -774,10 +800,12 @@ class Space:
         # calibrated one (calibrate()), else TAU
         self.tau = TAU if tau is None else float(tau)
         self._tau_given = tau is not None
+        self._taus: dict[str, float] = {}  # a named output's own calibrated temperature
         self.decay = decay
         self.author = author
         self._ids: list[str] = []
-        self._outcomes: list[str | None] = []
+        self._outcomes: list[str | None] = []  # the default output
+        self._named: list[dict[str, str]] = []  # each precedent's named outputs
         self._authors: list[str] = []
         self._ts: list[float] = []
         self._situations: list[Any] = []
@@ -793,6 +821,8 @@ class Space:
         self._leaf_vectors: dict[str, list[np.ndarray]] = {}
         self._leaf_matrix: dict[str, np.ndarray | None] = {}
         self._leaf_of: dict[str, list[int]] = {}
+        self._epoch = 0  # moves when a held precedent changes or goes (not when one is added): a view rebuilds
+        self._source: tuple[int, int] | None = None  # a view's: (id of the store it was made from, its epoch then)
         if path:
             self._open(path)
 
@@ -936,11 +966,13 @@ class Space:
         ts: float,
         situation: Any,
         traj: np.ndarray | None,
+        named: dict[str, str] | None = None,
     ) -> None:
         self._ids.append(rid)
         self._situations.append(situation)
         self._trajs.append(traj)
         self._outcomes.append(outcome or None)  # stored as "" in the file
+        self._named.append(dict(named or {}))
         self._authors.append(author)
         self._ts.append(float(ts))
         self._glyphs.append(glyph)
@@ -956,9 +988,86 @@ class Space:
         if self.readonly:
             raise ReadOnlyError(operation, self.path)
 
+    def _outs(self, output: str | None) -> list[str | None]:
+        """Every precedent's outcome for this output (None: ungraded for it), row by row."""
+        name = _output_name(output)
+        if name == DEFAULT:
+            return self._outcomes
+        return [named.get(name) for named in self._named]
+
+    def _tau_for(self, output: str | None) -> float:
+        """The temperature an output's probabilities use: a tau given to the Space, else that output's
+        calibrated one, else TAU (the default output keeps its own, as it always has)."""
+        name = _output_name(output)
+        if name == DEFAULT or self._tau_given:
+            return self.tau
+        return self._taus.get(name, TAU)
+
+    def outputs(self) -> list[str]:
+        """The outputs this store holds outcomes for: the default output first when any precedent has one."""
+        named = sorted({name for row in self._named for name in row})
+        return ([DEFAULT] if any(o is not None for o in self._outcomes) else []) + named
+
+    def set_tau(self, output: str | None, tau: float) -> None:
+        """Keep a temperature for one output, as calibrate() would (a view fits it; its store keeps it)."""
+        self._writes("calibrate")
+        name, tau = _output_name(output), float(tau)
+        if not tau > 0:
+            raise ValueError("tau is a positive number")
+        if name == DEFAULT:
+            self.tau, self._tau_given = tau, False
+        else:
+            self._taus[name] = tau
+        if self._db is not None:
+            self._db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", ("tau" if name == DEFAULT else f"tau:{name}", repr(tau)))
+            self._db.commit()
+
+    def view(self, fn: Callable[[Any], Any], into: Space | None = None) -> Space:
+        """This store's precedents with every situation passed through fn, in memory only: the same ids, outcomes
+        (every output's), authors, times and events, each glyph made again from its new situation. How one output
+        reads the store through its own learned word weights and interactions while the file holds each case once.
+        Given `into` (a view this store made before with the same fn), it is brought up to date instead: the
+        precedents added since are appended, every outcome and temperature copied; when a held precedent changed
+        or went since, it is made again. A view is for reads (and calibrate, whose tau its store keeps by
+        set_tau); recording into it changes nothing in the store."""
+        fresh = (
+            into is None
+            or into._source != (id(self), self._epoch)
+            or into._n > self._n
+            or into._ids != self._ids[: into._n]
+        )
+        out = Space(self.dim, self.k, self.min_sim, self.seed, self.decay, self.author) if fresh else into
+        assert out is not None
+        for i in range(out._n, self._n):
+            situation = fn(self._situations[i])
+            parts, ws = _keyed(situation, None, self.seed, self.dim)
+            traj = self._trajs[i]
+            if traj is not None:
+                parts.append(bind(symbol("trajectory", self.seed, self.dim), traj))
+                ws.append(1.0)
+            out._append(
+                self._ids[i], None, bundle(parts, ws), self._authors[i], self._ts[i], situation, traj
+            )
+        out._outcomes = list(self._outcomes)
+        out._named = [dict(row) for row in self._named]
+        out.k, out.min_sim = self.k, self.min_sim
+        out.tau, out._tau_given, out._taus = self.tau, self._tau_given, dict(self._taus)
+        out._source = (id(self), self._epoch)
+        return out
+
     def _drop(self, i: int) -> None:
-        for column in (self._ids, self._situations, self._trajs, self._outcomes, self._authors, self._ts, self._glyphs):
+        for column in (
+            self._ids,
+            self._situations,
+            self._trajs,
+            self._outcomes,
+            self._named,
+            self._authors,
+            self._ts,
+            self._glyphs,
+        ):
             del column[i]
+        self._epoch += 1
         self._leaf_drop(i)
         self._matrix[i : self._n - 1] = self._matrix[i + 1 : self._n]
         self._n -= 1
@@ -970,15 +1079,29 @@ class Space:
         events: list[np.ndarray] | None = None,
         rid: str | None = None,
         ts: float | None = None,
+        outcomes: dict[str, str] | None = None,
     ) -> str:
+        """One precedent: its situation, and its outcome (the default output's) and/or its named outcomes
+        (`outcomes`, {output: value}; "default" there is the same as `outcome`). The same id again replaces the
+        precedent, every outcome with it."""
         self._writes("record")
+        named = _named_outcomes(outcomes)
+        if DEFAULT in named:
+            if outcome not in (None, named[DEFAULT]):
+                raise ValueError("outcome and outcomes['default'] are the same output: give one")
+            outcome = named.pop(DEFAULT)
         rid = rid or str(uuid.uuid4())[:12]
         ts = time.time() if ts is None else float(ts)
         glyph = self.encode(situation, events)
         if rid in self._ids:  # the same id again replaces the row
             self._drop(self._ids.index(rid))
-        self._append(rid, outcome, glyph, self.author, ts, situation, self._traj(events))
+        self._append(rid, outcome, glyph, self.author, ts, situation, self._traj(events), named)
         if self._db is not None:
+            self._db.execute("DELETE FROM outcomes WHERE id = ?", (rid,))
+            self._db.executemany(
+                "INSERT INTO outcomes (id, output, value, ts) VALUES (?, ?, ?, ?)",
+                [(rid, name, value, ts) for name, value in named.items()],
+            )
             blob = np.stack(events).astype(np.int8).tobytes() if events else None
             self._db.execute(
                 "INSERT OR REPLACE INTO precedents (id, situation, outcome,"
@@ -997,6 +1120,34 @@ class Space:
             )
             self._db.commit()
         return rid
+
+    def grade(self, rid: str, output: str | None, value: str | None) -> None:
+        """One output's outcome on a precedent already held, added, replaced, or (None) taken away: a case
+        recorded once, its answers given as they become known. The situation and its glyph are untouched."""
+        self._writes("grade")
+        name = _output_name(output)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ValueError("an outcome is a non-empty string, or None to take it away")
+        if rid not in self._ids:
+            raise KeyError(f"no precedent {rid!r} here")
+        i = self._ids.index(rid)
+        if name == DEFAULT:
+            self._outcomes[i] = value
+        elif value is None:
+            self._named[i].pop(name, None)
+        else:
+            self._named[i][name] = value
+        if self._db is not None:
+            if name == DEFAULT:
+                self._db.execute("UPDATE precedents SET outcome = ? WHERE id = ?", (value or "", rid))
+            elif value is None:
+                self._db.execute("DELETE FROM outcomes WHERE id = ? AND output = ?", (rid, name))
+            else:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO outcomes (id, output, value, ts) VALUES (?, ?, ?, ?)",
+                    (rid, name, value, time.time()),
+                )
+            self._db.commit()
 
     def _sims(
         self, situation: dict[str, Any], events: list[np.ndarray] | None, weights: dict[str, Any] | None = None
@@ -1074,6 +1225,7 @@ class Space:
         events: list[np.ndarray] | None = None,
         weights: dict[str, Any] | None = None,
         bias: Callable[[str], float] | None = None,
+        output: str | None = None,
     ) -> Answer:
         """weights: the query's weights tree (see encode()). Weighted,
         every similarity here is the exact weighted sim (a fact tree's
@@ -1081,27 +1233,31 @@ class Space:
         that must agree'. Unweighted, it is the glyph sim, as always.
         bias(outcome): a factor on each voter's weight by its outcome
         (what the query's own words say about that outcome, for one);
-        the similarity bar, support and receipts are unbiased."""
+        the similarity bar, support and receipts are unbiased.
+        output: which output votes (default: the default output); a
+        precedent without an outcome for it ranks but does not vote."""
         if self._n == 0:
             return Answer(False, 0.0, 0.0, 0, None, {}, [])
+        outs = self._outs(output)
         top = self._top(situation, events, weights)
-        receipts = [(self._ids[i], s, self._outcomes[i], self._hash(i), self._authors[i]) for i, s in top]
+        receipts = [(self._ids[i], s, outs[i], self._hash(i), self._authors[i]) for i, s in top]
         # only precedents that clear the similarity bar get a vote
-        voters = [(i, s) for i, s in top if s >= self.min_sim and self._outcomes[i] is not None]
+        voters = [(i, s) for i, s in top if s >= self.min_sim and outs[i] is not None]
         if not voters:
             return Answer(False, 0.0, max(top[0][1], 0.0), 0, None, {}, receipts)
         sims = np.array([s for _, s in voters])
-        weights = sims if bias is None else np.array([s * bias(self._outcomes[i]) for i, s in voters])
+        weights = sims if bias is None else np.array([s * bias(outs[i]) for i, s in voters])
         wsum = float(weights.sum()) or 1.0
         outcomes: dict[str, float] = {}
         for (i, _), w in zip(voters, weights):
-            outcomes[self._outcomes[i]] = outcomes.get(self._outcomes[i], 0.0) + float(w)
+            outcomes[outs[i]] = outcomes.get(outs[i], 0.0) + float(w)
         outcomes = {o: w / wsum for o, w in outcomes.items()}
         top_outcome = max(outcomes, key=outcomes.get)
         return Answer(True, outcomes[top_outcome], float(sims.mean()), len(voters), top_outcome, outcomes, receipts)
 
-    def _evidence(self, sims: np.ndarray, outcome: str, bar: float) -> Evidence:
-        idx = [i for i in range(self._n) if self._outcomes[i] == outcome and sims[i] >= bar]
+    def _evidence(self, sims: np.ndarray, outcome: str, bar: float, outs: list[str | None] | None = None) -> Evidence:
+        outs = self._outcomes if outs is None else outs
+        idx = [i for i in range(self._n) if outs[i] == outcome and sims[i] >= bar]
         if not idx:
             return Evidence(outcome, 0, 0.0, 0.0, 0.0, [])
         close = sims[idx]
@@ -1121,6 +1277,7 @@ class Space:
         events: list[np.ndarray] | None = None,
         min_sim: float | None = None,
         weights: dict[str, Any] | None = None,
+        output: str | None = None,
     ) -> Evidence:
         """Support for ONE candidate outcome, over every precedent (not
         just the top k), judged on its own: how many precedents with
@@ -1128,7 +1285,7 @@ class Space:
         if self._n == 0:
             return Evidence(outcome, 0, 0.0, 0.0, 0.0, [])
         bar = self.min_sim if min_sim is None else min_sim
-        return self._evidence(self._scores(situation, events, weights), outcome, bar)
+        return self._evidence(self._scores(situation, events, weights), outcome, bar, self._outs(output))
 
     def answers(
         self,
@@ -1136,6 +1293,7 @@ class Space:
         events: list[np.ndarray] | None = None,
         min_count: int = 1,
         weights: dict[str, Any] | None = None,
+        output: str | None = None,
     ) -> list[Evidence]:
         """Every outcome with qualifying precedent in this situation,
         strongest first. The read for situations that genuinely have
@@ -1143,9 +1301,10 @@ class Space:
         share of a vote (see SPEC rule 4)."""
         if self._n == 0:
             return []
+        outs = self._outs(output)
         sims = self._scores(situation, events, weights)
-        found = {self._outcomes[i] for i in range(self._n) if sims[i] >= self.min_sim and self._outcomes[i] is not None}
-        out = [self._evidence(sims, o, self.min_sim) for o in found]
+        found = {outs[i] for i in range(self._n) if sims[i] >= self.min_sim and outs[i] is not None}
+        out = [self._evidence(sims, o, self.min_sim, outs) for o in found]
         out = [e for e in out if e.count >= min_count]
         return sorted(out, key=lambda e: (-e.count, -e.support, e.outcome))
 
@@ -1155,6 +1314,7 @@ class Space:
         outcome: str,
         events: list[np.ndarray] | None = None,
         weights: dict[str, Any] | None = None,
+        output: str | None = None,
     ) -> float:
         """Max similarity among precedents with THIS outcome (0.0 if
         none). The veto primitive: 'how close is the nearest recorded
@@ -1162,7 +1322,7 @@ class Space:
         consensus vote can dilute."""
         if self._n == 0:
             return 0.0
-        mask = np.array([o == outcome for o in self._outcomes[: self._n]])
+        mask = np.array([o == outcome for o in self._outs(output)[: self._n]])
         if not mask.any():
             return 0.0
         sims = self._scores(situation, events, weights)[mask]
@@ -1175,6 +1335,7 @@ class Space:
         weights: dict[str, Any] | None = None,
         top: int | None = None,
         min_score: float | None = None,
+        output: str | None = None,
     ) -> list[FactTree]:
         """The exact read: every precedent scored by weighted sim
         (unweighted keys weigh 1), the `top` (default k) best each
@@ -1191,17 +1352,18 @@ class Space:
             key=lambda i: (-scores[i], -sims[i], -self._ts[i], self._ids[i]),
         )
         traj = self._traj(events)
-        probs = self._probabilities(scores, self.tau)
+        outs = self._outs(output)
+        probs = self._probabilities(scores, self._tau_for(output), outs=outs)
         return [
             FactTree(
                 self._ids[i],
-                self._outcomes[i],
+                outs[i],
                 self._authors[i],
                 self._ts[i],
                 self._hash(i),
                 float(sims[i]),
                 self._exact(i, situation, traj, weights, glyphs=True),
-                probs.get(self._outcomes[i], 0.0) if self._outcomes[i] is not None else 0.0,
+                probs.get(outs[i], 0.0) if outs[i] is not None else 0.0,
             )
             for i in order[: self.k if top is None else top]
         ]
@@ -1212,27 +1374,34 @@ class Space:
         events: list[np.ndarray] | None = None,
         weights: dict[str, Any] | None = None,
         bias: Callable[[str], float] | None = None,
+        output: str | None = None,
     ) -> dict[str, float]:
         """P(outcome | situation) for every outcome among the POOL
         nearest precedents by exact weighted sim: a softmax of their
         scores at temperature tau, summed per outcome. Calibrated once
-        calibrate() has fit tau to this store's own graded record."""
+        calibrate() has fit tau to this store's own graded record.
+        output: which output's outcomes, at that output's own tau."""
         if self._n == 0:
             return {}
-        return self._probabilities(self._scores(situation, events, weights or {}), self.tau, bias=bias)
+        scores = self._scores(situation, events, weights or {})
+        return self._probabilities(scores, self._tau_for(output), bias=bias, outs=self._outs(output))
 
     def _probabilities(
-        self, scores: np.ndarray, tau: float, skip: int = -1, bias: Callable[[str], float] | None = None
+        self,
+        scores: np.ndarray,
+        tau: float,
+        skip: int = -1,
+        bias: Callable[[str], float] | None = None,
+        outs: list[str | None] | None = None,
     ) -> dict[str, float]:
-        order = [
-            int(i) for i in np.argsort(scores, kind="stable")[::-1] if i != skip and self._outcomes[i] is not None
-        ][:POOL]
+        outs = self._outcomes if outs is None else outs
+        order = [int(i) for i in np.argsort(scores, kind="stable")[::-1] if i != skip and outs[i] is not None][:POOL]
         if not order:
             return {}
         top = float(scores[order[0]])
         mass: dict[str, float] = {}
         for i in order:
-            o = self._outcomes[i]
+            o = outs[i]
             mass[o] = mass.get(o, 0.0) + math.exp((float(scores[i]) - top) / tau) * (1.0 if bias is None else bias(o))
         z = sum(mass.values()) or 1.0
         return {o: m / z for o, m in mass.items()}
@@ -1244,6 +1413,7 @@ class Space:
         weights_for: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
         cost: Callable[[dict[str, float], str], float] | None = None,
         bias_for: Callable[[dict[str, Any]], Callable[[str], float] | None] | None = None,
+        output: str | None = None,
     ) -> float:
         """Fit tau so probabilities mean what they say: hold out each of
         the `sample` newest precedents in turn, score it against the
@@ -1255,9 +1425,12 @@ class Space:
         `cost(probabilities, true)` is what deciding from those
         probabilities would cost when `true` is the outcome: given, the
         temperature with the least total cost wins, log-loss breaking
-        ties, so the fit serves the decision rather than the curve."""
+        ties, so the fit serves the decision rather than the curve.
+        output: fit that output's own tau (saved as 'tau:<output>')."""
         self._writes("calibrate")
-        graded = [i for i in range(self._n) if self._outcomes[i] is not None]
+        name = _output_name(output)
+        outs = self._outs(name)
+        graded = [i for i in range(self._n) if outs[i] is not None]
         if len(graded) < 10:
             raise ValueError("calibrate needs at least 10 precedents with an outcome")
         held = graded[-sample:]
@@ -1273,18 +1446,23 @@ class Space:
         for tau in TAUS:
             loss = paid = 0.0
             for h, scores, bias in scored:
-                p = self._probabilities(scores, tau, skip=h, bias=bias)
-                loss -= math.log(max(p.get(self._outcomes[h], 0.0), 1e-6))
+                p = self._probabilities(scores, tau, skip=h, bias=bias, outs=outs)
+                loss -= math.log(max(p.get(outs[h], 0.0), 1e-6))  # type: ignore[arg-type]
                 if cost is not None:
-                    paid += cost(p, self._outcomes[h])
+                    paid += cost(p, outs[h])  # type: ignore[arg-type]
             key = (round(paid, 9), loss) if cost is not None else (loss, 0.0)
             if key < best[:2]:
                 best = (*key, tau)
-        self.tau, self._tau_given = best[2], False
+        if name == DEFAULT:
+            self.tau, self._tau_given = best[2], False
+            key_name = "tau"
+        else:
+            self._taus[name] = best[2]
+            key_name = f"tau:{name}"
         if self._db is not None:
-            self._db.execute("INSERT OR REPLACE INTO meta VALUES ('tau', ?)", (repr(self.tau),))
+            self._db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key_name, repr(best[2])))
             self._db.commit()
-        return self.tau
+        return best[2]
 
     def __len__(self) -> int:
         return self._n
@@ -1323,6 +1501,7 @@ class Space:
                 )
             changed += 1
         if changed:
+            self._epoch += 1
             self._leaf_index, self._leaf_vectors, self._leaf_matrix, self._leaf_of = {}, {}, {}, {}
             n, self._n = self._n, 0
             for i in range(n):
@@ -1332,9 +1511,10 @@ class Space:
                 self._db.commit()
         return changed
 
-    def graded(self) -> list[tuple[dict[str, Any], str]]:
-        """Every precedent with an outcome: (situation, outcome), oldest first."""
-        return [(self._situations[i], self._outcomes[i]) for i in range(self._n) if self._outcomes[i] is not None]
+    def graded(self, output: str | None = None) -> list[tuple[dict[str, Any], str]]:
+        """Every precedent with an outcome for this output: (situation, outcome), oldest first."""
+        outs = self._outs(output)
+        return [(self._situations[i], outs[i]) for i in range(self._n) if outs[i] is not None]  # type: ignore[misc]
 
     def meta(self, key: str) -> Any:
         """A value kept with the store (JSON), or None: what a model learned from it, for one."""
@@ -1366,18 +1546,25 @@ class Space:
         if _file_encoding(self._db) < ENCODING:
             _reencode_rows(self._db, self)
         self._db.commit()
-        saved = self._db.execute("SELECT value FROM meta WHERE key = 'tau'").fetchone()
-        if saved and not self._tau_given:
-            self.tau = float(saved[0])
+        self._load_taus()
         self.refresh()
 
     def _open_readonly(self, path: str) -> None:
         self._ro_connect()
         if self._db is not None and _has_meta(self._db):
-            saved = self._db.execute("SELECT value FROM meta WHERE key = 'tau'").fetchone()
-            if saved and not self._tau_given:
-                self.tau = float(saved[0])
+            self._load_taus()
         self.refresh()
+
+    def _load_taus(self) -> None:
+        """The calibrated temperatures saved in the file: the default output's ('tau') and each named one's
+        ('tau:<output>'). A tau given to the Space wins over all of them."""
+        assert self._db is not None
+        for key, value in self._db.execute("SELECT key, value FROM meta WHERE key = 'tau' OR key LIKE 'tau:%'"):
+            if key == "tau":
+                if not self._tau_given:
+                    self.tau = float(value)
+            else:
+                self._taus[key[4:]] = float(value)
 
     def _ro_connect(self) -> None:
         """(Re)connect a read-only store: mode=ro, no journal_mode pragma, no schema. A WAL store whose -wal and
@@ -1446,7 +1633,21 @@ class Space:
                 self._traj(_events_from_blob(ev, dim)),
             )
             added += 1
+        self._load_named()
         return added
+
+    def _load_named(self) -> None:
+        """Every held precedent's named outcomes, as the file has them now (grades other agents gave
+        included). A file from before named outputs has none."""
+        assert self._db is not None
+        if not _has_table(self._db, "outcomes"):
+            return
+        at = {rid: i for i, rid in enumerate(self._ids)}
+        named: list[dict[str, str]] = [{} for _ in self._ids]
+        for rid, output, value in self._db.execute("SELECT id, output, value FROM outcomes ORDER BY ts, rowid"):
+            if rid in at:
+                named[at[rid]][output] = value
+        self._named = named
 
     def merge(self, other_path: str) -> int:
         """Union another Space file into this one (by precedent id).
@@ -1464,6 +1665,10 @@ class Space:
             t="ts" if "ts" in cols else "0.0",
             e="events" if "events" in cols else "NULL",
         )
+        named_of: dict[str, list[tuple[str, str, float]]] = {}
+        if _has_table(other, "outcomes"):
+            for rid, output, value, ots in other.execute("SELECT id, output, value, ts FROM outcomes ORDER BY ts, rowid"):
+                named_of.setdefault(rid, []).append((output, value, ots))
         known = set(self._ids)
         added = 0
         for rid, situation, outcome, dim, blob, author, ts, ev in other.execute(select):
@@ -1475,8 +1680,16 @@ class Space:
                 glyph = self.encode(json.loads(situation), _events_from_blob(ev, dim))
             else:
                 glyph = np.frombuffer(blob, dtype=np.int8).copy()
+            rows = named_of.get(rid, [])
             self._append(
-                rid, outcome, glyph, author, ts, _situation_of(situation), self._traj(_events_from_blob(ev, dim))
+                rid,
+                outcome,
+                glyph,
+                author,
+                ts,
+                _situation_of(situation),
+                self._traj(_events_from_blob(ev, dim)),
+                {output: value for output, value, _ in rows},
             )
             if self._db is not None:
                 self._db.execute(
@@ -1484,6 +1697,10 @@ class Space:
                     " outcome, dim, glyph, author, ts, events)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (rid, situation, outcome, dim, glyph.tobytes(), author, ts, ev),
+                )
+                self._db.executemany(
+                    "INSERT OR REPLACE INTO outcomes (id, output, value, ts) VALUES (?, ?, ?, ?)",
+                    [(rid, output, value, ots) for output, value, ots in rows],
                 )
             added += 1
         if self._db is not None:
@@ -1584,6 +1801,12 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         " ts REAL NOT NULL DEFAULT 0, events BLOB)"
     )
     db.execute("CREATE TABLE IF NOT EXISTS meta ( key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    # a precedent's named outcomes (multi-output models): the default output stays in precedents.outcome
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS outcomes ("
+        " id TEXT NOT NULL, output TEXT NOT NULL, value TEXT NOT NULL,"
+        " ts REAL NOT NULL DEFAULT 0, PRIMARY KEY (id, output))"
+    )
     cols = [r[1] for r in db.execute("PRAGMA table_info(precedents)")]
     # migrate older files in place
     if "author" not in cols:
@@ -1615,7 +1838,11 @@ def _file_encoding(db: sqlite3.Connection) -> int:
 
 
 def _has_meta(db: sqlite3.Connection) -> bool:
-    return db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").fetchone() is not None
+    return _has_table(db, "meta")
+
+
+def _has_table(db: sqlite3.Connection, name: str) -> bool:
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
 
 
 def _situation_of(text: str | None) -> Any:
