@@ -78,9 +78,20 @@ reads from its own copy and sends writes (functions marked `"writes": true`, dep
 is down the others go on serving reads and answer writes 503 `E_NO_HEAD` (with `Retry-After: 2`): on Enterprise
 until another node is elected, in 1.5 to 3 seconds ([High availability](#high-availability-enterprise)); on Pro and
 Team until it restarts (Kubernetes and `restart: unless-stopped` do that in seconds) or you promote another node
-([Failover](#failover-pro-and-team)). A key without
-cluster sync (Community, Free) never starts it: rrotor logs `cluster synchronisation disabled under the Community
-licence` and runs alone.
+([Failover](#failover-pro-and-team)).
+
+**Without a key that allows sync** (none, Free, a key without cluster sync, or a key more than 14 days past its
+expiry) the nodes never connect to each other, so they cannot share a store. Rather than let your load balancer
+spread callers across separate stores, **exactly one node serves**: the cluster's head if there was one, else
+`RROTOR_CLUSTER_HEAD`, else the lowest node id among the peers (an IP address in `RROTOR_CLUSTER_PEERS` counts as
+itself, so set `RROTOR_CLUSTER_ADVERTISE` or `RROTOR_CLUSTER_HEAD` there). Every other node answers `/readyz` 503
+`{"reason": "unlicensed", "code": "E_LICENCE_CLUSTER"}`, so the load balancer leaves it out, and the API 503
+`E_LICENCE_CLUSTER`: "This cluster has no licence key with sync: only rrotor-0 serves; add a Pro, Team or Enterprise
+key." It logs that at error once, keeps its `/data`, and does not open the link. `/v1/health` and `GET /v1/cluster`
+answer on every node with `status` (`standalone` on the node that serves, `unlicensed` on the rest) and `serving`.
+Put a key with sync on every node (the environment, or `/etc/rrotor/license.key`, which a waiting node reads again
+every 10 seconds) and they cluster within seconds; when a key stops allowing sync, the head serves alone again and
+the others turn `unlicensed`.
 
 - **The port:** **7778** (`RROTOR_CLUSTER_PORT`), node to node only. Open it between the nodes and nowhere else;
   never put it behind the public load balancer.
@@ -88,7 +99,7 @@ licence` and runs alone.
   it can join (up to `max_nodes`). To change it, set the new one in `RROTOR_CLUSTER_SECRET` and the old one in
   `RROTOR_CLUSTER_SECRET_PREVIOUS` on each node in turn, then remove the old one.
 - **Readiness:** `GET /readyz` (open) is 200 while a node may take traffic and 503 with the reason (`joining`,
-  `catching_up`, `no_cluster`, `refused`) otherwise: point the load balancer's health check at it, and liveness at
+  `catching_up`, `no_cluster`, `refused`, `unlicensed`) otherwise: point the load balancer's health check at it, and liveness at
   `/healthz`. A new node is `catching_up` until it has taken the head's snapshot and log.
 - **One architecture:** every node runs the same image on the same CPU architecture; a node of another refuses the
   head's models (`E_CLUSTER_ARCH`) and stays not ready.

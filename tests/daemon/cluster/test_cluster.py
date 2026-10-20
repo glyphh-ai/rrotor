@@ -222,8 +222,18 @@ async def test_community_never_listens_and_says_why(nodes: Nodes, caplog):
         "node_id": "a",
         "status": "standalone",
         "reason": "cluster synchronisation disabled under the Community licence",
+        "serving": "a",
+        "refusal": None,
     }
-    assert a.short() == {"role": "standalone"} and a.identity() == (None, "standalone")
+    assert a.short() == {
+        "node_id": "a",
+        "role": "standalone",
+        "status": "standalone",
+        "ready": True,
+        "serving": "a",
+        "reason": None,
+    }
+    assert a.identity() == (None, "standalone")
     b = nodes.make("b", ["b"], key=keys().key(cluster_sync_enabled=False), cluster_head="b")
     await start(b)
     await until(lambda: "cluster synchronisation disabled under this licence" in caplog.text)
@@ -237,7 +247,7 @@ async def test_the_cluster_off_is_standalone_and_never_starts(nodes: Nodes):
     assert a.ready() == (True, None, None)
 
 
-async def test_past_grace_the_head_runs_alone_the_followers_are_refused_and_a_new_key_resumes(nodes: Nodes):
+async def test_past_grace_the_head_runs_alone_the_followers_are_unlicensed_and_a_new_key_resumes(nodes: Nodes):
     now, fixed = [datetime.now(UTC)], datetime.now(UTC)
     ids = ["a", "b", "c"]
     expiring = keys().key(expires_at=(now[0] + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -247,11 +257,17 @@ async def test_past_grace_the_head_runs_alone_the_followers_are_refused_and_a_ne
     await start(a, b, c)
     await until(lambda: b.status == "ready" and c.status == "ready")
     now[0] += timedelta(days=20)
-    await until(lambda: a.status == "standalone" and b.listener is None and c.status == "refused")
+    await until(
+        lambda: a.status == "standalone" and b.listener is None and b.serving == "a" and c.status == "unlicensed"
+    )
     assert a.listener is None and b.listener is None and a.cluster_id is None and c.listener is not None
     for follower in (b, c):
         assert follower.refusal is not None and follower.refusal["code"] == "E_LICENCE_CLUSTER"
-        assert follower.cluster_id is not None
+        assert follower.refusal["message"] == cluster_node.unlicensed("a")
+        assert "only a serves; add a Pro, Team or Enterprise key." in follower.refusal["message"]
+        assert follower.cluster_id is not None and follower.ready() == (False, "unlicensed", "E_LICENCE_CLUSTER")
+        assert follower.unlinked
+    assert a.ready() == (True, None, None) and not a.unlinked and b.serving == "a"
     now[0] -= timedelta(days=20)
     await until(lambda: a.role == "head" and b.status == "ready" and c.status == "ready")
 
@@ -422,6 +438,64 @@ def test_a_head_whose_key_stops_allowing_a_cluster_cuts_nobody_and_wakes_the_gat
     a.raft.members = [cluster_node.Member(n, "", "", n, "t").to_json() for n in ("a", "b")]
     a._fit()
     assert a.changed.is_set() and len(a.members()) == 2
+
+
+def test_the_node_id_an_address_stands_for():
+    assert cluster_node.peer_id("rrotor-0.rrotor-headless.rrotor.svc.cluster.local:7778") == "rrotor-0"
+    assert cluster_node.peer_id("rrotor-2:7778") == "rrotor-2"
+    assert cluster_node.peer_id("10.0.1.10:7778") == "10.0.1.10:7778"
+    assert cluster_node.peer_id("[fd00::1]:7778") == "[fd00::1]:7778"
+    assert "only the node with the lowest id serves" in cluster_node.unlicensed(None)
+
+
+async def test_unlicensed_by_dns_no_peer_known_serves_nothing_until_this_node_is_the_lowest(nodes: Nodes, caplog):
+    answers: list[list[str]] = [[]]
+    failing = [True]
+
+    async def resolve(name: str, port: int) -> list[Any]:
+        if name == "rrotor-headless.rrotor.svc.cluster.local":
+            return [(0, 0, 0, "", (ip, port)) for ip in answers[0]]
+        if failing[0]:
+            raise OSError("no such host")
+        return [(0, 0, 0, "", ("10.0.0.2", port))]
+
+    c = nodes.make(
+        "rrotor-1",
+        [],
+        key=None,
+        cluster_peers=(),
+        cluster_dns="rrotor-headless.rrotor.svc.cluster.local",
+        cluster_port=7778,
+        cluster_advertise="rrotor-1.rrotor-headless.rrotor.svc.cluster.local:7778",
+    )
+    c.discovery.resolve = resolve
+    await start(c)
+    await until(lambda: c.status == "unlicensed")
+    assert c.serving is None and c.ready() == (False, "unlicensed", "E_LICENCE_CLUSTER")
+    assert c.refusal is not None and c.refusal["message"] == cluster_node.unlicensed(None)
+    answers[0] = ["10.0.0.3", "10.0.0.2"]  # the lowest is this node's own address, which its name does not resolve to
+    await until(lambda: c.serving == "10.0.0.2:7778")
+    assert c.status == "unlicensed" and c.listener is None
+    failing[0] = False  # now it does
+    await until(lambda: c.status == "standalone")
+    assert c.serving == "10.0.0.2:7778" and c.refusal is None and c.ready() == (True, None, None)
+    assert caplog.text.count("cluster: this node does not serve.") == 2  # once each time it changed
+
+
+async def test_a_gate_that_fails_is_looked_at_again(nodes: Nodes, caplog, monkeypatch):
+    c = nodes.make("a", ["a"], key=None, cluster_head="a")
+    await start(c)
+    await until(lambda: c.status == "standalone")
+    calls = [0]
+
+    async def broken() -> tuple[str | None, bool]:
+        calls[0] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(c, "_designated", broken)
+    await until(lambda: "cluster: the gate failed" in caplog.text)
+    monkeypatch.undo()
+    await until(lambda: c.gated is False and calls[0] >= 1 and c.status == "standalone")
 
 
 async def test_stopping_cancels_what_the_node_was_still_telling(nodes: Nodes):

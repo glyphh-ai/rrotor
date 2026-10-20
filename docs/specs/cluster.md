@@ -258,8 +258,17 @@ audit store. It answers `GET /v1/cluster`. A new head takes all of these over; t
   fits (never the head); they become refused nodes, `/data` kept. A smaller `max_precedents` refuses growth, as on
   one node ([licensing.md](licensing.md#over-the-cap-after-a-downgrade)).
 - **Past grace, or Community:** sync stops. The head runs on as a standalone node with Community limits; the
-  followers become refused (`E_LICENCE_CLUSTER`), their data kept at their applied seq. A new key resumes the
+  followers become `unlicensed` (`E_LICENCE_CLUSTER`), their data kept at their applied seq. A new key resumes the
   cluster from there.
+- **An unlicensed cluster serves from one node, never from divergent stores** (built). Nodes configured as a cluster
+  (`RROTOR_CLUSTER=on`, behind one load balancer) with no key that allows sync would otherwise each serve their own
+  store. Exactly one serves, the designated head: the cluster's head as the node last knew it; else
+  `RROTOR_CLUSTER_HEAD`; else the lowest node id among the peers (an address's host or first label; an IP address
+  stands for itself, matched against the node's advertised address). Every other node is `unlicensed`: `/readyz` 503
+  (`unlicensed`, `E_LICENCE_CLUSTER`), the API 503 `E_LICENCE_CLUSTER` ("This cluster has no licence key with sync:
+  only `<head>` serves; add a Pro, Team or Enterprise key.") but for `/healthz`, `/readyz`, the health and `GET
+  /v1/cluster`, no link, `/data` kept, logged at error once. The listener still never starts; the key files are read
+  again every 10 s while the gate is closed, so a key with sync dropped in clusters the nodes.
 - **Every node heartbeats** with its `node_id`, `cluster_id` and `role` ([licensing.md](licensing.md#5-the-heartbeat)),
   so the server sees every node, synced or not.
 
@@ -414,7 +423,8 @@ local or head-only per route.
 | Two nodes with one node id | The second is refused (`E_CLUSTER_NODE_ID`) |
 | A node of another architecture | Refuses the first `deploy` entry (`E_CLUSTER_ARCH`), not ready |
 | The cluster secret differs on one node | Its TLS handshakes fail; it logs `cluster: peer certificate not from this cluster` and stays not ready |
-| The licence expires mid-run | Runs in flight finish. Within 14 days nothing changes. Past grace: sync stops, the head runs alone on Community limits, followers are refused (data kept) |
+| The licence expires mid-run | Runs in flight finish. Within 14 days nothing changes. Past grace: sync stops, the head runs alone on Community limits, followers are `unlicensed`, out of the load balancer (data kept) |
+| Nodes configured as a cluster without a key that allows sync (none, Free, no `cluster_sync_enabled`, past grace) | No listener. One node serves, the designated head (the cluster's head as last known, else `RROTOR_CLUSTER_HEAD`, else the lowest node id); every other answers `/readyz` 503 `unlicensed` and the API 503 `E_LICENCE_CLUSTER` naming it, data kept, no link. A key with sync arriving clusters them; never two stores behind one load balancer |
 | A function marked `"writes": false` writes | `E_READ_ONLY` on a follower; the store is untouched |
 | The disk fills on a follower | Apply fails; the node stops applying, goes not ready and logs it; the head keeps its entries until it returns or is evicted |
 | The drain's endpoint is down | Logs, metrics, traces buffered to `RROTOR_DRAIN_BUFFER` per signal, oldest dropped and counted; audit events resume from the cursor when it is back |
@@ -454,8 +464,8 @@ malformed stops rrotor at start with `E_CONFIG`, naming it.
 
 | Call | Does |
 |---|---|
-| `GET /readyz` (open) | 200 when this node may take traffic: standalone and up; or a member applied to within a second of the head. 503 with the reason otherwise (`joining`, `catching_up`, `refused`, `no_cluster`) |
-| `GET /v1/cluster` | `{cluster_id, node_id, role, head, term, commit_seq, applied_seq, tier, max_nodes, ha, members: [{node_id, address, role, voter, applied_seq, lag, last_seen, version}], refused: [{node_id, at, code}]}`; standalone: `{role: "standalone"}` |
+| `GET /readyz` (open) | 200 when this node may take traffic: standalone and up; or a member applied to within a second of the head. 503 with the reason otherwise (`joining`, `catching_up`, `refused`, `no_cluster`, `unlicensed`) |
+| `GET /v1/cluster` | `{cluster_id, node_id, role, head, term, commit_seq, applied_seq, tier, max_nodes, ha, members: [{node_id, address, role, voter, applied_seq, lag, last_seen, version}], refused: [{node_id, at, code}]}`; standalone: `{role: "standalone"}`; the cluster on without a key that allows sync: `{role: "standalone", node_id, status: "standalone" \| "unlicensed", reason, serving, refusal}` |
 | `GET /v1/audit?since&until&kind&actor&model&run_id&limit&cursor` | The cluster's audit events, newest first, paged; on a follower, answered by the head; Enterprise only (403 `E_NOT_IN_PLAN` otherwise) |
 | `GET /v1/health` | Adds `cluster` (as above, short), `drains` (per signal: `state`, `buffered`, `dropped`, `last_export_at`), `server_logs` (on or off, with the warning), the licence as [licensing.md](licensing.md#replacing-todays-licence-the-migration) shows it |
 | MCP `cluster_status` | `GET /v1/cluster` |

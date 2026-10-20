@@ -160,8 +160,9 @@ true`; the daemon's nine-minute count logs a warning once per change.
 `max_nodes` is enforced as **cluster membership**: the head refuses a node's join once the cluster has
 `max_nodes` members (`E_CLUSTER_FULL`), and a refused node serves nothing but `/healthz`
 ([cluster.md](cluster.md#4-membership-and-the-head)). A node that does not sync is not a member and is not counted.
-Community is one node: `cluster_sync_enabled` is false, so the cluster transport never starts and a second node is
-just another standalone rrotor.
+Community is one node: `cluster_sync_enabled` is false, so the cluster transport never starts; nodes configured as
+a cluster (`RROTOR_CLUSTER=on`) serve from one of them only, the rest `unlicensed`
+([cluster.md](cluster.md#5-licensing-in-a-cluster)).
 
 The server's count is separate and soft: it sees each node that heartbeats or links (`node_id`, `cluster_id`,
 `role`, [5](#5-the-heartbeat)), shows "4 nodes on a 3-node plan" on the platform and may email; it never stops a
@@ -171,7 +172,8 @@ node.
 
 - **`cluster_sync_enabled: false`**, or Community: the cluster transport never starts, even with
   `RROTOR_CLUSTER=on`; rrotor logs `cluster synchronisation disabled under the Community licence` (or `under this
-  licence`) at warning and runs standalone.
+  licence`) at warning. One node serves, the designated head; every other answers `/readyz` 503 `unlicensed` and
+  the API 503 `E_LICENCE_CLUSTER` until a key with sync arrives ([cluster.md](cluster.md#5-licensing-in-a-cluster)).
 - **HA** (automatic head election) is `tier: enterprise`. Pro and Team get a head and replication, with failover
   by the head's restart or by hand ([cluster.md](cluster.md#4-membership-and-the-head)).
 - **The audit log** is `tier: enterprise`.

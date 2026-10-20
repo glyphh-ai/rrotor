@@ -50,6 +50,7 @@ class Licence:
         self.runtime_id, self.clock = runtime_id, clock
         self.found: dict[tuple[str, bool], Key] = {}  # (source, legacy): the best good key found there
         self.refused: dict[str, str] = {}  # source: why its key was refused, while it is
+        self.read: dict[Path, str] = {}  # each key file's text as last read
         self.warned: date | None = None
         self.on_event: Callable[[str, dict[str, Any]], object] | None = None  # audit: changed, expired, bad
         self.expired_told: str | None = None  # the key whose expiry was told
@@ -147,17 +148,26 @@ class Licence:
             log.info("community: no licence key")
         self.warn()
 
-    def reread(self) -> None:
-        """The key files, read again: at start, every hour and on SIGHUP (a renewal dropped in, nothing restarted)."""
+    def reread(self, changed: bool = False) -> None:
+        """The key files, read again: at start, every hour and on SIGHUP (a renewal dropped in, nothing restarted).
+        `changed`: only a file whose text changed since it was last read (`fresh`)."""
         for path in self.files:
             text = ""
             with contextlib.suppress(OSError, UnicodeDecodeError):
                 text = path.read_text().strip()
+            if changed and self.read.get(path) == text:
+                continue
+            self.read[path] = text
             if text:
                 sent: Any = text
                 with contextlib.suppress(ValueError):
                     sent = json.loads(text)  # a legacy licence as its JSON
                 self.offer(sent, str(path))
+
+    def fresh(self) -> None:
+        """The key files read again where their text changed: a cluster whose key allows no sync looks every few
+        seconds for one that does, without logging the same bad key each time."""
+        self.reread(changed=True)
 
     def warn(self) -> None:
         """Once a day while the key held has expired: when it did, and when Community's limits apply."""

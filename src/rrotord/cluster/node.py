@@ -2,11 +2,16 @@
 (replication.py).
 
 **Gated by the licence key.** With `RROTOR_CLUSTER=on` the transport starts only while the key held has
-`cluster_sync_enabled`; under Community (or a key without it) the listener never starts, rrotor logs `cluster
-synchronisation disabled under the Community licence` (or `under this licence`) at warning and runs standalone. When
-a key stops allowing it, a head runs on standalone and tells its followers, which become refused
-(`E_LICENCE_CLUSTER`, their data kept); a new key resumes the cluster from there. The gate is looked at again every
-10 seconds and whenever the licence changes.
+`cluster_sync_enabled`; under Community (or a key without it, or past grace) the listener never starts and rrotor
+logs `cluster synchronisation disabled under the Community licence` (or `under this licence`) at warning. **An
+unlicensed cluster serves from one node, never from divergent stores:** without sync each node would keep its own
+store behind the one load balancer, so exactly one serves, the designated head (the cluster's head as this node last
+knew it; else `RROTOR_CLUSTER_HEAD`; else the lowest node id among the peers, an IP address standing for itself),
+and every other node is `unlicensed`: `/readyz` 503, everything but `/healthz`, `/readyz`, the health and `GET
+/v1/cluster` 503 `E_LICENCE_CLUSTER` naming the node that serves, the link down, its /data kept, logged at error
+once. A head whose key stops allowing sync tells its followers so. The gate is looked at again every 10 seconds and
+whenever the licence changes, and while it is closed the key files are read again each time (when their text
+changed), so a key with sync dropped in clusters the nodes within seconds, from where their logs stand.
 
 **Finding the head.** A node dials every address discovery gives (discovery.py), itself among them, and says hello;
 each answers who it is, its cluster and its head. A node that hears of a head asks it to join. With no cluster
@@ -74,6 +79,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import ipaddress
 import logging
 import time
 import uuid
@@ -88,7 +94,7 @@ from aiohttp import web
 from rrotord import log as logs
 from rrotord.access import Access
 from rrotord.audit import WHO, Audit, Who
-from rrotord.cluster.discovery import Discovery, Resolve, getaddrinfo
+from rrotord.cluster.discovery import Discovery, Resolve, getaddrinfo, joined
 from rrotord.cluster.raft import majority
 from rrotord.cluster.replication import Replication
 from rrotord.cluster.tls import COMMAND, Credentials, peer_name
@@ -131,6 +137,25 @@ def no_head(message: str = "No head answers this node: writes wait for it.") -> 
 
 async def _no_telemetry(node: str, msg: dict[str, Any]) -> dict[str, Any]:
     raise ClusterError("This node takes no telemetry.", code="E_CLUSTER_MESSAGE")
+
+
+def unlicensed(head: str | None) -> str:
+    """What a node an unlicensed cluster does not serve from answers."""
+    return (
+        f"This cluster has no licence key with sync: only {head or 'the node with the lowest id'} serves; "
+        "add a Pro, Team or Enterprise key."
+    )
+
+
+def peer_id(address: str) -> str:
+    """The node id an address stands for: its host's first label (`rrotor-0` of `rrotor-0.rrotor-headless...:7778`),
+    or an IP address's whole address."""
+    host = address.rsplit(":", 1)[0].strip("[]")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return host.split(".")[0]
+    return address
 
 
 def names(members: Any) -> list[str]:
@@ -188,7 +213,9 @@ class Cluster:
         saved = read_json(self.path) if config.cluster else None
         self.state: dict[str, Any] = saved if isinstance(saved, dict) else {}
         self.role = "standalone"  # head or follower while a member; a node that is not one is standalone
-        self.status = "joining" if config.cluster else "standalone"  # ready, joining, no_cluster, refused, standalone
+        # ready, joining, no_cluster, refused, standalone; unlicensed: a node an unlicensed cluster does not serve from
+        self.status = "joining" if config.cluster else "standalone"
+        self.serving: str | None = None  # while the key allows no sync: the node the cluster serves from
         self.refusal: dict[str, Any] | None = None  # this node's, while it is refused
         self.refused: list[dict[str, Any]] = []  # the head's: the nodes it refused, the newest last
         self.links: dict[str, Channel] = {}  # the head's: each follower's connection
@@ -280,6 +307,12 @@ class Cluster:
         return False, status, code
 
     @property
+    def unlinked(self) -> bool:
+        """The link stays down here (one link per runtime): a follower, or a node an unlicensed cluster does not
+        serve from."""
+        return self.role == "follower" or self.status == "unlicensed"
+
+    @property
     def member(self) -> bool:
         """A head or a follower: what syncs is the head's to write."""
         return self.role in ("head", "follower")
@@ -335,8 +368,15 @@ class Cluster:
         """`GET /v1/cluster` and `cluster_status`."""
         if not self.config.cluster:
             return {"role": "standalone"}
-        if self.status == "standalone":
-            return {"role": "standalone", "node_id": self.node_id, "status": "standalone", "reason": self._reason()}
+        if self.status in ("standalone", "unlicensed"):
+            return {
+                "role": "standalone",
+                "node_id": self.node_id,
+                "status": self.status,
+                "reason": self._reason(),
+                "serving": self.serving,
+                "refusal": self.refusal,
+            }
         limits = self.licence.limits()
         return {
             "cluster_id": self.cluster_id,
@@ -357,8 +397,18 @@ class Cluster:
 
     def short(self) -> dict[str, Any]:
         """The health's `cluster`."""
-        if self.status == "standalone":
+        if not self.config.cluster:
             return {"role": "standalone"}
+        if self.status in ("standalone", "unlicensed"):
+            ready = self.status == "standalone"
+            return {
+                "node_id": self.node_id,
+                "role": "standalone",
+                "status": self.status,
+                "ready": ready,
+                "serving": self.serving,
+                "reason": None if ready else "unlicensed",
+            }
         ready, why, _ = self.ready()
         return {
             "cluster_id": self.cluster_id,
@@ -398,14 +448,18 @@ class Cluster:
 
     async def _supervise(self) -> None:
         while True:
+            if self.gated is False:
+                self.licence.fresh()  # a key dropped in while sync is off is taken within GATE seconds
             enabled = self.licence.limits().cluster_sync_enabled
-            if enabled != self.gated:
-                self.gated = enabled
-                try:
+            try:
+                if enabled != self.gated:
+                    self.gated = enabled
                     await (self._open() if enabled else self._close())
-                except Exception:
-                    log.exception("cluster: the transport could not start")
-                    self.gated = None
+                elif not enabled:
+                    await self._unlicensed()  # the node it serves from looked at again (the peers' DNS may move)
+            except Exception:
+                log.exception("cluster: the transport could not start" if enabled else "cluster: the gate failed")
+                self.gated = None
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.changed.wait(), GATE)
             self.changed.clear()
@@ -435,6 +489,7 @@ class Cluster:
         if self.refusal is not None and self.refusal["code"] == "E_LICENCE_CLUSTER":
             self.refusal = None
         self.status = "joining" if self.refusal is None else "refused"
+        self.serving = None
         app = web.Application()
         app.router.add_get(PATH, self._accept)
         app.router.add_get("/cluster/v1/versions/{model}/{commit}.tar", self._version)
@@ -450,17 +505,49 @@ class Cluster:
         log.warning(self._reason())
         if self.role == "head":
             for channel in list(self.links.values()):
-                await self._tell_removed(
-                    channel, "E_LICENCE_CLUSTER", "The licence key no longer allows cluster synchronisation."
-                )
-            self.status = "standalone"
-        elif self.state.get("cluster_id") and self.state.get("head") != self.node_id:
-            self._refuse("E_LICENCE_CLUSTER", "The licence key does not allow cluster synchronisation.")
-        else:
-            self.status = "standalone"
+                await self._tell_removed(channel, "E_LICENCE_CLUSTER", unlicensed(self.node_id))
         self.role = "standalone"
         await self._shut()
+        await self._unlicensed()
+
+    async def _unlicensed(self) -> None:
+        """The key allows no sync: this node serves alone if it is the designated head, else it is `unlicensed`.
+        Logged once each time that changes."""
+        head, mine = await self._designated()
+        status = "standalone" if mine else "unlicensed"
+        if (status, head) == (self.status, self.serving):
+            return
+        self.status, self.serving = status, head
+        if mine:
+            self.refusal = None
+            log.warning("cluster: no licence key with sync: this node alone serves; the others answer 503")
+        else:
+            self.refusal = {"code": "E_LICENCE_CLUSTER", "message": unlicensed(head), "at": stamp(self.wall())}
+            log.error(f"cluster: this node does not serve. {unlicensed(head)}", extra={"code": "E_LICENCE_CLUSTER"})
         self._identify()
+
+    async def _designated(self) -> tuple[str | None, bool]:
+        """The node an unlicensed cluster serves from, and whether it is this one: the cluster's head as this node
+        last knew it; else `RROTOR_CLUSTER_HEAD`; else the lowest node id among the peers (an address's host, or its
+        first label; an IP address stands for itself, matched against this node's advertised address, which with
+        DNS-found peers is also resolved). None while no peer is known, and then no node is the one."""
+        head = (self.state.get("head") if self.state.get("cluster_id") else None) or self.config.cluster_head
+        if head:
+            return str(head), head == self.node_id
+        addresses = await self.discovery.addresses()
+        if not addresses:
+            return None, False
+        lowest = min(addresses, key=lambda a: (peer_id(a), a))
+        return peer_id(lowest), peer_id(lowest) == self.node_id or lowest in await self._advertised()
+
+    async def _advertised(self) -> set[str]:
+        """This node's advertised address, and with peers found by DNS the addresses its host resolves to."""
+        mine = {self.address}
+        if self.config.cluster_dns is not None:
+            host = self.address.rsplit(":", 1)[0].strip("[]")
+            with contextlib.suppress(OSError):
+                mine |= {joined(str(info[4][0]), self.port) for info in await self.discovery.resolve(host, self.port)}
+        return mine
 
     async def _shut(self) -> None:
         await self.replication.stop()
@@ -688,7 +775,7 @@ class Cluster:
 
     def _refuse(self, code: str, message: str) -> None:
         self.refusal = {"code": code, "message": message, "at": stamp(self.wall())}
-        self.role, self.status = "standalone", "refused"
+        self.role, self.status = "standalone", "unlicensed" if code == "E_LICENCE_CLUSTER" else "refused"
         self._identify()
         log.error("cluster: this node is refused", extra={"code": code, "reason": message})
 
