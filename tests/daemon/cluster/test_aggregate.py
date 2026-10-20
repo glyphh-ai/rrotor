@@ -19,7 +19,7 @@ from rrotord.api.app import make
 from rrotord.audit import Who
 from rrotord.cluster.transport import ClusterError
 from rrotord.daemon import Daemon
-from tests.daemon.cluster.conftest import Nodes, node_config, until
+from tests.daemon.cluster.conftest import Nodes, node_config, settled, until
 from tests.fakes import FakeCollector, LocalLauncher, keys, ready
 
 KEY = "rk_" + "k" * 30
@@ -59,21 +59,7 @@ class Fleet:
         key = keys().key(tier="enterprise", max_nodes=3)
         for node in IDS:
             await self.add(node, IDS, key, **extra)
-        head, followers = self.daemons[0], self.daemons[1:]
-        # settled from both sides: each follower holds a channel to the head, and the head is head in the same term
-        # with every follower's link registered (its telemetry is taken only from a member's link, in its term)
-        await until(
-            lambda: (
-                head.cluster.role == "head"
-                and all(
-                    d.cluster.role == "follower"
-                    and d.cluster.head_channel
-                    and d.cluster.raft.term == head.cluster.raft.term
-                    and d.cluster.node_id in head.cluster.links
-                    for d in followers
-                )
-            )
-        )
+        await until(lambda: settled(self.daemons[0].cluster, [d.cluster for d in self.daemons[1:]]))
         return self.daemons
 
     async def close(self) -> None:

@@ -10,7 +10,7 @@ import pytest
 
 from rrotord import __main__ as entry
 from rrotord.cluster import command
-from tests.daemon.cluster.conftest import SECRET, Nodes, b64, until
+from tests.daemon.cluster.conftest import SECRET, Nodes, b64, settled, until
 from tests.daemon.test_main import keep_logging
 
 
@@ -19,7 +19,7 @@ async def test_leave_and_join_by_command(nodes: Nodes):
     a, b = nodes.make("a", ids), nodes.make("b", ids)
     await a.start()
     await b.start()
-    await until(lambda: b.status == "ready")
+    await until(lambda: b.status == "ready" and settled(a, [b]))
     code, said = await command.run(b.config, ["leave", "b"])  # on the follower: passed to the head
     assert code == 0 and json.loads(said) == {"removed": "b", "members": 1}
     await until(lambda: b.status == "refused")
