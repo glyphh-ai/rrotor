@@ -297,7 +297,7 @@ A git repo; a version is a commit.
 | `hosts` | The hosts a run may reach on 443 (`*.example.com` allowed) |
 | `needs` | The parts it imports from, by name (`["ada"]`) ([10](#10-parts)) |
 | `data` | `true` mounts its persistent data folder at `/data` |
-| `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
+| `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run. An Ada run holds its whole store, 4 bytes a dimension per precedent and doubled as it grows: at 4,096 dimensions 512 fails from 4,096 precedents, so the Ada examples set 1024, which holds Community's 5,000 (`tests/test_examples_memory.py`); a bigger cap needs more |
 | `secrets`, `databases`, `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `model.py` does not

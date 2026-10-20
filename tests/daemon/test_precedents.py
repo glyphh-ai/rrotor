@@ -86,6 +86,19 @@ def test_current_is_the_last_reading_or_one_now_when_none_has_read(tmp_path):
     assert counted.current() == 3  # then the nine-minute reading's
 
 
+def test_now_reads_the_stores_for_the_health_and_leaves_the_reporting_reading_alone(tmp_path):
+    models = Models(tmp_path)
+    model(models, "tickets", ["ada"], 3)
+    counted = Precedents(models)
+    assert counted.current() == 3
+    store(models.data("tickets") / ada.STORE, 5)
+    assert counted.now() == 5 and counted.total == 3  # what the stores hold; the link's report keeps its own pace
+    model(models, "broken", ["ada"], None)
+    (models.data("broken") / ada.STORE).parent.mkdir(parents=True)
+    (models.data("broken") / ada.STORE).write_bytes(b"not a database")
+    assert counted.now() == 3  # a store that does not read: the last reading
+
+
 def test_a_total_over_the_licence_keys_cap_is_warned_of_once_per_change(tmp_path, caplog):
     models = Models(tmp_path)
     model(models, "tickets", ["ada"], 60)

@@ -55,6 +55,15 @@ class Precedents:
             return None
         return sum(self.by_model.values())
 
+    def now(self) -> int | None:
+        """The total read now, for the health and `GET /v1/licence` (a caller asking how near the cap they are wants
+        what the stores hold, not a reading up to nine minutes old); the last reading when a store does not read.
+        The reporting's reading (`total`, `reported`) is left as it is."""
+        try:
+            return total(self.models)
+        except sqlite3.Error:
+            return self.current()
+
     def current(self) -> int | None:
         """The last reading; read now when none has yet (the heartbeat at boot comes before the first tick)."""
         if self.total is None:
