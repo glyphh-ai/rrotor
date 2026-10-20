@@ -59,8 +59,21 @@ class Fleet:
         key = keys().key(tier="enterprise", max_nodes=3)
         for node in IDS:
             await self.add(node, IDS, key, **extra)
-        followers = self.daemons[1:]
-        await until(lambda: all(d.cluster.role == "follower" and d.cluster.head_channel for d in followers))
+        head, followers = self.daemons[0], self.daemons[1:]
+        # settled from both sides: each follower holds a channel to the head, and the head is head in the same term
+        # with every follower's link registered (its telemetry is taken only from a member's link, in its term)
+        await until(
+            lambda: (
+                head.cluster.role == "head"
+                and all(
+                    d.cluster.role == "follower"
+                    and d.cluster.head_channel
+                    and d.cluster.raft.term == head.cluster.raft.term
+                    and d.cluster.node_id in head.cluster.links
+                    for d in followers
+                )
+            )
+        )
         return self.daemons
 
     async def close(self) -> None:
