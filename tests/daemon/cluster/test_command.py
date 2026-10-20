@@ -19,9 +19,11 @@ async def test_leave_and_join_by_command(nodes: Nodes):
     a, b = nodes.make("a", ids), nodes.make("b", ids)
     await a.start()
     await b.start()
-    await until(lambda: b.status == "ready" and settled(a, [b]))
+    # b's join committed at the head too: leave waits only CHANGE_WITHIN for the last membership change, then is busy
+    await until(lambda: b.status == "ready" and settled(a, [b]) and a.raft.ready_for_change())
     code, said = await command.run(b.config, ["leave", "b"])  # on the follower: passed to the head
-    assert code == 0 and json.loads(said) == {"removed": "b", "members": 1}
+    assert code == 0, said
+    assert json.loads(said) == {"removed": "b", "members": 1}
     await until(lambda: b.status == "refused")
     code, said = await command.run(b.config, ["join"])
     assert code == 0 and json.loads(said)["status"] == "ready"
