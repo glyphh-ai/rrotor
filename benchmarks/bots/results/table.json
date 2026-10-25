@@ -1,0 +1,142 @@
+[
+ {
+  "name": "always human",
+  "accuracy": 0.809,
+  "challenged": 0.0,
+  "people_blocked": 0,
+  "bots_in": 382,
+  "bots_caught": 0.0,
+  "cost": 382.0,
+  "note": ""
+ },
+ {
+  "name": "rule: one request and no gap",
+  "accuracy": 0.8305,
+  "challenged": 0.0,
+  "people_blocked": 200,
+  "bots_in": 139,
+  "bots_caught": 0.6361256544502618,
+  "cost": 1139.0,
+  "note": ""
+ },
+ {
+  "name": "logistic regression, every feature",
+  "accuracy": 0.949,
+  "challenged": 0.0,
+  "people_blocked": 80,
+  "bots_in": 22,
+  "bots_caught": 0.9424083769633508,
+  "cost": 422.0,
+  "note": ""
+ },
+ {
+  "name": "logistic regression, every feature, cost-aware",
+  "accuracy": 0.935,
+  "challenged": 0.0,
+  "people_blocked": 116,
+  "bots_in": 14,
+  "bots_caught": 0.9633507853403142,
+  "cost": 594.0,
+  "note": "block when P(bot) > 1/6"
+ },
+ {
+  "name": "logistic regression, edge features",
+  "accuracy": 0.872,
+  "challenged": 0.0,
+  "people_blocked": 84,
+  "bots_in": 172,
+  "bots_caught": 0.5497382198952879,
+  "cost": 592.0,
+  "note": ""
+ },
+ {
+  "name": "logistic regression, edge features, cost-aware",
+  "accuracy": 0.802,
+  "challenged": 0.0,
+  "people_blocked": 379,
+  "bots_in": 17,
+  "bots_caught": 0.9554973821989529,
+  "cost": 1912.0,
+  "note": "block when P(bot) > 1/6"
+ },
+ {
+  "name": "Ada, every feature, plain vote",
+  "accuracy": 0.9575,
+  "challenged": 0.0,
+  "people_blocked": 42,
+  "bots_in": 43,
+  "bots_caught": 0.887434554973822,
+  "cost": 253.0,
+  "note": ""
+ },
+ {
+  "name": "Ada, every feature, decide (costs, ask 0.5)",
+  "accuracy": 0.9712793733681462,
+  "challenged": 0.0425,
+  "people_blocked": 12,
+  "bots_in": 43,
+  "bots_caught": 0.743455497382199,
+  "cost": 145.5,
+  "note": ""
+ },
+ {
+  "name": "  Ada, every feature, decide, sessions of 5+ requests (1322)",
+  "accuracy": 0.9961977186311787,
+  "challenged": 0.00529500756429652,
+  "people_blocked": 3,
+  "bots_in": 2,
+  "bots_caught": 0.9411764705882353,
+  "cost": 20.5,
+  "note": ""
+ },
+ {
+  "name": "  Ada, every feature, forced to answer (no challenge)",
+  "accuracy": 0.9575,
+  "challenged": 0.0,
+  "people_blocked": 42,
+  "bots_in": 43,
+  "bots_caught": 0.887434554973822,
+  "cost": 253.0,
+  "note": ""
+ },
+ {
+  "name": "Ada, edge features, plain vote",
+  "accuracy": 0.898,
+  "challenged": 0.0,
+  "people_blocked": 93,
+  "bots_in": 111,
+  "bots_caught": 0.7094240837696335,
+  "cost": 576.0,
+  "note": ""
+ },
+ {
+  "name": "Ada, edge features, decide (costs, ask 0.5)",
+  "accuracy": 0.9292763157894737,
+  "challenged": 0.088,
+  "people_blocked": 18,
+  "bots_in": 111,
+  "bots_caught": 0.44502617801047123,
+  "cost": 289.0,
+  "note": ""
+ },
+ {
+  "name": "  Ada, edge features, decide, sessions of 5+ requests (1322)",
+  "accuracy": 0.9907904834996163,
+  "challenged": 0.014372163388804841,
+  "people_blocked": 6,
+  "bots_in": 6,
+  "bots_caught": 0.7647058823529411,
+  "cost": 45.5,
+  "note": ""
+ },
+ {
+  "name": "  Ada, edge features, forced to answer (no challenge)",
+  "accuracy": 0.898,
+  "challenged": 0.0,
+  "people_blocked": 93,
+  "bots_in": 111,
+  "bots_caught": 0.7094240837696335,
+  "cost": 576.0,
+  "note": ""
+ }
+]

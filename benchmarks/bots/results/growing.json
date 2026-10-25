@@ -1,0 +1,68 @@
+[
+ {
+  "precedents": 30,
+  "name": "     30 precedents",
+  "accuracy": 0.809,
+  "challenged": 0.0,
+  "people_blocked": 0,
+  "bots_in": 382,
+  "bots_caught": 0.0,
+  "cost": 382.0,
+  "note": ""
+ },
+ {
+  "precedents": 100,
+  "name": "    100 precedents",
+  "accuracy": 0.9267352185089974,
+  "challenged": 0.222,
+  "people_blocked": 0,
+  "bots_in": 114,
+  "bots_caught": 0.005235602094240838,
+  "cost": 336.0,
+  "note": ""
+ },
+ {
+  "precedents": 300,
+  "name": "    300 precedents",
+  "accuracy": 0.8932424758659853,
+  "challenged": 0.1195,
+  "people_blocked": 9,
+  "bots_in": 179,
+  "bots_caught": 0.1099476439790576,
+  "cost": 343.5,
+  "note": ""
+ },
+ {
+  "precedents": 1000,
+  "name": "   1000 precedents",
+  "accuracy": 0.9177559912854031,
+  "challenged": 0.082,
+  "people_blocked": 12,
+  "bots_in": 139,
+  "bots_caught": 0.38219895287958117,
+  "cost": 281.0,
+  "note": ""
+ },
+ {
+  "precedents": 3000,
+  "name": "   3000 precedents",
+  "accuracy": 0.9165781083953242,
+  "challenged": 0.059,
+  "people_blocked": 16,
+  "bots_in": 141,
+  "bots_caught": 0.4214659685863874,
+  "cost": 280.0,
+  "note": ""
+ },
+ {
+  "precedents": 10000,
+  "name": "  10000 precedents",
+  "accuracy": 0.9292763157894737,
+  "challenged": 0.088,
+  "people_blocked": 18,
+  "bots_in": 111,
+  "bots_caught": 0.44502617801047123,
+  "cost": 289.0,
+  "note": ""
+ }
+]

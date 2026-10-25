@@ -1,0 +1,190 @@
+{
+  "name": "bots-edge",
+  "seed": 3,
+  "dimension": 4096,
+  "layers": [
+    {
+      "name": "pace",
+      "segments": [
+        {
+          "name": "volume",
+          "roles": [
+            {
+              "name": "number_of_requests",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 6.0,
+                "bin_width": 0.25
+              }
+            },
+            {
+              "name": "total_duration",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 6.0,
+                "bin_width": 0.25
+              }
+            }
+          ]
+        },
+        {
+          "name": "rhythm",
+          "roles": [
+            {
+              "name": "average_time",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 6.0,
+                "bin_width": 0.25
+              }
+            },
+            {
+              "name": "standard_deviation",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 6.0,
+                "bin_width": 0.25
+              }
+            },
+            {
+              "name": "max_barrage",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 6.0,
+                "bin_width": 0.25
+              }
+            },
+            {
+              "name": "night",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 1.0,
+                "bin_width": 0.1
+              }
+            },
+            {
+              "name": "repeated_requests",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 1.0,
+                "bin_width": 0.1
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "shape",
+      "segments": [
+        {
+          "name": "methods",
+          "roles": [
+            {
+              "name": "get_method",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 1.0,
+                "bin_width": 0.1
+              }
+            },
+            {
+              "name": "post_method",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 1.0,
+                "bin_width": 0.1
+              }
+            },
+            {
+              "name": "head_method",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 1.0,
+                "bin_width": 0.1
+              }
+            },
+            {
+              "name": "other_method",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 1.0,
+                "bin_width": 0.1
+              }
+            }
+          ]
+        },
+        {
+          "name": "content",
+          "roles": [
+            {
+              "name": "images",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 1.0,
+                "bin_width": 0.1
+              }
+            },
+            {
+              "name": "total_html",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 1.0,
+                "bin_width": 0.1
+              }
+            },
+            {
+              "name": "html_to_image",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 6.0,
+                "bin_width": 0.25
+              }
+            }
+          ]
+        },
+        {
+          "name": "walk",
+          "roles": [
+            {
+              "name": "width",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 6.0,
+                "bin_width": 0.25
+              }
+            },
+            {
+              "name": "depth",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 10.0,
+                "bin_width": 1.0
+              }
+            },
+            {
+              "name": "std_depth",
+              "numeric_config": {
+                "min_value": 0.0,
+                "max_value": 6.0,
+                "bin_width": 0.25
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "output": {
+    "report": [],
+    "costs": {
+      "bot": {
+        "human": 5.0
+      },
+      "human": {
+        "bot": 1.0
+      }
+    },
+    "ask": 0.5
+  }
+}
