@@ -35,6 +35,7 @@ The sandbox's own tests run inside the image (`image/Dockerfile`, target `sandbo
 | Loans: the bank's cost over 200 (lower is better) | **100** | 110 | |
 | Support messages: 200 routed to 77 intents | 90.0% | 96.5% | **97.5%**, the LLM seeing 22%, at $0.22 against $300 |
 | A session's memory: what a turn needs from earlier turns | recall by request 14%; recency 36%; a per-file ledger recovers it by construction | | history is 89% of every call's context: ~70% of the bill |
+| Robots at the door: 2,000 web sessions, person or robot, from behaviour alone (gate's cost, lower is better) | **145.5**, 12 people blocked | 31 on the 200 sample, 6 people blocked | on sessions of 5+ requests: 99.6%, 3 people blocked in 1,322 |
 
 - [`benchmarks/credit/`](benchmarks/credit/README.md): 200 real loan decisions, Ada against Claude and a classic
   model on the same hold-out, with cost and time.
@@ -43,3 +44,5 @@ The sandbox's own tests run inside the image (`image/Dockerfile`, target `sandbo
 - [`benchmarks/session/`](benchmarks/session/README.md): what a Claude Code turn needs from the turns before it, on
   180 real sessions; why the `glyphh` plugin's file ledger.
 - [`benchmarks/issues/`](benchmarks/issues/README.md): free-text issue triage, the counter-example.
+- [`benchmarks/bots/`](benchmarks/bots/README.md): a web session, person or robot, from how it behaves; the gate
+  at glyphh.ai's edge and what its first probe said.
