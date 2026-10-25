@@ -20,46 +20,6 @@
   "note": ""
  },
  {
-  "name": "logistic regression, every feature",
-  "accuracy": 0.949,
-  "challenged": 0.0,
-  "people_blocked": 80,
-  "bots_in": 22,
-  "bots_caught": 0.9424083769633508,
-  "cost": 422.0,
-  "note": ""
- },
- {
-  "name": "logistic regression, every feature, cost-aware",
-  "accuracy": 0.935,
-  "challenged": 0.0,
-  "people_blocked": 116,
-  "bots_in": 14,
-  "bots_caught": 0.9633507853403142,
-  "cost": 594.0,
-  "note": "block when P(bot) > 1/6"
- },
- {
-  "name": "logistic regression, edge features",
-  "accuracy": 0.872,
-  "challenged": 0.0,
-  "people_blocked": 84,
-  "bots_in": 172,
-  "bots_caught": 0.5497382198952879,
-  "cost": 592.0,
-  "note": ""
- },
- {
-  "name": "logistic regression, edge features, cost-aware",
-  "accuracy": 0.802,
-  "challenged": 0.0,
-  "people_blocked": 379,
-  "bots_in": 17,
-  "bots_caught": 0.9554973821989529,
-  "cost": 1912.0,
-  "note": "block when P(bot) > 1/6"
- },
- {
   "name": "Ada, every feature, plain vote",
   "accuracy": 0.9575,
   "challenged": 0.0,

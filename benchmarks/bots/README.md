@@ -21,17 +21,14 @@ itself); every system learned the same 10,000; nothing tuned on the 2,000. Cost 
 |---|---|---|---|---|---|---|
 | Let everyone in | 80.9% | | 0 | 382 | 0% | 382 |
 | Rule: one request, no gap, is a robot | 83.0% | | 200 | 139 | 64% | 1,139 |
-| Logistic regression, every feature | 94.9% | | 80 | 22 | 94% | 422 |
-| Logistic regression, cost-aware | 93.5% | | 116 | 14 | 96% | 594 |
 | **Ada, every feature, learned, calibrated, `decide`** | **97.1%** | 4.2% | **12** | 43 | 74% | **145.5** |
 | the same, on the 1,322 sessions of 5+ requests | 99.6% | 0.5% | 3 | 2 | 94% | 20.5 |
 | Ada, edge features (what the origin sees) | 92.9% | 8.8% | 18 | 111 | 45% | 289 |
 | the same, on the 1,322 sessions of 5+ requests | 99.1% | 1.4% | 6 | 6 | 77% | 45.5 |
-| Logistic regression, edge features | 87.2% | | 84 | 172 | 55% | 592 |
 
-Ada's cost is a third of the classic model's and well under letting everyone in; on the sessions a gate actually
-meets while they run (five requests or more, where the gate first asks) it is nearly exact, blocking three people
-in 1,322 with every feature and six with the edge's. The single-request sessions are where the robots hide (443 of
+Ada's cost is well under letting everyone in and a tenth of the rule's; on the sessions a gate actually meets
+while they run (five requests or more, where the gate first asks) it is nearly exact, blocking three people in
+1,322 with every feature and six with the edge's. The single-request sessions are where the robots hide (443 of
 the 2,000 have one request, most of them robots) and where behaviour has nothing to say: one request, no gap.
 Those are a rate limiter's and a referrer check's, not a precedent store's, and the table does not pretend
 otherwise.
@@ -87,8 +84,6 @@ which says the ceiling is the features, not the store.
   `calibrate` on 1,000 of its own; `decide` under the costs in the spec, `ask` priced at 0.5. Defaults otherwise
   (k 15, min_sim 0.10). The plain vote is beside it in `results/table.json`: 95.8% right, 42 people blocked, cost
   253 with every feature; the costs and the challenge are what take it to 12 and 145.5.
-- **Classic model:** logistic regression (numpy, standardised, a missing-value flag per feature), P(robot) over
-  0.5 and, cost-aware, over 1/6.
 - **The judge:** a fresh Claude agent (Fable 5.1, effort medium) given 1,000 of the 10,000 (ten thousand rows of
   35 numbers are more than a context holds), the brief in `judge_prompt.md`, no code allowed. It read about 490
   and judged the 200 by hand; its note: a session with no referrer was its master robot signal, and the 5:1 cost

@@ -1,6 +1,6 @@
 """Bots at the door: is a web session a person or a robot, from how it behaves? The same split for everyone:
 10,000 sessions to learn from, 2,000 held out (plus a 200 sample with opaque ids for the LLM judge). Runs Ada
-(learned weights, calibrated, `decide` under the gate's costs), a rule, and a logistic regression here; writes
+(learned weights, calibrated, `decide` under the gate's costs) and a rule here; writes
 train.jsonl, holdout.jsonl and the labels for the judge; writes edge_spec.json, the spec the live gate uses.
 
 Data: `fetch.sh` (Zenodo 3477932, CC BY 4.0). Two feature files joined by session id, 67,352 sessions, 20% robots.
@@ -15,8 +15,6 @@ import random
 import sys
 import time
 from pathlib import Path
-
-import numpy as np
 
 RROTOR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RROTOR / "tests" / "kernel"))
@@ -223,35 +221,6 @@ def ada_decisions(m: glyphh_spec.Model, cases: list[dict], edge: bool) -> tuple[
     return plain, decided, full
 
 
-def logistic(train: list[dict], test: list[dict], truth: list[str], edge: bool) -> list[dict]:
-    fields = [role_name(c) for c, (_, _, at_edge) in FEATURES.items() if at_edge or not edge]
-
-    def vec(c: dict) -> list[float]:
-        return [0.0 if c[f] is None else c[f] for f in fields] + [1.0 if c[f] is None else 0.0 for f in fields]
-
-    X = np.array([vec(c) for c in train])
-    y = np.array([1.0 if c["outcome"] == "bot" else 0.0 for c in train])
-    mu, sd = X.mean(0), X.std(0) + 1e-9
-    Xn = np.c_[(X - mu) / sd, np.ones(len(X))]
-    w = np.zeros(Xn.shape[1])
-    for _ in range(3000):
-        p = 1 / (1 + np.exp(-Xn @ w))
-        w -= 0.05 * (Xn.T @ (p - y) / len(y) + 0.01 * np.r_[w[:-1], 0])
-    Xt = np.c_[(np.array([vec(c) for c in test]) - mu) / sd, np.ones(len(test))]
-    pt = 1 / (1 + np.exp(-Xt @ w))
-    tag = "edge features" if edge else "every feature"
-    out = [score(f"logistic regression, {tag}", ["bot" if p > 0.5 else "human" for p in pt], truth)]
-    out.append(
-        score(
-            f"logistic regression, {tag}, cost-aware",
-            ["bot" if p > 1 / 6 else "human" for p in pt],
-            truth,
-            "block when P(bot) > 1/6",
-        )
-    )
-    return out
-
-
 def in_flight(test: list[dict], decisions: list[str], truth: list[str], name: str) -> dict:
     """The same decisions on the sessions of five requests or more: the ones a gate meets while they run."""
     keep = [i for i, c in enumerate(test) if c["requests"] >= 5]
@@ -273,8 +242,6 @@ def main() -> None:
     table: list[dict] = []
     table.append(score("always human", ["human"] * len(test), truth))
     table.append(score("rule: one request and no gap", ["bot" if c["requests"] <= 1 else "human" for c in test], truth))
-    table += logistic(train, test, truth, edge=False)
-    table += logistic(train, test, truth, edge=True)
 
     for edge in (False, True):
         tag = "edge features" if edge else "every feature"
