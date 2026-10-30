@@ -14,7 +14,7 @@ connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh`
 | `examples/` | `ada_incidents`, `ada_tickets` (Ada models) and `daily_sales` (the base alone), each with tests |
 | `parts/ada/`, `scripts/part.py` | The Ada part's recipe; building and signing a part |
 | `deploy/` | The self-hosting packages |
-| `benchmarks/` | Ada measured against LLMs and classic models |
+| `benchmarks/` | Ada measured against LLMs |
 
 ## Develop
 
@@ -37,8 +37,8 @@ The sandbox's own tests run inside the image (`image/Dockerfile`, target `sandbo
 | A session's memory: what a turn needs from earlier turns | recall by request 14%; recency 36%; a per-file ledger recovers it by construction | | history is 89% of every call's context: ~70% of the bill |
 | Robots at the door: 2,000 web sessions, person or robot, from behaviour alone (gate's cost, lower is better) | **145.5**, 12 people blocked | 31 on the 200 sample, 6 people blocked | on sessions of 5+ requests: 99.6%, 3 people blocked in 1,322 |
 
-- [`benchmarks/credit/`](benchmarks/credit/README.md): 200 real loan decisions, Ada against Claude and a classic
-  model on the same hold-out, with cost and time.
+- [`benchmarks/credit/`](benchmarks/credit/README.md): 200 real loan decisions, Ada against Claude on the same
+  hold-out, with cost and time.
 - [`benchmarks/banking77/`](benchmarks/banking77/README.md): a customer's message routed to one of 77 intents from
   its text alone; Ada and Claude together.
 - [`benchmarks/session/`](benchmarks/session/README.md): what a Claude Code turn needs from the turns before it, on

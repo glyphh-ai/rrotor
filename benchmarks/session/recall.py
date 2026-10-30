@@ -1,10 +1,9 @@
 """Which earlier turns of a session does a new turn need? After the fact we know: the turns that touched the files
 this turn edits or reads. Before the fact a retriever has only the new request, the folder and the branch. Recall@k
-of four retrievers over every real session on this machine with 10+ turns: the last k turns (what compaction keeps),
-TF-IDF over the request text, Ada (a precedent per turn: the request, where, what it touched), and the oracle."""
+of three retrievers over every real session on this machine with 10+ turns: the last k turns (what compaction keeps),
+Ada (a precedent per turn: the request, where, what it touched), and the oracle."""
 
 import json
-import math
 import re
 import sys
 from collections import Counter, defaultdict
@@ -81,7 +80,6 @@ cases = 0
 sizes = []
 for sid, turns in sessions.items():
     model = S.Model(S.Spec.from_json(SPEC), author="eval")
-    docs = []  # for tf-idf: bags of the prior turns' request words
     for i, t in enumerate(turns):
         mine = paths_of(t)
         needed = set()  # for each file this turn touches, the last earlier turn that touched it
@@ -94,15 +92,6 @@ for sid, turns in sessions.items():
             total["all"] += len(needed)
             recent = set(range(max(0, i - K), i))
             hits["last k"] += len(needed & recent)
-            # tf-idf over request words
-            q = Counter(WORD.findall(t["request"].lower()))
-            df = Counter(w for d in docs for w in set(d))
-            scores = []
-            for j, d in enumerate(docs):
-                s = sum(q[w] * d[w] * math.log(len(docs) / (1 + df[w])) for w in q if w in d)
-                scores.append((s, j))
-            top = {j for s, j in sorted(scores, reverse=True)[:K] if s > 0}
-            hits["tf-idf"] += len(needed & top)
             # Ada: query with what is known before the turn is worked
             a = model.query(data_of(t, with_touched=False))
             got = {int(r[0][1:]) for r in a.receipts[:K]}
@@ -113,9 +102,8 @@ for sid, turns in sessions.items():
         # record this turn as a precedent (its outcome: the folder it worked in)
         model.record(data_of(t, with_touched=True), None, ts=float(i))
         model.space._ids[-1] = f"t{i}"  # the receipt names the turn
-        docs.append(Counter(WORD.findall(t["request"].lower())))
         sizes.append(len(json.dumps(data_of(t, True))) / 4)
 print(f"sessions {len(sessions)}, turns that needed earlier turns {cases}, needed turns {total['all']}, k={K}")
-for name in ("last k", "tf-idf", "Ada", "Ada + last 2", "oracle"):
+for name in ("last k", "Ada", "Ada + last 2", "oracle"):
     print(f"  {name:14s} recall@{K} {hits[name] / total['all']:.1%}")
 print(f"a precedent carried into context: median {int(np.median(sizes))} tokens, p90 {int(np.percentile(sizes, 90))}")
