@@ -1,5 +1,5 @@
 """German Credit, the same split for everyone: 800 to learn from, 200 held out. Writes train.jsonl, holdout.jsonl
-(labels withheld) and holdout_labels.json for the LLM judge; runs Ada and a logistic regression here."""
+(labels withheld) and holdout_labels.json for the LLM judge; runs Ada here."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ import random
 import sys
 import time
 from pathlib import Path
-
-import numpy as np
 
 RROTOR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RROTOR / "tests" / "kernel"))
@@ -238,36 +236,6 @@ def main() -> None:
             f"answered {answered / len(test):.0%}, {per:.2f}s per query",
         )
         score("Ada, cost-aware", careful, truth, time.time() - t0, "refuse when P(bad) > 1/6 in outcomes")
-
-    # logistic regression, numpy
-    cats = [f for f in FIELDS if f not in NUMERIC]
-    values = {f: sorted({c[f] for c in rows}) for f in cats}
-
-    def vec(c: dict) -> list[float]:
-        x = [float(c[f]) for f in sorted(NUMERIC)]
-        for f in cats:
-            x += [1.0 if c[f] == v else 0.0 for v in values[f]]
-        return x
-
-    t0 = time.time()
-    X = np.array([vec(c) for c in train])
-    y = np.array([1.0 if c["decision"] == "bad" else 0.0 for c in train])
-    mu, sd = X.mean(0), X.std(0) + 1e-9
-    Xn = np.c_[(X - mu) / sd, np.ones(len(X))]
-    w = np.zeros(Xn.shape[1])
-    for _ in range(3000):
-        p = 1 / (1 + np.exp(-Xn @ w))
-        w -= 0.05 * (Xn.T @ (p - y) / len(y) + 0.01 * np.r_[w[:-1], 0])
-    Xt = np.c_[(np.array([vec(c) for c in test]) - mu) / sd, np.ones(len(test))]
-    pt = 1 / (1 + np.exp(-Xt @ w))
-    score("logistic regression", ["bad" if p > 0.5 else "good" for p in pt], truth, time.time() - t0)
-    score(
-        "logistic regression, cost-aware",
-        ["bad" if p > 1 / 6 else "good" for p in pt],
-        truth,
-        time.time() - t0,
-        "refuse when P(bad) > 1/6",
-    )
 
 
 if __name__ == "__main__":

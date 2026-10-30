@@ -1,7 +1,7 @@
 # Benchmark: credit decisions — Ada against an LLM, on the same hold-out
 
 **The question:** for a structured decision an app would otherwise hand to an LLM, how does an Ada model compare on
-accuracy, cost and time, with a classic model beside both for honesty?
+accuracy, cost and time?
 
 **The data:** German Credit (UCI Statlog): 1,000 loan applications, 20 typed fields (checking account, credit
 history, purpose, amount, duration, savings, employment, housing, age, …) and the bank's real decision, good or
@@ -15,7 +15,6 @@ bad. The dataset's own cost matrix: approving a bad loan costs 5, refusing a goo
 |---|---|---|
 | Ada | `record` of the 800 cases with their outcome, into the spec in `run.py` (3 layers; the applicant's money roles weigh 1.0, their life roles 0.6; hand-set, untuned) | `query` each of the 200; `top`. "Cost-aware": refuse when `outcomes["bad"]` > 1/6 |
 | LLM (Claude Fable 5.1, effort medium, two independent runs) | Read `train.jsonl` (the brief is `judge_prompt.md`; no code allowed) | Judged each of the 200 by hand; told the cost matrix |
-| Logistic regression | One-hot + standardised, numpy, 3,000 steps | P(bad) > 0.5; "cost-aware": P(bad) > 1/6 |
 
 Run on 2026-10-16.
 
@@ -28,7 +27,6 @@ the bank's cost counts a bad loan approved as five good ones refused. Dollars fo
 |---|---|---|---|
 | Always approve | 67.5% | 325 | $0 |
 | Claude Fable 5.1, two runs (disagreed on 12 of 200) | 77.0% / 79.0% | 110 / 114 | $4.20 batched, ~$300 one by one |
-| Logistic regression, cost-aware | 68.5% | 103 | ~$0 |
 | **Ada, learned fields and interactions, calibrated, `decide`** | 70.0% | **100** | $0.00001 |
 | Ada, asking a person where every answer is dear (111 of 200 decided) | 81.1% | 45 on those | $0.00001 |
 
@@ -39,8 +37,6 @@ the bank's cost counts a bad loan approved as five good ones refused. Dollars fo
 | Always approve | 67.5% | 65 | 0 | 325 | — |
 | **Ada** (min_sim 0.25, k 25) | **77.0%** | 41 | 5 | 210 | yes |
 | Ada, cost-aware | 59.5% | 10 | 71 | 121 | yes |
-| Logistic regression | 75.0% | 37 | 13 | 198 | yes |
-| Logistic regression, cost-aware | 68.5% | 10 | 53 | **103** | yes |
 | **LLM, run 1** (read 430 of the 800) | **77.0%** | 16 | 30 | 110 | the two runs agree on |
 | **LLM, run 2** (read ~140 of the 800) | **79.0%** | 18 | 24 | 114 | 94% of cases |
 
@@ -71,15 +67,14 @@ Ada's ingest is paid once; every decision after is a query.
 
 ## What the first run says
 
-- **Accuracy: a tie.** Ada 77%, the LLM 77–79%, logistic regression 75%, all from the same 800 cases.
-- **The bank's cost: the LLM and the classic model ahead of this first run.** A similarity-weighted vote is not a
+- **Accuracy: a tie.** Ada 77%, the LLM 77–79%, both from the same 800 cases.
+- **The bank's cost: the LLM ahead of this first run.** A similarity-weighted vote is not a
   calibrated probability, so a cost threshold over-refuses (71 good loans). Learned weights, calibration and a cost
   matrix in the spec fixed it (below).
-- **Determinism:** the two LLM runs disagreed on 12 of 200 decisions. Ada and the classic model never do.
+- **Determinism:** the two LLM runs disagreed on 12 of 200 decisions. Ada never does.
 - **Cost per decision:** Ada is three to five orders of magnitude cheaper, and keeps the data in the runtime.
-- **The uncomfortable line:** on purely structured data a classic model with a threshold is hard to beat on numbers.
-  Ada's reasons to exist are the receipts (which precedents), the clearance layers, and learning one confirmed case at
-  a time with no retraining.
+- **Where Ada earns its place:** the receipts (which precedents), the clearance layers, and learning one confirmed
+  case at a time with no retraining.
 
 ## After calibration, the same 200 once more
 
@@ -120,14 +115,13 @@ min_sim 0.35, stood; only the plain `query` line below depends on it.
 | Ada, learned from its own store as it filled, `decide` | 69.5% | 10 | 51 | 101 |
 | earlier, by hand in the script (isotonic curve, 1/6 rule) | 67.0% | 11 | 55 | 110 |
 | for reference: LLM runs 1 and 2 | 77.0% / 79.0% | 16 / 18 | 30 / 24 | 110 / 114 |
-| for reference: logistic regression, cost-aware | 68.5% | 10 | 53 | 103 |
 
 Cross-validated accuracy inside the 800 was 71.8%, so this hold-out runs a little easy for every contestant; the
 ranking is what to read, not the third digit.
 
 So: with the learned spec Ada's plain answer is the best accuracy on the table (78.5% without the pairs, cost 171,
 from 210 with the hand-set weights; the pairs cost the plain answer a point), and on the bank's cost `decide` with
-interactions lands at **100** — ahead of both LLM runs (110, 114) and of the thresholded classic model (103) —
+interactions lands at **100** — ahead of both LLM runs (110, 114) —
 with every choice made before the hold-out was opened. The pairs are what moved it: the same spec without them
 decides at 108. The whole calibration costs 6 s (the vectorised query: 0.005 s per query at 800 precedents with
 the pairs, was 0.97 s).
@@ -154,7 +148,7 @@ Every number on this page holds on kernel 3.9.0: with no text role, the lexicon 
 
 ```sh
 benchmarks/credit/fetch.sh                         # german.data (CC BY 4.0, UCI)
-uv run python benchmarks/credit/run.py             # the split, Ada and the baseline; ~4 minutes
+uv run python benchmarks/credit/run.py             # the split and Ada; ~4 minutes
 uv run python benchmarks/credit/calibrate.py       # learned spec, interactions, calibration, the cost rule; ~3 minutes
 uv run python benchmarks/credit/score.py benchmarks/credit/results/llm_run1.json   # any answers file
 ```

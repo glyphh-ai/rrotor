@@ -28,7 +28,6 @@ turns, carrying k of them:
 | Retriever | recall@5 | recall@10 |
 |---|---|---|
 | The last k turns (what compaction keeps) | **36.4%** | **47.3%** |
-| TF-IDF over the request text | 11.2% | 17.3% |
 | Ada: a precedent per turn, queried by the request | 14.2% | 21.7% |
 | Ada plus the last 2 turns | 30.6% | 35.7% |
 | Oracle | 91.8% | 98.5% |
@@ -41,8 +40,8 @@ median 12 turns, the ninetieth percentile 141.
 - **The money is real and it is history.** Nine tenths of every call's context is the session so far, and it is
   re-read on every call. Replace it with a few hundred tokens of what the turn needs and the bill falls by about
   seventy percent, with the fixed preamble as the floor.
-- **The request does not say what is needed; what was done last does.** Similarity over the request text, Ada's or
-  TF-IDF's, recovers a seventh of the needed turns. Recency recovers a third to a half. The needed turns are the last
+- **The request does not say what is needed; what was done last does.** Ada's similarity over the request text
+  recovers a seventh of the needed turns. Recency recovers a third to a half. The needed turns are the last
   touch of each file the turn works on, and nothing in "fix the flaky test" names which turn that was.
 - **So the mechanism is a ledger, not a search.** A precedent per file, the last thing done to it and why, fetched
   when the model touches the file again: by construction that recovers every file-keyed need, at a median of three

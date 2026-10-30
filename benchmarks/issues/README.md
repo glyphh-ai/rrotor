@@ -10,7 +10,7 @@ set, Ada learning from 80% and queried on the 20% held out (`holdout.py`; the is
 | kubernetes — area (`sig/*`) | 11 | 36% | 66% | 69% | 54% |
 | kubernetes — kind (bug / feature / flake / failing-test / cleanup / docs) | 6 | 37% | 86% | 78% | 76% |
 
-Free text is where a TF-IDF classifier or an LLM is at home and Ada's edges (typed fields, receipts, clearance, no
+Free text is where an LLM is at home and Ada's edges (typed fields, receipts, clearance, no
 model in the path) count for little. The credit benchmark beside this one is the fit Ada is for.
 
 ```sh
