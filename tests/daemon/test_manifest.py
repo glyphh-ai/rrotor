@@ -120,3 +120,58 @@ def test_a_program_that_reads_secrets_is_the_heads():
     """Secrets are node-local and the head keeps them: every call of a program that declares one runs there."""
     keyed = m.Manifest.model_validate({"name": "k", "secrets": ["API_KEY"], "functions": {"start": {"writes": False}}})
     assert (keyed.head_only, keyed.writes("start")) == (True, True)
+
+
+SCHEDULED = {"type": "object", "properties": {"day": {"type": "string"}}, "additionalProperties": False}
+
+
+def test_schedules_are_read(tmp_path):
+    data = {
+        "name": "p",
+        "functions": {"start": {"inputs": SCHEDULED}},
+        "schedules": [
+            {"function": "start", "cron": "15 6 * * *"},
+            {
+                "function": "start",
+                "cron": "0 9 * * MON",
+                "tz": "Europe/Amsterdam",
+                "input": {"day": "x"},
+                "name": "mon",
+            },
+        ],
+    }
+    found = m.read(src(tmp_path, data))
+    daily, monday = found.schedules
+    assert (daily.id, daily.tz, daily.input, monday.id) == ("start", "UTC", {}, "mon")
+    import datetime as dt
+
+    assert monday.next_after(dt.datetime(2026, 11, 1, tzinfo=dt.UTC)) == dt.datetime(2026, 11, 2, 8, tzinfo=dt.UTC)
+
+
+@pytest.mark.parametrize(
+    ("schedule", "why"),
+    [
+        ({"function": "start", "cron": "61 * * * *"}, "schedules.0.cron: Value error, '61' is not a minute (0-59)"),
+        ({"function": "start", "cron": "daily"}, "five fields"),
+        ({"function": "start", "cron": "* * * * *", "tz": "Mars/Base"}, "schedules.0.tz: Value error, 'Mars/Base'"),
+        ({"function": "other", "cron": "* * * * *"}, "schedules.0: other is not one of its functions"),
+        ({"function": "start", "cron": "* * * * *", "input": {"day": 5}}, "schedules.0.input does not fit start's"),
+        ({"function": "start", "cron": "* * * * *", "every": 1}, "schedules.0.every: Extra inputs"),
+        ({"cron": "* * * * *"}, "schedules.0.function: Field required"),
+    ],
+)
+def test_refused_schedules(tmp_path, schedule, why):
+    data = {"name": "p", "functions": {"start": {"inputs": SCHEDULED}}, "schedules": [schedule]}
+    assert why in refusal(tmp_path, data)
+
+
+def test_the_examples_manifest_is_read_with_its_schedule():
+    found = m.read(Path(__file__).resolve().parents[2] / "examples" / "daily_sales")
+    [daily] = found.schedules
+    assert (found.name, daily.id, daily.function, daily.cron) == ("daily_sales", "each_morning", "start", "15 6 * * *")
+
+
+def test_two_schedules_of_one_name_are_refused(tmp_path):
+    two = [{"function": "start", "cron": "0 6 * * *"}, {"function": "start", "cron": "0 18 * * *"}]
+    data = {"name": "p", "functions": {"start": {}}, "schedules": two}
+    assert "schedules.1: two schedules are named start; give each its own name" in refusal(tmp_path, data)

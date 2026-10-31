@@ -37,6 +37,7 @@ from rrotord.parts import Parts
 from rrotord.programs import Programs, Version
 from rrotord.runner.engine import Runner
 from rrotord.sandbox.probe import Layers
+from rrotord.scheduler import Scheduler
 
 BODY_MAX = 96 * 1024 * 1024  # a bundle in base64, with room
 
@@ -79,6 +80,7 @@ class Services:
     drain: Drain | None = None  # the customer's collector and server-side logging, when either is on
     cluster: Cluster | None = None  # this node's place in its cluster; none: standalone
     gathered: ClusterAudit | None = None  # the cluster's audit store, read on its head
+    scheduler: Scheduler | None = None  # the programs' schedules: fired by the daemon, listed and paused here
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -187,6 +189,16 @@ def setup(app: web.Application, s: Services) -> None:
         m = request.match_info
         return web.json_response(await ops.secret_delete(s, m["name"], m["secret"]))
 
+    async def schedules(_: web.Request) -> web.Response:
+        return web.json_response(await ops.schedules(s))
+
+    def pausing(paused: bool) -> Handler:
+        async def handler(request: web.Request) -> web.Response:
+            m = request.match_info
+            return web.json_response(await ops.schedule_pause(s, m["program"], m["name"], paused))
+
+        return handler
+
     async def call(request: web.Request) -> web.Response:
         return web.json_response(await ops.call(s, await body(request)))
 
@@ -279,6 +291,9 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/v1/programs/{name}/secrets", secrets_list)
     app.router.add_put("/v1/programs/{name}/secrets/{secret}", secret_set)
     app.router.add_delete("/v1/programs/{name}/secrets/{secret}", secret_delete)
+    app.router.add_get("/v1/schedules", schedules)
+    app.router.add_post("/v1/schedules/{program}/{name}/pause", pausing(True))
+    app.router.add_post("/v1/schedules/{program}/{name}/resume", pausing(False))
     app.router.add_post("/v1/runs", call)
     app.router.add_post("/v1/runs/{run_id}/continue", resume)
     app.router.add_post("/v1/runs/{run_id}/cancel", cancel)

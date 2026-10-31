@@ -21,5 +21,6 @@
     }
   },
   "hosts": ["api.frankfurter.dev"],
-  "limits": { "seconds": 60, "memory_mb": 256 }
+  "limits": { "seconds": 60, "memory_mb": 256 },
+  "schedules": [{ "function": "start", "cron": "15 6 * * *", "name": "each_morning" }]
 }

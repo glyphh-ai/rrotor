@@ -29,7 +29,8 @@ INSTRUCTIONS = (
     "program_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
     "waiting for the person; program_deploy deploys a commit of a program's GitHub repo; audit_query reads the audit "
     "log (Enterprise); cluster_status shows the runtime's cluster; secrets_list, secret_set and secret_delete keep a "
-    "program's secrets (values are never shown back)."
+    "program's secrets (values are never shown back); schedules_list, schedule_pause and schedule_resume show and "
+    "pause the schedules this runtime fires itself."
 )
 
 
@@ -108,7 +109,20 @@ async def secret_delete(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.secret_delete(s, ops.text_of(args, "program"), ops.text_of(args, "name"))
 
 
+async def schedules_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
+    return await ops.schedules(s)
+
+
+async def schedule_pause(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.schedule_pause(s, ops.text_of(args, "program"), ops.text_of(args, "name"), True)
+
+
+async def schedule_resume(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.schedule_pause(s, ops.text_of(args, "program"), ops.text_of(args, "name"), False)
+
+
 RUN = _obj({"run_id": {"type": "string"}}, ["run_id"])
+SCHEDULE_ARGS = _obj({"program": {"type": "string"}, "name": {"type": "string"}}, ["program", "name"])
 TOOLS: tuple[Tool, ...] = (
     Tool(
         "programs_list",
@@ -199,9 +213,23 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "secret_delete",
         "Delete a program's secret.",
-        _obj({"program": {"type": "string"}, "name": {"type": "string"}}, ["program", "name"]),
+        SCHEDULE_ARGS,
         secret_delete,
     ),
+    Tool(
+        "schedules_list",
+        "The programs' schedules: function, cron and zone, the next fire, the last run and skip, paused or not.",
+        _obj({}),
+        schedules_list,
+        True,
+    ),
+    Tool(
+        "schedule_pause",
+        "Pause a schedule (by program and name: the function's, unless it names itself); kept across restarts.",
+        SCHEDULE_ARGS,
+        schedule_pause,
+    ),
+    Tool("schedule_resume", "Resume a paused schedule.", SCHEDULE_ARGS, schedule_resume),
 )
 BY_NAME = {t.name: t for t in TOOLS}
 

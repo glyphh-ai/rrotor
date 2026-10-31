@@ -27,6 +27,7 @@ from rrotord.programs import Programs
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
+from rrotord.scheduler import Scheduler
 from rrotord.vault import Vault
 from tests.fakes import FakeLink, LocalLauncher, keys, ready, token
 
@@ -80,7 +81,17 @@ def services(root: Path, sock: Path, local_token: str, fetch: Any = None) -> Ser
         Tools(python=sys.executable, uv=shutil.which("uv") or "uv", github=f"file://{root / 'github'}"),
     )
     return Services(
-        config, programs, deployer, runner, Credentials(config.data), LinkView(), layers, parts, licence, fetch
+        config,
+        programs,
+        deployer,
+        runner,
+        Credentials(config.data),
+        LinkView(),
+        layers,
+        parts,
+        licence,
+        fetch,
+        scheduler=Scheduler(programs, runner, config.data),
     )
 
 

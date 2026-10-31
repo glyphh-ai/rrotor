@@ -29,8 +29,9 @@ installs it and starts its log after that seq; a snapshot of another term than t
 follower is ready once it has applied all the head had committed when it last heard, and stays ready unless it has
 been behind for more than a second. A node made head applies all its log holds before it leads (`own`).
 
-**Never syncs:** runs, sandboxes, parts, `runtime.json`, the link's outbox, audit, any program's data folder, and
-the vault (rrotord/vault.py: secrets are node-local, kept by the head)."""
+**Never syncs:** runs, sandboxes, parts, `runtime.json`, the link's outbox, audit, any program's data folder, the
+vault (rrotord/vault.py: secrets are node-local, kept by the head) and `schedules.json` (rrotord/scheduler.py: the
+head fires the schedules)."""
 
 from __future__ import annotations
 

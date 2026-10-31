@@ -1,5 +1,6 @@
-"""Secrets in a cluster: node-local, kept by the head. A follower refuses to set one and asks the head for the list,
-and every call of a program that declares secrets runs on the head, whose vault holds them."""
+"""Secrets and schedules in a cluster: node-local, kept by the head. A follower refuses to set a secret and asks the
+head for the list, every call of a program that declares secrets runs on the head, whose vault holds them, and only
+the head fires schedules."""
 
 from __future__ import annotations
 
@@ -40,3 +41,20 @@ async def test_secrets_stay_on_the_head_and_calls_that_need_them_run_there(ring:
     assert one.runner.vault is not None and one.runner.vault.names("keyed") == []  # never replicated
     status, run, _ = await ring.call("n1", "start", program="keyed")
     assert (run["status"], run["data"]) == ("done", "sk-") and run["run_id"].startswith("n0~"), run
+
+
+async def test_only_the_head_fires_schedules_and_a_follower_lists_the_heads(ring: Ring):
+    ids = ["n0", "n1"]
+    head = await ring.add("n0", ids)
+    await until(lambda: head.cluster.role == "head")
+    schedules = [{"function": "start", "cron": "* * * * *"}]
+    install(head.runner.programs, manifest("ticks", schedules=schedules), READS.replace("ctx.secrets['API_KEY']", "''"))
+    one = await ring.add("n1", ids)
+    await until(lambda: one.cluster.ready()[0] and one.runner.programs.active("ticks") is not None)
+    assert head.scheduler.leading() and not one.scheduler.leading()
+    assert await one.scheduler.tick() == [] and one.scheduler.due == {}
+    head.scheduler.pause("ticks", "start", True)
+    status, listed = await ring.get("n1", "/v1/schedules")
+    assert (status, listed["schedules"][0]["id"], listed["schedules"][0]["paused"]) == (200, "ticks/start", True)
+    res = await ring.clients["n1"].post("/v1/schedules/ticks/start/resume", headers=ring.headers())
+    assert (res.status, (await res.json())["error"]["code"]) == (503, "E_NOT_HEAD")

@@ -4,6 +4,7 @@ program.py without running it (its syntax tree), since no program code runs outs
 from __future__ import annotations
 
 import ast
+import datetime as dt
 import json
 import re
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Annotated, Any, Literal
 import jsonschema
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from rrotord.cron import Cron, zone
 from rrotord.errors import BadRequest, DeployError
 
 NAME = r"^[a-z][a-z0-9_]{0,62}$"
@@ -39,6 +41,36 @@ class Function(BaseModel):
         return value
 
 
+class Schedule(BaseModel):
+    """A function the daemon calls on a cron schedule (docs/architecture.md, 5.6)."""
+
+    model_config = ConfigDict(extra="forbid")
+    function: Annotated[str, Field(pattern=FUNCTION)]
+    cron: str
+    tz: str = "UTC"
+    input: dict[str, Any] = Field(default_factory=dict)
+    name: Annotated[str, Field(pattern=NAME)] | None = None  # the function's name by default
+
+    @field_validator("cron")
+    @classmethod
+    def _cron(cls, value: str) -> str:
+        Cron.parse(value)
+        return value
+
+    @field_validator("tz")
+    @classmethod
+    def _tz(cls, value: str) -> str:
+        zone(value)
+        return value
+
+    @property
+    def id(self) -> str:
+        return self.name or self.function
+
+    def next_after(self, after: dt.datetime) -> dt.datetime:
+        return Cron.parse(self.cron).next_after(after, zone(self.tz))
+
+
 class Limits(BaseModel):
     model_config = ConfigDict(extra="forbid")
     seconds: int = Field(300, ge=1, le=3600)
@@ -59,6 +91,7 @@ class Manifest(BaseModel):
     limits: Limits = Limits()
     connectors: list[str] = []
     data: bool = False
+    schedules: list[Schedule] = []  # functions the daemon calls on a cron schedule (rrotord/scheduler.py)
 
     @field_validator("hosts")
     @classmethod
@@ -85,6 +118,22 @@ class Manifest(BaseModel):
         for function in self.functions.values():
             if function.writes is None:
                 function.writes = self.data  # safe: a program with data writes unless it says a function does not
+        return self
+
+    @model_validator(mode="after")
+    def _schedules(self) -> Manifest:
+        seen: set[str] = set()
+        for i, schedule in enumerate(self.schedules):
+            where = f"schedules.{i}"
+            function = self.functions.get(schedule.function)
+            if function is None:
+                raise ValueError(f"{where}: {schedule.function} is not one of its functions")
+            errors = sorted(jsonschema.Draft202012Validator(function.inputs).iter_errors(schedule.input), key=str)
+            if errors:
+                raise ValueError(f"{where}.input does not fit {schedule.function}'s inputs: {errors[0].message}")
+            if schedule.id in seen:
+                raise ValueError(f"{where}: two schedules are named {schedule.id}; give each its own name")
+            seen.add(schedule.id)
         return self
 
     @property

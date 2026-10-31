@@ -14,6 +14,7 @@ from rrotord.cluster.transport import ClusterError
 from rrotord.errors import BadRequest, RrotorError, Unavailable
 from rrotord.programs import Version
 from rrotord.runner.record import Run
+from rrotord.scheduler import Scheduler
 from rrotord.vault import Vault
 
 if TYPE_CHECKING:
@@ -174,7 +175,7 @@ async def approvals(s: Services) -> list[dict[str, Any]]:
 
 
 def on_head(s: Services, what: str) -> None:
-    """What only the head keeps (the vault) is changed there: a follower refuses, naming the head."""
+    """What only the head keeps (the vault, the schedules' state) is changed there: a follower refuses, naming it."""
     if forward.follower(s):
         assert s.cluster is not None  # noqa: S101  (a follower is a member)
         head = s.cluster.state.get("head")
@@ -221,6 +222,25 @@ async def secret_delete(s: Services, program: str, name: str) -> dict[str, Any]:
     if s.audit is not None:
         s.audit.emit("secret.delete", program=program, secret=name, outcome={"status": "done", "code": None})
     return {"program": program, "name": name, "set": False}
+
+
+def scheduler(s: Services) -> Scheduler:
+    if s.scheduler is None:
+        raise Unavailable("This rrotor has no scheduler.", code="E_SCHEDULER")
+    return s.scheduler
+
+
+async def schedules(s: Services) -> dict[str, Any]:
+    """Every program's schedules: the next fire, the last run, the last skip, paused or not. A follower asks its
+    head, which fires them."""
+    if forward.follower(s):
+        return await forward.relayed(s, "schedules", {})
+    return {"schedules": scheduler(s).view()}
+
+
+async def schedule_pause(s: Services, program: str, name: str, paused: bool) -> dict[str, Any]:
+    on_head(s, "Schedules are paused and resumed")
+    return scheduler(s).pause(program, name, paused)
 
 
 def text_of(data: dict[str, Any], key: str) -> str:

@@ -245,12 +245,14 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 | `vault/key`, `vault/<name>.json` | The rrotor's own key (32 bytes, 0600, made on first use); a program's secrets, each encrypted with it ([5.5](#55-secrets)) |
 | `models/` | An earlier release's name for `programs/`: moved to `programs/` when the daemon starts, if `programs/` is not there; its runs' and audit events' `model` reads as `program` |
 | `runs/<run_id>/` | Each run's `run.json` (with its checkpoints) and `log.jsonl` |
+| `schedules.json` | Each schedule's pause, last run and last skip ([5.6](#56-schedules)) |
 | `parts/<name>/<version>/`, `parts/<name>/current` | An installed part, and the version in use |
 | `audit/<YYYY-MM-DD>.jsonl`, `audit/.cursor`, `audit/.cursor-glyphh` | Enterprise: the audit log, a file a day; how far the customer's drain and server-side logging have read it ([13](#13-logs-audit-and-drains)) |
 | `logging.json` | Whether server-side logging was on at the last start (turning it on or off is an audit event) |
 
 **The image** (`image/Dockerfile`): Debian 13 (trixie) slim, amd64 and arm64; `tini`, Python 3.13 (Debian's),
-Node 22, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates; in rrotord's venv, the OpenTelemetry
+Node 22, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates, tzdata (a schedule's time zone); in
+rrotord's venv, the OpenTelemetry
 SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests). No browser, no database. It runs as
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
 is the `hosted` target: the base, with no part built in ([11](#11-the-image-and-ci)).
@@ -280,7 +282,8 @@ A git repo; a version is a commit.
     "summary": { "writes": false }
   },
   "hosts": ["api.frankfurter.dev"],
-  "limits": { "seconds": 60, "memory_mb": 256 }
+  "limits": { "seconds": 60, "memory_mb": 256 },
+  "schedules": [{ "function": "start", "cron": "15 6 * * *", "name": "each_morning" }]
 }
 ```
 
@@ -295,6 +298,7 @@ A git repo; a version is a commit.
 | `data` | `true` mounts its persistent data folder at `/data` |
 | `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
 | `secrets` | The secrets it reads by name, `^[A-Z][A-Z0-9_]{0,63}$` ([5.5](#55-secrets)) |
+| `schedules` | Functions the runtime calls by itself: each `{function, cron, tz?, input?, name?}` ([5.6](#56-schedules)) |
 | `databases`, `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `program.py` does not
@@ -323,7 +327,7 @@ ctx.files                     # its folder, a pathlib.Path
 ctx.data                      # its persistent data folder ("data": true), else None
 ctx.home                      # its code (the folder program.py is in)
 ctx.clearance                 # who asks, 0 to 1; 1 unless the call says (the program decides what it means)
-ctx.caller                    # who called
+ctx.caller                    # who called: "claude", or "schedule" for a run its schedule started (5.6)
 ctx.readonly                  # a cluster follower's run: its folders are read-only
 ctx.secrets["NAME"], ctx.secrets.get("NAME")   # a secret the manifest declares (5.5)
 ctx.log(message, **detail)
@@ -395,6 +399,45 @@ A program reads an API key or a password as `ctx.secrets["ANALYTICS_KEY"]`; its 
   follower refuses to set or delete one (503 `E_NOT_HEAD`, naming the head) and asks the head for the list, and every
   call of a program that declares secrets runs on the head ([14](#14-the-cluster)). A node made head has its own
   vault: the secrets are set on it again.
+
+### 5.6 Schedules
+
+A program says when the runtime should call it, in its manifest; the daemon fires each schedule itself
+(`rrotord/scheduler.py`), with no Claude and no server involved:
+
+```json
+"schedules": [
+  { "function": "start", "cron": "15 6 * * *" },
+  { "function": "summary", "cron": "0 9 * * MON-FRI", "tz": "Europe/Amsterdam", "input": {}, "name": "weekdays" }
+]
+```
+
+- **Each schedule:** `function` (one of its functions), `cron`, `tz` (an IANA zone, default `UTC`), `input` (the
+  call's inputs, checked against the function's schema at deploy) and `name` (`^[a-z][a-z0-9_]{0,62}$`, the
+  function's by default; two schedules of one function need names). A deploy refuses a bad one (`E_MANIFEST`, naming
+  `schedules.<n>` and why).
+- **Cron** (`rrotord/cron.py`, no dependency): five fields, minute hour day-of-month month day-of-week; each `*`, a
+  number, `a-b`, `*/n`, `a-b/n`, `a/n` or a comma list of those; `JAN`-`DEC` and `SUN`-`SAT`, and 7 for Sunday;
+  `@hourly`, `@daily`, `@midnight`, `@weekly`, `@monthly`, `@yearly`, `@annually`. When day-of-month and day-of-week
+  are both restricted, a day matching either fires (as cron has always read them); when one is `*`, the other
+  decides. An expression that can never fire (`0 0 30 2 *`) is refused.
+- **Across a change of the clocks** in `tz`: a wall time the clocks skip fires once, as far past the jump as it was
+  past the hour (02:30 fires at 03:30); a wall time the clocks pass twice fires once, the first time.
+- **Fired as a normal run:** once a minute (just past it) the scheduler starts every schedule of each program's active
+  version that came due, through the runner, `caller: schedule`, as `rrotor` with `via: schedule` in the audit log.
+  An approval or an input waits like any other run's (`GET /v1/approvals`), and expires after 15 minutes.
+- **No overlap:** a schedule whose last run has not ended (still running, or waiting) is skipped that time; the skip
+  is kept (`skipped: {at, run_id, count}`), logged and audited (`schedule.skipped`).
+- **Nothing is replayed:** fires missed while the daemon was down, or while the node was not the head, are not made
+  up; a tick that comes late fires a schedule once, however many times it came due.
+- **Listed, paused, resumed:** `GET /v1/schedules` (MCP `schedules_list`): each schedule's `id`
+  (`<program>/<name>`), version, function, cron, tz, input, `paused`, `next_at` (none while paused), `last` (`{run_id,
+  at, status, code}`, the run's status as it is now; `refused` with its code when the call was refused) and
+  `skipped`. `POST /v1/schedules/{program}/{name}/pause` and `…/resume` (MCP `schedule_pause`, `schedule_resume`)
+  keep the pause in `/data/schedules.json`, across restarts and new versions; audited `schedule.pause`,
+  `schedule.resume`.
+- **In a cluster only the head fires** (or the one node an unlicensed cluster serves from). Schedules' state is the
+  head's, node-local like the vault: a follower asks the head for the list and refuses a pause (503 `E_NOT_HEAD`).
 
 ## 6. The link: protocol 2
 
@@ -475,6 +518,8 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `POST /v1/programs/deploy` | `{repo, commit, token?}` or `{bundle, commit}` ([2.2](#22-build-deploy-and-call)): `201 {program, version, commit_sha, deployed_at}` |
 | `GET /v1/programs/{name}/secrets` | `{program, secrets: [{name, declared, set}]}`: never a value ([5.5](#55-secrets)) |
 | `PUT /v1/programs/{name}/secrets/{secret}`, `DELETE …` | `{value}`: a secret set, encrypted with the rrotor's key; deleted. `{program, name, set}` |
+| `GET /v1/schedules` | `{schedules: [{id, program, name, version, function, cron, tz, input, paused, next_at, last, skipped}]}` ([5.6](#56-schedules)) |
+| `POST /v1/schedules/{program}/{name}/pause`, `…/resume` | The schedule paused or resumed, kept across restarts: the schedule as listed |
 | `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
 | `POST /v1/runs/{id}/continue` | `{answer}`: the next `Result` |
 | `POST /v1/runs/{id}/cancel` | Stops it; `end` runs; `cancelled` |
@@ -502,6 +547,7 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `audit_query` `{since?, until?, kind?, program?, run_id?, limit?}` | `GET /v1/audit` |
 | `cluster_status` | `GET /v1/cluster` |
 | `secrets_list` `{program}`, `secret_set` `{program, name, value}`, `secret_delete` `{program, name}` | A program's secrets ([5.5](#55-secrets)): names only back, never a value |
+| `schedules_list`, `schedule_pause` `{program, name}`, `schedule_resume` `{program, name}` | `GET /v1/schedules`; pause and resume ([5.6](#56-schedules)) |
 
 A refusal is a tool error carrying the API's `{error}`.
 
@@ -817,6 +863,9 @@ write to the head.
   `cluster` ([7](#7-the-api)); the heartbeat's `cluster_id` and `role` ([12](#12-self-hosting)); `cluster_id` and
   `role` on every log line and `cluster_id` on every audit event, and the drain's resource
   ([13](#13-logs-audit-and-drains)).
+- **Schedules fire on the head only** ([5.6](#56-schedules)), and the node an unlicensed cluster serves from; a
+  follower fires none, and a node made head counts from the moment it leads (nothing missed is replayed). Their
+  pauses and last results are in the head's `/data/schedules.json`, node-local like the vault.
 - **Which calls write** (`manifest.py`): each function's `"writes"`, default the program's `data`. Every call of a
   program with `"data": true` runs on the head (`head_only`), whatever its functions say: its data folder never
   replicates; so does every call of a program that declares `secrets`, which only the head's vault holds

@@ -4,7 +4,7 @@
 FROM debian:trixie-slim AS os
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-venv bubblewrap libseccomp2 util-linux git ca-certificates tini libstdc++6 \
+      python3 python3-venv bubblewrap libseccomp2 util-linux git ca-certificates tini libstdc++6 tzdata \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=node:22-trixie-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /usr/local/bin/uv

@@ -43,6 +43,7 @@ from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
 from rrotord.runner.record import Records
 from rrotord.sandbox.probe import Layers, container_needs, probe
+from rrotord.scheduler import Scheduler
 from rrotord.store import read_json, write_json
 from rrotord.vault import Vault
 
@@ -70,6 +71,7 @@ class Daemon:
     aggregate: Aggregate = field(init=False)
     drain: Drain | None = field(init=False)
     cluster: Cluster = field(init=False)
+    scheduler: Scheduler = field(init=False)
     session: aiohttp.ClientSession | None = None
 
     def __post_init__(self) -> None:
@@ -135,6 +137,13 @@ class Daemon:
             node=lambda: c.node_id if self.cluster.member else None,
             readonly=lambda: self.cluster.role == "follower",
             vault=Vault(c.data),
+        )
+        self.scheduler = Scheduler(
+            programs,
+            self.runner,
+            c.data,
+            leading=lambda: self.cluster.role == "head" or self.cluster.status == "standalone",
+            audit=self.audit,
         )
         self.cluster.deposed = self._deposed
         handler.runner = self.runner
@@ -264,6 +273,7 @@ class Daemon:
             self.drain,
             self.cluster,
             self.gathered,
+            self.scheduler,
         )
 
     def install_builtin(self) -> list[str]:
@@ -350,6 +360,7 @@ class Daemon:
             asyncio.create_task(self._expire()),
             asyncio.create_task(self._usage()),
             asyncio.create_task(self._licence()),
+            asyncio.create_task(self.scheduler.run()),
         ]
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGHUP, self.reread)
@@ -369,6 +380,7 @@ class Daemon:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.cluster.stop()
+        await self.scheduler.stop()
         await self.runner.shutdown()
         await api.cleanup()
         if self.session is not None:
