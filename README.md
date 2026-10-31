@@ -1,20 +1,20 @@
 # rrotor
 
-The runtime a person's Ada models run in: one locked-down, headless Linux image that deploys a model by commit, runs
+A local runtime for a person's models: one locked-down, headless Linux image that deploys a model by commit, runs
 each call in a sandbox, and answers over REST and MCP at its own address. Customers run it themselves, at `https://<host>/mcp`
 ([self-hosting](docs/self-hosting/README.md)); Glyphh-run hosting is off. It is added to Claude as a
 connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh` SDKs (`glyphh-ai/glyphh`). Image:
-`ghcr.io/glyphh-ai/rrotor`.
+`ghcr.io/glyphh-ai/rrotor`. Ada models do not run here: they run in Ada Cloud, on the Glyphh server.
 
 | Where | What |
 |---|---|
-| [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, Ada, the licence, parts, CI |
+| [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, the licence, parts, CI |
 | [`docs/self-hosting/`](docs/self-hosting/README.md) | Running your own: Docker Compose, Helm, Terraform; privileges, licensing, backups |
 | `src/rrotord/`, `src/rrotor/` | The daemon; the model SDK every sandbox imports |
-| `examples/` | `ada_incidents`, `ada_tickets` (Ada models) and `daily_sales` (the base alone), each with tests |
-| `parts/ada/`, `scripts/part.py` | The Ada part's recipe; building and signing a part |
+| `examples/` | `daily_sales`, a model with its tests |
+| `scripts/part.py` | Building and signing a part |
 | `deploy/` | The self-hosting packages |
-| `benchmarks/` | Ada measured against LLMs |
+| `benchmarks/` | Ada (Ada Cloud's) measured against LLMs; kept here because other repos read it by path |
 
 ## Develop
 
@@ -29,6 +29,9 @@ The sandbox's own tests run inside the image (`image/Dockerfile`, target `sandbo
 (`.github/workflows/ci.yml`).
 
 ## Benchmarks
+
+These measure Ada, which runs in Ada Cloud, not in rrotor; they stay in this repo because other repos read them by
+path.
 
 | | Ada alone | Best LLM alone | Ada in front of the LLM |
 |---|---|---|---|

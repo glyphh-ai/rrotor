@@ -16,7 +16,8 @@ customer sends them somewhere.
 A cluster is N rrotors of one runtime (one runtime id and token, one public host) behind the customer's load
 balancer, each with its own `/data`. One is the **head**: the single writer of everything that syncs, the holder
 of the cluster's link and its aggregate state, and where its drain is exported from. The rest are **followers**:
-they serve every read locally from their replica and forward every write to the head.
+they hold every deployed version, serve the reads of models without data locally and forward every write, and every
+call of a model with data, to the head.
 
 ![The cluster](../img/cluster-topology.png)
 
@@ -48,7 +49,6 @@ Free (Community) is one node and has no head: everything here is off and rrotor 
 
 | Syncs | What it is on `/data` | How it changes |
 |---|---|---|
-| **Each Ada model's precedent store** | `models/<name>/data/precedents.sqlite`: the `precedents` table (id, situation, outcome, dim, glyph, author, ts, events) and the `meta` table (`learned`: what `learn` produced, the weights and word tables; `tau`: what `calibrate` fitted; `settings`: what `configure` kept) | Written by the kernel inside the sandbox, by `record`, `learn`, `calibrate`, `configure`, a rewrite after `learn`, a re-encode at deploy |
 | **Deployed models and versions** | `models/<name>/versions/<commit>/` (source and venv), `active.json` | Deploy, activate, remove |
 | **Runtime keys** | `access.json` | The link's `keys` (the head's link only) |
 | **The licence key** | `licence.json` | The head's heartbeat or link, its file or environment |
@@ -57,73 +57,50 @@ Free (Community) is one node and has no head: everything here is off and rrotor 
 **Never syncs:** runs (`runs/<id>/`: their records, checkpoints and logs: a run lives on the node that ran it),
 sandbox state and `/tmp`, parts (each node's come from its image), `runtime.json` (every node has the same id and
 token from its own environment), `machine-id`, the link's outbox (the head's alone), the local audit store (each
-node's own, gathered at the head, [7](#7-logging-audit-and-drains)), and any data-folder file but
-`precedents.sqlite`.
+node's own, gathered at the head, [7](#7-logging-audit-and-drains)), and every model's data folder.
 
-**A model that keeps other state** (a non-Ada model with `"data": true`, or one that writes its `files/` folder)
-runs on the head only: every call to it is forwarded. Only the Ada store has a replication format.
+**No model's state replicates.** A model with `"data": true` keeps its state in its data folder on the head, and
+runs on the head only: every call to it is forwarded, whatever its functions are marked (`head_only`). A model
+without data runs its reads on the node asked, its folders read-only. (Ada, with its precedent stores, is not a
+model rrotor runs: it lives in Ada Cloud on the server.)
 
 ## 3. Replication
 
 ### The head is the single writer
 
-Writes are forwarded to the head; the head runs them, captures what changed, orders it and ships it.
+Writes are forwarded to the head; the head runs them. What syncs (versions, keys, the licence, membership) changes
+on the head only, which orders it in one log and ships it.
 
 Chosen over "each node appends locally to a log the head orders" because:
 
-- **The cap and `learn` need one store.** The per-node cap is on the synced store; with writers on every node no
-  one sees the total until the head has ordered it, so the cap could only be enforced after the fact. `learn` run
-  on two nodes over two different stores computes two different weight tables.
-- **Read-your-writes.** A `decide` that asks for the outcome and records it, then a `query`, sees its own precedent;
-  with local appends the next call through the load balancer may not.
-- **Latency is one LAN hop**, paid on writes only; reads, the bulk of an Ada model's traffic, stay local.
-- **A head outage stops writes, not reads**, and the store cannot diverge while it lasts. With local appends a
-  partition lets every side grow its own store, and someone has to merge them.
+- **A model's state is in one place.** A model with data writes its data folder on the head alone, so two nodes
+  never hold two different states of it, and nothing has to merge them.
+- **Read-your-writes.** A call that writes, then one that reads, both reach the head's data folder; with local
+  state the next call through the load balancer may not see the first.
+- **Latency is one LAN hop**, paid on writes and on calls of models with data; reads of models without data stay
+  local.
+- **A head outage stops writes, not local reads**, and nothing can diverge while it lasts.
 
 ### Which calls write
 
-A new manifest key, per function: `"writes": true | false`. Default `true` for a function of a model with
-`"data": true` (safe: it is forwarded), `false` otherwise. The Ada skill and the examples mark `query`, `facts` and
-`probabilities` `"writes": false`; `record`, `learn`, `settings`, `decide` and `start` write.
+A manifest key, per function: `"writes": true | false`. Default `true` for a function of a model with
+`"data": true`, `false` otherwise. Every call of a model with data runs on the head whatever its functions are
+marked (its data folder is there alone); for a model without data, a function marked `"writes": false` runs on the
+node asked and one marked `true` is forwarded.
 
-The sandbox enforces it: on a follower a run's `/data` (and `/files`) is mounted **read-only** and the SDK opens the
-store with the kernel's read-only mode (`Space(path, readonly=True)`: `file:…?mode=ro`, no `journal_mode` pragma,
-no schema made, a rewrite or re-encode on open kept in memory only; kernel 3.10, `glyphh-ai/ada-private`). A
+The sandbox enforces it: on a follower a run's `/files` (and `/data`, had it one) is mounted **read-only**. A
 function marked `false` that writes fails loudly (`E_READ_ONLY`, naming the function) instead of diverging.
 
 A follower that receives a writing call (`POST /v1/runs`, `model_call`, deploy, activate, remove) forwards the
 request, with its caller already authenticated, to the head over the cluster transport ([6](#6-transport)), and
 answers what the head answers. Forwarding carries the caller (key hash or sign-in), the clearance and a deadline.
 
-### Capturing changes on the head
+### What the log carries
 
-The kernel writes SQLite from inside the sandbox; the daemon never sees the calls. So the daemon installs, in each
-Ada store on the head, a change table and triggers:
-
-```sql
-CREATE TABLE IF NOT EXISTS _rrotor_changes (n INTEGER PRIMARY KEY AUTOINCREMENT, tbl TEXT, op TEXT, key TEXT);
-CREATE TABLE IF NOT EXISTS _rrotor_capture (on_ INTEGER);   -- one row; 0 while a follower applies
--- AFTER INSERT / UPDATE / DELETE on precedents (key: id) and meta (key: key),
---   WHEN (SELECT on_ FROM _rrotor_capture) = 1: INSERT INTO _rrotor_changes (tbl, op, key)
-```
-
-The store is made by the kernel on the model's first run; the daemon installs the triggers before every run on the
-head (`CREATE … IF NOT EXISTS`, a few milliseconds) and, for a store that had none, ships a snapshot first. After a
-writing run ends (and every second while one runs), the daemon reads `_rrotor_changes` past its cursor, reads the
-current row for each key, and appends one **entry** per run to the replication log:
-
-```json
-{"seq": 1042, "term": 3, "kind": "rows", "model": "incidents",
- "rows": [{"tbl": "precedents", "op": "upsert", "row": {"id": "…", "situation": "…", "outcome": "…", "dim": 4096, "glyph": "<b64>", "author": "…", "ts": 0, "events": null}},
-          {"tbl": "meta", "op": "upsert", "row": {"key": "learned", "value": "…"}}]}
-```
-
-Then it deletes the captured change rows. Every change goes this way: a record, `learn`'s `learned` and the rows
-it rewrites, `calibrate`'s `tau`, `configure`'s `settings`, a re-encode's every row. **`learn` results are
-distributed** as any other rows; a follower's next run reads them from `meta` when it opens the store.
-
-The other entry kinds: `deploy {model, version, commit_sha, manifest}`, `activate`, `remove`, `keys {hashes}`,
-`licence {key}`, `member {add | remove, node}`, `snapshot_marker`.
+The entry kinds: `deploy {model, version, commit_sha, manifest}` (a version made active, by deploy or activation),
+`remove`, `keys {hashes}`, `licence {key}`, `member {add | remove, node}`, and `head` (a head's first entry in its
+term). A model call writes no entry. An earlier release also wrote `rows` entries (a model store's changes); one
+still in a log from before the upgrade applies as nothing.
 
 ### The log
 
@@ -132,10 +109,9 @@ cluster) and `term` (the head's, [4](#4-membership-and-the-head)). The head appe
 receives and applies it in order. Kept until every member has applied it and a snapshot covers it, at most
 `RROTOR_CLUSTER_LOG_KEEP` (1 GiB); past that a lagging follower catches up from a snapshot.
 
-**A follower applies** each entry in one SQLite transaction on the replica (`_rrotor_capture` set to 0 for it), then
-records `applied_seq` in `cluster/state.json`. Followers keep their replicas in `journal_mode=DELETE` and the
-applier sets a `busy_timeout`: a run reading the store sees it before an entry or after, never half. A run that is
-waiting keeps the store as it opened it, as today's worker does. A `deploy` entry makes the follower fetch the
+**A follower applies** each entry in order, then records `applied_seq` in `cluster/state.json`; an entry that does
+not apply stops the applying there (the node goes not ready, and tries again with the next append). A `deploy`
+entry makes the follower fetch the
 version from the head (`GET /cluster/v1/versions/<model>/<commit>.tar`: `src/` and `venv/`, the head's build, so no
 follower needs GitHub or PyPI); a node of another architecture than the head's refuses it (`E_CLUSTER_ARCH`): one
 cluster, one architecture.
@@ -147,15 +123,17 @@ cluster, one architecture.
 | **Pro, Team** | Once the entry is on the head's disk (asynchronous) | Lost writes are possible, of the last moments; the promotion command shows each follower's lag and refuses a lagging one without `--force` |
 | **Enterprise** | Once a majority of voters hold the entry (`E_NOT_COMMITTED` 503 after 5 s, the entry kept and committed when they return) | No acknowledged write is lost |
 
+A model call writes no entry, so its answer waits on nothing new: what it wrote is in the head's data folder, which
+no follower holds. Deploys, keys and the licence are the writes this table governs.
+
 **Read-your-writes through one node:** the head's answer carries `Rrotor-Cluster-Seq`; a follower that forwarded a
 write waits (up to 2 s) until it has applied that seq before answering. A caller that moves between nodes may send
 `Rrotor-Min-Seq: <seq>`; a node behind it waits up to 2 s, then forwards the read to the head.
 
 ### Catch-up
 
-A new node, or one past the head's log: the head sends a **snapshot**: each Ada store via SQLite's online backup
-(`sqlite3.Connection.backup`, consistent inside one read transaction, with the change cursor it reached mapped to a
-seq), each deployed version's tar, `access.json`, the licence and the cluster state, as one stream; then the log
+A new node, or one past the head's log: the head sends a **snapshot**: each deployed version's tar, `access.json`, the
+licence and the cluster state (the seq and term it stands at, the members), as one stream; then the log
 from the snapshot's seq. The node is **not ready** (`/readyz` 503) until it has applied to within one second of
 the head; the load balancer sends it nothing until then.
 
@@ -167,7 +145,7 @@ A run lives on the node that runs it. In a cluster its id carries that node: `<n
 
 ### What a caller sees when the head changes
 
-| | Reads (`writes: false`) | Writes |
+| | Reads (`writes: false`, a model without data) | Writes, and every call of a model with data |
 |---|---|---|
 | Head alive | Local, every node | Forwarded, answered by the head |
 | Head lost, Enterprise | Local, uninterrupted | 503 `E_NO_HEAD`, `Retry-After: 2`, for the election (1 to 3 s) |
@@ -250,13 +228,10 @@ audit store. It answers `GET /v1/cluster`. A new head takes all of these over; t
 - **One key per cluster.** Each node is started with the same key (the packages put it in the cluster's Secret),
   and the head propagates the newest it holds (from its heartbeat or link) as a `licence` entry. **Every node checks
   the signature itself**; a node never takes the head's word for a key.
-- **The head checks the limits:** `max_nodes` at join, `cluster_sync_enabled` before anything replicates, the
-  precedent cap on every write (it is the only writer).
-- **The cap is per node, on the synced store:** every node holds the whole store, so a Pro cluster holds 50,000
-  precedents across its models, the same 50,000 on each of its three nodes. It is not 3 × 50,000.
+- **The head checks the limits:** `max_nodes` at join, `cluster_sync_enabled` before anything replicates. A key's
+  `max_precedents` is Ada Cloud's and is not read ([licensing.md](licensing.md)).
 - **A downgrade:** a key with a smaller `max_nodes` makes the head remove the members joined last until the cluster
-  fits (never the head); they become refused nodes, `/data` kept. A smaller `max_precedents` refuses growth, as on
-  one node ([licensing.md](licensing.md#over-the-cap-after-a-downgrade)).
+  fits (never the head); they become refused nodes, `/data` kept.
 - **Past grace, or Community:** sync stops. The head runs on as a standalone node with Community limits; the
   followers become `unlicensed` (`E_LICENCE_CLUSTER`), their data kept at their applied seq. A new key resumes the
   cluster from there.
@@ -333,7 +308,7 @@ One per thing that happened, who did it and how it ended:
 | `config.server_logs` | Server-side logging turned on or off |
 
 `actor.type` is `key` (its SHA-256, never the key), `sign-in` (the subject the server's introspection names), `local`,
-`server` (a link `deploy`) or `rrotor` (its own work, a re-encode). `client` is the request's address (the last
+`server` (a link `deploy`) or `rrotor` (its own work, a licence key read from its environment). `client` is the request's address (the last
 `X-Forwarded-For` hop the packages' proxy sets), kept locally and in the customer's drain only.
 
 **Kept** in `/data/audit/<YYYY-MM-DD>.jsonl`, one file a day, appended and fsynced per event; deleted past
@@ -360,7 +335,7 @@ The recommended setup: each rrotor (or the head, for the cluster) exports logs, 
   `rrotor.runtime.id`, `rrotor.cluster.id`, `rrotor.node.role`, `rrotor.mode`.
 - **Logs:** every line above as an OTLP log record. **Audit events:** OTLP log records with
   `event.name = rrotor.audit.<kind>` and the event's fields as attributes. **Metrics:** `rrotor.runs` (counter: model,
-  function, status), `rrotor.run.seconds` (histogram), `rrotor.precedents` (gauge per model, and the cap),
+  function, status), `rrotor.run.seconds` (histogram),
   `rrotor.link.state`, `rrotor.cluster.lag` (seqs behind the head, per follower), `rrotor.cluster.term`,
   `rrotor.drain.dropped`. **Traces:** a span per API request; child spans for the forward to the head, the sandbox's
   start, the function, the commit wait; the caller's `traceparent` honoured.
@@ -425,7 +400,7 @@ local or head-only per route.
 | The cluster secret differs on one node | Its TLS handshakes fail; it logs `cluster: peer certificate not from this cluster` and stays not ready |
 | The licence expires mid-run | Runs in flight finish. Within 14 days nothing changes. Past grace: sync stops, the head runs alone on Community limits, followers are `unlicensed`, out of the load balancer (data kept) |
 | Nodes configured as a cluster without a key that allows sync (none, Free, no `cluster_sync_enabled`, past grace) | No listener. One node serves, the designated head (the cluster's head as last known, else `RROTOR_CLUSTER_HEAD`, else the lowest node id); every other answers `/readyz` 503 `unlicensed` and the API 503 `E_LICENCE_CLUSTER` naming it, data kept, no link. A key with sync arriving clusters them; never two stores behind one load balancer |
-| A function marked `"writes": false` writes | `E_READ_ONLY` on a follower; the store is untouched |
+| A function marked `"writes": false` writes | `E_READ_ONLY` on a follower; its folders are untouched |
 | The disk fills on a follower | Apply fails; the node stops applying, goes not ready and logs it; the head keeps its entries until it returns or is evicted |
 | The drain's endpoint is down | Logs, metrics, traces buffered to `RROTOR_DRAIN_BUFFER` per signal, oldest dropped and counted; audit events resume from the cursor when it is back |
 | The head is down, `RROTOR_DRAIN_AT=head` | Followers buffer as above; the new head (or the old one, restarted) takes the batches |
@@ -479,10 +454,8 @@ so no runtime key can change the cluster.
 
 - **`hello`** gains `node_id`, `cluster_id` and `role`. Only a standalone node or a head opens the link. The
   server's `welcome` and the heartbeat's answer gain `license_key`.
-- **`usage`** from the head carries the cluster's key counts (summed from the followers each minute) and the synced
-  store's `precedents` once.
-- **The heartbeat**, from every node: `node_id`, `cluster_id`, `role`, `precedents` (this node's store)
-  ([licensing.md](licensing.md#5-the-heartbeat)).
+- **`usage`** from the head carries the cluster's key counts (summed from the followers each minute).
+- **The heartbeat**, from every node: `node_id`, `cluster_id`, `role` ([licensing.md](licensing.md#5-the-heartbeat)).
 - **The server** needs: `license_key` in `welcome` and the heartbeat's answer; the heartbeat's new fields stored per
   node (`node_id` within the runtime) and shown; a subject in the introspection answer for audit (`sub`); the
   OTLP receiver for server-side logging.
@@ -494,18 +467,17 @@ Each step ships on its own, keeps 100% coverage, and leaves a standalone rrotor 
 | # | Step | Tests | Proves |
 |---|---|---|---|
 | 1 | **The licence key** ([licensing.md](licensing.md)): the format, the embedded public key, every source, Community, grace, newest-wins, hourly re-read and `SIGHUP`, the heartbeat's `license_key`, the legacy mapping | `test_licence_key.py`, `test_heartbeat.py`, `test_daemon.py` | A node runs on no key, a bad key, a good key and an expired one, never crashing |
-| 2 | **The precedent cap per node**: `limit_exceeded`, replace-at-cap, merge capped, the downgrade behaviour, `precedents` in the licence view | `tests/sdk/test_ada.py`, `test_engine.py`, MCP | Every write path is capped; the caller sees `indexed: false`, never a failure |
+| 2 | **The precedent cap per node**: built, then removed with Ada (Ada and its limits live in Ada Cloud) | | |
 | 3 | **Structured logs and audit events**: the fields, the audit store, rotation and retention, `GET /v1/audit`, `audit_query`, Enterprise-gated | `test_audit.py`, routes, MCP | Who called what is recorded, kept and queried locally; nothing redacted leaks (a test feeds secrets and payloads and greps every output) |
 | 4 | **Drains**: the OTel SDK, OTLP over HTTP, the resource attributes, buffer and drop, the audit cursor, `RROTOR_SERVER_LOGS` with its warning | `test_drain.py` against an in-process fake collector | Signals reach a collector; a down endpoint loses only the oldest logs and no audit event |
 | 5 | **The cluster's skeleton**: settings, node id, the `:7778` listener, the derived CA and mTLS, `hello`, peers by list and DNS, bootstrap, join with `max_nodes`, `/readyz`, `GET /v1/cluster`, `cluster_status`, sync gated by the key. Nothing replicates yet | `tests/daemon/cluster/` with N daemons in one event loop | Nodes find and authenticate each other; a foreign secret is refused; the node past `max_nodes` is refused; Community never listens |
-| 6 | **Replication with a fixed head**: the `writes` manifest key, read-only follower runs (kernel 3.10's read-only open), forwarding, run-id holders, change capture, the log, apply, `Rrotor-Cluster-Seq`, snapshots and catch-up, `deploy`, `keys` and `licence` entries, the head-only link and summed `usage` | Two and three daemons with fake sandboxes and a real SQLite store; the image job with a real kernel | A record on any node is read on every node; `learn` on the head changes every follower's answers; a new node catches up; a follower never writes |
+| 6 | **Replication with a fixed head**: the `writes` manifest key, read-only follower runs, models with data on the head only, forwarding, run-id holders, the log, apply, `Rrotor-Cluster-Seq`, snapshots and catch-up, `deploy`, `keys` and `licence` entries, the head-only link and summed `usage` (the Ada store's change capture, built here, went with Ada) | Two and three daemons with fake sandboxes | A write on any node runs on the head; a read stays local; a new node catches up; a follower never writes |
 | 7 | **Manual failover (Pro, Team)**: terms and fencing, `rrotord cluster promote`, lag shown, `--force`, a rejoining old head discarding its tail | The simulation (below) | Writes resume on the promoted node; no node accepts a lower term |
 | 8 | **Elected heads (Enterprise)**: votes, timeouts, majority commit, voters and learners, `E_NOT_COMMITTED`, `E_NO_HEAD` with `Retry-After`, SDK retries | A deterministic simulation: a seeded scheduler over in-memory transports, crashes, partitions, delays and restarts across thousands of seeds; it checks one head per term, no committed entry lost, every replica equal at the end | Raft's safety on our transport, not by argument |
 | 9 | **The aggregate drain**: followers' `telemetry` to the head, `RROTOR_DRAIN_AT`, the cluster audit store | Three daemons and a fake collector | One endpoint sees every node's signals with each node's identity |
 | 10 | **The packages** (below) and the self-hosting docs | CI's `deploy` job: `helm template` with `cluster.enabled`, Compose `config`, `terraform validate` | They render; a three-node Compose cluster comes up in the image job |
 
-Outside this repo, before step 6 ships: the kernel's read-only open (`glyphh-ai/ada-private`, kernel 3.10) and the
-Ada skill's `"writes"` (`glyphh-ai/glyphh`). Before step 1: `license_key` from the server. Before step 4's
+Outside this repo, before step 1: `license_key` from the server. Before step 4's
 server-side logging: the server's OTLP receiver.
 
 ## 12. The packages
@@ -534,7 +506,7 @@ server-side logging: the server's OTLP receiver.
 
 1. Should a key be bound to one runtime (a `runtime_id` in the payload)? Unbound, one customer's key serves any
    number of clusters, each held to `max_nodes`; bound, a key per runtime and more for the server to issue.
-2. Team's 500,000 precedents per node (TBD): confirm, given about 16 KB of RAM per precedent (8 GB per node).
+2. (Closed: Team's precedents per node were Ada's, now Ada Cloud's, not rrotor's.)
 3. HA as defined here: Pro and Team fail over by restart or by hand, Enterprise automatically. Or automatic for
    Team too?
 4. Is the audit log Enterprise only, as decided, while drains (of logs, metrics and traces) are on every plan,

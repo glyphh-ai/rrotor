@@ -1,7 +1,8 @@
 # rrotor architecture
 
-rrotor is the runtime a person's Ada models run in: one headless Linux image that deploys a model by commit, runs
+rrotor is a local runtime for a person's models: one headless Linux image that deploys a model by commit, runs
 each call in a sandbox with no network but the hosts it declares, and answers over REST and MCP at its own address.
+Ada models are not run here: they run in Ada Cloud, on the Glyphh server.
 This document is how its parts work and call each other. The system around it (accounts, plans, the data model,
 provisioning) is in `glyphh-ai/server`, `docs/architecture.md`; running your own is in
 [`self-hosting/`](self-hosting/README.md). What is decided but not built is in [Not built yet](#not-built-yet), with its build specs in
@@ -11,7 +12,7 @@ provisioning) is in `glyphh-ai/server`, `docs/architecture.md`; running your own
 
 | Part | What it is |
 |---|---|
-| **Claude** | Claude Code, the Claude apps or any MCP client. It has the runtime as a connector and, with the `glyphh` plugin (`glyphh-ai/glyphh`), the Ada skill: how to write, deploy and call an Ada model with the runtime's own tools |
+| **Claude** | Claude Code, the Claude apps or any MCP client. It has the runtime as a connector: it writes, deploys and calls a model with the runtime's own tools |
 | **Apps** | Anyone's software, calling the runtime's REST API with a runtime key, directly or through the SDKs (`glyphh` on PyPI, `@glyphh-ai/glyphh` on npm, both in `glyphh-ai/glyphh`) |
 | **rrotor** | This repo: the daemon `rrotord` and the model SDK `rrotor`, in the image `ghcr.io/glyphh-ai/rrotor`. One per volume |
 | **The Glyphh server** | `https://api.glyphh.ai`: provisions hosted machines, makes runtime keys and runtime tokens, signs the licence key, vouches for a Glyphh sign-in, and holds the runtime's link. Never on the data path |
@@ -76,8 +77,8 @@ only the keys' SHA-256s ([7](#7-the-api)).
 
 ### 2.2 Build, deploy and call
 
-A model is a GitHub repo; a version is a commit. Claude, following the Ada skill, writes the model with the person,
-pushes it, and deploys the commit through the runtime's own MCP.
+A model is a GitHub repo; a version is a commit. Claude writes the model with the person, pushes it, and deploys the
+commit through the runtime's own MCP.
 
 ![Deploy and call](img/seq-deploy-call.png)
 
@@ -85,27 +86,25 @@ pushes it, and deploys the commit through the runtime's own MCP.
 sequenceDiagram
     autonumber
     actor P as Person
-    participant C as Claude, with the Ada skill
+    participant C as Claude
     participant GH as GitHub
     participant R as rrotor
     participant G as Glyphh server
-    P->>C: "Remember our incidents and suggest the fix"
-    C->>C: writes spec.json, glyphh.json, model.py and its tests, commits
+    P->>C: "Each morning, post yesterday's sales to the ledger"
+    C->>C: writes glyphh.json, model.py and its tests, commits
     C->>GH: git push to the person's repo
     C->>R: model_deploy {repo, commit, token?}
     R->>GH: fetch exactly that commit
-    R->>R: check the SHA and the manifest, make the venv, check the Ada spec
+    R->>R: check the SHA and the manifest, make the venv
     R-->>C: {model, version, commit_sha}
     R-)G: deployed {model, version, commit_sha, repo, manifest}
-    C->>R: model_call record, for each past case, then learn
+    C->>R: model_call start {day}
     R->>R: a sandbox per run: load, the function, end
-    R-->>C: Result done {data}
-    C->>R: model_call decide {data}
-    R-->>C: Result needs_input {run_id, prompt}
-    P->>C: the answer
+    R-->>C: Result needs_approval {run_id, step, prompt}
+    P->>C: approve
     C->>R: model_continue {run_id, answer}
     R-->>C: Result done {data}
-    R-)G: usage {keys, precedents}, at most once a minute
+    R-)G: usage {keys}, at most once a minute
 ```
 
 - **Deploy by commit:** `model_deploy` (and `POST /v1/models/deploy`) takes `{repo, commit, token?}`: `repo` is
@@ -117,9 +116,8 @@ sequenceDiagram
   App.
 - **Every deploy is reported** up the link as `deployed`, however it was asked for, so the server records every
   model and version on the runtime.
-- **The samples:** `examples/ada_incidents/` and `examples/ada_tickets/` are Ada models ([8](#8-ada));
-  `examples/daily_sales/` is a model that needs no part, used to test the base end to end: it reads a sales export
-  from its folder, converts the total with one declared host, asks approval for its `write` step and writes a
+- **The sample:** `examples/daily_sales/` is a model that needs no part, used to test the base end to end: it reads
+  a sales export from its folder, converts the total with one declared host, asks approval for its `write` step and writes a
   ledger.
 
 ## 3. Hosted machines
@@ -145,7 +143,7 @@ sequenceDiagram
     W->>G: POST /v1/runtimes {name, size}
     G->>F: the doorman with the first machine, then a volume and a machine
     Note over G,F: RROTOR_MODE=hosted, RROTOR_SERVER, RROTOR_RUNTIME_ID, RROTOR_RUNTIME_TOKEN, RROTOR_PUBLIC_DOMAIN
-    F->>R: boot: the built-in Ada part installed
+    F->>R: boot
     R->>G: WebSocket /v1/runtime/link, hello {mode: hosted}
     G-->>R: welcome {license_key, keys}
     Note over F,R: idle, Fly's proxy stops the machine
@@ -184,15 +182,15 @@ flowchart TB
         subgraph S["a sandbox per run: bwrap, Landlock, seccomp, rlimits"]
             Model["the model, with the rrotor SDK<br/>load, function, end"]
         end
-        Ada["parts on /data/parts<br/>ada: the kernel and numpy"]
+        Installed["parts on /data/parts<br/>what a model's manifest needs"]
         Data[("/data")]
         Tini --> D
         Gate --> API
         API --> Runner
         Runner --> S
-        Parts --> Ada
+        Parts --> Installed
         Model -- "HTTPS via 127.0.0.1:3128, a unix socket out" --> Proxy
-        Model -. "read-only at /opt/parts/ada" .-> Ada
+        Model -. "read-only at /opt/parts/name" .-> Installed
         Runner --> Data
     end
     Callers["Claude and apps"] -- "HTTPS, Bearer" --> Gate
@@ -243,7 +241,7 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 | `models/<name>/versions/<commit>/` | A deployed version: `src/` (the checkout), `venv/`, `version.json`; immutable |
 | `models/<name>/active.json` | Which version is active |
 | `models/<name>/files/` | The model's own folder, seeded from the commit's `files/` on its first deploy |
-| `models/<name>/data/` | Its persistent data, outside git (an Ada model's `precedents.sqlite`) |
+| `models/<name>/data/` | Its persistent data, outside git (`"data": true`) |
 | `runs/<run_id>/` | Each run's `run.json` (with its checkpoints) and `log.jsonl` |
 | `parts/<name>/<version>/`, `parts/<name>/current` | An installed part, and the version in use |
 | `audit/<YYYY-MM-DD>.jsonl`, `audit/.cursor`, `audit/.cursor-glyphh` | Enterprise: the audit log, a file a day; how far the customer's drain and server-side logging have read it ([13](#13-logs-audit-and-drains)) |
@@ -253,7 +251,7 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 Node 22, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates; in rrotord's venv, the OpenTelemetry
 SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests). No browser, no database. It runs as
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
-is the `hosted` target: the base with the Ada part in `/opt/parts-builtin`, installed at boot ([11](#11-the-image-and-ci)).
+is the `hosted` target: the base, with no part built in ([11](#11-the-image-and-ci)).
 
 ## 5. A model
 
@@ -267,24 +265,20 @@ A git repo; a version is a commit.
 | `model.py` | `load`, the functions, `end` |
 | `requirements.lock` | Optional: its Python dependencies, pinned with hashes, installed at deploy, never at run |
 | `files/` | Optional: seed files, copied into its folder on the first deploy |
-| `spec.json` | An Ada model's spec ([8](#8-ada)) |
 
 ### 5.2 The manifest: `glyphh.json`
 
 ```json
 {
-  "name": "incidents",
-  "description": "An app's incidents, remembered: the fix for a new error",
+  "name": "daily_sales",
+  "description": "A day's sales, added up, converted to euros, and written to its ledger once approved",
   "python": "3.13",
   "functions": {
-    "record": { "writes": true, "inputs": { "type": "object", "required": ["data"] } },
-    "query": { "writes": false, "inputs": { "type": "object", "required": ["data"] } },
-    "decide": { "writes": true, "inputs": { "type": "object", "required": ["data"] } },
-    "start": {}
+    "start": { "writes": true, "approvals": ["write"], "inputs": { "type": "object" } },
+    "summary": { "writes": false }
   },
-  "needs": ["ada"],
-  "data": true,
-  "limits": { "seconds": 300, "memory_mb": 512 }
+  "hosts": ["api.frankfurter.dev"],
+  "limits": { "seconds": 60, "memory_mb": 256 }
 }
 ```
 
@@ -293,11 +287,11 @@ A git repo; a version is a commit.
 | `name` | `^[a-z][a-z0-9_]{0,62}$`; a deploy names the model by it |
 | `version` | Optional, 1 or more |
 | `description`, `python` | Free text; `python` must be `3.13` |
-| `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it changes what a cluster syncs: `true` runs it on the cluster's head, `false` on whichever node the call reaches, read-only there; default the model's `data`) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
+| `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it runs on a cluster's head: `true` runs it there, `false` on whichever node the call reaches, read-only there; default the model's `data`; every call of a model with `data` runs on the head whatever it says) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
 | `hosts` | The hosts a run may reach on 443 (`*.example.com` allowed) |
-| `needs` | The parts it imports from, by name (`["ada"]`) ([10](#10-parts)) |
+| `needs` | The parts it imports from, by name ([10](#10-parts)) |
 | `data` | `true` mounts its persistent data folder at `/data` |
-| `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run. An Ada run holds its whole store, 4 bytes a dimension per precedent and doubled as it grows: at 4,096 dimensions 512 fails from 4,096 precedents, so the Ada examples set 1024, which holds Community's 5,000 (`tests/test_examples_memory.py`); a bigger cap needs more |
+| `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
 | `secrets`, `databases`, `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `model.py` does not
@@ -309,7 +303,7 @@ The `rrotor` package, standard library only, ships in the image and is mounted r
 `/opt/rrotor`: models import it and never install it.
 
 ```python
-from rrotor import Ctx, Result, ada
+from rrotor import Ctx, Result
 
 Result.done(data)                                     # finished, with data (JSON)
 Result.needs_input(prompt, schema=None, options=None) # a value or a choice
@@ -324,13 +318,12 @@ ctx.checkpoint(key, fn)       # fn runs once per run; a resumed run reads the st
 ctx.http                      # HTTPS to the declared hosts (any library works too: HTTPS_PROXY is set)
 ctx.files                     # its folder, a pathlib.Path
 ctx.data                      # its persistent data folder ("data": true), else None
-ctx.home                      # its code (spec.json beside model.py)
-ctx.clearance                 # who asks, 0 to 1; 1 unless the call says
+ctx.home                      # its code (the folder model.py is in)
+ctx.clearance                 # who asks, 0 to 1; 1 unless the call says (the model decides what it means)
 ctx.caller                    # who called
-ctx.limits                    # an Ada model's precedent cap, from the licence key (8)
+ctx.readonly                  # a cluster follower's run: its folders are read-only
 ctx.log(message, **detail)
 ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
-ada.open(ctx)                 # an Ada model: the spec and the store, on ctx.ada (8)
 ```
 
 - **Approvals and inputs are re-entrant.** A `continue` calls the same function again with the same inputs: steps
@@ -385,7 +378,7 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 | up | `result` | `seq`, `run_id`, the `Result`, seconds: only for a run a `call` opened |
 | up | `deployed` | model, version, commit SHA, `repo` (null unless from a repo), `manifest`; after **every** deploy, by any route; not numbered, kept until acknowledged |
 | up | `event` | `seq`, model, kind, data: `deploy_failed` `{version, commit_sha, code, message}` when a `deploy` or `activate` cannot be done |
-| up | `usage` | `seq`, `keys` (each runtime key that let a request in: `{key_sha256, calls, last_used_at}`), `precedents` (the runtime's total across its Ada models) |
+| up | `usage` | `seq`, `keys` (each runtime key that let a request in: `{key_sha256, calls, last_used_at}`) |
 | both | `ping`, `pong` | every 20 s |
 | both | `ack` | `of`: the `id` acknowledged (the server acks every `result`, `event`, `usage` and `deployed`) |
 
@@ -398,19 +391,14 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
   restarting, and any other close or a dropped connection: reconnect with backoff. A `welcome` not heard within
   10 s of `hello` closes and reconnects.
 - **`usage`, and never more:** the gate counts, in memory, one call per request a runtime key let in (a 401 or 402
-  is not a call; a Glyphh sign-in or the local token is no key). Every 60 s, when there were calls or the
-  precedents are due, one numbered `usage` goes up; the daemon flushes once more when it stops. Calls in the minute
-  before a crash are lost. Never a call's inputs, outputs or the key itself:
+  is not a call; a Glyphh sign-in or the local token is no key). Every 60 s, when there were calls, one
+  numbered `usage` goes up; the daemon flushes once more when it stops. Calls in the minute before a crash are lost.
+  Never a call's inputs, outputs or the key itself:
 
   ```json
-  {"type": "usage", "id": "<hex>", "seq": 7, "keys": [{"key_sha256": "<hex>", "calls": 2, "last_used_at": "2026-10-18T09:00:00+00:00"}], "precedents": 1200}
+  {"type": "usage", "id": "<hex>", "seq": 7, "keys": [{"key_sha256": "<hex>", "calls": 2, "last_used_at": "2026-10-18T09:00:00+00:00"}]}
   ```
 
-- **`precedents`:** every model with a version that needs `ada` has its store counted without the kernel and
-  without writing (`rrotor.ada.count`, `rrotord/precedents.py`), every nine minutes on the minute's tick. The total
-  is due once after each start and then whenever it differs from the one last reported (with `keys: []` if there
-  were no calls). A store that does not read is logged and the reading before stands; until one has read, `usage`
-  carries no `precedents`.
 - **`secret_set`** is parsed and logged `E_NOT_BUILT`; the link stays.
 - **Runs called at the runtime's address** stay on it: their results never go up the link.
 - **The link off** (`RROTOR_LINK=off`, self-hosted only) means no link, no heartbeat and no introspection.
@@ -483,7 +471,7 @@ with the refusal's code to everything but `/healthz`, `/readyz`, `/v1/health` an
 ([14](#14-the-cluster)).
 
 **In a cluster** ([14](#14-the-cluster)) every route and tool answers the same on every node: a follower sends a
-writing call (`"writes": true`, or any call of a model with data but no Ada), a deploy, and anything about a run
+writing call (`"writes": true`, or any call of a model with data), a deploy, and anything about a run
 another node holds (run ids are `<node id>~<uuid>`) to its head, which does it as the same caller; `GET
 /v1/approvals` gathers every node's. A member's answers carry `Rrotor-Cluster-Seq` (the head's last seq, a
 follower's applied one); a follower that forwarded a write answers once it has applied it (up to 2 s), and a request
@@ -494,76 +482,26 @@ node no longer in the cluster: 410 `E_RUN_LOST`.
 
 ## 8. Ada
 
-An Ada model is a typed spec and a precedent store, run as a model: a repo with `glyphh.json` (`"needs": ["ada"]`,
-`"data": true`), `spec.json` (what a case looks like, its `seed` and `dimension`) and `model.py`, whose functions
-call the kernel through `rrotor.ada`. How to write one is the Ada skill (`glyphh-ai/glyphh`,
-`plugins/glyphh/skills/ada/SKILL.md`); the kernel is `glyphh-ai/ada-private`.
-
-```python
-from rrotor import Result, ada
-
-def load(ctx):
-    ada.open(ctx)          # the spec read, the store opened: the kernel's Model on ctx.ada
-
-def record(ctx, inputs):
-    return Result.done({"id": ctx.ada.record(inputs["data"], inputs.get("outcome"))})
-
-def query(ctx, inputs):
-    return Result.done(ctx.ada.query(inputs["data"], clearance=ctx.clearance).to_json())
-```
-
-- **The part:** the kernel and numpy, built into the published image and installed at boot ([10](#10-parts)); a
-  model imports them because its manifest needs `ada`.
-- **The store** is `precedents.sqlite` in the model's data folder (`/data/models/<name>/data`, mounted at `/data`),
-  so it outlives every version.
-- **Checked at deploy:** an Ada model without `"data": true` or without a readable `spec.json` is refused
-  (`E_MANIFEST`). A changed encoding (the spec's `seed` or `dimension`) between the active version and the new one
-  makes rrotor run `rrotor.ada.reencode` in the new version's sandbox before it goes active: every precedent's glyph
-  rebuilt from its recorded situation. If that fails, the deploy is refused (`E_ADA_ENCODING`), the version before
-  stays active and the new one is not kept.
-- **`clearance`** (0 to 1) comes with the call (`clearance` on `POST /v1/runs` and `model_call`), never from the
-  inputs; the model passes `ctx.clearance` to the kernel, which cuts what a reader below a layer's
-  `security_weight` may see.
-- **The precedent cap:** the licence key's `max_precedents` ([9](#9-the-licence)): Community's 5,000 with no key,
-  null (unlimited) on Enterprise, per node across all its Ada models. When an Ada run starts, the runner counts the
-  other Ada models' stores and hands the run `limits.precedents_elsewhere` beside `limits.precedents` and `plan`;
-  `rrotor.ada` wraps the kernel's two paths that grow a store: `record` with a new id is refused once the model's
-  own count plus that has reached the cap (one whose id the store holds replaces its row and goes), and
-  `space.merge(path)` is refused, whole, when the rows it would add pass it. `learn`, `calibrate`, `refresh`,
-  `configure`, a re-encode and a deploy are never checked. Refused, it raises `rrotor.ada.LimitExceeded`, which a
-  model may catch; uncaught, the run ends **`done`**, never `failed`, with `{"status": "limit_exceeded", "indexed":
-  false, "message": "Precedent store capacity limit reached (50,000 max for the Pro plan). Upgrade the key to index
-  further precedents.", "precedents": 50000, "cap": 50000}` as its data (REST 200, MCP's `model_call` result, not a
-  tool error); the precedents recorded earlier in the run stay. Nothing is counted on the hot path, so runs of
-  different models at the same time can overshoot by what they record meanwhile; the next run of each is refused.
-  A store over the cap (after a downgrade) keeps every row and answers queries, `learn` and settings; only growth is
-  refused, `GET /v1/licence` shows `precedents.over: true` and the nine-minute count logs a warning once per change.
-  A store that does not read counts none (logged).
-- **Size:** about 16 KB of RAM per precedent.
-- **The examples,** each with its tests on `rrotor.testing.Harness` and the kernel in `tests/kernel/`:
-  `examples/ada_incidents/` (an app's incidents: the fix for a new error, and the nearest precedent's cause, owner
-  and runbook for a cleared caller) and `examples/ada_tickets/` (support-ticket triage). Both have `record`,
-  `query`, `facts`, `probabilities`, `learn` (weights and calibration from the store's own precedents),
-  `settings` (the model's levers, read or changed live), `decide` (asks for the outcome when no answer is good
-  enough) and `start`.
+rrotor runs no Ada models. Ada lives in Ada Cloud, one multi-tenant service on the Glyphh server. There is no Ada
+SDK, part, precedent store or precedent cap here.
 
 ## 9. The licence
 
-rrotor runs with no key at all, as **Community** (one node, 5,000 precedents, no sync); a signed **licence key**,
-checked on the node with no network request, lifts those limits to its own (`rrotord/licence_key.py`,
-`rrotord/licence.py`). Built as [`specs/licensing.md`](specs/licensing.md) sections 1 to 4 decide: the node cap is
-enforced at join, sync is gated by the key, and in a cluster the precedent cap is held by the head, the only
-writer, on the synced store every node holds ([14](#14-the-cluster)); HA (a cluster electing its own head) is
-`tier: enterprise` with sync, shown as `ha`.
+rrotor runs with no key at all, as **Community** (one node, no sync); a signed **licence key**, checked on the node
+with no network request, lifts those limits to its own (`rrotord/licence_key.py`, `rrotord/licence.py`). Built as
+[`specs/licensing.md`](specs/licensing.md) sections 1 to 4 decide: the node cap is enforced at join and sync is
+gated by the key ([14](#14-the-cluster)); HA (a cluster electing its own head) is `tier: enterprise` with sync,
+shown as `ha`.
 
-- **The plans** (the server's policy for what it signs; rrotor acts on the key's own numbers): Free $0 (1 node,
-  5,000 precedents), Pro $99/month (3, 50,000), Team $299/month (10, 500,000), Enterprise by contract (unlimited,
-  HA, the audit log). Keys expire at the end of the paid month and the next arrives at the heartbeat.
+- **The plans** (the server's policy for what it signs; rrotor acts on the key's own numbers): Free $0 (1 node),
+  Pro $99/month (3), Team $299/month (10), Enterprise by contract (unlimited, HA, the audit log). Keys expire at the
+  end of the paid month and the next arrives at the heartbeat.
 
 - **The key:** `<base64url payload>.<base64url signature>`, base64url without padding; Ed25519 over the payload's
   exact bytes. The payload is UTF-8 JSON: `license_id` (UUID), `tier` (`free`, `pro`, `team`, `enterprise`),
-  `max_nodes` (≥ 1, or null), `max_precedents` (≥ 0, or null: unlimited), `cluster_sync_enabled`, `issued_at`,
-  `expires_at` (RFC 3339 UTC) and `customer_id`. Unknown fields are ignored; one missing or mistyped makes it bad.
+  `max_nodes` (≥ 1, or null), `cluster_sync_enabled`, `issued_at`, `expires_at` (RFC 3339 UTC) and `customer_id`.
+  Unknown fields are ignored; one missing or mistyped makes it bad. The server also writes `max_precedents`, Ada
+  Cloud's limit: rrotor does not read it.
 - **The public key is in the code** (`licence_key.PUBLIC_KEYS`: Glyphh's, and the next during a rotation); a key is
   good if any of them verifies it. `RROTOR_LICENCE_PUBLIC_KEY` is no longer read: whoever sets the environment could
   then sign their own.
@@ -576,27 +514,26 @@ writer, on the synced store every node holds ([14](#14-the-cluster)); HA (a clus
   every start and re-read (`licence key refused: <why>`), state `bad`, Community; never a failed start. Good: the
   key's limits, `live`; past `expires_at` 14 days' grace (`GRACE_DAYS`, rrotor's constant) with the key's limits,
   `grace` and `days_left`, a warning daily; past that, `expired`, Community, a warning daily.
-- **Nothing a licence does refuses a run:** an Ada model runs with no key; the worst case is Community's cap.
+- **Nothing a licence does refuses a run:** a model runs with no key; the worst case is Community's limits.
 - **The legacy licence** (release N only): the server's `{payload, signature}` over canonical JSON, wherever one
-  arrives, mapped: `plan` as the tier (unknown: `free`), `max_nodes` and `max_precedents` from the plan table (Pro 3
-  and 50,000, Team 10 and 500,000, Enterprise unlimited), `features.sync` as `cluster_sync_enabled`, `expires_at`
+  arrives, mapped: `plan` as the tier (unknown: `free`), `max_nodes` from the plan table (Pro 3, Team 10,
+  Enterprise unlimited), `features.sync` as `cluster_sync_enabled`, `expires_at`
   plus `grace_days` as `expires_at`; refused if it names another runtime. A key is preferred to it.
 - **`GET /v1/licence` and the health:** `{tier, community, license_id, customer_id, source, issued_at, expires_at,
-  state (live, grace, expired, bad, none), days_left, max_nodes, max_precedents, cluster_sync_enabled, ha,
-  precedents: {held, cap, over}}`, the limits those that apply now, `held` the node's count ([8](#8-ada)).
+  state (live, grace, expired, bad, none), days_left, max_nodes, cluster_sync_enabled, ha}`, the limits those that
+  apply now.
 
 ## 10. Parts
 
-A **part** is what a model needs beside the base. One is built: **ada**, the Ada kernel (`glyphh_kernel.py`,
-`glyphh_spec.py`, `glyphh_nsm.py`, `glyphh_lexicon.py` and its lexicon) and numpy (`parts/ada/`).
+A **part** is what a model needs beside the base: the databases (`postgres`, `mongodb`, `neo4j`, rrotor's own) or
+any part a manifest names in `needs`. None is built yet, and the image carries none.
 
 - **What a part is:** a gzipped tarball with `part.json` at its top, `{name, version, mod, arch (amd64 | arm64 |
   any), rrotor (the lowest base version it needs), env: {PYTHONPATH: [folders]}, services}`, and its tree
   (`lib/`). `scripts/part.py build <folder>` makes one, deterministically, with its SHA-256 and its Ed25519
   signature by Glyphh's release key (`RROTOR_RELEASE_KEY`); `scripts/part.py keygen` makes a pair.
-- **Where it comes from:** CI builds the Ada part for both architectures and publishes it as the release
-  `part-ada-<kernel version>` (`<name>-<version>-<arch>.tar.gz`, `.sha256`, `.sig`); the published image carries it
-  in `/opt/parts-builtin` and installs it at boot, this architecture's only.
+- **Built in:** an image may carry parts in `/opt/parts-builtin` (`<name>-<version>-<arch>.tar.gz` with its
+  `.sha256` and `.sig`), installed at boot, this architecture's only; the published image carries none.
 - **Install, upgrade, remove** (a local rrotor; hosted and self-hosted take the image's): `POST /v1/parts` (the archive in base64, or a URL fetched up to 256 MB), `GET
   /v1/parts`, `DELETE /v1/parts/{name}`. rrotor checks the hash and the
   signature with `RROTOR_RELEASE_PUBLIC_KEY` before it unpacks anything, then `part.json` (the part asked for, this
@@ -611,10 +548,9 @@ A **part** is what a model needs beside the base. One is built: **ada**, the Ada
 
 | Job | What |
 |---|---|
-| `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the examples' tests |
+| `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the sample model's tests |
 | `deploy` | Compose (the air-gapped overlay, the cluster file and the per-node file, which refuses to render without its node's settings) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file (one replica, and two clusters of three), `terraform fmt -check` and `validate` for both modules and their examples (one node and a cluster). Nothing is started |
 | `image` | Builds the base and runs the sandbox tests inside it; starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off`; with the secret `CI_CLUSTER_LICENSE_KEY` (a key with cluster sync), brings up the three-node Compose cluster and checks every node ready, `rrotor-0` the head of three |
-| `part-ada` (main) | Clones `glyphh-ai/ada-private` at `main` (`ADA_KERNEL_TOKEN`), builds and signs the Ada part for amd64 and arm64 (`RROTOR_RELEASE_KEY`), publishes the release `part-ada-<version>` |
 | `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with the release public key baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |
 
 The version is `pyproject.toml`'s; a new version is a new image tag.
@@ -631,10 +567,9 @@ container's privileges, the outbound connections, backups and upgrades are in
 `E_CONFIG`, naming the variable.
 
 - **The heartbeat** (`rrotord/heartbeat.py`): at boot and every 24 hours, `POST {RROTOR_SERVER}/v1/license/verify`
-  with the runtime token and exactly `{machine, licence_id, version, active_runs, node_id, cluster_id, role,
-  precedents}` (`node_id` is `RROTOR_NODE_ID`, else the hostname; `cluster_id` and `role` the cluster's and
-  this node's, `head` or `follower`, else null and `standalone` ([14](#14-the-cluster)); `precedents` the node's
-  count); the answer's `license_key` is offered as a key. A failure is
+  with the runtime token and exactly `{machine, licence_id, version, active_runs, node_id, cluster_id, role}`
+  (`node_id` is `RROTOR_NODE_ID`, else the hostname; `cluster_id` and `role` the cluster's and this node's, `head`
+  or `follower`, else null and `standalone` ([14](#14-the-cluster))); the answer's `license_key` is offered as a key. A failure is
   logged and shown in the health, and tried again after a minute, doubling to an hour; it never stops rrotor.
 - **What the container lacks:** when bwrap cannot start, a self-hosted rrotor reads from `/proc` what is in its way
   (its seccomp mode, its AppArmor profile, mounts over `/proc`, the user-namespace sysctl) and puts it in the
@@ -677,8 +612,7 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
   `rrotor.runtime.id`, `rrotor.cluster.id` (in a cluster), `rrotor.node.role` (`standalone`, `head` or `follower`,
   as it is when the batch goes), `rrotor.mode`, and `OTEL_RESOURCE_ATTRIBUTES`. Log lines are log records (the
   line's fields as attributes); audit events are log records named `rrotor.audit.<kind>`. Metrics: `rrotor.runs`
-  (model, function, status), `rrotor.run.seconds`, `rrotor.precedents` (per model) and `rrotor.precedents.cap`,
-  `rrotor.link.state`, `rrotor.drain.dropped` (per destination and signal), and on a member `rrotor.cluster.term`
+  (model, function, status), `rrotor.run.seconds`, `rrotor.link.state`, `rrotor.drain.dropped` (per destination and signal), and on a member `rrotor.cluster.term`
   and, on the head, `rrotor.cluster.lag` (per follower, the seqs it last acknowledged behind the head's log). Traces
   (`OTEL_TRACES_SAMPLER`, default `parentbased_always_on`): a span per API request, a child of the caller's
   `traceparent`, with `rrotor.sandbox.start` and `rrotor.function` under it; on a follower `rrotor.cluster.forward`
@@ -731,16 +665,17 @@ Built as [`specs/cluster.md`](specs/cluster.md) build order steps 5 to 10 decide
 failover and elected heads (`rrotord/cluster/`), the cluster's drain and audit store at the head
 ([13](#13-logs-audit-and-drains)), and the packages that run it. Several self-hosted rrotors of one runtime find and authenticate each other, one
 makes the cluster and is its **head**, the rest join it as **followers** up to the key's `max_nodes`. The head is the
-single writer of what syncs (each Ada model's precedent store, the deployed versions, the runtime keys, the licence
-key) and ships it to every follower as one ordered log; followers serve every read from their replica and forward
-every write to the head.
+single writer of what syncs (the deployed versions, the runtime keys, the licence key, the members) and ships it to
+every follower as one ordered log. No model's state replicates: a model with data keeps it in its data folder on the
+head, and every call of it runs there. Followers run the reads of models without data themselves and forward every
+write to the head.
 
 - **On, and gated by the key:** `RROTOR_CLUSTER=on` (a self-hosted rrotor only) starts the cluster's transport only
   while the licence key held has `cluster_sync_enabled`. Under Community, or a key without it, the listener never
   starts: rrotor logs `cluster synchronisation disabled under the Community licence` (or `under this licence`) at
   warning.
-- **An unlicensed cluster serves from one node, never from divergent stores.** Without sync each node would keep its
-  own store behind the one load balancer, and an answer would depend on the node it reached. So with the cluster on
+- **An unlicensed cluster serves from one node, never from divergent copies.** Without sync each node would keep its
+  own versions, keys and data behind the one load balancer, and an answer would depend on the node it reached. So with the cluster on
   and no key that allows sync (none, Free, a key without `cluster_sync_enabled`, or past grace) exactly one node
   serves, the **designated head**: the cluster's head as the node last knew it; else `RROTOR_CLUSTER_HEAD`; else the
   lowest node id among the peers (an address's host or its first label; an IP address stands for itself, matched
@@ -805,7 +740,7 @@ every write to the head.
 - **State:** `/data/cluster/state.json`: this node's random instance id, the cluster id, the term and the vote
   given in it, the head and its address, the members (id, address, version, instance, joined at, voter), the
   configuration's (seq, term) and the one before it, the nodes that left, the seq applied, and `stale` (a deposed
-  head's stores may hold writes no log has). A restarted node finds its head again from it.
+  head may hold writes no log has). A restarted node finds its head again from it.
 - **Terms and fencing** (Raft's rules, `cluster/raft.py`, on our own log and transport): every `append`,
   `snapshot`, `vote`, `join` and `forward` carries the sender's term. A node refuses anything of a lower term,
   answering its own, and takes a higher one at once. A head that sees a higher term (in an answer, a vote, a forward
@@ -843,12 +778,11 @@ every write to the head.
   `cluster` ([7](#7-the-api)); the heartbeat's `cluster_id` and `role` ([12](#12-self-hosting)); `cluster_id` and
   `role` on every log line and `cluster_id` on every audit event, and the drain's resource
   ([13](#13-logs-audit-and-drains)).
-- **Which calls write** (`manifest.py`): each function's `"writes"`, default the model's `data` (the examples
-  and the Ada skill mark `query`, `facts` and `probabilities` false). A follower runs a `false` one itself, with
-  `/files` and `/data` mounted read-only (`--ro-bind`, and Landlock read-only) and the Ada store opened with the
-  kernel's read-only mode (`Model(..., readonly=True)`, kernel 3.10): a function marked `false` that writes fails
-  `E_READ_ONLY`, naming it, and the store is untouched. A model with data but no Ada keeps state no replication
-  carries: every call to it runs on the head. An older kernel cannot open a store read-only: `E_ADA_KERNEL`.
+- **Which calls write** (`manifest.py`): each function's `"writes"`, default the model's `data`. Every call of a
+  model with `"data": true` runs on the head (`head_only`), whatever its functions say: its data folder never
+  replicates. A follower runs a `false` function of a model without data itself, with `/files` mounted read-only
+  (`--ro-bind`, and Landlock read-only; `ctx.readonly` is true): a function marked `false` that writes fails
+  `E_READ_ONLY`, naming it, and the folder is untouched.
 - **Forwarding** (`api/forward.py`, `cluster/node.py`): a writing call, a deploy, and continue, cancel, status and
   log of a run another node holds go to the head over the cluster transport (`forward {op, args, who, target,
   deadline}`), with the caller as data (its actor, address and route), and the head does them as that caller: its
@@ -856,17 +790,10 @@ every write to the head.
   follower is passed on by the head (410 `E_RUN_LOST` when that node is not connected). A run's id names its node,
   `<node id>~<uuid>` (a plain UUID is the head's, or a run the link opened). `GET /v1/approvals` gathers every
   node's. A follower with no head answers writes 503 `E_NO_HEAD` and serves reads.
-- **Change capture on the head** (`cluster/capture.py`): before every run of an Ada model, after it (and each of its
-  steps), and every second while runs are in hand, the daemon installs in the store a change table
-  (`_rrotor_changes`) and triggers on `precedents` and `meta` (insert, update, delete, a changed key), reads the
-  keys changed and each row as it is now in one read transaction, appends one `rows` entry per model, and deletes
-  what it shipped. A store captured for the first time is shipped whole (`rows` with `reset` and its schema). A
-  record, `learn`'s weights and the rows it rewrites, `calibrate`'s temperature, `configure`'s settings and a
-  re-encode all travel this way, so `learn` on the head changes every follower's answers.
 - **The log** (`cluster/log.py`): `/data/cluster/log/` on every node, JSON-line segments named by their first seq,
-  each entry `{seq, term, kind, ...}`: `rows`, `deploy {model, version, commit_sha, manifest}` (any version made
+  each entry `{seq, term, kind, ...}`: `deploy {model, version, commit_sha, manifest}` (any version made
   active, by the API, MCP or the link), `remove`, `keys {hashes}`, `licence {key}`, `member {op, node, members}`,
-  `head {node}`. Committed once on the head's disk (fsynced): Pro and Team. Kept until every member has applied it,
+  `head {node}` (a `rows` entry, an earlier release's model state, applies as nothing). Committed once on the head's disk (fsynced): Pro and Team. Kept until every member has applied it,
   and never past `RROTOR_CLUSTER_LOG_KEEP` (the oldest segments go; the newest stays; `base` keeps the seq and term
   of the last one gone). Each entry's term is known (runs of one term, read again at start), and a tail that
   diverged from the head's is dropped (`truncate`).
@@ -874,18 +801,14 @@ every write to the head.
   entries, commit_seq}` past what it holds, and waits for new entries when it is in step. The follower takes them
   only if its log holds the entry before them at that term (else it answers where to begin again, its applied seq);
   an entry that conflicts is dropped with all after it, unless it was applied, when it asks for a snapshot. It
-  applies what is committed in order: `rows` in one SQLite transaction on the replica (capture off), `deploy` by fetching the
+  applies what is committed in order: `deploy` by fetching the
   version's `src/` and `venv/` from the head as a tar (no GitHub or PyPI on a follower; a head of another
   architecture is refused, `E_CLUSTER_ARCH`), `remove`, `keys` into the access list, `licence` offered to its own
   licence, which checks the signature itself. `applied_seq` is kept in `cluster/state.json`. An entry that does not
-  apply stops the applying there, logged, and the node is not ready until it does. **Replicas are kept in
-  `journal_mode=DELETE`:** the kernel's read-only open reads a WAL file that has no `-wal` and `-shm` beside it as
-  immutable, which a writer would make inconsistent; a rollback-journal file is opened plain `mode=ro`, SQLite's
-  locks keep a read whole (the applier waits on `busy_timeout`), and a run reads the store before an entry or after,
-  never half.
+  apply stops the applying there, logged, and the node is not ready until it does.
 - **Snapshots and catch-up:** a new node, or one behind what the head's log still holds, is sent `snapshot`: it
-  fetches one tar (every Ada store by SQLite's online backup after the head ships what was pending, every version,
-  the keys, the licence key, the seq it stands at), installs it (each store swapped in atomically), and its log
+  fetches one tar (every version, the keys, the licence key, the members, the seq it stands at), installs it, and
+  its log
   starts after that seq. A member that comes back within the log catches up from the log. A follower is
   `catching_up` (`/readyz` 503) until it has applied what the head had committed, and again once behind it for
   more than a second.
@@ -895,10 +818,8 @@ every write to the head.
 - **The head's other jobs:** it exports the cluster's drain and keeps the cluster's audit store
   ([13](#13-logs-audit-and-drains)); only the head opens the runtime's link (a follower's stays `follower`, and closes if
   it was up when it became one); its `hello` names the node, its cluster and its role. Each follower's ping carries
-  its runtime keys' calls since the last one, which the head adds to its own: its `usage` is the cluster's, with
-  the synced store's precedents. Every node still heartbeats. The precedent cap is the head's to hold, on the
-  synced store: every node holds the same precedents, so a Pro cluster holds 50,000 across its nodes, not 50,000 on
-  each ([9](#9-the-licence)).
+  its runtime keys' calls since the last one, which the head adds to its own: its `usage` is the cluster's. Every
+  node still heartbeats.
 - **The packages** (`deploy/`, [`self-hosting/`](self-hosting/README.md#a-cluster)): Helm's `cluster.enabled` and
   `replicas` (a Parallel StatefulSet, `RROTOR_NODE_ID` from the pod name, `RROTOR_CLUSTER_DNS` at the headless
   Service with port 7778 and `publishNotReadyAddresses`, the advertised address the pod's name under it, the head
@@ -911,7 +832,7 @@ every write to the head.
   `/readyz`, no Caddy). `replicas` and `node_count` of 1 are the single box as before.
 - **The seams left for what comes next:** the snapshot is a plain GET on the listener rather than binary frames on
   the WebSocket; a deposed head takes a whole snapshot rather than only the models it touched; the clients' retry
-  of `E_NO_HEAD` is the SDKs' (in `glyphh-ai/ada`), not this repo's.
+  of `E_NO_HEAD` is the SDKs' (in `glyphh-ai/glyphh`), not this repo's.
 - **Proven by simulation** (`tests/daemon/cluster/sim.py`): the nodes' Raft over a seeded network in one thread, no
   clock but the scheduler's: messages delayed, reordered, lost and doubled, partitions, crashes and restarts (log,
   term, vote and store kept), writes, members joining and leaving, compaction, and an operator's promotions, forced
