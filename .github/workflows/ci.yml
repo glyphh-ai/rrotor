@@ -1,5 +1,5 @@
 # rrotor's checks on every push and pull request: lint, types, the tests with the 100% coverage gate, the sample
-# model's tests, the image with the sandbox tests inside it, the WSL root filesystem, and the self-hosting packages.
+# program's tests, the image with the sandbox tests inside it, the WSL root filesystem, and the self-hosting packages.
 # On main, with the repository variable PUBLISH_IMAGES set to true, the one published image (the Dockerfile's
 # `hosted` target) is pushed to Fly's registry for the hosted machines and to
 # ghcr.io/glyphh-ai/rrotor (multi-arch, :<version> and :latest) for everyone else, and its digests reported. The GHCR
@@ -34,7 +34,7 @@ jobs:
         run: uv run mypy
       - name: Tests (100% line and branch coverage of rrotor and rrotord)
         run: uv run pytest
-      - name: The sample model's tests
+      - name: The sample program's tests
         run: uv run pytest examples/daily_sales/tests -o addopts="" -p no:cacheprovider --import-mode=importlib
 
   # The self-hosting packages (deploy/, docs/self-hosting/): each is checked as written, nothing is started.

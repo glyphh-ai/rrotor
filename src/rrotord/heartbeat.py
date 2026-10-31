@@ -4,7 +4,7 @@ nothing else out. At boot and every 24 hours it posts `{server}/v1/license/verif
 answers (`license_key`; release N also takes the legacy `licence`, and prefers the key) to rrotord/licence.py. The
 machine is a SHA-256 of the runtime id and /etc/machine-id (or, where there is none, a random id kept on /data);
 `node_id` is the operator's own name for the node, `cluster_id` and `role` (standalone, head or follower) its
-cluster's. Never an IP address, a prompt, a model's inputs or outputs, or anyone's data. A failure is logged and
+cluster's. Never an IP address, a prompt, a program's inputs or outputs, or anyone's data. A failure is logged and
 tried again with backoff, a minute doubling to an hour; it never stops rrotor (docs/architecture.md, 12)."""
 
 from __future__ import annotations

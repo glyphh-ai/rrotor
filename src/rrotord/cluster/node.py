@@ -53,8 +53,8 @@ head that comes back is fenced by the promoted one's term.
 **Replication.** The head ships its log to each follower it admits, from what the follower says it applied (a
 snapshot first for a new node or one behind the log), over the follower's own connection: `append` and `snapshot`
 are the head's requests, answered as Raft does. A joined follower is `catching_up` (not ready) until it has applied
-what the head had committed, and again once behind it for more than a second. `GET /cluster/v1/versions/
-<model>/<commit>.tar` and `GET /cluster/v1/snapshot` are plain requests on the listener, for members only.
+what the head had committed, and again once behind it for more than a second. `GET /cluster/v2/versions/
+<program>/<commit>.tar` and `GET /cluster/v2/snapshot` are plain requests on the listener, for members only.
 
 **Forwarding** (`forward`): a follower sends a writing call, a deploy, and anything about a run another node holds
 to its head, with the caller as data (who, from where, by which route), a deadline and its term; the head does it
@@ -98,11 +98,23 @@ from rrotord.cluster.discovery import Discovery, Resolve, getaddrinfo, joined
 from rrotord.cluster.raft import majority
 from rrotord.cluster.replication import Replication
 from rrotord.cluster.tls import COMMAND, Credentials, peer_name
-from rrotord.cluster.transport import MESSAGE_MAX, PATH, Channel, ClusterError, answer, dial, failed, fetch, frame
+from rrotord.cluster.transport import (
+    EARLIER,
+    MESSAGE_MAX,
+    PATH,
+    UPGRADE,
+    Channel,
+    ClusterError,
+    answer,
+    dial,
+    failed,
+    fetch,
+    frame,
+)
 from rrotord.config import NODE_ID, Config
 from rrotord.errors import BadRequest, RrotorError, Unavailable
 from rrotord.licence import Licence
-from rrotord.models import Models
+from rrotord.programs import Programs
 from rrotord.store import read_json, write_json
 
 log = logging.getLogger("rrotor.cluster")
@@ -201,7 +213,7 @@ class Cluster:
         version: str,
         resolve: Resolve = getaddrinfo,
         wall: Callable[[], float] = time.time,
-        models: Models | None = None,
+        programs: Programs | None = None,
         access: Access | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -240,7 +252,7 @@ class Cluster:
             config.data / "cluster" / "log",
             config.run_dir / "cluster" / "scratch",
             config.cluster_log_keep,
-            models or Models(config.data),
+            programs or Programs(config.data),
             self.access,
             licence,
             role=lambda: self.role,
@@ -492,8 +504,9 @@ class Cluster:
         self.serving = None
         app = web.Application()
         app.router.add_get(PATH, self._accept)
-        app.router.add_get("/cluster/v1/versions/{model}/{commit}.tar", self._version)
-        app.router.add_get("/cluster/v1/snapshot", self._snapshot)
+        app.router.add_get("/cluster/v2/versions/{program}/{commit}.tar", self._version)
+        app.router.add_get("/cluster/v2/snapshot", self._snapshot)
+        app.router.add_route("*", EARLIER, self._earlier)
         self.listener = web.AppRunner(app, access_log=None, shutdown_timeout=SHUTDOWN)
         await self.listener.setup()
         await web.TCPSite(self.listener, BIND, self.port, ssl_context=self.credentials.server).start()
@@ -1307,12 +1320,18 @@ class Cluster:
     async def _version(self, request: web.Request) -> web.StreamResponse:
         """A version's `src/` and `venv/`, the head's build, with the head's architecture."""
         self._member_asking(request)
-        model, commit = request.match_info["model"], request.match_info["commit"]
+        program, commit = request.match_info["program"], request.match_info["commit"]
         try:
-            tar = await asyncio.to_thread(self.replication.version_tar, model, commit)
+            tar = await asyncio.to_thread(self.replication.version_tar, program, commit)
         except RrotorError as err:
             return web.json_response(err.to_json(), status=err.status)
         return await self._send_file(request, tar, {"Rrotor-Arch": self.replication.arch})
+
+    async def _earlier(self, request: web.Request) -> web.Response:
+        """A node of an earlier release (cluster protocol 1) asking: refused by name, never misread."""
+        log.error("cluster: a peer speaks an earlier cluster protocol", extra={"path": request.path})
+        err = ClusterError(UPGRADE, code="E_CLUSTER_VERSION", status=426)
+        return web.json_response(err.to_json(), status=err.status)
 
     async def _snapshot(self, request: web.Request) -> web.StreamResponse:
         self._member_asking(request)

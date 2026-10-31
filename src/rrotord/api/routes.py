@@ -2,10 +2,10 @@
 hosted one's callers, at its one public host for a self-hosted one's. The operations themselves are in ops.py, shared
 with the MCP server (mcp.py).
 
-What changes the runtime itself, not its models (its link's token, its parts, its licence), answers only on a local
+What changes the runtime itself, not its programs (its link's token, its parts, its licence), answers only on a local
 rrotor, to its owner's mod with the local token. A hosted or self-hosted rrotor takes those from its environment, its
 image and Glyphh (the link, the heartbeat, a licence key in GLYPHH_LICENSE_KEY or /etc/rrotor/license.key), never
-from a caller: a runtime key or a Glyphh sign-in calls and deploys models, and is refused E_LOCAL_ONLY there."""
+from a caller: a runtime key or a Glyphh sign-in calls and deploys programs, and is refused E_LOCAL_ONLY there."""
 
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ from rrotord.errors import BadRequest, Forbidden, RrotorError
 from rrotord.introspect import Introspector
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
-from rrotord.models import Models, Version
 from rrotord.parts import Parts
+from rrotord.programs import Programs, Version
 from rrotord.runner.engine import Runner
 from rrotord.sandbox.probe import Layers
 
@@ -62,7 +62,7 @@ class HeartbeatView(Protocol):
 @dataclass(slots=True)
 class Services:
     config: Config
-    models: Models
+    programs: Programs
     deployer: Deployer
     runner: Runner
     credentials: Credentials
@@ -161,7 +161,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "access": s.access.view() if s.access is not None else None,
                 **drains.view(s.drain),
                 "approvals": len(s.runner.approvals()),  # this node's
-                "models": len(s.models.names()),
+                "programs": len(s.programs.names()),
             }
         )
 
@@ -170,8 +170,8 @@ def setup(app: web.Application, s: Services) -> None:
         s.credentials.set(data.get("runtime_id"), data.get("token"))  # type: ignore[arg-type]
         return web.json_response({"runtime_id": s.credentials.runtime_id, "link": "connecting"})
 
-    async def models(_: web.Request) -> web.Response:
-        return web.json_response({"models": s.models.describe()})
+    async def programs(_: web.Request) -> web.Response:
+        return web.json_response({"programs": s.programs.describe()})
 
     async def deploy(request: web.Request) -> web.Response:
         return web.json_response(await ops.deploy(s, await body(request)), status=201)
@@ -263,8 +263,8 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get(METADATA + "/mcp", resource_metadata)
     app.router.add_get("/v1/health", health)
     app.router.add_put("/v1/runtime/token", local_only(s.config.mode, runtime_token))
-    app.router.add_get("/v1/models", models)
-    app.router.add_post("/v1/models/deploy", deploy)
+    app.router.add_get("/v1/programs", programs)
+    app.router.add_post("/v1/programs/deploy", deploy)
     app.router.add_post("/v1/runs", call)
     app.router.add_post("/v1/runs/{run_id}/continue", resume)
     app.router.add_post("/v1/runs/{run_id}/cancel", cancel)

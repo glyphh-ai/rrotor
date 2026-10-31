@@ -9,10 +9,14 @@ listener's answer names the listener, which the dialer checks against the listen
 
 Replication's (replication.py, node.py): the head's `append` and `snapshot`, asked of a follower over the follower's
 own connection and answered with the seq applied; `forward`, either way; and two plain GETs on the same listener with
-the same mutual TLS (`fetch`), `/cluster/v1/versions/<model>/<commit>.tar` and `/cluster/v1/snapshot`. A refusal
+the same mutual TLS (`fetch`), `/cluster/v2/versions/<program>/<commit>.tar` and `/cluster/v2/snapshot`. A refusal
 carries its HTTP status and detail, so a forwarded request's caller sees what the head said. A member's `telemetry`
 (its drain's batches and kept audit events) goes to its head the same way. `vote` comes with elections: an unknown
-type is answered E_CLUSTER_MESSAGE."""
+type is answered E_CLUSTER_MESSAGE.
+
+**Version.** Every path carries the cluster's wire and log format (`/cluster/v2/`; v1 named a program `model`). A
+node of another version is refused, not misread: dialling one that has no `/cluster/v2/link` raises
+E_CLUSTER_VERSION, and a node answers any `/cluster/v1/` request 426 with E_CLUSTER_VERSION (node.py)."""
 
 from __future__ import annotations
 
@@ -32,7 +36,10 @@ from rrotord.cluster.tls import Credentials, peer_name
 from rrotord.errors import RrotorError
 
 log = logging.getLogger("rrotor.cluster")
-PATH = "/cluster/v1/link"
+VERSION = 2  # the cluster's wire and log format (v1 named a program `model`)
+PATH = f"/cluster/v{VERSION}/link"
+EARLIER = "/cluster/v1/{rest:.*}"  # an earlier release's paths: refused with E_CLUSTER_VERSION
+UPGRADE = f"This node speaks cluster protocol {VERSION}; upgrade every node of the cluster to the same release."
 ANSWER_WITHIN = 10.0  # seconds a request waits for its answer
 CONNECT_WITHIN = 5.0
 MESSAGE_MAX = 128 * 1024 * 1024  # a forwarded deploy's bundle, an append of a store's rows
@@ -159,6 +166,11 @@ async def dial(
         except aiohttp.ClientConnectorCertificateError:
             foreign = True
             continue
+        except aiohttp.WSServerHandshakeError as err:
+            if err.status in (404, 426):  # no /cluster/v2/link there: a node of another release
+                log.error("cluster: peer speaks another cluster protocol", extra={"address": address})
+                raise ClusterError(f"{address}: {UPGRADE}", code="E_CLUSTER_VERSION") from err
+            continue
         except (aiohttp.ClientError, OSError, TimeoutError, ssl.SSLError):
             continue  # unreachable, or our certificate refused: the next identity, if any
         channel = Channel(ws, peer_name(ws.get_extra_info("ssl_object")))
@@ -186,7 +198,7 @@ async def dial(
 async def fetch(
     session: aiohttp.ClientSession, credentials: Credentials, address: str, path: str, dest: Path, within: float
 ) -> dict[str, str]:
-    """A plain GET on a node's listener (`/cluster/v1/...`), with the same mutual TLS, streamed into `dest`; answers
+    """A plain GET on a node's listener (`/cluster/v2/...`), with the same mutual TLS, streamed into `dest`; answers
     its headers. Raises ClusterError: what the other end refused (its code and status), or E_CLUSTER_UNREACHABLE."""
     for identity in credentials.identities:
         try:

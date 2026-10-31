@@ -1,6 +1,6 @@
 # rrotor
 
-A local runtime for a person's models: one locked-down, headless Linux image that deploys a model by commit, runs
+A local runtime for a person's programs: one locked-down, headless Linux image that deploys a program by commit, runs
 each call in a sandbox, and answers over REST and MCP at its own address. Customers run it themselves, at `https://<host>/mcp`
 ([self-hosting](docs/self-hosting/README.md)); Glyphh-run hosting is off. It is added to Claude as a
 connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh` SDKs (`glyphh-ai/glyphh`). Image:
@@ -10,8 +10,8 @@ connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh`
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, the licence, parts, CI |
 | [`docs/self-hosting/`](docs/self-hosting/README.md) | Running your own: Docker Compose, Helm, Terraform; privileges, licensing, backups |
-| `src/rrotord/`, `src/rrotor/` | The daemon; the model SDK every sandbox imports |
-| `examples/` | `daily_sales`, a model with its tests |
+| `src/rrotord/`, `src/rrotor/` | The daemon; the program SDK every sandbox imports |
+| `examples/` | `daily_sales`, a program with its tests |
 | `scripts/part.py` | Building and signing a part |
 | `deploy/` | The self-hosting packages |
 | `benchmarks/` | Ada (Ada Cloud's) measured against LLMs; kept here because other repos read it by path |

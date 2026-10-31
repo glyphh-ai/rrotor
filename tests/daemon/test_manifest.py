@@ -9,7 +9,7 @@ from rrotord.errors import BadRequest, DeployError
 
 def src(tmp_path: Path, data: object, source: str = "def start(ctx, inputs):\n    pass\n") -> Path:
     (tmp_path / "glyphh.json").write_text(data if isinstance(data, str) else json.dumps(data))
-    (tmp_path / "model.py").write_text(source)
+    (tmp_path / "program.py").write_text(source)
     return tmp_path
 
 
@@ -45,9 +45,9 @@ def test_no_glyphh_json(tmp_path):
         m.read(tmp_path)
 
 
-def test_no_model_py(tmp_path):
+def test_no_program_py(tmp_path):
     (tmp_path / "glyphh.json").write_text("{}")
-    with pytest.raises(DeployError, match=r"no model\.py"):
+    with pytest.raises(DeployError, match=r"no program\.py"):
         m.read(tmp_path)
 
 
@@ -79,12 +79,12 @@ def test_refused_manifests(tmp_path, data, why):
     assert why in refusal(tmp_path, data)
 
 
-def test_a_function_missing_from_model_py(tmp_path):
+def test_a_function_missing_from_program_py(tmp_path):
     data = {"name": "p", "functions": {"start": {}, "other": {}}}
-    assert refusal(tmp_path, data) == "model.py has no function other."
+    assert refusal(tmp_path, data) == "program.py has no function other."
 
 
-def test_model_py_that_does_not_parse(tmp_path):
+def test_program_py_that_does_not_parse(tmp_path):
     assert "does not parse: line 1" in refusal(tmp_path, {"name": "p", "functions": {"start": {}}}, "def (")
 
 
@@ -101,7 +101,7 @@ def test_check_inputs_names_where_the_first_error_is():
         m.check_inputs(fn, {})
 
 
-def test_writes_defaults_to_the_models_data_and_a_model_with_data_is_the_heads():
+def test_writes_defaults_to_the_programs_data_and_a_program_with_data_is_the_heads():
     kept = m.Manifest.model_validate(
         {"name": "m", "data": True, "functions": {"record": {}, "query": {"writes": False}}}
     )

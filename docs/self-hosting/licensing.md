@@ -85,27 +85,27 @@ The answer is `200 {"license_key": "<key>"}`: the newest key the server holds fo
 also takes the earlier `licence` beside it). If the call fails or is refused, rrotor keeps the key it has and tries
 again.
 
-**Never sent, in the heartbeat or anywhere it is stored:** IP addresses, hostnames, prompts, model inputs or
-outputs, model code, files, secrets, or anything about your users. The server keeps only what the body
+**Never sent, in the heartbeat or anywhere it is stored:** IP addresses, hostnames, prompts, program inputs or
+outputs, program code, files, secrets, or anything about your users. The server keeps only what the body
 carries and when it came. It does not store or log the caller's address
 for this route. As with any HTTPS request, the address is visible on the network path itself (your egress proxy,
 the edge of Glyphh's hosting provider); it is not in the request and the server does not keep it.
 
 ## The link, when it is on
 
-The link is the same as a hosted rrotor's ([architecture, section 6](../architecture.md#6-the-link-protocol-1)):
+The link is the same as a hosted rrotor's ([architecture, section 6](../architecture.md#6-the-link-protocol-2)):
 one WebSocket rrotor opens to the server, authenticated with the runtime token; the server never connects in. What
 goes up it:
 
 | Message | Carries |
 |---|---|
-| `hello` | The protocol, rrotor's version, its mode, the runtime id, the model versions deployed |
-| `deployed` | After each deploy: the model, the version, the commit SHA, the repo it came from (if any) and its `glyphh.json` manifest |
-| `event` | A deploy the server asked for that could not be done: the model, version, commit and why |
+| `hello` | The protocol, rrotor's version, its mode, the runtime id, the program versions deployed |
+| `deployed` | After each deploy: the program, the version, the commit SHA, the repo it came from (if any) and its `glyphh.json` manifest |
+| `event` | A deploy the server asked for that could not be done: the program, version, commit and why |
 | `usage` | Once a minute at most: for each runtime key used, its SHA-256, a count of calls and when it was last used |
 | `ack`, `pong` | Acknowledgements and keep-alives |
 
-The server calls no model over the link: a run's inputs and results stay on your rrotor. When a caller signs in to Glyphh rather than using a runtime key, rrotor asks the server whether
+The server calls no program over the link: a run's inputs and results stay on your rrotor. When a caller signs in to Glyphh rather than using a runtime key, rrotor asks the server whether
 that sign-in is good for it (`POST /v1/runtime/introspect`, with the token the caller presented) and keeps the
 answer a minute. With `RROTOR_LINK=off` none of this happens, and callers use runtime keys.
 
@@ -117,7 +117,7 @@ heartbeat or the link, so a running subscription never lapses.
 - **Past `expires_at`, for 14 days:** everything runs on the key's limits. The health says `grace` and how many
   days are left, and rrotor logs a warning daily.
 - **More than 14 days past:** Community's limits: one node serves and a cluster stops syncing
-  ([A cluster](README.md#a-cluster)). Nothing crashes, nothing is deleted, no model is refused, and a new key from
+  ([A cluster](README.md#a-cluster)). Nothing crashes, nothing is deleted, no program is refused, and a new key from
   any source lifts the limits at once.
 
 ## Air-gapped

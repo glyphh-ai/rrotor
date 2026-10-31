@@ -85,7 +85,7 @@ async def test_three_daemons_two_admitted_the_third_refused_and_out_of_the_load_
         {"ready": False, "reason": "refused", "code": "E_CLUSTER_FULL"},
     )
     assert (await get(third_api, "/healthz", auth=False))[0] == 200
-    status, body = await get(third_api, "/v1/models")
+    status, body = await get(third_api, "/v1/programs")
     assert (status, body["error"]["code"]) == (503, "E_CLUSTER_FULL")
     status, body = await get(head_api, "/v1/cluster")
     assert status == 200 and (body["role"], body["head"], body["max_nodes"], body["tier"]) == ("head", "n0", 2, "pro")
@@ -142,13 +142,13 @@ async def test_an_unlicensed_cluster_serves_from_one_node_a_key_clusters_it_and_
     assert all(d.cluster.listener is None and d.cluster.serving == lowest for d in daemons)  # nothing listens
     message = f"This cluster has no licence key with sync: only {lowest} serves; add a Pro, Team or Enterprise key."
     assert await get(apis[one], "/readyz", auth=False) == (200, {"ready": True})
-    assert (await get(apis[one], "/v1/models"))[0] == 200
+    assert (await get(apis[one], "/v1/programs"))[0] == 200
     for i in others:
         assert await get(apis[i], "/readyz", auth=False) == (
             503,
             {"ready": False, "reason": "unlicensed", "code": "E_LICENCE_CLUSTER"},
         )
-        status, body = await get(apis[i], "/v1/models")
+        status, body = await get(apis[i], "/v1/programs")
         assert (status, body["error"]["code"], body["error"]["message"]) == (503, "E_LICENCE_CLUSTER", message)
         status, health = await get(apis[i], "/v1/health")
         assert status == 200 and health["cluster"] == {
@@ -186,7 +186,7 @@ async def test_an_unlicensed_cluster_serves_from_one_node_a_key_clusters_it_and_
     assert await get(apis[0], "/readyz", auth=False) == (200, {"ready": True})
     for api in apis[1:]:
         assert (await get(api, "/readyz", auth=False))[1]["reason"] == "unlicensed"
-        status, body = await get(api, "/v1/models")
+        status, body = await get(api, "/v1/programs")
         assert (status, body["error"]["message"]) == (503, cluster_node.unlicensed("n0"))
 
 

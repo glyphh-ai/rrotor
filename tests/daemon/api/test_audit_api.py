@@ -20,7 +20,7 @@ from rrotord.audit import Audit
 from rrotord.drain import Drain, SendFailed
 from tests.daemon.api.conftest import PORT, Api, open_api, services
 from tests.daemon.api.test_hosted import HOST, MACHINE, Vouches
-from tests.fakes import DONE_MODEL, GitRepo, install, manifest, token
+from tests.fakes import DONE_PROGRAM, GitRepo, install, manifest, token
 
 LOCAL = {"Host": f"127.0.0.1:{PORT}"}
 
@@ -54,8 +54,8 @@ def events(api: Api) -> list[dict[str, Any]]:
 
 async def test_the_audit_log_is_read_on_enterprise_only(audited):
     api, tier = audited
-    install(api.services.models, manifest("sample"), DONE_MODEL)
-    res = await api.client.post("/v1/runs", json={"model": "sample", "inputs": {"q": 1}}, headers=api.auth())
+    install(api.services.programs, manifest("sample"), DONE_PROGRAM)
+    res = await api.client.post("/v1/runs", json={"program": "sample", "inputs": {"q": 1}}, headers=api.auth())
     run_id = (await res.json())["run_id"]
     res = await api.client.get("/v1/audit", params={"kind": "run.call", "limit": "5"}, headers=api.auth())
     body = await res.json()
@@ -87,9 +87,9 @@ async def rpc(api: Api, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 async def test_mcp_calls_are_audited_as_mcp_and_audit_query_reads_them(audited):
     api, tier = audited
-    install(api.services.models, manifest("sample"), DONE_MODEL)
-    await rpc(api, "model_call", {"model": "sample"})
-    found = await rpc(api, "audit_query", {"model": "sample", "limit": 10})
+    install(api.services.programs, manifest("sample"), DONE_PROGRAM)
+    await rpc(api, "program_call", {"program": "sample"})
+    found = await rpc(api, "audit_query", {"program": "sample", "limit": 10})
     assert not found["isError"] and [e["via"] for e in found["structuredContent"]["events"]] == ["mcp", "mcp"]
     tier.tier = "team"
     refused = await rpc(api, "audit_query", {})
@@ -99,33 +99,37 @@ async def test_mcp_calls_are_audited_as_mcp_and_audit_query_reads_them(audited):
 async def test_deploys_and_their_failures_are_audited(audited, tmp_path):
     api, _ = audited
     repo = GitRepo(tmp_path / "src")
-    sha_ = repo.model(manifest("sample"))
+    sha_ = repo.program(manifest("sample"))
     repo.bare(tmp_path / "github", "owner/sample")
-    res = await api.client.post("/v1/models/deploy", json={"repo": "owner/sample", "commit": sha_}, headers=api.auth())
+    res = await api.client.post(
+        "/v1/programs/deploy", json={"repo": "owner/sample", "commit": sha_}, headers=api.auth()
+    )
     assert res.status == 201
-    res = await api.client.post("/v1/models/deploy", json={"bundle": "%%%", "commit": sha_}, headers=api.auth())
+    res = await api.client.post("/v1/programs/deploy", json={"bundle": "%%%", "commit": sha_}, headers=api.auth())
     assert res.status == 400
-    res = await api.client.post("/v1/models/deploy", json={"commit": sha_}, headers=api.auth())
+    res = await api.client.post("/v1/programs/deploy", json={"commit": sha_}, headers=api.auth())
     assert res.status == 400
-    deployed, *failed = [e for e in events(api) if e["kind"].startswith("model.")]
-    assert (deployed["kind"], deployed["model"], deployed["version"], deployed["repo"]) == (
-        "model.deploy",
+    deployed, *failed = [e for e in events(api) if e["kind"].startswith("program.")]
+    assert (deployed["kind"], deployed["program"], deployed["version"], deployed["repo"]) == (
+        "program.deploy",
         "sample",
         1,
         "owner/sample",
     )
     assert [(e["kind"], e["outcome"]["code"]) for e in failed] == [
-        ("model.deploy_failed", "E_BUNDLE"),
-        ("model.deploy_failed", "E_BAD_REQUEST"),
+        ("program.deploy_failed", "E_BUNDLE"),
+        ("program.deploy_failed", "E_BAD_REQUEST"),
     ]
 
 
 async def test_every_401_and_403_is_an_audit_event_without_the_bearer(audited):
     api, _ = audited
     wrong = token()
-    assert (await api.client.get("/v1/models", headers={"Authorization": f"Bearer {wrong}"})).status == 401
-    assert (await api.client.get("/v1/models")).status == 401
-    assert (await api.client.get("/v1/models", headers={**api.auth(), "Origin": "https://evil.example"})).status == 403
+    assert (await api.client.get("/v1/programs", headers={"Authorization": f"Bearer {wrong}"})).status == 401
+    assert (await api.client.get("/v1/programs")).status == 401
+    assert (
+        await api.client.get("/v1/programs", headers={**api.auth(), "Origin": "https://evil.example"})
+    ).status == 403
     assert (await api.client.get("/healthz")).status == 200
     denied = [e for e in events(api) if e["kind"] == "access.denied"]
     assert [(e["actor"], e["outcome"]["code"]) for e in denied] == [
@@ -133,7 +137,9 @@ async def test_every_401_and_403_is_an_audit_event_without_the_bearer(audited):
         ({"type": "anonymous", "key_sha256": None}, "E_AUTH"),
         ({"type": "anonymous", "key_sha256": sha(api.token)}, "E_ORIGIN"),
     ]
-    assert denied[0]["path"] == "/v1/models" and denied[0]["method"] == "GET" and denied[0]["outcome"]["status"] == 401
+    assert (
+        denied[0]["path"] == "/v1/programs" and denied[0]["method"] == "GET" and denied[0]["outcome"]["status"] == 401
+    )
     assert all(wrong not in str(e) and api.token not in str(e) for e in events(api))
 
 
@@ -154,11 +160,11 @@ async def hosted(tmp_path: Path, short_dir: Path) -> AsyncIterator[Api]:
 
 
 async def test_a_key_and_a_sign_in_are_named_with_the_forwarded_client(hosted):
-    install(hosted.services.models, manifest("sample"), DONE_MODEL)
+    install(hosted.services.programs, manifest("sample"), DONE_PROGRAM)
     forwarded = {"X-Forwarded-For": "203.0.113.9, 10.0.4.17"}
-    await hosted.client.post("/v1/runs", json={"model": "sample"}, headers=hosted.auth(**forwarded))
+    await hosted.client.post("/v1/runs", json={"program": "sample"}, headers=hosted.auth(**forwarded))
     signed = {"Authorization": "Bearer signed-in-" + "x" * 20}
-    await hosted.client.post("/v1/runs", json={"model": "sample"}, headers=signed)
+    await hosted.client.post("/v1/runs", json={"program": "sample"}, headers=signed)
     res = await hosted.client.put("/v1/licence", data="x", headers=hosted.auth())
     assert res.status == 403
     calls = [e for e in events(hosted) if e["kind"] == "run.call"]

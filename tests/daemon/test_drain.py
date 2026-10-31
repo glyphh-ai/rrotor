@@ -78,14 +78,14 @@ def bodies(fake: FakeCollector, who: str = "collector") -> list[str]:
 async def test_logs_metrics_and_traces_reach_the_collector_with_rrotors_resource(tmp_path, fake):
     d = Drain(config(tmp_path, fake.url), runtime_id="rt-1")
     d.start()
-    with log.bind(run_id="r1", model="m"), d.telemetry.span("rrotor.function"):
+    with log.bind(run_id="r1", program="m"), d.telemetry.span("rrotor.function"):
         logging.getLogger("rrotor.t").info("hello", extra={"n": 1})
     logging.getLogger("opentelemetry.exporter").warning("never fed back")
     d.telemetry.ended("m", "start", "done", 0.5)
     await d.tick()
     lines = fake.logs()
     assert [line["body"] for line in lines] == ["hello"]
-    assert (lines[0]["node_id"], lines[0]["run_id"], lines[0]["model"], lines[0]["n"]) == ("rrotor-1", "r1", "m", 1)
+    assert (lines[0]["node_id"], lines[0]["run_id"], lines[0]["program"], lines[0]["n"]) == ("rrotor-1", "r1", "m", 1)
     assert lines[0]["trace_id"] == fake.spans()[0]["trace_id"] != "" and lines[0]["severity"] == "INFO"
     assert [s["name"] for s in fake.spans()] == ["rrotor.function"]
     assert {"rrotor.runs", "rrotor.run.seconds", "rrotor.drain.dropped"} <= fake.metrics()

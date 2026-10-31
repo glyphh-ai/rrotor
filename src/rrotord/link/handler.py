@@ -1,11 +1,11 @@
 """What the Cloud's messages do here: a welcome's licence key is offered, a call opens a run, continue and cancel go
 to it, deploy, activate and remove change the versions. Every run the Cloud called answers its Results up the link; a
-deploy answers `deployed`, or an event `deploy_failed` (protocol 1 has no refusal of its own). Every other deploy
+deploy answers `deployed`, or an event `deploy_failed` (the protocol has no refusal of its own). Every other deploy
 (the API's and its MCP's) reports `deployed` through here too.
 
 What the Cloud asks for is done as `server` (rrotord/audit.py): its calls, continues and cancels are audit events
-like any caller's, and its deploys, activations and removals are `model.deploy`, `model.activate`,
-`model.remove` or `model.deploy_failed`."""
+like any caller's, and its deploys, activations and removals are `program.deploy`, `program.activate`,
+`program.remove` or `program.deploy_failed`."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from rrotord.errors import RrotorError
 from rrotord.licence import Licence
 from rrotord.link import protocol as p
 from rrotord.link.client import LinkClient
-from rrotord.models import Models, Version
+from rrotord.programs import Programs, Version
 from rrotord.runner.engine import Runner, failed
 from rrotord.runner.record import Run
 
@@ -29,14 +29,20 @@ log = logging.getLogger("rrotor.link")
 class LinkHandler:
     def __init__(
         self,
-        models: Models,
+        programs: Programs,
         runner: Runner,
         deployer: Deployer,
         licence: Licence | None = None,
         access: Access | None = None,
         audit: Audit | None = None,
     ) -> None:
-        self.models, self.runner, self.deployer, self.licence, self.access = models, runner, deployer, licence, access
+        self.programs, self.runner, self.deployer, self.licence, self.access = (
+            programs,
+            runner,
+            deployer,
+            licence,
+            access,
+        )
         self.audit = audit
         self.link: LinkClient | None = None
 
@@ -45,7 +51,7 @@ class LinkHandler:
             self.audit.emit(kind, who=SERVER, **detail)
 
     def deployed(self) -> list[dict[str, Any]]:
-        return self.models.deployed()
+        return self.programs.deployed()
 
     async def on_welcome(self, message: p.Welcome) -> None:
         """The runtime keys the welcome carries are kept, and its licence key (and, release N, its legacy licence)
@@ -79,7 +85,7 @@ class LinkHandler:
             return
         manifest = version.manifest.model_dump(mode="json")
         await self.link.owe(
-            lambda _seq: p.deployed(version.model, version.version, version.commit_sha, repo, manifest),
+            lambda _seq: p.deployed(version.program, version.version, version.commit_sha, repo, manifest),
             numbered=False,
         )
 
@@ -100,7 +106,7 @@ class LinkHandler:
     async def _call(self, message: p.Call) -> None:
         try:
             await self.runner.call(
-                model=message.model,
+                program=message.program,
                 function=message.function,
                 inputs=message.inputs,
                 version=message.version,
@@ -143,12 +149,12 @@ class LinkHandler:
     async def on_deploy(self, message: p.Deploy) -> None:
         try:
             if message.type == "remove":
-                found = self.models.by_sha(message.model, message.commit_sha)
+                found = self.programs.by_sha(message.program, message.commit_sha)
                 if found is not None:
-                    self.models.remove(found)
+                    self.programs.remove(found)
                     self._audit(
-                        "model.remove",
-                        model=found.model,
+                        "program.remove",
+                        program=found.program,
                         version=found.version,
                         commit_sha=found.commit_sha,
                         outcome={"status": "done", "code": None},
@@ -157,18 +163,18 @@ class LinkHandler:
             repo = message.repo if message.type == "deploy" and message.repo else None
             if repo is not None:
                 version = await self.deployer.from_repo(repo, message.commit_sha, message.token, message.version)
-                if version.model != message.model:
-                    self.models.remove(version)
+                if version.program != message.program:
+                    self.programs.remove(version)
                     raise RrotorError(
-                        f"The commit's glyphh.json names {version.model}, not {message.model}.", code="E_MANIFEST"
+                        f"The commit's glyphh.json names {version.program}, not {message.program}.", code="E_MANIFEST"
                     )
             else:
-                version = await self.deployer.held(message.model, message.commit_sha, message.version)
+                version = await self.deployer.held(message.program, message.commit_sha, message.version)
         except RrotorError as err:
-            log.warning("deploy failed", extra={"model": message.model, "code": err.code})
+            log.warning("deploy failed", extra={"program": message.program, "code": err.code})
             self._audit(
-                "model.deploy_failed",
-                model=message.model,
+                "program.deploy_failed",
+                program=message.program,
                 version=message.version,
                 commit_sha=message.commit_sha,
                 outcome={"status": "failed", "code": err.code},
@@ -180,11 +186,11 @@ class LinkHandler:
                     "code": err.code,
                     "message": err.message,
                 }
-                await self.link.owe(lambda seq: p.event(seq, message.model, "deploy_failed", data))
+                await self.link.owe(lambda seq: p.event(seq, message.program, "deploy_failed", data))
             return
         self._audit(
-            "model.activate" if message.type == "activate" else "model.deploy",
-            model=version.model,
+            "program.activate" if message.type == "activate" else "program.deploy",
+            program=version.program,
             version=version.version,
             commit_sha=version.commit_sha,
             repo=repo,

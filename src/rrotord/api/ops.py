@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from rrotord.api import forward
 from rrotord.errors import BadRequest, RrotorError
-from rrotord.models import Version
+from rrotord.programs import Version
 from rrotord.runner.record import Run
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ def answer(run: Run) -> dict[str, Any]:
     result = run.result or {}
     return {
         "run_id": run.id,
-        "model": run.model,
+        "program": run.program,
         "version": run.version,
         "function": run.function,
         "status": run.status,
@@ -72,12 +72,12 @@ async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
     except RrotorError as err:
         if s.audit is not None:
             outcome = {"status": "failed", "code": err.code}
-            s.audit.emit("model.deploy_failed", repo=repo, commit_sha=commit, outcome=outcome)
+            s.audit.emit("program.deploy_failed", repo=repo, commit_sha=commit, outcome=outcome)
         raise
     if s.audit is not None:
         s.audit.emit(
-            "model.deploy",
-            model=version.model,
+            "program.deploy",
+            program=version.program,
             version=version.version,
             commit_sha=version.commit_sha,
             repo=source,
@@ -90,11 +90,11 @@ async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
 
 
 async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dict[str, Any]:
-    """Open a run of a model's function; the first Result, with its data."""
-    model, function = data.get("model"), data.get("function", "start")
+    """Open a run of a program's function; the first Result, with its data."""
+    program, function = data.get("program"), data.get("function", "start")
     inputs, version, clearance = data.get("inputs") or {}, data.get("version"), data.get("clearance", 1.0)
     if (
-        not isinstance(model, str)
+        not isinstance(program, str)
         or not isinstance(function, str)
         or not isinstance(inputs, dict)
         or not (version is None or isinstance(version, int))
@@ -102,17 +102,17 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dic
         or not isinstance(clearance, int | float)
         or not 0 <= clearance <= 1
     ):
-        raise BadRequest("Send {model, function, inputs, version?, clearance? (0 to 1)}.")
+        raise BadRequest("Send {program, function, inputs, version?, clearance? (0 to 1)}.")
     c = s.cluster
     if (
         c is not None
         and c.role == "follower"
-        and (forward.writes(s, model, function, version) or not await c.caught_up(forward.MIN_SEQ.get()))
+        and (forward.writes(s, program, function, version) or not await c.caught_up(forward.MIN_SEQ.get()))
     ):
         return await forward.relayed(s, "call", {"data": data, "caller": caller})
-    term = forward.leading(s) if forward.writes(s, model, function, version) else None
+    term = forward.leading(s) if forward.writes(s, program, function, version) else None
     run = await s.runner.call(
-        model=model, function=function, inputs=inputs, version=version, caller=caller, clearance=float(clearance)
+        program=program, function=function, inputs=inputs, version=version, caller=caller, clearance=float(clearance)
     )
     await forward.committed(s, term)
     return answer(run)

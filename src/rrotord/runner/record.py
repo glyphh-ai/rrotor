@@ -25,7 +25,7 @@ def now() -> str:
 @dataclass(slots=True)
 class Run:
     id: str
-    model: str
+    program: str
     version: int
     commit_sha: str
     function: str
@@ -33,7 +33,7 @@ class Run:
     caller: str
     origin: str  # "link" (the Cloud called it) or "local" (the local API)
     status: str = "running"
-    clearance: float = 1.0  # who asks, as a share of what the model may show (ctx.clearance): 1 sees all
+    clearance: float = 1.0  # who asks, as a share of what the program may show (ctx.clearance): 1 sees all
     created_at: str = field(default_factory=now)
     updated_at: str = field(default_factory=now)
     waiting_since: str | None = None
@@ -51,7 +51,7 @@ class Run:
         """What the local API shows: never the inputs' values in a list, only on the run itself."""
         return {
             "run_id": self.id,
-            "model": self.model,
+            "program": self.program,
             "version": self.version,
             "function": self.function,
             "caller": self.caller,
@@ -104,6 +104,8 @@ class Records:
         if not well_formed(run_id):
             return None
         data = read_json(self.folder(run_id) / "run.json")
+        if data and "model" in data:  # saved by an earlier release, which named a program `model`
+            data["program"] = data.pop("model")
         return Run(**data) if data else None
 
     def all(self) -> list[Run]:

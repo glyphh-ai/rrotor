@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-MODEL, VENV, SDK, FILES, DATA, PARTS = "/model", "/venv", "/opt/rrotor", "/files", "/data", "/opt/parts"
+PROGRAM, VENV, SDK, FILES, DATA, PARTS = "/program", "/venv", "/opt/rrotor", "/files", "/data", "/opt/parts"
 PROXY_SOCKET = "/run/rrotor/proxy.sock"
 SYSTEM_RO = ("/usr", "/etc/ssl", "/etc/ca-certificates", "/etc/localtime", "/etc/alternatives")
 LINKS = (("usr/bin", "/bin"), ("usr/sbin", "/sbin"), ("usr/lib", "/lib"), ("usr/lib64", "/lib64"))
@@ -20,7 +20,7 @@ class Mounts:
     sdk: Path  # the rrotor package's folder
     files: Path
     proxy: Path | None
-    data: Path | None = None  # the model's persistent data folder, when its manifest asks
+    data: Path | None = None  # the program's persistent data folder, when its manifest asks
     parts: tuple[tuple[str, Path], ...] = ()  # the parts its manifest asks for: (name, where it is installed)
     pythonpath: tuple[str, ...] = ()  # the parts' PYTHONPATH entries, as paths inside the sandbox
     readonly: bool = False  # a follower's run: /files and /data read-only
@@ -38,7 +38,7 @@ def landlock_rules(mounts: Mounts) -> dict[str, object]:
     """What the worker locks itself to, as paths inside the sandbox."""
     mine = [FILES] + ([DATA] if mounts.data else [])
     write = [FILES, "/tmp", "/dev", *mine[1:]] if not mounts.readonly else ["/tmp", "/dev"]
-    read = [*SYSTEM_RO, MODEL, VENV, SDK, "/proc", *(f"{PARTS}/{name}" for name, _ in mounts.parts)]
+    read = [*SYSTEM_RO, PROGRAM, VENV, SDK, "/proc", *(f"{PARTS}/{name}" for name, _ in mounts.parts)]
     return {
         "read": read + (mine if mounts.readonly else []),
         "write": write,
@@ -93,7 +93,7 @@ def command(
     argv += [
         "--ro-bind",
         str(mounts.src),
-        MODEL,
+        PROGRAM,
         "--ro-bind",
         str(mounts.venv),
         VENV,
@@ -134,5 +134,5 @@ def command(
         }
     for key, value in env.items():
         argv += ["--setenv", key, value]
-    argv += ["--seccomp", str(seccomp_fd), "--chdir", MODEL, "--", f"{VENV}/bin/python", "-m", "rrotor._worker"]
+    argv += ["--seccomp", str(seccomp_fd), "--chdir", PROGRAM, "--", f"{VENV}/bin/python", "-m", "rrotor._worker"]
     return argv

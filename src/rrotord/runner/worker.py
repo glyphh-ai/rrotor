@@ -15,7 +15,7 @@ from typing import Any
 from rrotord.runner.launch import Launcher, Spec
 
 Note = Callable[[dict[str, Any]], None]
-OUTPUT_LINES = 2000  # per stream, per worker: a chatty model is cut short in its log, never in its run
+OUTPUT_LINES = 2000  # per stream, per worker: a chatty program is cut short in its log, never in its run
 
 
 class Worker:

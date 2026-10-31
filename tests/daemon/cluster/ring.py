@@ -1,7 +1,7 @@
 """Daemons of one cluster in one event loop, for replication's tests: each its own /data, its API on a test server,
 its cluster listener on 127.0.0.1 with real mutual TLS, runs in the test launcher (the host's Python, no sandbox).
 
-Two models: `notes`, with data (its data folder is the head's alone, so every call of it runs there), and `lookup`,
+Two programs: `notes`, with data (its data folder is the head's alone, so every call of it runs there), and `lookup`,
 without (its reads run on the node asked). A write that replicates is `Ring.write`: `notes.record` asked on any node
 (it runs on the head), then one runtime key more on the head, which every member applies from the log."""
 
@@ -29,7 +29,7 @@ NOTES = {
     "data": True,
     "functions": {"record": {}, "count": {}, "decide": {}},
 }
-NOTES_MODEL = '''
+NOTES_PROGRAM = '''
 import json
 
 from rrotor import Result
@@ -73,7 +73,7 @@ LOOKUP = {
         "ask": {"writes": False, "approvals": ["ok"]},
     },
 }
-LOOKUP_MODEL = '''
+LOOKUP_PROGRAM = '''
 import errno
 
 from rrotor import Result
@@ -98,15 +98,15 @@ def ask(ctx, inputs):
 '''
 
 
-def models(d: Daemon, sha: str = "a" * 40, version: int = 1) -> None:
-    """Both models, as a deploy leaves them, on the head: their versions ship to every follower."""
-    install(d.runner.models, NOTES, NOTES_MODEL, sha=sha, version=version)
-    install(d.runner.models, LOOKUP, LOOKUP_MODEL, sha=sha, version=version)
+def programs(d: Daemon, sha: str = "a" * 40, version: int = 1) -> None:
+    """Both programs, as a deploy leaves them, on the head: their versions ship to every follower."""
+    install(d.runner.programs, NOTES, NOTES_PROGRAM, sha=sha, version=version)
+    install(d.runner.programs, LOOKUP, LOOKUP_PROGRAM, sha=sha, version=version)
 
 
 def notes(d: Daemon) -> int:
     """The notes this node's data folder holds (only the head's has any)."""
-    path = d.runner.models.data("notes") / "notes.jsonl"
+    path = d.runner.programs.data("notes") / "notes.jsonl"
     return len(path.read_text().splitlines()) if path.is_file() else 0
 
 
@@ -163,10 +163,10 @@ class Ring:
             await self.stop(node_id)
 
     async def call(
-        self, node_id: str, function: str, data: Any = None, model: str = "notes", **body: Any
+        self, node_id: str, function: str, data: Any = None, program: str = "notes", **body: Any
     ) -> tuple[int, Any, Any]:
         inputs = {} if data is None else {"data": data}
-        sent = {"model": model, "function": function, "inputs": inputs, **body}
+        sent = {"program": program, "function": function, "inputs": inputs, **body}
         res = await self.clients[node_id].post("/v1/runs", json=sent, headers=self.headers())
         return res.status, await res.json(), res.headers
 

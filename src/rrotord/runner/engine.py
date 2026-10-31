@@ -1,14 +1,14 @@
 """Runs: a call opens one, each continue resumes it, cancel and expiry end it; `end` always runs. The worker stays
 up while a run waits (up to 15 minutes); if it is gone (rrotor restarted), a continue starts a new one that loads
 again and reads its checkpoints back (docs/architecture.md, 5.4). Every call answers a Result, never an exception:
-the errors raised here are about the call itself (no such model, inputs refused), never about the model.
+the errors raised here are about the call itself (no such program, inputs refused), never about the program.
 
 Every call, continue and cancel is an audit event with its outcome, and every run's end one with its final status
-(rrotord/audit.py); while a run is handled its id, model, version and function are on every log line; with a drain,
+(rrotord/audit.py); while a run is handled its id, program, version and function are on every log line; with a drain,
 its sandbox's start and its function are spans, and its end counted (rrotord/otel.py).
 
 In a cluster (docs/specs/cluster.md, 3) a run's id names the node that holds it (`node`), and a follower's runs
-mount the model's folders read-only (`readonly`)."""
+mount the program's folders read-only (`readonly`)."""
 
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ from rrotord import log as logs
 from rrotord.audit import Audit
 from rrotord.errors import Conflict, NotFound, RrotorError, Unavailable
 from rrotord.manifest import check_inputs
-from rrotord.models import Models, Version
 from rrotord.otel import Telemetry
 from rrotord.parts import KNOWN, Parts
+from rrotord.programs import Programs, Version
 from rrotord.proxy import EgressProxy
 from rrotord.runner.launch import Launcher, Spec
 from rrotord.runner.record import WAITING, Records, Run, new_id, now
@@ -52,7 +52,7 @@ def failed(step: str, code: str, reason: str) -> dict[str, Any]:
 
 def about(run: Run) -> dict[str, Any]:
     """A run as its log lines and audit events name it."""
-    return {"run_id": run.id, "model": run.model, "version": run.version, "function": run.function}
+    return {"run_id": run.id, "program": run.program, "version": run.version, "function": run.function}
 
 
 def outcome(run: Run) -> dict[str, Any]:
@@ -66,7 +66,7 @@ class Runner:
     def __init__(
         self,
         *,
-        models: Models,
+        programs: Programs,
         records: Records,
         proxy: EgressProxy,
         launcher: Launcher,
@@ -81,7 +81,7 @@ class Runner:
         readonly: Callable[[], bool] = lambda: False,
     ) -> None:
         self.node, self.readonly = node, readonly
-        self.models, self.records, self.proxy, self.launcher = models, records, proxy, launcher
+        self.programs, self.records, self.proxy, self.launcher = programs, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
         self.parts, self.audit, self.telemetry = parts, audit, telemetry
         self.notify = notify
@@ -113,7 +113,7 @@ class Runner:
     async def call(
         self,
         *,
-        model: str,
+        program: str,
         function: str,
         inputs: dict[str, Any],
         version: int | None = None,
@@ -125,9 +125,9 @@ class Runner:
         """A run opened and its first Result; the call is an audit event either way (`refused` with its code when it
         never became a run)."""
         try:
-            run = await self._call(model, function, inputs, version, caller, origin, run_id, clearance)
+            run = await self._call(program, function, inputs, version, caller, origin, run_id, clearance)
         except RrotorError as err:
-            asked = {"model": model, "version": version, "function": function, "run_id": run_id}
+            asked = {"program": program, "version": version, "function": function, "run_id": run_id}
             self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
             raise
         self._audit("run.call", **about(run), outcome=outcome(run), seconds=round(run.seconds, 3))
@@ -135,7 +135,7 @@ class Runner:
 
     async def _call(
         self,
-        model: str,
+        program: str,
         function: str,
         inputs: dict[str, Any],
         version: int | None,
@@ -146,29 +146,29 @@ class Runner:
     ) -> Run:
         if not self.layers.ready:
             raise Unavailable(
-                f"The sandbox is not ready, so no model runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
+                f"The sandbox is not ready, so no program runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
             )
-        found = self.models.get(model, version)
+        found = self.programs.get(program, version)
         fn = found.manifest.functions.get(function)
         if fn is None:
-            raise NotFound(f"{model} has no function {function}.", code="E_FUNCTION_MISSING")
+            raise NotFound(f"{program} has no function {function}.", code="E_FUNCTION_MISSING")
         check_inputs(fn, inputs)
         run = Run(
-            run_id or new_id(self.node()), model, found.version, found.commit_sha, function, inputs, caller, origin
+            run_id or new_id(self.node()), program, found.version, found.commit_sha, function, inputs, caller, origin
         )
         run.clearance = clearance
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
         with logs.bind(**about(run)):
             async with self._lock(run.id):
-                refused = self._parts_refused(model, found)
+                refused = self._parts_refused(program, found)
                 if refused:
                     await self._finish(run, refused)
                 else:
                     await self._go(run, found, None)
         return run
 
-    def _parts_refused(self, model: str, found: Version) -> dict[str, Any] | None:
+    def _parts_refused(self, program: str, found: Version) -> dict[str, Any] | None:
         """Why the run cannot go: a part its manifest asks for is not installed (a licence never refuses a run)."""
         needed = found.manifest.parts()
         if not needed:
@@ -177,7 +177,7 @@ class Runner:
         if missing:
             brings = sorted({KNOWN.get(name, name) for name in missing})
             reason = (
-                f"{model} needs the part{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not installed "
+                f"{program} needs the part{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not installed "
                 f"(from the {', '.join(brings)} mod{'s' if len(brings) > 1 else ''})."
             )
             return failed("parts", "E_PART_MISSING", reason)
@@ -204,7 +204,7 @@ class Runner:
                 run.state, run.status, run.waiting_since = state.to_json(), "running", None
                 self.records.save(run)
                 self.records.log(run.id, {"event": "continued", "pending": run.pending})
-                found = self.models.by_sha(run.model, run.commit_sha)
+                found = self.programs.by_sha(run.program, run.commit_sha)
                 worker = self.workers.get(run.id)
                 if found is None:
                     reason = "This run's version is no longer here."
@@ -248,11 +248,11 @@ class Runner:
     def _left(self, run: Run, found: Version) -> float:
         return max(found.manifest.limits.seconds - run.seconds, 0.0)
 
-    def _mounts(self, model: str, found: Version, socket: Path | None) -> bwrap.Mounts:
+    def _mounts(self, program: str, found: Version, socket: Path | None) -> bwrap.Mounts:
         manifest = found.manifest
-        files = self.models.files(model)
+        files = self.programs.files(program)
         files.mkdir(parents=True, exist_ok=True)
-        data = self.models.data(model) if manifest.data else None
+        data = self.programs.data(program) if manifest.data else None
         if data:
             data.mkdir(parents=True, exist_ok=True)
         needed = manifest.parts()
@@ -274,7 +274,7 @@ class Runner:
         manifest = found.manifest
         hosts = frozenset(manifest.hosts)
         socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
-        mounts = self._mounts(run.model, found, socket)
+        mounts = self._mounts(run.program, found, socket)
         limits = bwrap.Limits(manifest.limits.memory_mb, manifest.limits.seconds + 5)
         try:
             with self._span("rrotor.sandbox.start", run):
@@ -320,7 +320,7 @@ class Runner:
             reason = (
                 "The run went past its seconds and was stopped."
                 if alive
-                else f"The model's process stopped (exit {worker.proc.returncode})."
+                else f"The program's process stopped (exit {worker.proc.returncode})."
             )
             stopped = self.stopping.pop(run.id, None)
             await self._end(
@@ -366,7 +366,7 @@ class Runner:
         payload = {"inputs": run.inputs, "data": result.get("data")}
         self._audit("run.end", **about(run), outcome=outcome(run), seconds=round(run.seconds, 3), payload=payload)
         if self.telemetry is not None:
-            self.telemetry.ended(run.model, run.function, run.status, run.seconds)
+            self.telemetry.ended(run.program, run.function, run.status, run.seconds)
         await self._tell(run)
 
     async def _tell(self, run: Run) -> None:
@@ -415,7 +415,7 @@ class Runner:
         return [
             {
                 "run_id": r.id,
-                "model": r.model,
+                "program": r.program,
                 "function": r.function,
                 "origin": r.origin,
                 "step": (r.result or {}).get("step"),
@@ -435,7 +435,7 @@ class Runner:
             if (
                 run is None
                 or run.status != "running"
-                or not self.models.get(run.model, run.version).manifest.writes(run.function)
+                or not self.programs.get(run.program, run.version).manifest.writes(run.function)
             ):
                 continue
             self.stopping[run_id] = failed(run.function, code, reason)

@@ -1,5 +1,5 @@
-"""glyphh.json, the model's manifest (docs/architecture.md, 5.2): read, checked, and its functions found in
-model.py without running it (its syntax tree), since no model code runs outside the sandbox."""
+"""glyphh.json, the program's manifest (docs/architecture.md, 5.2): read, checked, and its functions found in
+program.py without running it (its syntax tree), since no program code runs outside the sandbox."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class Function(BaseModel):
     description: str = ""
     inputs: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
     approvals: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]] = []
-    writes: bool | None = None  # whether it runs on the head; unset: the model's `data` (docs/specs/cluster.md, 3)
+    writes: bool | None = None  # whether it runs on the head; unset: the program's `data` (docs/specs/cluster.md, 3)
 
     @field_validator("inputs")
     @classmethod
@@ -83,41 +83,41 @@ class Manifest(BaseModel):
             raise ValueError(f"{', '.join(sorted(reserved))} cannot be a function: load and end run on their own")
         for function in self.functions.values():
             if function.writes is None:
-                function.writes = self.data  # safe: a model with data writes unless it says a function does not
+                function.writes = self.data  # safe: a program with data writes unless it says a function does not
         return self
 
     @property
     def head_only(self) -> bool:
-        """A model that keeps state in its data folder, which never replicates: every call to it runs on the head."""
+        """A program that keeps state in its data folder, which never replicates: every call to it runs on the head."""
         return self.data
 
     def writes(self, function: str) -> bool:
-        """Whether a call of `function` runs on the cluster's head: it writes, or its model is the head's alone. A
+        """Whether a call of `function` runs on the cluster's head: it writes, or its program is the head's alone. A
         function the manifest does not name writes (the head says it is missing)."""
         found = self.functions.get(function)
         return found is None or bool(found.writes) or self.head_only
 
     def parts(self) -> list[str]:
-        """The parts this model needs beside the base (docs/architecture.md, 10): its databases, and the ones it
+        """The parts this program needs beside the base (docs/architecture.md, 10): its databases, and the ones it
         names, each once, in order."""
         return list(dict.fromkeys([*self.databases, *self.needs]))
 
 
-def _defined(model: Path) -> set[str]:
+def _defined(program: Path) -> set[str]:
     try:
-        tree = ast.parse(model.read_bytes(), filename="model.py")
+        tree = ast.parse(program.read_bytes(), filename="program.py")
     except SyntaxError as err:
-        raise DeployError(f"model.py does not parse: line {err.lineno}: {err.msg}", code="E_MANIFEST") from None
+        raise DeployError(f"program.py does not parse: line {err.lineno}: {err.msg}", code="E_MANIFEST") from None
     return {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
 def read(src: Path) -> Manifest:
     """The manifest of a checked-out version, refused with E_MANIFEST and why."""
-    path, model = src / "glyphh.json", src / "model.py"
+    path, program = src / "glyphh.json", src / "program.py"
     if not path.is_file():
         raise DeployError("The commit has no glyphh.json.", code="E_MANIFEST")
-    if not model.is_file():
-        raise DeployError("The commit has no model.py.", code="E_MANIFEST")
+    if not program.is_file():
+        raise DeployError("The commit has no program.py.", code="E_MANIFEST")
     try:
         manifest = Manifest.model_validate(json.loads(path.read_text()))
     except (ValueError, ValidationError) as err:
@@ -128,9 +128,9 @@ def read(src: Path) -> Manifest:
             else str(err)
         )
         raise DeployError(f"glyphh.json is refused: {why}", code="E_MANIFEST") from None
-    missing = sorted(set(manifest.functions) - _defined(model))
+    missing = sorted(set(manifest.functions) - _defined(program))
     if missing:
-        raise DeployError(f"model.py has no function {', '.join(missing)}.", code="E_MANIFEST")
+        raise DeployError(f"program.py has no function {', '.join(missing)}.", code="E_MANIFEST")
     return manifest
 
 

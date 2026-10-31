@@ -36,8 +36,8 @@ from rrotord.link.client import LinkClient
 from rrotord.link.credentials import Credentials
 from rrotord.link.handler import LinkHandler
 from rrotord.link.outbox import Outbox
-from rrotord.models import Models
 from rrotord.parts import Parts
+from rrotord.programs import Programs
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
@@ -77,8 +77,8 @@ class Daemon:
         if c.mode == "self" and self.layers.checks.get("bubblewrap", {}).get("ok") is False:
             self.layers.needs = container_needs()  # its owner runs the container: say what it lacks
             log.warning("bwrap cannot start: the container lacks", extra={"needs": self.layers.needs})
-        models = Models(c.data)
-        self.deployer = Deployer(models, c.run_dir / "deploy")
+        programs = Programs(c.data)
+        self.deployer = Deployer(programs, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
         self.licence = Licence(c.data, c.runtime_id)
         self.audit = Audit(
@@ -90,7 +90,7 @@ class Daemon:
             payloads=c.log_payloads,
         )
         self.access = Access(c.data, c.keys_sha256, on_change=self._keys_changed)
-        self.cluster = Cluster(c, self.licence, self.audit, VERSION, models=models, access=self.access)
+        self.cluster = Cluster(c, self.licence, self.audit, VERSION, programs=programs, access=self.access)
         self.cluster.usage, self.cluster.taken = self.access.usage.merge, self.access.usage.take
         self.licence.on_event = self._licence_event
         self.licence.start(c.licence_env)  # never fatal: a bad key is logged and the node runs as Community
@@ -119,9 +119,9 @@ class Daemon:
         self.aggregate = Aggregate(self.audit, self.gathered, self.cluster)
         self.aggregate.drain = self.drain
         self.cluster.on_telemetry = self.aggregate.received
-        self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access, self.audit)  # type: ignore[arg-type]
+        self.handler = handler = LinkHandler(programs, None, self.deployer, self.licence, self.access, self.audit)  # type: ignore[arg-type]
         self.runner = Runner(
-            models=models,
+            programs=programs,
             records=Records(c.data),
             proxy=EgressProxy(c.run_dir / "proxy"),
             launcher=self.launcher,
@@ -243,7 +243,7 @@ class Daemon:
     def services(self) -> Services:
         return Services(
             self.config,
-            self.runner.models,
+            self.runner.programs,
             self.deployer,
             self.runner,
             self.link.credentials,

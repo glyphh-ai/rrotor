@@ -25,7 +25,7 @@ def test_down_messages_by_type():
             "type": "call",
             "id": "c1",
             "run_id": run_id,
-            "model": "x",
+            "program": "x",
             "version": 1,
             "function": "start",
             "inputs": {},
@@ -35,7 +35,7 @@ def test_down_messages_by_type():
     assert isinstance(call, p.Call) and str(call.run_id) == run_id
     assert isinstance(p.DOWN.validate_python({"type": "continue", "run_id": run_id, "answer": 1}), p.Continue)
     assert isinstance(p.DOWN.validate_python({"type": "cancel", "run_id": run_id}), p.Cancel)
-    deploy = p.DOWN.validate_python({"type": "activate", "model": "x", "version": 2, "commit_sha": SHA})
+    deploy = p.DOWN.validate_python({"type": "activate", "program": "x", "version": 2, "commit_sha": SHA})
     assert isinstance(deploy, p.Deploy) and deploy.repo is None
     assert isinstance(p.DOWN.validate_python({"type": "secret_set"}), p.Unbuilt)
     assert isinstance(p.DOWN.validate_python({"type": "ack", "of": "m1"}), p.Ack)
@@ -44,12 +44,32 @@ def test_down_messages_by_type():
 
 def test_a_bad_message_is_refused():
     with pytest.raises(ValidationError):
-        p.DOWN.validate_python({"type": "deploy", "model": "x", "version": 1, "commit_sha": "short"})
+        p.DOWN.validate_python({"type": "deploy", "program": "x", "version": 1, "commit_sha": "short"})
+
+
+def test_a_protocol_1_message_naming_a_model_is_refused_not_misread():
+    """Protocol 1 named a program `model`: such a message fails validation (the client skips it), and `hello` says 2,
+    so a server of protocol 1 closes the link with 4426 (`upgrade_needed`)."""
+    assert p.PROTOCOL == 2
+    for old in (
+        {"type": "deploy", "model": "x", "version": 1, "commit_sha": SHA},
+        {
+            "type": "call",
+            "run_id": str(uuid.uuid4()),
+            "model": "x",
+            "version": 1,
+            "function": "f",
+            "inputs": {},
+            "caller": "routine",
+        },
+    ):
+        with pytest.raises(ValidationError):
+            p.DOWN.validate_python(old)
 
 
 def test_up_messages():
     hello = p.hello("0.1.0", "local", "rid", [])
-    assert (hello["type"], hello["protocol"], hello["runtime_id"]) == ("hello", 1, "rid")
+    assert (hello["type"], hello["protocol"], hello["runtime_id"]) == ("hello", 2, "rid")
     result = p.result(3, "r", {"status": "done", "data": 1, "extra": "no"}, 2.9)
     assert result["result"] == {"status": "done", "data": 1, "step": None, "prompt": None}
     assert (result["seq"], result["seconds"]) == (3, 2)
@@ -67,7 +87,7 @@ def test_deployed_carries_the_repo_and_the_manifest_or_nulls():
     assert full == {
         "type": "deployed",
         "id": full["id"],
-        "model": "x",
+        "program": "x",
         "version": 2,
         "commit_sha": SHA,
         "repo": "owner/x",

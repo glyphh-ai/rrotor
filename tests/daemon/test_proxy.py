@@ -148,7 +148,7 @@ async def test_a_target_without_a_port_is_refused(short_dir):
 
 async def test_an_undeclared_host_is_refused(short_dir):
     _, records = await refused(short_dir, b"CONNECT [::1]:443 HTTP/1.1\r\n\r\n")
-    assert records == [{"proxy": "refused", "host": "::1", "why": "not in the model's hosts"}]
+    assert records == [{"proxy": "refused", "host": "::1", "why": "not in the program's hosts"}]
 
 
 async def test_a_name_that_does_not_resolve_is_a_bad_gateway(short_dir):

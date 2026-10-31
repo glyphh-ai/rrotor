@@ -19,7 +19,7 @@ from rrotord.cluster.tls import Credentials
 from rrotord.cluster.transport import ClusterError, fetch
 from rrotord.errors import RrotorError
 from tests.daemon.cluster.conftest import SECRET, Nodes, until
-from tests.daemon.cluster.ring import Ring, held, models
+from tests.daemon.cluster.ring import Ring, held, programs
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ async def three(ring: Ring) -> list[str]:
     ids = ["n0", "n1", "n2"]
     head = await ring.add("n0", ids)
     await until(lambda: head.cluster.role == "head")
-    models(head)
+    programs(head)
     status, body, _ = await ring.write("n0")
     assert (status, body["status"]) == (200, "done"), body
     for n in ids[1:]:
@@ -248,7 +248,7 @@ async def test_votes_that_cannot_be_asked_and_requests_that_cannot_be_read(ring:
                 session,
                 Credentials([SECRET], "x", tmp_path / "x"),
                 zero.cluster.address,
-                "/cluster/v1/snapshot",
+                "/cluster/v2/snapshot",
                 tmp_path / "s.tar",
                 5.0,
             )

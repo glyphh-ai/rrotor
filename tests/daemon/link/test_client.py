@@ -1,4 +1,4 @@
-"""The link client against a fake Cloud: a real aiohttp WebSocket server speaking protocol 1."""
+"""The link client against a fake Cloud: a real aiohttp WebSocket server speaking protocol 2."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ class Handler:
         self.calls: list[tuple[str, Any]] = []
 
     def deployed(self) -> list[dict[str, Any]]:
-        return [{"model": "x", "version": 1, "commit_sha": SHA}]
+        return [{"program": "x", "version": 1, "commit_sha": SHA}]
 
     async def on_welcome(self, message: p.Welcome) -> None:
         self.calls.append(("welcome", message))
@@ -196,7 +196,7 @@ async def test_it_says_hello_goes_online_and_replays_what_it_owes(tmp_path, sess
     await until(lambda: bool(cloud.of("event")))
     assert cloud.headers == [f"Bearer {secret}"]
     hello = cloud.hellos[0]
-    assert (hello["protocol"], hello["runtime_id"], hello["deployed"][0]["model"]) == (1, str(uuid.UUID(int=1)), "x")
+    assert (hello["protocol"], hello["runtime_id"], hello["deployed"][0]["program"]) == (2, str(uuid.UUID(int=1)), "x")
     assert link.client.state == "online" and link.client.attempt == 0
     welcomed = [m for kind, m in link.handler.calls if kind == "welcome"]
     assert len(welcomed) == 1 and welcomed[0].licence is not None and welcomed[0].licence.payload == LICENCE["payload"]
@@ -223,7 +223,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
             {
                 "type": "call",
                 "run_id": run_id,
-                "model": "x",
+                "program": "x",
                 "version": 1,
                 "function": "start",
                 "inputs": {},
@@ -231,7 +231,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
             },
             {"type": "continue", "run_id": run_id, "answer": {"approved": True}},
             {"type": "cancel", "run_id": run_id},
-            {"type": "deploy", "model": "x", "version": 2, "commit_sha": SHA},
+            {"type": "deploy", "program": "x", "version": 2, "commit_sha": SHA},
             {"type": "keys", "hashes": ["a" * 64]},
             {"type": "pause", "reason": "runtime_hours"},
             {"type": "resume"},

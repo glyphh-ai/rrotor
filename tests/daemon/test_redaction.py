@@ -28,7 +28,7 @@ INPUT = "INPUT-SECRET-7f3a"
 OUTPUT = "OUTPUT-SECRET-91bc"
 CTX = "CTXLOG-SECRET-2d4e"
 BODY = "BODY-SECRET-5a6b"
-MODEL = f"""
+PROGRAM = f"""
 from rrotor import Result
 
 def start(ctx, inputs):
@@ -73,21 +73,21 @@ async def exercise(tmp_path: Path, short_dir: Path, fake: FakeCollector, payload
     s.drain = Drain(s.config, runtime_id="rt-1", audit=s.audit, token=lambda: RUNTIME_TOKEN)
     s.runner.telemetry = s.drain.telemetry
     s.drain.start()
-    install(s.models, manifest("sample"), MODEL)
+    install(s.programs, manifest("sample"), PROGRAM)
     client = TestClient(TestServer(make(s)), headers={"Host": f"127.0.0.1:{PORT}"})
     await client.start_server()
     auth = {"Authorization": f"Bearer {LOCAL_TOKEN}"}
     try:
-        res = await client.post("/v1/runs", json={"model": "sample", "inputs": {"secret": INPUT}}, headers=auth)
+        res = await client.post("/v1/runs", json={"program": "sample", "inputs": {"secret": INPUT}}, headers=auth)
         assert (await res.json())["data"]["answer"] == OUTPUT
-        rpc = {"name": "model_call", "arguments": {"model": "sample", "inputs": {"secret": INPUT}}}
+        rpc = {"name": "program_call", "arguments": {"program": "sample", "inputs": {"secret": INPUT}}}
         await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": rpc}, headers=auth)
         repo = {"repo": "owner/missing", "commit": "a" * 40, "token": REPO_TOKEN}
-        assert (await client.post("/v1/models/deploy", json=repo, headers=auth)).status >= 400
+        assert (await client.post("/v1/programs/deploy", json=repo, headers=auth)).status >= 400
         bad = base64.b64encode(BODY.encode()).decode()
-        await client.post("/v1/models/deploy", json={"bundle": bad, "commit": "a" * 40}, headers=auth)
-        await client.post("/v1/runs", json={"model": "nope", "inputs": {"secret": INPUT}}, headers=auth)
-        await client.get("/v1/models", headers={"Authorization": f"Bearer {RUNTIME_TOKEN}"})
+        await client.post("/v1/programs/deploy", json={"bundle": bad, "commit": "a" * 40}, headers=auth)
+        await client.post("/v1/runs", json={"program": "nope", "inputs": {"secret": INPUT}}, headers=auth)
+        await client.get("/v1/programs", headers={"Authorization": f"Bearer {RUNTIME_TOKEN}"})
         logging.getLogger("rrotor.t").info(f"a careless line: Bearer {RUNTIME_TOKEN}", extra={"token": REPO_TOKEN})
     finally:
         await client.close()

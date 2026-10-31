@@ -1,6 +1,6 @@
 # Self-hosting rrotor
 
-rrotor is the runtime your models run in ([architecture](../architecture.md)). You run it yourself, on your own
+rrotor is the runtime your programs run in ([architecture](../architecture.md)). You run it yourself, on your own
 machine, cluster or cloud account, at your own address; Glyphh does not host it. It is one image,
 `ghcr.io/glyphh-ai/rrotor:<version>` (and `:latest`). Ada models do not run in rrotor: they run in Ada Cloud, on the
 Glyphh server.
@@ -21,8 +21,8 @@ first. There is no autoscaling.
 **Built:** the signed licence key that carries these limits, and Community (Free's limits) without one
 ([Licensing](#licensing)); structured logs, the audit log (Enterprise) and log drains
 ([Logs, audit and drains](#logs-audit-and-drains)); a cluster: nodes that find and authenticate each
-other, a head, the key's node cap at join, sync gated by the key, replication from the head (the models, keys and
-licence; writes and every call of a model with data forwarded to it, other reads on every node), manual failover (`rrotord cluster promote`), on
+other, a head, the key's node cap at join, sync gated by the key, replication from the head (the programs, keys and
+licence; writes and every call of a program with data forwarded to it, other reads on every node), manual failover (`rrotord cluster promote`), on
 Enterprise high availability (an elected head), and the cluster's drain and audit log gathered at the head
 ([A cluster](#a-cluster)), and each package running one. The
 decided design is [`specs/licensing.md`](../specs/licensing.md) and [`specs/cluster.md`](../specs/cluster.md); prices are the
@@ -72,8 +72,8 @@ server-side logging is on.
 Several self-hosted rrotors of one runtime, each with its own volume, behind your load balancer: they find each
 other, authenticate each other with mutual TLS derived from one secret you make, and one of them, the **head**,
 admits the others up to your key's `max_nodes`. The head is the only writer: it holds the runtime's link, and ships
-the deployed models, the runtime keys and the licence key to every other node, which serves reads from its own copy
-and sends writes (functions marked `"writes": true`, deploys) to the head. A model with data (`"data": true`) keeps
+the deployed programs, the runtime keys and the licence key to every other node, which serves reads from its own copy
+and sends writes (functions marked `"writes": true`, deploys) to the head. A program with data (`"data": true`) keeps
 it on the head alone, never synced, so every call of it runs there. While the head
 is down the others go on serving reads and answer writes 503 `E_NO_HEAD` (with `Retry-After: 2`): on Enterprise
 until another node is elected, in 1.5 to 3 seconds ([High availability](#high-availability-enterprise)); on Pro and
@@ -81,7 +81,7 @@ Team until it restarts (Kubernetes and `restart: unless-stopped` do that in seco
 ([Failover](#failover-pro-and-team)).
 
 **Without a key that allows sync** (none, Free, a key without cluster sync, or a key more than 14 days past its
-expiry) the nodes never connect to each other, so they cannot share models, keys or data. Rather than let your load
+expiry) the nodes never connect to each other, so they cannot share programs, keys or data. Rather than let your load
 balancer spread callers across nodes that hold different things, **exactly one node serves**: the cluster's head if there was one, else
 `RROTOR_CLUSTER_HEAD`, else the lowest node id among the peers (an IP address in `RROTOR_CLUSTER_PEERS` counts as
 itself, so set `RROTOR_CLUSTER_ADVERTISE` or `RROTOR_CLUSTER_HEAD` there). Every other node answers `/readyz` 503
@@ -102,9 +102,9 @@ the others turn `unlicensed`.
   `catching_up`, `no_cluster`, `refused`, `unlicensed`) otherwise: point the load balancer's health check at it, and liveness at
   `/healthz`. A new node is `catching_up` until it has taken the head's snapshot and log.
 - **One architecture:** every node runs the same image on the same CPU architecture; a node of another refuses the
-  head's models (`E_CLUSTER_ARCH`) and stays not ready.
-- **Mark your functions:** in a model without data, `"writes": false` on each function that only reads lets every
-  node answer it; everything else, and every call of a model with data, runs on the head. A function marked `false`
+  head's programs (`E_CLUSTER_ARCH`) and stays not ready.
+- **Mark your functions:** in a program without data, `"writes": false` on each function that only reads lets every
+  node answer it; everything else, and every call of a program with data, runs on the head. A function marked `false`
   that writes fails `E_READ_ONLY` on another node (its folders are read-only there).
 - **Logs, metrics, traces and audit:** the head exports the whole cluster's to your collector, each node's with its
   own identity, and keeps the cluster's audit log ([below](#logs-audit-and-drains)); only the head needs the egress.
@@ -201,7 +201,7 @@ fields.
 
 - **Logs:** JSON lines on stdout, one per event, tokens masked; every line names the node (`node_id`, and in a
   cluster `cluster_id` and `role`), and the run
-  (`run_id`, `model`, `version`, `function`) and the trace (`trace_id`, `span_id`) where there is one. Docker keeps
+  (`run_id`, `program`, `version`, `function`) and the trace (`trace_id`, `span_id`) where there is one. Docker keeps
   them rotated (the Compose package: 10 MB a file, five files); on Kubernetes the kubelet rotates them. A run's own
   `ctx.log` lines stay in its log on `/data` (`GET /v1/runs/{id}/log`).
 - **The audit log** (Enterprise): one event per call (REST, MCP or the link) and its end, deploy, change to the
@@ -209,7 +209,7 @@ fields.
   cluster made, joined, refused or left; who did
   it (a runtime key's SHA-256, never the key; a Glyphh sign-in's subject; the local token; Glyphh; rrotor itself),
   from which address, and how it ended. Kept in `/data/audit/<YYYY-MM-DD>.jsonl`, one file a day, each event fsynced;
-  read with `GET /v1/audit` (`since`, `until`, `kind`, `actor`, `model`, `run_id`, `limit`, `cursor`; newest first)
+  read with `GET /v1/audit` (`since`, `until`, `kind`, `actor`, `program`, `run_id`, `limit`, `cursor`; newest first)
   or the MCP tool `audit_query`. Below Enterprise the same events are log lines (`logger: rrotor.audit`), not kept,
   and `GET /v1/audit` is 403 `E_NOT_IN_PLAN`.
 - **A drain** to your own OpenTelemetry collector: logs, metrics, traces and audit events by OTLP over HTTP with
@@ -233,7 +233,7 @@ fields.
 - **Server-side logging** (`RROTOR_SERVER_LOGS=on`): the same signals also go to Glyphh, so the platform can show
   them. rrotor says so plainly at every start and in its health. Refused with the link off. In a cluster only the
   head sends it, for every node, whatever `RROTOR_DRAIN_AT` says; set it on every node alike.
-- **Never sent anywhere, never logged:** a model's inputs and outputs, `ctx.log`'s fields, secrets, tokens and keys,
+- **Never sent anywhere, never logged:** a program's inputs and outputs, `ctx.log`'s fields, secrets, tokens and keys,
   request bodies. `RROTOR_LOG_PAYLOADS=on` adds inputs and results (4 KB each) to the run's spans and its `run.end`
   audit event, for your own drain only; Glyphh never gets them, nor your callers' addresses.
 
@@ -255,7 +255,7 @@ fields.
 
 ## The container's privileges, and why
 
-Every model run is sandboxed inside rrotor: bubblewrap gives it its own user, mount, PID and network namespaces,
+Every program run is sandboxed inside rrotor: bubblewrap gives it its own user, mount, PID and network namespaces,
 Landlock limits the files it can touch, a seccomp filter refuses the dangerous system calls, and an egress proxy is
 its only way out ([architecture, section 4](../architecture.md#4-rrotor-inside)). Making namespaces and mounting a
 fresh `/proc` from inside a container is exactly what a container runtime's defaults forbid, so rrotor's container
@@ -283,8 +283,8 @@ an unprivileged user (uid 10001) on a read-only root filesystem, and its own sec
 | `api.glyphh.ai:443` | The link (a WebSocket, outbound only), the daily licence heartbeat, and checking a Glyphh sign-in | `RROTOR_LINK=on` |
 | `ghcr.io:443` | Pulling the image | Installing and upgrading |
 | Let's Encrypt (`acme-v02.api.letsencrypt.org:443`) | Caddy's certificate | Compose and Terraform, unless you bring your own |
-| `github.com:443` | Fetching a model's commit when one is deployed from its repo | Deploys from git |
-| The hosts a model declares | A run's own egress, port 443 only, through rrotor's proxy | Runs whose manifest asks for them |
+| `github.com:443` | Fetching a program's commit when one is deployed from its repo | Deploys from git |
+| The hosts a program declares | A run's own egress, port 443 only, through rrotor's proxy | Runs whose manifest asks for them |
 | Your OpenTelemetry collector | The drain: logs, metrics, traces, audit events | `OTEL_EXPORTER_OTLP_ENDPOINT` set |
 | `api.glyphh.ai:443` (`/v1/otlp/v1/…`) | Server-side logging | `RROTOR_SERVER_LOGS=on` |
 
@@ -316,7 +316,7 @@ nothing is running. Go forwards only: to go back, restore the backup you took be
 
 ## Backups
 
-Everything rrotor keeps is on `/data`: the runtime's id and token (`runtime.json`), each model's deployed versions,
+Everything rrotor keeps is on `/data`: the runtime's id and token (`runtime.json`), each program's deployed versions,
 its own files and data folder, each run's record and log, the parts installed, the licence held,
 and, on Enterprise, the audit log (`/data/audit`).
 Back that up and you can rebuild rrotor anywhere.
@@ -326,7 +326,7 @@ Back that up and you can rebuild rrotor anywhere.
   then `docker compose start rrotor`.
 - **Disk snapshots:** an EBS snapshot (`data_volume_id`), a Compute Engine snapshot (`data_disk`), or a CSI
   VolumeSnapshot of the claim `data-<name>-0` (`data-rrotor-0` for a release named `rrotor`). In a cluster, back up
-  the head's: only the head holds the models' data folders, and a new node takes its copy of the rest from the head. A snapshot of a running rrotor is crash-consistent: the
+  the head's: only the head holds the programs' data folders, and a new node takes its copy of the rest from the head. A snapshot of a running rrotor is crash-consistent: the
   link's outbox replays what was not acknowledged, and a run that was in flight is lost.
 - **A backup holds the runtime token.** Keep it as you keep the token. Restoring it on a second machine while the
   first still runs makes two of the same runtime: the newer link takes over, the older stops (`replaced`).

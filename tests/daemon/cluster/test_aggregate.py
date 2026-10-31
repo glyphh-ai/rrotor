@@ -98,7 +98,7 @@ def signals(d: Daemon, n: int) -> None:
     line(d, f"hello from {node} {n}")
     with d.drain.telemetry.span(f"work on {node} {n}"):
         pass
-    d.audit.emit("run.call", who=Who({"type": "key", "key_sha256": "ab" * 32}, "10.0.4.17", "rest"), model="m", n=n)
+    d.audit.emit("run.call", who=Who({"type": "key", "key_sha256": "ab" * 32}, "10.0.4.17", "rest"), program="m", n=n)
 
 
 async def rounds(daemons: list[Daemon]) -> None:

@@ -1,6 +1,6 @@
 """Deploying a version: exactly one commit, from a git bundle sent to the API, from a GitHub repo (with a token for
 a private one; the Cloud mints a short-lived one per deploy), or one this rrotor already holds. The commit's SHA is
-checked, the manifest read, a venv made and `requirements.lock` installed (binary wheels only, with hashes: no model
+checked, the manifest read, a venv made and `requirements.lock` installed (binary wheels only, with hashes: no program
 code runs outside the sandbox, not even a package's setup), and the version becomes active (docs/architecture.md,
 2.2 and 5)."""
 
@@ -17,8 +17,8 @@ from pathlib import Path
 
 from rrotord import manifest as manifests
 from rrotord.errors import BadRequest, DeployError
-from rrotord.models import Models, Version
 from rrotord.proc import run
+from rrotord.programs import Programs, Version
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 REPO = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
@@ -40,8 +40,8 @@ def check_sha(commit: str) -> str:
 
 
 class Deployer:
-    def __init__(self, models: Models, scratch: Path, tools: Tools | None = None) -> None:
-        self.models, self.scratch, self.tools = models, scratch, tools or Tools()
+    def __init__(self, programs: Programs, scratch: Path, tools: Tools | None = None) -> None:
+        self.programs, self.scratch, self.tools = programs, scratch, tools or Tools()
 
     def _git_env(self, home: Path, token: str | None = None) -> dict[str, str]:
         env = {
@@ -92,17 +92,17 @@ class Deployer:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    async def held(self, model: str, commit: str, version: int | None = None) -> Version:
+    async def held(self, program: str, commit: str, version: int | None = None) -> Version:
         """A commit this rrotor already holds (a deploy without a repo): made active, renumbered to the Cloud's."""
-        found = self.models.by_sha(model, check_sha(commit))
+        found = self.programs.by_sha(program, check_sha(commit))
         if found is None:
             raise DeployError(
-                f"This rrotor does not hold {model} at {commit[:12]}; deploy it from its folder first.",
+                f"This rrotor does not hold {program} at {commit[:12]}; deploy it from its folder first.",
                 code="E_COMMIT_MISSING",
             )
         if version is not None and version != found.version:
-            found = self.models.renumber(found, version)
-        self.models.activate(found)
+            found = self.programs.renumber(found, version)
+        self.programs.activate(found)
         return found
 
     def _scratch(self) -> Path:
@@ -116,10 +116,10 @@ class Deployer:
             raise DeployError(f"The commit fetched is {head[:12]}, not {commit[:12]}.", code="E_SHA")
         found = manifests.read(src)
         shutil.rmtree(src / ".git")
-        existing = self.models.by_sha(found.name, commit)
+        existing = self.programs.by_sha(found.name, commit)
         if existing is not None:
             return await self.held(found.name, commit, version)
-        root = self.models.version_root(found.name, commit)
+        root = self.programs.version_root(found.name, commit)
         staging = root.with_name(f".{commit}.staging")
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
@@ -132,8 +132,8 @@ class Deployer:
             shutil.rmtree(staging, ignore_errors=True)
             raise
         self._seed(found.name, root / "src" / "files")
-        made = self.models.record(found.name, version or self.models.next_number(found.name), commit, found)
-        self.models.activate(made)
+        made = self.programs.record(found.name, version or self.programs.next_number(found.name), commit, found)
+        self.programs.activate(made)
         return made
 
     async def _venv(self, root: Path) -> None:
@@ -164,8 +164,8 @@ class Deployer:
             raise DeployError(f"requirements.lock could not be installed: {done.why()}", code="E_DEPS")
 
     def _seed(self, name: str, seed: Path) -> None:
-        """A version's files/ seed its folder on the model's first deploy; never over what is there."""
-        folder = self.models.files(name)
+        """A version's files/ seed its folder on the program's first deploy; never over what is there."""
+        folder = self.programs.files(name)
         if folder.exists():
             return
         if seed.is_dir():

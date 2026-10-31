@@ -24,7 +24,7 @@ resource "google_compute_subnetwork" "rrotor" {
 
 # One node: HTTPS in (and HTTP, for the certificate and the redirect). A cluster: the API from Google's load
 # balancer and the cluster's port from the other nodes only (cluster.tf). Egress is open by Compute Engine's default
-# rule: the link and the heartbeat to the Glyphh server, the image pull, Let's Encrypt, and the egress models.
+# rule: the link and the heartbeat to the Glyphh server, the image pull, Let's Encrypt, and the egress programs.
 resource "google_compute_firewall" "web" {
   count         = local.cluster ? 0 : 1
   project       = var.project

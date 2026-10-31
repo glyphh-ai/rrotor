@@ -52,19 +52,19 @@ def test_setup_sends_json_to_stdout(capsys):
 def test_every_line_names_the_node_and_the_run_in_hand_and_the_span():
     log.identify(node_id="rrotor-1", cluster_id=None)
     try:
-        with log.bind(run_id="r1", model="m", version=None):
+        with log.bind(run_id="r1", program="m", version=None):
             with log.bind(function="start"):
                 line = json.loads(log.JsonFormatter().format(record("in a run")))
             assert "function" not in json.loads(log.JsonFormatter().format(record("after")))
-        plain = json.loads(log.JsonFormatter().format(record("outside", model="own")))
+        plain = json.loads(log.JsonFormatter().format(record("outside", program="own")))
         tracer = TracerProvider(shutdown_on_exit=False).get_tracer("t")
         with tracer.start_as_current_span("s") as span:
             traced = json.loads(log.JsonFormatter().format(record("traced")))
     finally:
         log.identify()
-    assert (line["node_id"], line["run_id"], line["model"], line["function"]) == ("rrotor-1", "r1", "m", "start")
+    assert (line["node_id"], line["run_id"], line["program"], line["function"]) == ("rrotor-1", "r1", "m", "start")
     assert "version" not in line and "cluster_id" not in line and "trace_id" not in line
-    assert (plain["node_id"], plain["model"]) == ("rrotor-1", "own") and "run_id" not in plain
+    assert (plain["node_id"], plain["program"]) == ("rrotor-1", "own") and "run_id" not in plain
     context = span.get_span_context()
     assert traced["trace_id"] == f"{context.trace_id:032x}" and traced["span_id"] == f"{context.span_id:016x}"
     assert "node_id" not in json.loads(log.JsonFormatter().format(record("unnamed")))

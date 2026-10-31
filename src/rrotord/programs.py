@@ -1,5 +1,6 @@
-"""The models this rrotor holds: each version a checked-out commit with its venv, immutable, and which one is
-active. On /data/models/<name>/ (docs/architecture.md, 4)."""
+"""The programs this rrotor holds: each version a checked-out commit with its venv, immutable, and which one is
+active. On /data/programs/<name>/ (docs/architecture.md, 4); an earlier release's /data/models/ is moved there when
+the daemon starts, if /data/programs/ is not there yet."""
 
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from rrotord.store import read_json, write_json
 
 @dataclass(frozen=True, slots=True)
 class Version:
-    model: str
+    program: str
     version: int
     commit_sha: str
     deployed_at: str
@@ -34,16 +35,19 @@ class Version:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "model": self.model,
+            "program": self.program,
             "version": self.version,
             "commit_sha": self.commit_sha,
             "deployed_at": self.deployed_at,
         }
 
 
-class Models:
+class Programs:
     def __init__(self, data: Path) -> None:
-        self.root = data / "models"
+        self.root = data / "programs"
+        earlier = data / "models"  # an earlier release named a program `model`: its deploys are kept, moved once
+        if earlier.is_dir() and not self.root.exists():
+            earlier.rename(self.root)
         self.on_change: Callable[[str, Version], None] | None = None  # a version activated or removed (the head's)
 
     def folder(self, name: str) -> Path:
@@ -90,7 +94,7 @@ class Models:
 
     def get(self, name: str, version: int | None = None) -> Version:
         if name not in self.names():
-            raise NotFound(f"This rrotor has no model {name}.", code="E_MODEL_MISSING", model=name)
+            raise NotFound(f"This rrotor has no program {name}.", code="E_PROGRAM_MISSING", program=name)
         if version is None:
             found = self.active(name)
         else:
@@ -99,7 +103,7 @@ class Models:
             raise NotFound(
                 f"{name} has no version {version or '(active)'} here.",
                 code="E_VERSION_MISSING",
-                model=name,
+                program=name,
                 version=version,
             )
         return found
@@ -121,28 +125,28 @@ class Models:
         meta = read_json(found.root / "version.json")
         meta["version"] = version
         write_json(found.root / "version.json", meta)
-        return self.by_sha(found.model, found.commit_sha) or found
+        return self.by_sha(found.program, found.commit_sha) or found
 
     def next_number(self, name: str) -> int:
         return max((v.version for v in self.versions(name)), default=0) + 1
 
     def activate(self, found: Version) -> None:
-        write_json(self.root / found.model / "active.json", {"commit_sha": found.commit_sha})
+        write_json(self.root / found.program / "active.json", {"commit_sha": found.commit_sha})
         if self.on_change is not None:
             self.on_change("activate", found)
 
     def remove(self, found: Version) -> None:
-        active = self.active(found.model)
+        active = self.active(found.program)
         if active is not None and active.commit_sha == found.commit_sha:
-            (self.root / found.model / "active.json").unlink()
+            (self.root / found.program / "active.json").unlink()
         shutil.rmtree(found.root)
         if self.on_change is not None:
             self.on_change("remove", found)
 
     def deployed(self) -> list[dict[str, Any]]:
-        """The active version of each model, for the link's hello."""
+        """The active version of each program, for the link's hello."""
         return [
-            {"model": v.model, "version": v.version, "commit_sha": v.commit_sha}
+            {"program": v.program, "version": v.version, "commit_sha": v.commit_sha}
             for n in self.names()
             if (v := self.active(n))
         ]

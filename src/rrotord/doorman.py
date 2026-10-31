@@ -1,7 +1,7 @@
 """The doorman: the one always-on machine in the runtimes app. Fly's proxy lands a request for `<machine>.<domain>`
 on any started machine; this one answers every such request with `fly-replay: instance=<machine>`, so the right
 machine gets it (started if it was stopped) and nobody else's machine is woken to bounce it. Nothing else: no
-models, no link, no data."""
+programs, no link, no data."""
 
 from __future__ import annotations
 

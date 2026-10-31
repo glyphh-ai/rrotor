@@ -1,6 +1,6 @@
 # rrotor architecture
 
-rrotor is a local runtime for a person's models: one headless Linux image that deploys a model by commit, runs
+rrotor is a local runtime for a person's programs: one headless Linux image that deploys a program by commit, runs
 each call in a sandbox with no network but the hosts it declares, and answers over REST and MCP at its own address.
 Ada models are not run here: they run in Ada Cloud, on the Glyphh server.
 This document is how its parts work and call each other. The system around it (accounts, plans, the data model,
@@ -12,9 +12,9 @@ provisioning) is in `glyphh-ai/server`, `docs/architecture.md`; running your own
 
 | Part | What it is |
 |---|---|
-| **Claude** | Claude Code, the Claude apps or any MCP client. It has the runtime as a connector: it writes, deploys and calls a model with the runtime's own tools |
+| **Claude** | Claude Code, the Claude apps or any MCP client. It has the runtime as a connector: it writes, deploys and calls a program with the runtime's own tools |
 | **Apps** | Anyone's software, calling the runtime's REST API with a runtime key, directly or through the SDKs (`glyphh` on PyPI, `@glyphh-ai/glyphh` on npm, both in `glyphh-ai/glyphh`) |
-| **rrotor** | This repo: the daemon `rrotord` and the model SDK `rrotor`, in the image `ghcr.io/glyphh-ai/rrotor`. One per volume |
+| **rrotor** | This repo: the daemon `rrotord` and the program SDK `rrotor`, in the image `ghcr.io/glyphh-ai/rrotor`. One per volume |
 | **The Glyphh server** | `https://api.glyphh.ai`: provisions hosted machines, makes runtime keys and runtime tokens, signs the licence key, vouches for a Glyphh sign-in, and holds the runtime's link. Never on the data path |
 | **The platform** | `https://platform.glyphh.ai`: where a person makes and starts machines, makes runtime keys, registers a self-hosted runtime and shows its licence key |
 | **Fly** | Hosts the hosted machines: one app, `*.glyphh.app`, a machine and a volume per runtime, and the doorman |
@@ -28,7 +28,7 @@ One image, four modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
 | `doorman` | One always-on Fly machine per app | Every `*.glyphh.app` request's first hop | Nobody: it only replays ([3](#3-hosted-machines)) |
 | `local` (the default) | Any container host | `127.0.0.1:<port>` only | A local token, held as its SHA-256 (`RROTOR_LOCAL_TOKEN_SHA256`); the runtime token is handed in with `PUT /v1/runtime/token` |
 
-rrotor has no sign-in of its own and nothing to log into. It connects out to the server (the link, [6](#6-the-link-protocol-1));
+rrotor has no sign-in of its own and nothing to log into. It connects out to the server (the link, [6](#6-the-link-protocol-2));
 the server never connects in. A call goes from the caller to the runtime and back: nothing of Glyphh's sees its
 inputs or its answer.
 
@@ -37,7 +37,7 @@ machines; `hosted` and `doorman` stay in the code, used only if Glyphh turns it 
 Customers run rrotor themselves, in `self` mode at their own address ([12](#12-self-hosting),
 [`self-hosting/`](self-hosting/README.md)).
 
-## 2. A model, end to end
+## 2. A program, end to end
 
 ### 2.1 Adding the runtime to Claude
 
@@ -69,7 +69,7 @@ sequenceDiagram
     C->>R: POST /mcp tools/list, Bearer the token
     R->>G: POST /v1/runtime/introspect {token}, Bearer the runtime token
     G-->>R: active (kept a minute, good or bad)
-    R-->>C: models_list, model_call, model_continue, ...
+    R-->>C: programs_list, program_call, program_continue, ...
 ```
 
 An app sends a runtime key instead (`Authorization: Bearer <key>`), made on the platform's Keys page; rrotor holds
@@ -77,7 +77,7 @@ only the keys' SHA-256s ([7](#7-the-api)).
 
 ### 2.2 Build, deploy and call
 
-A model is a GitHub repo; a version is a commit. Claude writes the model with the person, pushes it, and deploys the
+A program is a GitHub repo; a version is a commit. Claude writes the program with the person, pushes it, and deploys the
 commit through the runtime's own MCP.
 
 ![Deploy and call](img/seq-deploy-call.png)
@@ -91,32 +91,32 @@ sequenceDiagram
     participant R as rrotor
     participant G as Glyphh server
     P->>C: "Each morning, post yesterday's sales to the ledger"
-    C->>C: writes glyphh.json, model.py and its tests, commits
+    C->>C: writes glyphh.json, program.py and its tests, commits
     C->>GH: git push to the person's repo
-    C->>R: model_deploy {repo, commit, token?}
+    C->>R: program_deploy {repo, commit, token?}
     R->>GH: fetch exactly that commit
     R->>R: check the SHA and the manifest, make the venv
-    R-->>C: {model, version, commit_sha}
-    R-)G: deployed {model, version, commit_sha, repo, manifest}
-    C->>R: model_call start {day}
+    R-->>C: {program, version, commit_sha}
+    R-)G: deployed {program, version, commit_sha, repo, manifest}
+    C->>R: program_call start {day}
     R->>R: a sandbox per run: load, the function, end
     R-->>C: Result needs_approval {run_id, step, prompt}
     P->>C: approve
-    C->>R: model_continue {run_id, answer}
+    C->>R: program_continue {run_id, answer}
     R-->>C: Result done {data}
     R-)G: usage {keys}, at most once a minute
 ```
 
-- **Deploy by commit:** `model_deploy` (and `POST /v1/models/deploy`) takes `{repo, commit, token?}`: `repo` is
+- **Deploy by commit:** `program_deploy` (and `POST /v1/programs/deploy`) takes `{repo, commit, token?}`: `repo` is
   `owner/name` on GitHub, `commit` the full 40-character SHA, `token` for a private repo. rrotor fetches that one
   commit (depth 1), checks its SHA, reads `glyphh.json` ([5.2](#52-the-manifest-glyphhjson)), makes a venv from
-  `requirements.lock` (binary wheels only, with hashes: no model code runs outside the sandbox, not even a package's
+  `requirements.lock` (binary wheels only, with hashes: no program code runs outside the sandbox, not even a package's
   setup) and makes the version active. The REST route also takes `{bundle, commit}`, a git bundle of the commit in
   base64, up to 64 MB. The server can deploy too, down the link, with a short-lived token from the Glyphh GitHub
   App.
 - **Every deploy is reported** up the link as `deployed`, however it was asked for, so the server records every
-  model and version on the runtime.
-- **The sample:** `examples/daily_sales/` is a model that needs no part, used to test the base end to end: it reads
+  program and version on the runtime.
+- **The sample:** `examples/daily_sales/` is a program that needs no part, used to test the base end to end: it reads
   a sales export from its folder, converts the total with one declared host, asks approval for its `write` step and writes a
   ledger.
 
@@ -174,23 +174,23 @@ flowchart TB
         subgraph D["rrotord: one Python 3.13 asyncio process"]
             Gate["the gate<br/>runtime key, Glyphh sign-in or local token"]
             API["REST and MCP on :7777"]
-            Link["link client<br/>protocol 1, outbound"]
-            Runner["model runner<br/>deploys, runs, checkpoints, seconds"]
+            Link["link client<br/>protocol 2, outbound"]
+            Runner["program runner<br/>deploys, runs, checkpoints, seconds"]
             Proxy["egress proxy<br/>per-run host allowlist, CONNECT and SNI"]
             Parts["part store<br/>install, switch, remove"]
         end
         subgraph S["a sandbox per run: bwrap, Landlock, seccomp, rlimits"]
-            Model["the model, with the rrotor SDK<br/>load, function, end"]
+            Program["the program, with the rrotor SDK<br/>load, function, end"]
         end
-        Installed["parts on /data/parts<br/>what a model's manifest needs"]
+        Installed["parts on /data/parts<br/>what a program's manifest needs"]
         Data[("/data")]
         Tini --> D
         Gate --> API
         API --> Runner
         Runner --> S
         Parts --> Installed
-        Model -- "HTTPS via 127.0.0.1:3128, a unix socket out" --> Proxy
-        Model -. "read-only at /opt/parts/name" .-> Installed
+        Program -- "HTTPS via 127.0.0.1:3128, a unix socket out" --> Proxy
+        Program -. "read-only at /opt/parts/name" .-> Installed
         Runner --> Data
     end
     Callers["Claude and apps"] -- "HTTPS, Bearer" --> Gate
@@ -201,8 +201,8 @@ flowchart TB
 |---|---|
 | **gate** | Who may call, by mode ([7](#7-the-api)); counts each request a runtime key let in |
 | **REST and MCP** | One set of operations (`api/ops.py`) behind both ([7](#7-the-api)) |
-| **link client** | Connects out, reconnects with backoff (1 s to 30 s, with jitter), replays what is not acknowledged ([6](#6-the-link-protocol-1)) |
-| **model runner** | Launches each run in its sandbox, keeps a waiting run's worker up to 15 minutes, runs `end` always, counts each run's seconds |
+| **link client** | Connects out, reconnects with backoff (1 s to 30 s, with jitter), replays what is not acknowledged ([6](#6-the-link-protocol-2)) |
+| **program runner** | Launches each run in its sandbox, keeps a waiting run's worker up to 15 minutes, runs `end` always, counts each run's seconds |
 | **egress proxy** | A run's only network: an HTTP `CONNECT` proxy on a unix socket per run; lets through port 443 of the hosts the manifest declares when the TLS SNI matches, refuses addresses that resolve to loopback, private or link-local ranges, and records what it refuses |
 | **part store** | Checks a part's hash and signature, unpacks it, switches it in one rename ([10](#10-parts)) |
 | **logs, audit, drain** | JSON log lines naming the node and the run; audit events, kept on Enterprise; OTLP to the customer's collector and, opt-in, to Glyphh ([13](#13-logs-audit-and-drains)) |
@@ -213,8 +213,8 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 
 | Layer | What it holds |
 |---|---|
-| **bubblewrap** | New user, mount, PID, IPC, UTS, cgroup and network namespaces; `--die-with-parent`, `--new-session`, `--clearenv`. Read-only `/usr` (and its `/lib`, `/bin` links), the version's code at `/model`, its venv at `/venv`, the SDK at `/opt/rrotor`, each part it needs at `/opt/parts/<name>`; writable `/files` (the model's folder), `/data` (its data folder, when the manifest asks) and a private `/tmp`. The network namespace has only loopback |
-| **Landlock** | Applied by the worker before it imports the model: read only the read-only mounts, write only the writable ones; on ABI 4 and later, TCP only to `127.0.0.1:3128`; on ABI 6, no abstract unix sockets or signals outside the sandbox. A kernel without Landlock refuses runs |
+| **bubblewrap** | New user, mount, PID, IPC, UTS, cgroup and network namespaces; `--die-with-parent`, `--new-session`, `--clearenv`. Read-only `/usr` (and its `/lib`, `/bin` links), the version's code at `/program`, its venv at `/venv`, the SDK at `/opt/rrotor`, each part it needs at `/opt/parts/<name>`; writable `/files` (the program's folder), `/data` (its data folder, when the manifest asks) and a private `/tmp`. The network namespace has only loopback |
+| **Landlock** | Applied by the worker before it imports the program: read only the read-only mounts, write only the writable ones; on ABI 4 and later, TCP only to `127.0.0.1:3128`; on ABI 6, no abstract unix sockets or signals outside the sandbox. A kernel without Landlock refuses runs |
 | **seccomp** | A filter built with libseccomp and handed to `bwrap --seccomp`: `ptrace`, `mount`, `unshare`, `setns`, `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `io_uring_*`, kernel modules, `kexec`, clocks, `reboot` and others refused; new user namespaces refused; sockets only `AF_UNIX`, `AF_INET`, `AF_INET6`. `no_new_privs` is set |
 | **egress** | Inside the namespace the worker forwards `127.0.0.1:3128` to the run's proxy socket, so `HTTPS_PROXY` works for any library |
 | **limits** | `prlimit`: data size (the manifest's `memory_mb`), CPU seconds, open files, file size, no core files; the runner's wall clock (`limits.seconds`) kills the run |
@@ -238,10 +238,11 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 | `licence.json`, `licence.token` | The licence key held, `{key, source}`; a key dropped in as a file (as `/etc/rrotor/license.key`) |
 | `machine-id` | A self-hosted rrotor's machine id, where the host gives none |
 | `link/outbox.json` | The sequence counter and what is not yet acknowledged |
-| `models/<name>/versions/<commit>/` | A deployed version: `src/` (the checkout), `venv/`, `version.json`; immutable |
-| `models/<name>/active.json` | Which version is active |
-| `models/<name>/files/` | The model's own folder, seeded from the commit's `files/` on its first deploy |
-| `models/<name>/data/` | Its persistent data, outside git (`"data": true`) |
+| `programs/<name>/versions/<commit>/` | A deployed version: `src/` (the checkout), `venv/`, `version.json`; immutable |
+| `programs/<name>/active.json` | Which version is active |
+| `programs/<name>/files/` | The program's own folder, seeded from the commit's `files/` on its first deploy |
+| `programs/<name>/data/` | Its persistent data, outside git (`"data": true`) |
+| `models/` | An earlier release's name for `programs/`: moved to `programs/` when the daemon starts, if `programs/` is not there; its runs' and audit events' `model` reads as `program` |
 | `runs/<run_id>/` | Each run's `run.json` (with its checkpoints) and `log.jsonl` |
 | `parts/<name>/<version>/`, `parts/<name>/current` | An installed part, and the version in use |
 | `audit/<YYYY-MM-DD>.jsonl`, `audit/.cursor`, `audit/.cursor-glyphh` | Enterprise: the audit log, a file a day; how far the customer's drain and server-side logging have read it ([13](#13-logs-audit-and-drains)) |
@@ -253,16 +254,16 @@ SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests). 
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
 is the `hosted` target: the base, with no part built in ([11](#11-the-image-and-ci)).
 
-## 5. A model
+## 5. A program
 
-### 5.1 What a model is
+### 5.1 What a program is
 
 A git repo; a version is a commit.
 
 | File | What |
 |---|---|
 | `glyphh.json` | The manifest |
-| `model.py` | `load`, the functions, `end` |
+| `program.py` | `load`, the functions, `end` |
 | `requirements.lock` | Optional: its Python dependencies, pinned with hashes, installed at deploy, never at run |
 | `files/` | Optional: seed files, copied into its folder on the first deploy |
 
@@ -284,23 +285,23 @@ A git repo; a version is a commit.
 
 | Key | What |
 |---|---|
-| `name` | `^[a-z][a-z0-9_]{0,62}$`; a deploy names the model by it |
+| `name` | `^[a-z][a-z0-9_]{0,62}$`; a deploy names the program by it |
 | `version` | Optional, 1 or more |
 | `description`, `python` | Free text; `python` must be `3.13` |
-| `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it runs on a cluster's head: `true` runs it there, `false` on whichever node the call reaches, read-only there; default the model's `data`; every call of a model with `data` runs on the head whatever it says) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
+| `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it runs on a cluster's head: `true` runs it there, `false` on whichever node the call reaches, read-only there; default the program's `data`; every call of a program with `data` runs on the head whatever it says) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
 | `hosts` | The hosts a run may reach on 443 (`*.example.com` allowed) |
 | `needs` | The parts it imports from, by name ([10](#10-parts)) |
 | `data` | `true` mounts its persistent data folder at `/data` |
 | `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
 | `secrets`, `databases`, `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
-A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `model.py` does not
-define (read from its syntax tree: no model code runs outside the sandbox).
+A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `program.py` does not
+define (read from its syntax tree: no program code runs outside the sandbox).
 
 ### 5.3 The SDK: `rrotor`
 
 The `rrotor` package, standard library only, ships in the image and is mounted read-only into every sandbox at
-`/opt/rrotor`: models import it and never install it.
+`/opt/rrotor`: programs import it and never install it.
 
 ```python
 from rrotor import Ctx, Result
@@ -318,8 +319,8 @@ ctx.checkpoint(key, fn)       # fn runs once per run; a resumed run reads the st
 ctx.http                      # HTTPS to the declared hosts (any library works too: HTTPS_PROXY is set)
 ctx.files                     # its folder, a pathlib.Path
 ctx.data                      # its persistent data folder ("data": true), else None
-ctx.home                      # its code (the folder model.py is in)
-ctx.clearance                 # who asks, 0 to 1; 1 unless the call says (the model decides what it means)
+ctx.home                      # its code (the folder program.py is in)
+ctx.clearance                 # who asks, 0 to 1; 1 unless the call says (the program decides what it means)
 ctx.caller                    # who called
 ctx.readonly                  # a cluster follower's run: its folders are read-only
 ctx.log(message, **detail)
@@ -329,7 +330,7 @@ ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 - **Approvals and inputs are re-entrant.** A `continue` calls the same function again with the same inputs: steps
   done are skipped by `ctx.checkpoint`, and `ctx.ask_approval(step, …)` then answers the decision for that step
   (`{"approved": true}`). A step not named in the function's `approvals` fails the run (`E_STEP_UNDECLARED`).
-- **`rrotor.testing`** gives a model's own tests a `Ctx` with no sandbox (`Harness`): inputs, answers, a folder, and
+- **`rrotor.testing`** gives a program's own tests a `Ctx` with no sandbox (`Harness`): inputs, answers, a folder, and
   an `http` that answers what the test says.
 
 ### 5.4 A run
@@ -361,23 +362,23 @@ stateDiagram-v2
 - **Every call answers a `Result`**, never an exception: a crash is `failed` with the error and the step.
 - **Seconds** are the time a run spent running, not waiting.
 
-## 6. The link: protocol 1
+## 6. The link: protocol 2
 
 JSON messages over the WebSocket `{RROTOR_SERVER}/v1/runtime/link` (`Authorization: Bearer <runtime token>`, never
 in a URL), one per frame, each with `type` and `id`. rrotor connects out; the server never connects in.
 
 | Direction | `type` | Carries |
 |---|---|---|
-| up | `hello` | protocol 1, rrotor's version, mode, runtime id, the versions deployed |
+| up | `hello` | protocol 2 (protocol 1 named a program `model`: the server closes a link of the other protocol with 4426), rrotor's version, mode, runtime id, the versions deployed |
 | down | `welcome` | accepted; for a hosted or self-hosted runtime, the licence key (`license_key`, [9](#9-the-licence)), in release N also the legacy licence (`licence: {payload, signature}`; the key is preferred), and the runtime keys' SHA-256s (`keys`, the whole list) |
 | down | `keys` | `hashes`: the whole list again, whenever a key is made, revoked or expires |
-| down | `deploy`, `activate`, `remove` | model, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
+| down | `deploy`, `activate`, `remove` | program, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
 | down | `continue` | `run_id`, `answer` |
-| down | `call`, `cancel` | `run_id`, model, version, function, inputs, caller, clearance; `cancel` the `run_id`. Handled; the server sends neither |
+| down | `call`, `cancel` | `run_id`, program, version, function, inputs, caller, clearance; `cancel` the `run_id`. Handled; the server sends neither |
 | down | `pause`, `resume` | Handled (a paused hosted runtime answers 402 `E_LIMIT` to all but `/healthz`); the server sends neither |
 | up | `result` | `seq`, `run_id`, the `Result`, seconds: only for a run a `call` opened |
-| up | `deployed` | model, version, commit SHA, `repo` (null unless from a repo), `manifest`; after **every** deploy, by any route; not numbered, kept until acknowledged |
-| up | `event` | `seq`, model, kind, data: `deploy_failed` `{version, commit_sha, code, message}` when a `deploy` or `activate` cannot be done |
+| up | `deployed` | program, version, commit SHA, `repo` (null unless from a repo), `manifest`; after **every** deploy, by any route; not numbered, kept until acknowledged |
+| up | `event` | `seq`, program, kind, data: `deploy_failed` `{version, commit_sha, code, message}` when a `deploy` or `activate` cannot be done |
 | up | `usage` | `seq`, `keys` (each runtime key that let a request in: `{key_sha256, calls, last_used_at}`) |
 | both | `ping`, `pong` | every 20 s |
 | both | `ack` | `of`: the `id` acknowledged (the server acks every `result`, `event`, `usage` and `deployed`) |
@@ -434,18 +435,18 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `GET /healthz` | `{ok: true}` while the process is up |
 | `GET /readyz` | `200 {ready: true}` while this node may take traffic: standalone and up, or a cluster's member in step with its head; else `503 {ready: false, reason, code}`, the reason `joining`, `catching_up`, `refused`, `no_cluster` or `unlicensed` ([14](#14-the-cluster)) |
 | `GET /v1/cluster` | This node's cluster: `{cluster_id, node_id, role, status, head, term, commit_seq, applied_seq, tier, max_nodes, ha, members: [{node_id, address, role, voter, applied_seq, lag, last_seen, connected, version, instance, joined_at}], refused: [{node_id, at, code}], refusal}`; `{role: standalone}` with the cluster off, and the reason when the key does not allow it ([14](#14-the-cluster)) |
-| `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of models, `cluster` (`{role: standalone}`, or the cluster's id, this node's role and status, whether it is ready, the head, the term and the members' count), `drains` (per signal: `state` (`off`, `waiting`, `ok`, `failing`), `buffered`, `dropped`, `last_export_at`) and `server_logs` (`on`, and the warning while it is) |
-| `GET /v1/models` | Each model, its versions (number, commit, when), the active one, its functions |
-| `POST /v1/models/deploy` | `{repo, commit, token?}` or `{bundle, commit}` ([2.2](#22-build-deploy-and-call)): `201 {model, version, commit_sha, deployed_at}` |
-| `POST /v1/runs` | `{model, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, model, version, function, status, data, step, prompt, seconds}` |
+| `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of programs, `cluster` (`{role: standalone}`, or the cluster's id, this node's role and status, whether it is ready, the head, the term and the members' count), `drains` (per signal: `state` (`off`, `waiting`, `ok`, `failing`), `buffered`, `dropped`, `last_export_at`) and `server_logs` (`on`, and the warning while it is) |
+| `GET /v1/programs` | Each program, its versions (number, commit, when), the active one, its functions |
+| `POST /v1/programs/deploy` | `{repo, commit, token?}` or `{bundle, commit}` ([2.2](#22-build-deploy-and-call)): `201 {program, version, commit_sha, deployed_at}` |
+| `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
 | `POST /v1/runs/{id}/continue` | `{answer}`: the next `Result` |
 | `POST /v1/runs/{id}/cancel` | Stops it; `end` runs; `cancelled` |
 | `GET /v1/runs/{id}` | Status, function, times, seconds, the last `Result` |
 | `GET /v1/runs/{id}/log` | The run's log lines |
-| `GET /v1/approvals` | Runs waiting for approval: run, model, step, prompt, when |
+| `GET /v1/approvals` | Runs waiting for approval: run, program, step, prompt, when |
 | `GET /v1/parts`, `POST /v1/parts`, `DELETE /v1/parts/{name}` | The parts installed; install one (`{name, version, sha256, signature, archive \| url}`); remove one ([10](#10-parts)); installing and removing are local only |
 | `GET /v1/licence`, `PUT /v1/licence` | `{licence}`: the key held, its state and the limits that apply ([9](#9-the-licence)); hand one in as the body (release N: or a legacy `{payload, signature}`, `{token}` or offline token), `{licence, kept}`, `kept: false` when another is held; a bad one is 400 `E_LICENCE`; handing one in is local only |
-| `GET /v1/audit` | `?since&until&kind&actor&model&run_id&limit&cursor`: the audit log, newest first, `{events, cursor}` (`limit` 100, at most 1000; `cursor` null at the end); Enterprise only, 403 `E_NOT_IN_PLAN` otherwise; in a cluster, the cluster's, which its head keeps (a follower asks it) ([13](#13-logs-audit-and-drains)) |
+| `GET /v1/audit` | `?since&until&kind&actor&program&run_id&limit&cursor`: the audit log, newest first, `{events, cursor}` (`limit` 100, at most 1000; `cursor` null at the end); Enterprise only, 403 `E_NOT_IN_PLAN` otherwise; in a cluster, the cluster's, which its head keeps (a follower asks it) ([13](#13-logs-audit-and-drains)) |
 | `PUT /v1/runtime/token` | `{runtime_id, token}`: a runtime token handed in (a local runtime's way to get one); kept in `/data/runtime.json`, and the link reconnects with it; local only |
 
 **MCP:** `POST /mcp`, Streamable HTTP, stateless, one JSON-RPC message per POST; MCP 2026-07-28 (`server/discover`,
@@ -454,14 +455,14 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 
 | Tool | Does |
 |---|---|
-| `models_list` | The models, their versions, the active one, its functions |
-| `model_deploy` `{repo, commit, token?}` | A commit of a GitHub repo as the model's next version |
-| `model_call` `{model, function?, inputs?, version?, clearance?}` | Opens a run: the first `Result`, with its data |
-| `model_continue` `{run_id, answer}` | The next `Result` |
-| `model_cancel` `{run_id}` | Stops a run |
+| `programs_list` | The programs, their versions, the active one, its functions |
+| `program_deploy` `{repo, commit, token?}` | A commit of a GitHub repo as the program's next version |
+| `program_call` `{program, function?, inputs?, version?, clearance?}` | Opens a run: the first `Result`, with its data |
+| `program_continue` `{run_id, answer}` | The next `Result` |
+| `program_cancel` `{run_id}` | Stops a run |
 | `run_status`, `run_log` `{run_id}` | A run's status and last `Result`; its log lines |
 | `approvals` | The runs waiting for the person's approval |
-| `audit_query` `{since?, until?, kind?, model?, run_id?, limit?}` | `GET /v1/audit` |
+| `audit_query` `{since?, until?, kind?, program?, run_id?, limit?}` | `GET /v1/audit` |
 | `cluster_status` | `GET /v1/cluster` |
 
 A refusal is a tool error carrying the API's `{error}`.
@@ -471,7 +472,7 @@ with the refusal's code to everything but `/healthz`, `/readyz`, `/v1/health` an
 ([14](#14-the-cluster)).
 
 **In a cluster** ([14](#14-the-cluster)) every route and tool answers the same on every node: a follower sends a
-writing call (`"writes": true`, or any call of a model with data), a deploy, and anything about a run
+writing call (`"writes": true`, or any call of a program with data), a deploy, and anything about a run
 another node holds (run ids are `<node id>~<uuid>`) to its head, which does it as the same caller; `GET
 /v1/approvals` gathers every node's. A member's answers carry `Rrotor-Cluster-Seq` (the head's last seq, a
 follower's applied one); a follower that forwarded a write answers once it has applied it (up to 2 s), and a request
@@ -514,7 +515,7 @@ shown as `ha`.
   every start and re-read (`licence key refused: <why>`), state `bad`, Community; never a failed start. Good: the
   key's limits, `live`; past `expires_at` 14 days' grace (`GRACE_DAYS`, rrotor's constant) with the key's limits,
   `grace` and `days_left`, a warning daily; past that, `expired`, Community, a warning daily.
-- **Nothing a licence does refuses a run:** a model runs with no key; the worst case is Community's limits.
+- **Nothing a licence does refuses a run:** a program runs with no key; the worst case is Community's limits.
 - **The legacy licence** (release N only): the server's `{payload, signature}` over canonical JSON, wherever one
   arrives, mapped: `plan` as the tier (unknown: `free`), `max_nodes` from the plan table (Pro 3, Team 10,
   Enterprise unlimited), `features.sync` as `cluster_sync_enabled`, `expires_at`
@@ -525,7 +526,7 @@ shown as `ha`.
 
 ## 10. Parts
 
-A **part** is what a model needs beside the base: the databases (`postgres`, `mongodb`, `neo4j`, rrotor's own) or
+A **part** is what a program needs beside the base: the databases (`postgres`, `mongodb`, `neo4j`, rrotor's own) or
 any part a manifest names in `needs`. None is built yet, and the image carries none.
 
 - **What a part is:** a gzipped tarball with `part.json` at its top, `{name, version, mod, arch (amd64 | arm64 |
@@ -539,7 +540,7 @@ any part a manifest names in `needs`. None is built yet, and the image carries n
   signature with `RROTOR_RELEASE_PUBLIC_KEY` before it unpacks anything, then `part.json` (the part asked for, this
   architecture, this rrotor); it unpacks to `/data/parts/<name>/<version>/` and switches `current` in one rename, and the older
   version goes. A failed install leaves the one before.
-- **A model's parts** (`needs`) are each mounted read-only at `/opt/parts/<name>`, their `env.PYTHONPATH` folders
+- **A program's parts** (`needs`) are each mounted read-only at `/opt/parts/<name>`, their `env.PYTHONPATH` folders
   after the SDK's. A run whose part is not installed fails `E_PART_MISSING`, naming the part; no licence refuses one.
 
 ## 11. The image and CI
@@ -548,7 +549,7 @@ any part a manifest names in `needs`. None is built yet, and the image carries n
 
 | Job | What |
 |---|---|
-| `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the sample model's tests |
+| `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the sample program's tests |
 | `deploy` | Compose (the air-gapped overlay, the cluster file and the per-node file, which refuses to render without its node's settings) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file (one replica, and two clusters of three), `terraform fmt -check` and `validate` for both modules and their examples (one node and a cluster). Nothing is started |
 | `image` | Builds the base and runs the sandbox tests inside it; starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off`; with the secret `CI_CLUSTER_LICENSE_KEY` (a key with cluster sync), brings up the three-node Compose cluster and checks every node ready, `rrotor-0` the head of three |
 | `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with the release public key baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |
@@ -587,13 +588,13 @@ order steps 3 and 4), and for a cluster, gathered at its head (step 9).
 server-side logging. The heartbeat and the link's `usage` are licensing, not telemetry, and keep their fixed fields.
 
 - **Log lines** (`rrotord/log.py`): JSON on stdout, `RROTOR_LOG_LEVEL`, tokens masked; every line has `at`, `level`,
-  `logger`, `message` and its fields, `node_id` (and `cluster_id` and `role` in a cluster), the run's `run_id`, `model`, `version` and `function` while one is
+  `logger`, `message` and its fields, `node_id` (and `cluster_id` and `role` in a cluster), the run's `run_id`, `program`, `version` and `function` while one is
   handled, and `trace_id` and `span_id` while a span is recorded. The packages rotate them (Docker's `json-file`,
   10 MB, five files; the kubelet). A run's `ctx.log` lines stay in `runs/<id>/log.jsonl`.
 - **Audit events** (`rrotord/audit.py`): `{id, at, node_id, cluster_id, kind, actor, client, via, …, outcome,
   seconds}`, one per `run.call`, `run.continue`, `run.cancel` (refused ones too, `outcome.status: refused` with the
-  code) and `run.end`, by any route (REST, MCP, the link); `model.deploy`, `model.activate`, `model.remove`,
-  `model.deploy_failed`; `keys.changed` (counts, hashes added and removed); `licence.changed`, `licence.expired`,
+  code) and `run.end`, by any route (REST, MCP, the link); `program.deploy`, `program.activate`, `program.remove`,
+  `program.deploy_failed`; `keys.changed` (counts, hashes added and removed); `licence.changed`, `licence.expired`,
   `licence.bad`; `access.denied` (a 401 or 403, with the code); `config.server_logs`; `cluster.head`,
   `cluster.join`, `cluster.refused` and `cluster.leave` (the node, the code or the reason, the term; on the head;
   `cluster.head` with its reason: `bootstrap`, `elected`, `promoted` by an operator, `deposed`, `no_majority`). `actor.type` is `key` (its
@@ -612,7 +613,7 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
   `rrotor.runtime.id`, `rrotor.cluster.id` (in a cluster), `rrotor.node.role` (`standalone`, `head` or `follower`,
   as it is when the batch goes), `rrotor.mode`, and `OTEL_RESOURCE_ATTRIBUTES`. Log lines are log records (the
   line's fields as attributes); audit events are log records named `rrotor.audit.<kind>`. Metrics: `rrotor.runs`
-  (model, function, status), `rrotor.run.seconds`, `rrotor.link.state`, `rrotor.drain.dropped` (per destination and signal), and on a member `rrotor.cluster.term`
+  (program, function, status), `rrotor.run.seconds`, `rrotor.link.state`, `rrotor.drain.dropped` (per destination and signal), and on a member `rrotor.cluster.term`
   and, on the head, `rrotor.cluster.lag` (per follower, the seqs it last acknowledged behind the head's log). Traces
   (`OTEL_TRACES_SAMPLER`, default `parentbased_always_on`): a span per API request, a child of the caller's
   `traceparent`, with `rrotor.sandbox.start` and `rrotor.function` under it; on a follower `rrotor.cluster.forward`
@@ -653,7 +654,7 @@ server-side logging. The heartbeat and the link's `usage` are licensing, not tel
   infrastructure. Set RROTOR_SERVER_LOGS=off to keep them here." Turning it on or off is an audit event. In a
   cluster the head sends it for every node. The server keeps what it receives for 7 days and shows it on the
   platform's Settings → Logs (`glyphh-ai/server`).
-- **Redaction:** never in a log line, audit event, span or metric: a model's inputs or outputs, `ctx.log`'s fields,
+- **Redaction:** never in a log line, audit event, span or metric: a program's inputs or outputs, `ctx.log`'s fields,
   secrets, tokens or keys (keys as SHA-256 only), request bodies; a drain sends each line exactly as stdout masks it.
   `RROTOR_LOG_PAYLOADS=on` adds inputs and `Result.data` (4 KB each) to the `rrotor.function` span and the kept
   `run.end` event, for the customer's drain only: before anything goes to Glyphh, `client`, `inputs`, `data`,
@@ -666,8 +667,8 @@ failover and elected heads (`rrotord/cluster/`), the cluster's drain and audit s
 ([13](#13-logs-audit-and-drains)), and the packages that run it. Several self-hosted rrotors of one runtime find and authenticate each other, one
 makes the cluster and is its **head**, the rest join it as **followers** up to the key's `max_nodes`. The head is the
 single writer of what syncs (the deployed versions, the runtime keys, the licence key, the members) and ships it to
-every follower as one ordered log. No model's state replicates: a model with data keeps it in its data folder on the
-head, and every call of it runs there. Followers run the reads of models without data themselves and forward every
+every follower as one ordered log. No program's state replicates: a program with data keeps it in its data folder on the
+head, and every call of it runs there. Followers run the reads of programs without data themselves and forward every
 write to the head.
 
 - **On, and gated by the key:** `RROTOR_CLUSTER=on` (a self-hosted rrotor only) starts the cluster's transport only
@@ -692,8 +693,8 @@ write to the head.
   (7778), never the API's port and never behind the public load balancer. JSON frames with `type` and `id`; a
   request (`hello`, `join`, `ping`, `command`) is answered by an `answer` with its id, `ok` or an `error {code,
   message, status, detail}`; the head pushes `removed` unasked, and asks a follower `append`, `snapshot` and
-  `forward` over the follower's own connection. `GET /cluster/v1/versions/<model>/<commit>.tar` and `GET
-  /cluster/v1/snapshot` are plain requests on the same listener, for members only. A member's `telemetry` (its
+  `forward` over the follower's own connection. `GET /cluster/v2/versions/<program>/<commit>.tar` and `GET
+  /cluster/v2/snapshot` are plain requests on the same listener, for members only. A member's `telemetry` (its
   drain's batches and kept audit events) is the head's to take ([13](#13-logs-audit-and-drains)). Any other type is
   `E_CLUSTER_MESSAGE` (`vote` comes with elections).
 - **Mutual TLS from one secret** (`cluster/tls.py`): from `RROTOR_CLUSTER_SECRET` (32 bytes or more, base64) every
@@ -778,9 +779,9 @@ write to the head.
   `cluster` ([7](#7-the-api)); the heartbeat's `cluster_id` and `role` ([12](#12-self-hosting)); `cluster_id` and
   `role` on every log line and `cluster_id` on every audit event, and the drain's resource
   ([13](#13-logs-audit-and-drains)).
-- **Which calls write** (`manifest.py`): each function's `"writes"`, default the model's `data`. Every call of a
-  model with `"data": true` runs on the head (`head_only`), whatever its functions say: its data folder never
-  replicates. A follower runs a `false` function of a model without data itself, with `/files` mounted read-only
+- **Which calls write** (`manifest.py`): each function's `"writes"`, default the program's `data`. Every call of a
+  program with `"data": true` runs on the head (`head_only`), whatever its functions say: its data folder never
+  replicates. A follower runs a `false` function of a program without data itself, with `/files` mounted read-only
   (`--ro-bind`, and Landlock read-only; `ctx.readonly` is true): a function marked `false` that writes fails
   `E_READ_ONLY`, naming it, and the folder is untouched.
 - **Forwarding** (`api/forward.py`, `cluster/node.py`): a writing call, a deploy, and continue, cancel, status and
@@ -791,9 +792,9 @@ write to the head.
   `<node id>~<uuid>` (a plain UUID is the head's, or a run the link opened). `GET /v1/approvals` gathers every
   node's. A follower with no head answers writes 503 `E_NO_HEAD` and serves reads.
 - **The log** (`cluster/log.py`): `/data/cluster/log/` on every node, JSON-line segments named by their first seq,
-  each entry `{seq, term, kind, ...}`: `deploy {model, version, commit_sha, manifest}` (any version made
+  each entry `{seq, term, kind, ...}`: `deploy {program, version, commit_sha, manifest}` (any version made
   active, by the API, MCP or the link), `remove`, `keys {hashes}`, `licence {key}`, `member {op, node, members}`,
-  `head {node}` (a `rows` entry, an earlier release's model state, applies as nothing). Committed once on the head's disk (fsynced): Pro and Team. Kept until every member has applied it,
+  `head {node}` (a `rows` entry, an earlier release's Ada store changes, applies as nothing). Committed once on the head's disk (fsynced): Pro and Team. Kept until every member has applied it,
   and never past `RROTOR_CLUSTER_LOG_KEEP` (the oldest segments go; the newest stays; `base` keeps the seq and term
   of the last one gone). Each entry's term is known (runs of one term, read again at start), and a tail that
   diverged from the head's is dropped (`truncate`).
@@ -831,7 +832,7 @@ write to the head.
   identity, 7778 between the nodes only, an AWS NLB with ACM or Google's external HTTPS load balancer checking
   `/readyz`, no Caddy). `replicas` and `node_count` of 1 are the single box as before.
 - **The seams left for what comes next:** the snapshot is a plain GET on the listener rather than binary frames on
-  the WebSocket; a deposed head takes a whole snapshot rather than only the models it touched; the clients' retry
+  the WebSocket; a deposed head takes a whole snapshot rather than only the programs it touched; the clients' retry
   of `E_NO_HEAD` is the SDKs' (in `glyphh-ai/glyphh`), not this repo's.
 - **Proven by simulation** (`tests/daemon/cluster/sim.py`): the nodes' Raft over a seeded network in one thread, no
   clock but the scheduler's: messages delayed, reordered, lost and doubled, partitions, crashes and restarts (log,
@@ -845,12 +846,12 @@ write to the head.
 
 ## Not built yet
 
-- **Secrets:** a vault for a model's `secrets` (`ctx.secrets` answers `E_NOT_BUILT`; `secret_set` on the link is
+- **Secrets:** a vault for a program's `secrets` (`ctx.secrets` answers `E_NOT_BUILT`; `secret_set` on the link is
   logged and skipped).
-- **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a model's `databases` (`ctx.db` answers
+- **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a program's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
 - **SSO and SAML, roles (RBAC).**
 - **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
   ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
-- **The gateway:** models behind OpenAI- and Anthropic-compatible endpoints, configured at the head
+- **The gateway:** programs behind OpenAI- and Anthropic-compatible endpoints, configured at the head
   ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).

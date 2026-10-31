@@ -1,5 +1,5 @@
 """Landlock, through its three system calls (no library): the worker may read only the read-only mounts, write
-only its folder and /tmp and, on ABI 4 and later, reach TCP only on the proxy's port. Applied before the model is
+only its folder and /tmp and, on ABI 4 and later, reach TCP only on the proxy's port. Applied before the program is
 imported; a kernel without Landlock refuses the run (the runner checks it at start, too)."""
 
 from __future__ import annotations

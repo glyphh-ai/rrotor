@@ -20,7 +20,7 @@ services:
     environment:
       RROTOR_MODE: self
       RROTOR_DATA: /data
-    # The model sandbox (bubblewrap) makes namespaces and mounts /proc, which Docker's default seccomp profile,
+    # The program sandbox (bubblewrap) makes namespaces and mounts /proc, which Docker's default seccomp profile,
     # AppArmor profile and masked paths refuse. rrotor's own seccomp filter and Landlock hold each run instead.
     security_opt:
       - seccomp:unconfined

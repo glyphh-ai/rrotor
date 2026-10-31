@@ -24,11 +24,11 @@ LEGACY = ("2025-11-25", "2025-06-18", "2025-03-26")
 VERSION_META = "io.modelcontextprotocol/protocolVersion"
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS = -32700, -32600, -32601, -32602
 INSTRUCTIONS = (
-    "This person's Glyphh runtime (rrotor): their models, deployed by commit and run here. models_list shows them; "
-    "model_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
-    "model_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
-    "waiting for the person; model_deploy deploys a commit of a model's GitHub repo; audit_query reads the audit log "
-    "(Enterprise); cluster_status shows the runtime's cluster."
+    "This person's Glyphh runtime (rrotor): their programs, deployed by commit and run here. programs_list shows them; "
+    "program_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
+    "program_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
+    "waiting for the person; program_deploy deploys a commit of a program's GitHub repo; audit_query reads the audit "
+    "log (Enterprise); cluster_status shows the runtime's cluster."
 )
 
 
@@ -51,19 +51,19 @@ def _obj(properties: dict[str, Any], required: list[str] | None = None) -> dict[
     return {"type": "object", "properties": properties, "required": required or [], "additionalProperties": False}
 
 
-async def models_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
-    return {"models": s.models.describe()}
+async def programs_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
+    return {"programs": s.programs.describe()}
 
 
-async def model_call(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+async def program_call(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.call(s, args)
 
 
-async def model_continue(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+async def program_continue(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.resume(s, ops.run_id_of(args), args.get("answer"))
 
 
-async def model_cancel(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+async def program_cancel(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.cancel(s, ops.run_id_of(args))
 
 
@@ -79,7 +79,7 @@ async def approvals(s: Services, _: dict[str, Any]) -> dict[str, Any]:
     return {"approvals": await ops.approvals(s)}
 
 
-async def model_deploy(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+async def program_deploy(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.deploy(s, args)
 
 
@@ -98,46 +98,50 @@ async def cluster_status(s: Services, _: dict[str, Any]) -> dict[str, Any]:
 RUN = _obj({"run_id": {"type": "string"}}, ["run_id"])
 TOOLS: tuple[Tool, ...] = (
     Tool(
-        "models_list",
-        "The models here: each one's versions, the active one and its functions.",
+        "programs_list",
+        "The programs here: each one's versions, the active one and its functions.",
         _obj({}),
-        models_list,
+        programs_list,
         True,
     ),
     Tool(
-        "model_call",
-        "Run a function of a model: the first Result, with its data. Waits for the model.",
+        "program_call",
+        "Run a function of a program: the first Result, with its data. Waits for the program.",
         _obj(
             {
-                "model": {"type": "string"},
+                "program": {"type": "string"},
                 "function": {"type": "string", "default": "start"},
                 "inputs": {"type": "object"},
                 "version": {"type": "integer", "minimum": 1},
                 "clearance": {"type": "number", "minimum": 0, "maximum": 1},
             },
-            ["model"],
+            ["program"],
         ),
-        model_call,
+        program_call,
     ),
     Tool(
-        "model_continue",
+        "program_continue",
         "Answer a run that is waiting for input or an approval: the next Result.",
         _obj({"run_id": {"type": "string"}, "answer": {}}, ["run_id"]),
-        model_continue,
+        program_continue,
     ),
-    Tool("model_cancel", "Stop a run; its end runs.", RUN, model_cancel),
+    Tool("program_cancel", "Stop a run; its end runs.", RUN, program_cancel),
     Tool("run_status", "A run's status, timing and last Result.", RUN, run_status, True),
     Tool("run_log", "A run's log lines.", RUN, run_log, True),
     Tool(
-        "approvals", "The runs waiting for the person's approval: run, model, step, prompt.", _obj({}), approvals, True
+        "approvals",
+        "The runs waiting for the person's approval: run, program, step, prompt.",
+        _obj({}),
+        approvals,
+        True,
     ),
     Tool(
-        "model_deploy",
-        "Deploy a commit of a model's GitHub repo (owner/name) as its next version; a token for a private repo.",
+        "program_deploy",
+        "Deploy a commit of a program's GitHub repo (owner/name) as its next version; a token for a private repo.",
         _obj(
             {"repo": {"type": "string"}, "commit": {"type": "string"}, "token": {"type": "string"}}, ["repo", "commit"]
         ),
-        model_deploy,
+        program_deploy,
     ),
     Tool(
         "audit_query",
@@ -147,7 +151,7 @@ TOOLS: tuple[Tool, ...] = (
                 "since": {"type": "string", "format": "date-time"},
                 "until": {"type": "string", "format": "date-time"},
                 "kind": {"type": "string"},
-                "model": {"type": "string"},
+                "program": {"type": "string"},
                 "run_id": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
             }

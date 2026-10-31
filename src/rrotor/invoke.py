@@ -1,4 +1,4 @@
-"""One call of a model's function, turned into a Result: the same in the sandbox's worker and in a model's own
+"""One call of a program's function, turned into a Result: the same in the sandbox's worker and in a program's own
 tests (`rrotor.testing`). Every call answers a Result, never an exception (docs/architecture.md, 5.4)."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rrotor.ctx import Ctx
-from rrotor.errors import ModelError, Wait
+from rrotor.errors import ProgramError, Wait
 from rrotor.result import Result
 
 Pending = dict[str, str]
@@ -29,9 +29,9 @@ def failure(step: str, code: str, reason: str) -> Result:
 
 
 def crash(step: str, err: BaseException) -> Result:
-    """A model's exception: its type and message, and where in the model it was raised."""
-    frames = [f for f in traceback.extract_tb(err.__traceback__) if f.filename.startswith("/model/")]
-    where = f" (model.py line {frames[-1].lineno})" if frames else ""
+    """A program's exception: its type and message, and where in the program it was raised."""
+    frames = [f for f in traceback.extract_tb(err.__traceback__) if f.filename.startswith("/program/")]
+    where = f" (program.py line {frames[-1].lineno})" if frames else ""
     return failure(step, "E_CRASH", f"{type(err).__name__}: {err}{where}")
 
 
@@ -62,9 +62,9 @@ def invoke(step: str, fn: Callable[..., Any], ctx: Ctx, *args: Any) -> Outcome:
     except Wait as wait:
         waited = wait.result if isinstance(wait.result, Result) else failure(step, "E_BAD_RESULT", "bad wait")
         return Outcome(waited, wait.pending)
-    except ModelError as err:
+    except ProgramError as err:
         return Outcome(failure(step, err.code, err.message))
-    except Exception as err:  # noqa: BLE001  (a model's crash is a failed Result, never an exception)
+    except Exception as err:  # noqa: BLE001  (a program's crash is a failed Result, never an exception)
         return Outcome(read_only(step, err) if wrote(err, ctx) else crash(step, err))
     if not isinstance(value, Result):
         return Outcome(failure(step, "E_BAD_RESULT", f"{step} returned {type(value).__name__}, not a Result."))

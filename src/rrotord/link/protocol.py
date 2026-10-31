@@ -1,5 +1,7 @@
-"""Protocol 1's messages, as the server builds them (glyphh-ai/server, ops/link/protocol.py): JSON, one per frame,
-each with `type` and `id`."""
+"""Protocol 2's messages, as the server builds them (glyphh-ai/server, ops/link/protocol.py): JSON, one per frame,
+each with `type` and `id`. Protocol 1 named a program `model`; `hello` says 2, so a server of protocol 1 closes the
+link with 4426 (`upgrade_needed`) rather than misreading it, and a protocol 1 message that still reaches rrotor
+fails validation and is skipped."""
 
 from __future__ import annotations
 
@@ -8,7 +10,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-PROTOCOL = 1
+PROTOCOL = 2  # 1 named a program `model`
 
 REFUSED, BAD_HELLO, SILENT, REPLACED, UPGRADE = 4401, 4400, 4408, 4409, 4426
 FAILED, RESTART = 1011, 1012
@@ -72,7 +74,7 @@ class Resume(Message):
 class Call(Message):
     type: Literal["call"]
     run_id: uuid.UUID
-    model: Name
+    program: Name
     version: int
     function: Name
     inputs: dict[str, Any]
@@ -93,7 +95,7 @@ class Cancel(Message):
 
 class Deploy(Message):
     type: Literal["deploy", "activate", "remove"]
-    model: Name
+    program: Name
     version: int
     repo: str | None = None
     commit_sha: Sha
@@ -158,18 +160,18 @@ def result(seq: int, run_id: str, outcome: dict[str, Any], seconds: float) -> di
     return {"type": "result", "id": new_id(), "seq": seq, "run_id": run_id, "result": keep, "seconds": int(seconds)}
 
 
-def event(seq: int, model: str, kind: str, data: Any) -> dict[str, Any]:
-    return {"type": "event", "id": new_id(), "seq": seq, "model": model, "kind": kind, "data": data}
+def event(seq: int, program: str, kind: str, data: Any) -> dict[str, Any]:
+    return {"type": "event", "id": new_id(), "seq": seq, "program": program, "kind": kind, "data": data}
 
 
 def deployed(
-    model: str, version: int, commit_sha: str, repo: str | None = None, manifest: dict[str, Any] | None = None
+    program: str, version: int, commit_sha: str, repo: str | None = None, manifest: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """After every deploy, however it was asked for: `repo` only for a deploy from a repo."""
     return {
         "type": "deployed",
         "id": new_id(),
-        "model": model,
+        "program": program,
         "version": version,
         "commit_sha": commit_sha,
         "repo": repo,

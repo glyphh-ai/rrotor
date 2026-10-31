@@ -1,4 +1,4 @@
-"""The worker in this process: a socket pair for its channel, a model in a folder, the runner played by a thread."""
+"""The worker in this process: a socket pair for its channel, a program in a folder, the runner played by a thread."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from rrotor._worker.channel import Channel
-from rrotor._worker.loop import Worker, import_model
+from rrotor._worker.loop import Worker, import_program
 
 pytestmark = pytest.mark.usefixtures("restore_signals")
 
@@ -64,14 +64,14 @@ def end_after_result(message: dict[str, Any], runner: Runner) -> None:
 
 
 @pytest.fixture(autouse=True)
-def forget_model() -> Iterator[None]:
+def forget_program() -> Iterator[None]:
     yield
-    sys.modules.pop("model", None)
+    sys.modules.pop("program", None)
 
 
 def write(folder: Path, source: str) -> str:
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "model.py").write_text(source)
+    (folder / "program.py").write_text(source)
     return str(folder)
 
 
@@ -89,10 +89,10 @@ def run(start: dict[str, Any] | None, react: React | None = end_after_result, la
 
 
 def start_for(folder: str, function: str = "start", **extra: Any) -> dict[str, Any]:
-    return {"function": function, "model": folder, "files": folder, "inputs": {"a": 1}, **extra}
+    return {"function": function, "program": folder, "files": folder, "inputs": {"a": 1}, **extra}
 
 
-MODEL = """
+PROGRAM = """
 from rrotor import Result
 
 def load(ctx):
@@ -112,7 +112,7 @@ def test_a_message_other_than_start_stops_the_worker():
 
 
 def test_a_run_loads_calls_and_ends(tmp_path):
-    folder = write(tmp_path / "p", MODEL)
+    folder = write(tmp_path / "p", PROGRAM)
     runner = run(start_for(folder))
     assert runner.ops() == ["log", "checkpoint", "result", "log", "ended"]
     assert runner.results() == [
@@ -147,7 +147,7 @@ def start(ctx, inputs):
 
 
 def test_the_runner_going_away_ends_the_run(tmp_path):
-    folder = write(tmp_path / "p", MODEL)
+    folder = write(tmp_path / "p", PROGRAM)
 
     def react(message: dict[str, Any], runner: Runner) -> None:
         if message["op"] == "result":
@@ -157,17 +157,17 @@ def test_the_runner_going_away_ends_the_run(tmp_path):
     assert run(start_for(folder), react).ops()[-1] == "ended"
 
 
-def test_a_model_that_cannot_import_fails_at_load(tmp_path):
+def test_a_program_that_cannot_import_fails_at_load(tmp_path):
     folder = write(tmp_path / "p", "raise ImportError('nope')\n")
     runner = run(start_for(folder), None)
     assert runner.results()[0]["data"]["reason"] == "ImportError: nope"
     assert runner.got[-1] == {"op": "ended", "result": None}
 
 
-def test_import_model_without_a_loader_raises(tmp_path, monkeypatch):
+def test_import_program_without_a_loader_raises(tmp_path, monkeypatch):
     monkeypatch.setattr("importlib.util.spec_from_file_location", lambda *a: None)
     with pytest.raises(ImportError, match="cannot be loaded"):
-        import_model(str(tmp_path))
+        import_program(str(tmp_path))
 
 
 def test_a_failed_load_skips_the_function(tmp_path):
@@ -243,8 +243,8 @@ class Lock:
         return 6
 
 
-def test_the_worker_locks_itself_down_before_the_model(tmp_path):
-    folder = write(tmp_path / "p", MODEL)
+def test_the_worker_locks_itself_down_before_the_program(tmp_path):
+    folder = write(tmp_path / "p", PROGRAM)
     lock = Lock()
     box = {"landlock": {"read": ["/usr"], "write": ["/files"], "tcp_ports": [3128]}}
     run(start_for(folder, sandbox=box), landlock=lock)
@@ -253,7 +253,7 @@ def test_the_worker_locks_itself_down_before_the_model(tmp_path):
 
 
 def test_a_sandbox_that_cannot_lock_fails_the_run(tmp_path):
-    folder = write(tmp_path / "p", MODEL)
+    folder = write(tmp_path / "p", PROGRAM)
     box: dict[str, Any] = {"landlock": {"read": [], "write": []}}
     runner = run(start_for(folder, sandbox=box), None, landlock=Lock(fail=True))
     assert runner.results()[0]["data"] == {"reason": "no landlock here", "code": "E_SANDBOX"}

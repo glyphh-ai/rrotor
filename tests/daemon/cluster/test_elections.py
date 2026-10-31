@@ -17,7 +17,7 @@ from rrotord.cluster import node as cluster_node
 from rrotord.cluster.raft import Timing
 from rrotord.errors import RrotorError
 from tests.daemon.cluster.conftest import Nodes, until
-from tests.daemon.cluster.ring import Ring, held, models
+from tests.daemon.cluster.ring import Ring, held, programs
 from tests.fakes import keys
 
 ENTERPRISE = keys().key(tier="enterprise", max_nodes=None, max_precedents=None)
@@ -54,7 +54,7 @@ async def three(ring: Ring) -> list[str]:
     ids = ["n0", "n1", "n2"]
     head = await ring.add("n0", ids, ENTERPRISE)
     await until(lambda: head.cluster.role == "head")
-    models(head)
+    programs(head)
     status, body, _ = await ring.write("n0")
     assert (status, body["status"]) == (200, "done"), body
     for n in ids[1:]:

@@ -1,5 +1,5 @@
 """Shared fixtures: the licence's public key patched to the tests' own (and its /etc file away from the host's), short
-folders for unix sockets, git repos and bundles of sample models, restored signals."""
+folders for unix sockets, git repos and bundles of sample programs, restored signals."""
 
 from __future__ import annotations
 

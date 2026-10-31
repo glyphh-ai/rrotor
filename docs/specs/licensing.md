@@ -82,7 +82,7 @@ can say what expired) and Community limits apply.
 
 ### Replacing today's licence (the migration)
 
-One model: the key. Today's `{payload, signature}` licence (plan, limits, mods, features, `runtime_id`, `kind`,
+One program: the key. Today's `{payload, signature}` licence (plan, limits, mods, features, `runtime_id`, `kind`,
 24 hours plus `grace_days`) goes, in two releases.
 
 1. **rrotor N** reads the key from every source above, and still takes a legacy licence wherever one arrives,
@@ -92,7 +92,7 @@ One model: the key. Today's `{payload, signature}` licence (plan, limits, mods, 
 2. **rrotor N+1** drops the legacy path: `rrotord/keys.py`'s `canonical`, the `runtime_id` check, `kind`, `mods`,
    `features` and `E_NOT_IN_PLAN` for an expired licence.
 
-What changes for a caller: **a model runs with no key**. Nothing a licence does refuses a run; the worst case is
+What changes for a caller: **a program runs with no key**. Nothing a licence does refuses a run; the worst case is
 Community's limits (one node, no sync). The key is not bound to a runtime (it carries no `runtime_id`): one customer's key serves each of their
 clusters, and `max_nodes` bounds each cluster, not the customer ([3](#3-the-node-cap)).
 
@@ -109,7 +109,7 @@ clusters, and `max_nodes` bounds each cluster, not the customer ([3](#3-the-node
 rrotor runs no Ada models: Ada, its precedent stores and the `max_precedents` cap live in Ada Cloud on the server.
 rrotor ignores a key's `max_precedents` (present or not, whatever its value), counts no precedents, and shows none:
 `GET /v1/licence` and the health have no `max_precedents` or `precedents`, the heartbeat and `usage` carry no
-precedent count, and the drain has no precedent gauge. A model's own data folder is not capped by the licence.
+precedent count, and the drain has no precedent gauge. A program's own data folder is not capped by the licence.
 
 ## 3. The node cap
 

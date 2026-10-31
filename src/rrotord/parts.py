@@ -1,4 +1,4 @@
-"""Parts: what a model needs beyond the base (docs/architecture.md, 10). A part is a tarball built in CI, signed
+"""Parts: what a program needs beyond the base (docs/architecture.md, 10). A part is a tarball built in CI, signed
 with Glyphh's release key and named with its SHA-256; rrotor checks both before it unpacks anything, keeps each
 version under /data/parts/<name>/<version>/ and switches /data/parts/<name>/current in one rename, so a failed
 install leaves the one before. A run mounts the parts its manifest asks for, read-only."""
