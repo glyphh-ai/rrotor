@@ -1,6 +1,7 @@
 # The CLI server: sandboxed command-line tools Claude drives through rrotor
 
-**Status: proposed (2026-10-31), not built.** For the founder's review before any code.
+**Status: approved (2026-10-31), being built.** The founder's rulings: a CLI is a kind of program; one-shot commands
+first (interactive sessions later); program databases start with SQLite.
 
 ## What it is
 
