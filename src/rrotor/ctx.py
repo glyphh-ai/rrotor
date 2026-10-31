@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn, overload
+from typing import Any, overload
 
-from rrotor.errors import NotJson, PartMissing, SecretMissing, SecretUndeclared, StepUndeclared, Wait
+from rrotor.errors import DatabaseUndeclared, NotJson, SecretMissing, SecretUndeclared, StepUndeclared, Wait
 from rrotor.http import Http
 from rrotor.result import Result
 
@@ -85,8 +86,8 @@ class Secrets:
 
 
 class Ctx:
-    """The run's context. Programs read `inputs`, `answer`, `files`, `data`, `home`, `clearance` and `caller`, and call
-    the methods below."""
+    """The run's context. Programs read `inputs`, `answer`, `files`, `data`, `home`, `clearance`, `caller` and `db`,
+    and call the methods below."""
 
     def __init__(
         self,
@@ -105,8 +106,11 @@ class Ctx:
         caller: str = "claude",
         readonly: bool = False,
         secrets: Secrets | None = None,
+        database: Path | None = None,
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
+        self._database = database  # the SQLite file, when the manifest asks for one
+        self._db: sqlite3.Connection | None = None  # opened on first use
         self._secrets = secrets or Secrets()
         self.readonly = readonly  # a cluster follower's run: its folders read-only
         self.inputs: dict[str, Any] = inputs
@@ -160,8 +164,24 @@ class Ctx:
         return (self._today() - dt.timedelta(days=1)).isoformat()
 
     @property
-    def db(self) -> NoReturn:
-        raise PartMissing("Databases (ctx.db)", "database")
+    def db(self) -> sqlite3.Connection:
+        """The program's SQLite database (`"databases": ["sqlite"]`), a file in its data folder, opened on first use
+        and closed when the run ends: commit with `with ctx.db:` (what is not committed is rolled back). Read-only on
+        a cluster's follower. Not declared: E_DATABASE_UNDECLARED."""
+        if self._database is None:
+            raise DatabaseUndeclared
+        if self._db is None:
+            if self.readonly:
+                self._db = sqlite3.connect(f"{self._database.as_uri()}?mode=ro", uri=True, timeout=5.0)
+            else:
+                self._db = sqlite3.connect(self._database, timeout=5.0)
+        return self._db
+
+    def close(self) -> None:
+        """The database closed, if it was opened (the run's end)."""
+        if self._db is not None:
+            self._db.close()
+            self._db = None
 
     @property
     def secrets(self) -> Secrets:

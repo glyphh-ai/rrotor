@@ -25,6 +25,7 @@ from rrotor.invoke import Outcome, crash, failure, invoke, lifecycle
 from rrotor.result import Result
 
 PROXY_URL = "http://127.0.0.1:3128"
+DATABASE = "db.sqlite3"  # ctx.db, in the program's data folder
 _DONE = Result.done()
 
 
@@ -127,6 +128,7 @@ class Worker:
             caller=str(start.get("caller", "claude")),
             readonly=bool(start.get("readonly")),
             secrets=Secrets(secrets.get("declared") or (), secrets.get("values") or {}),
+            database=Path(start["data"]) / DATABASE if start.get("sqlite") and start.get("data") else None,
         )
         try:
             program = import_program(str(start.get("program", "/program")))
@@ -165,5 +167,7 @@ class Worker:
             ending = getattr(program, "end", None)
             outcome = self._timed(30.0, lambda: Outcome(lifecycle("end", ending, ctx) or _DONE), "end")
             result = outcome.result.to_json() if outcome.result.status != "done" else None
+        if ctx is not None:
+            ctx.close()
         self.channel.send("ended", result=result)
         return 0

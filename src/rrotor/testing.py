@@ -4,6 +4,7 @@ from rrotor.testing import Harness, FakeHttp
 h = Harness(program, tmp_path, approvals={"start": {"write"}}, http=FakeHttp({"https://api.x/": {"ok": 1}}))
 # a program with data: data=<its data folder>, home=<its folder>, clearance=<who asks, 0 to 1>
 # secrets: secrets={"API_KEY": "test"} (declared: the names glyphh.json declares, those by default)
+# a SQLite database (ctx.db): database=tmp_path / "db.sqlite3"
 r = h.call("start", {"day": "2026-10-14"})   # Result needs_approval
 r = h.resume({"approved": True})               # Result done
 """
@@ -88,8 +89,9 @@ class Harness:
         caller: str = "claude",
         secrets: Mapping[str, str] | None = None,
         declared: Iterable[str] | None = None,
+        database: Path | None = None,
     ) -> None:
-        self.program, self.files = program, files
+        self.program, self.files, self.database = program, files, database
         self.secrets = Secrets(declared if declared is not None else (secrets or {}), secrets)
         self.data, self.clearance, self.caller = data, clearance, caller
         self.home = home if home is not None else Path(str(getattr(program, "__file__", "."))).parent
@@ -122,6 +124,7 @@ class Harness:
             clearance=self.clearance,
             caller=self.caller,
             secrets=self.secrets,
+            database=self.database,
         )
 
     def _run(self, answer: Any) -> Result:
@@ -134,6 +137,7 @@ class Harness:
         if not outcome.result.waiting:
             lifecycle("end", getattr(self.program, "end", None), ctx)
             self.ended = True
+        ctx.close()
         return outcome.result
 
     def call(self, function: str, inputs: dict[str, Any] | None = None) -> Result:

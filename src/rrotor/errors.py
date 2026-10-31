@@ -24,6 +24,15 @@ class PartMissing(ProgramError):
         self.what, self.mod = what, mod
 
 
+class DatabaseUndeclared(ProgramError):
+    """`ctx.db` read by a program whose manifest asks for no SQLite database."""
+
+    code = "E_DATABASE_UNDECLARED"
+
+    def __init__(self) -> None:
+        super().__init__('ctx.db is a SQLite database: add "databases": ["sqlite"] to glyphh.json.')
+
+
 class StepUndeclared(ProgramError):
     """A step asked approval for is not named in the function's `approvals` in the manifest."""
 

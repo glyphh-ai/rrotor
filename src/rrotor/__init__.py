@@ -6,13 +6,21 @@ A program is a module with `load(ctx)`, its functions `fn(ctx, inputs) -> Result
 its sandbox (docs/architecture.md, section 5)."""
 
 from rrotor.ctx import Ctx, Secrets
-from rrotor.errors import PartMissing, ProgramError, SecretMissing, SecretUndeclared, StepUndeclared
+from rrotor.errors import (
+    DatabaseUndeclared,
+    PartMissing,
+    ProgramError,
+    SecretMissing,
+    SecretUndeclared,
+    StepUndeclared,
+)
 from rrotor.http import Http, Response
 from rrotor.result import STATUSES, Result
 
 __all__ = [
     "STATUSES",
     "Ctx",
+    "DatabaseUndeclared",
     "Http",
     "PartMissing",
     "ProgramError",

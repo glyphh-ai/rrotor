@@ -86,7 +86,8 @@ class Manifest(BaseModel):
     functions: dict[Annotated[str, Field(pattern=FUNCTION)], Function]
     hosts: list[str] = []
     secrets: list[Annotated[str, Field(pattern=CAPS)]] = []  # what it reads from the vault (rrotord/vault.py)
-    databases: list[Literal["postgres", "mongodb", "neo4j"]] = []
+    # sqlite: a database file in its data folder, opened as ctx.db (rrotor's own); the others are parts, not built yet
+    databases: list[Literal["sqlite", "postgres", "mongodb", "neo4j"]] = []
     needs: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,39}$")]] = []  # parts by name
     limits: Limits = Limits()
     connectors: list[str] = []
@@ -117,7 +118,7 @@ class Manifest(BaseModel):
             raise ValueError(f"{', '.join(sorted(reserved))} cannot be a function: load and end run on their own")
         for function in self.functions.values():
             if function.writes is None:
-                function.writes = self.data  # safe: a program with data writes unless it says a function does not
+                function.writes = self.keeps_data  # safe: a program with data writes unless it says one does not
         return self
 
     @model_validator(mode="after")
@@ -137,10 +138,16 @@ class Manifest(BaseModel):
         return self
 
     @property
+    def keeps_data(self) -> bool:
+        """Whether its persistent data folder is mounted: it asks for one (`data`), or for a SQLite database, a file
+        in it (ctx.db)."""
+        return self.data or "sqlite" in self.databases
+
+    @property
     def head_only(self) -> bool:
-        """A program that keeps state in its data folder, which never replicates, or reads secrets, which only the
-        head's vault holds: every call to it runs on the head."""
-        return self.data or bool(self.secrets)
+        """A program that keeps state in its data folder (its SQLite database too), which never replicates, or reads
+        secrets, which only the head's vault holds: every call to it runs on the head."""
+        return self.keeps_data or bool(self.secrets)
 
     def writes(self, function: str) -> bool:
         """Whether a call of `function` runs on the cluster's head: it writes, or its program is the head's alone. A
@@ -149,9 +156,9 @@ class Manifest(BaseModel):
         return found is None or bool(found.writes) or self.head_only
 
     def parts(self) -> list[str]:
-        """The parts this program needs beside the base (docs/architecture.md, 10): its databases, and the ones it
-        names, each once, in order."""
-        return list(dict.fromkeys([*self.databases, *self.needs]))
+        """The parts this program needs beside the base (docs/architecture.md, 10): its databases (but SQLite, which
+        is rrotor's own), and the ones it names, each once, in order."""
+        return list(dict.fromkeys([*(d for d in self.databases if d != "sqlite"), *self.needs]))
 
 
 def _defined(program: Path) -> set[str]:

@@ -9,7 +9,8 @@ connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh`
 Everything about a program stays on the runtime: its code, its runs, its secrets, kept encrypted with the runtime's
 own key and read by the program as `ctx.secrets["NAME"]` ([architecture, 5.5](docs/architecture.md#55-secrets)), and
 its schedules, cron expressions in its manifest that the runtime fires itself
-([5.6](docs/architecture.md#56-schedules)). The Glyphh server only grants the licence.
+([5.6](docs/architecture.md#56-schedules)), and its SQLite database, a file in its data folder read as `ctx.db`
+([5.3](docs/architecture.md#53-the-sdk-rrotor)). The Glyphh server only grants the licence.
 
 | Where | What |
 |---|---|

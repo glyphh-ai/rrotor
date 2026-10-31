@@ -274,7 +274,7 @@ class Runner:
         manifest = found.manifest
         files = self.programs.files(program)
         files.mkdir(parents=True, exist_ok=True)
-        data = self.programs.data(program) if manifest.data else None
+        data = self.programs.data(program) if manifest.keeps_data else None
         if data:
             data.mkdir(parents=True, exist_ok=True)
         needed = manifest.parts()
@@ -352,6 +352,7 @@ class Runner:
             caller=run.caller,
             readonly=mounts.readonly,
             secrets={"declared": manifest.secrets, "values": values},
+            sqlite="sqlite" in manifest.databases,
             **self.launcher.paths(mounts),
         )
         await self._await_result(run, worker, found)

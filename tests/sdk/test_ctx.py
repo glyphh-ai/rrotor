@@ -1,10 +1,20 @@
 import datetime as dt
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from rrotor.ctx import Ctx, RunState, Secrets
-from rrotor.errors import NotJson, PartMissing, ProgramError, SecretMissing, SecretUndeclared, StepUndeclared, Wait
+from rrotor.errors import (
+    DatabaseUndeclared,
+    NotJson,
+    PartMissing,
+    ProgramError,
+    SecretMissing,
+    SecretUndeclared,
+    StepUndeclared,
+    Wait,
+)
 from rrotor.http import Http
 
 
@@ -107,10 +117,53 @@ def test_today_defaults_to_utc(tmp_path):
     assert make(tmp_path).today() == dt.datetime.now(dt.UTC).date().isoformat()
 
 
-@pytest.mark.parametrize("name", ["db"])
-def test_parts_not_installed_raise_part_missing(tmp_path, name):
-    with pytest.raises(PartMissing):
-        getattr(make(tmp_path), name)
+def test_db_without_a_declared_database_is_refused(tmp_path):
+    with pytest.raises(DatabaseUndeclared) as caught:
+        _ = make(tmp_path).db
+    assert caught.value.code == "E_DATABASE_UNDECLARED" and '"databases": ["sqlite"]' in caught.value.message
+    make(tmp_path).close()  # nothing opened: nothing to close
+
+
+def db_ctx(tmp_path: Path, readonly: bool = False) -> Ctx:
+    return Ctx(
+        inputs={},
+        approvals=frozenset(),
+        state=RunState(),
+        files=tmp_path,
+        http=Http(frozenset(), None),
+        readonly=readonly,
+        database=tmp_path / "db.sqlite3",
+    )
+
+
+def test_db_is_a_sqlite_file_opened_once_and_closed(tmp_path):
+    ctx = db_ctx(tmp_path)
+    assert ctx.db is ctx.db
+    with ctx.db:
+        ctx.db.execute("create table t (n integer)")
+        ctx.db.execute("insert into t values (7)")
+    ctx.db.execute("insert into t values (8)")  # never committed: rolled back when it closes
+    ctx.close()
+    assert ctx._db is None
+    again = db_ctx(tmp_path)
+    assert again.db.execute("select n from t").fetchall() == [(7,)]
+    again.close()
+
+
+def test_db_on_a_follower_is_read_only(tmp_path):
+    writer = db_ctx(tmp_path)
+    with writer.db:
+        writer.db.execute("create table t (n integer)")
+    writer.close()
+    reader = db_ctx(tmp_path, readonly=True)
+    assert reader.db.execute("select count(*) from t").fetchone() == (0,)
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        reader.db.execute("insert into t values (1)")
+    reader.close()
+
+
+def test_part_missing_names_the_mod():
+    assert PartMissing("Postgres", "rrotor").code == "E_PART_MISSING"
 
 
 def test_a_ctx_without_secrets_refuses_every_name(tmp_path):

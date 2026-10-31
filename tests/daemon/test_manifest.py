@@ -116,6 +116,15 @@ def test_writes_defaults_to_the_programs_data_and_a_program_with_data_is_the_hea
     assert (plain.writes("start"), plain.writes("save"), plain.head_only) == (False, True, False)
 
 
+def test_a_sqlite_database_is_data_kept_on_the_head_and_needs_no_part():
+    db = m.Manifest.model_validate(
+        {"name": "d", "databases": ["sqlite", "postgres"], "functions": {"add": {}, "read": {"writes": False}}}
+    )
+    assert (db.keeps_data, db.head_only, db.functions["add"].writes, db.writes("read")) == (True, True, True, True)
+    assert db.parts() == ["postgres"]
+    assert m.Manifest.model_validate({"name": "p", "functions": {"start": {}}}).keeps_data is False
+
+
 def test_a_program_that_reads_secrets_is_the_heads():
     """Secrets are node-local and the head keeps them: every call of a program that declares one runs there."""
     keyed = m.Manifest.model_validate({"name": "k", "secrets": ["API_KEY"], "functions": {"start": {"writes": False}}})

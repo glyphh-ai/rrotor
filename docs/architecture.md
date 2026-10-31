@@ -292,14 +292,15 @@ A git repo; a version is a commit.
 | `name` | `^[a-z][a-z0-9_]{0,62}$`; a deploy names the program by it |
 | `version` | Optional, 1 or more |
 | `description`, `python` | Free text; `python` must be `3.13` |
-| `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it runs on a cluster's head: `true` runs it there, `false` on whichever node the call reaches, read-only there; default the program's `data`; every call of a program with `data` runs on the head whatever it says) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
+| `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it runs on a cluster's head: `true` runs it there, `false` on whichever node the call reaches, read-only there; default whether the program keeps data (`data` or a SQLite database); every call of a program that keeps data runs on the head whatever it says) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
 | `hosts` | The hosts a run may reach on 443 (`*.example.com` allowed) |
 | `needs` | The parts it imports from, by name ([10](#10-parts)) |
 | `data` | `true` mounts its persistent data folder at `/data` |
+| `databases` | `sqlite`: a SQLite database, `/data/db.sqlite3` in its data folder (mounted, as `data` would), opened as `ctx.db`; it keeps data, so every call runs on a cluster's head. `postgres`, `mongodb`, `neo4j` are parts, not built yet ([10](#10-parts)) |
 | `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
 | `secrets` | The secrets it reads by name, `^[A-Z][A-Z0-9_]{0,63}$` ([5.5](#55-secrets)) |
 | `schedules` | Functions the runtime calls by itself: each `{function, cron, tz?, input?, name?}` ([5.6](#56-schedules)) |
-| `databases`, `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
+| `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `program.py` does not
 define (read from its syntax tree: no program code runs outside the sandbox).
@@ -324,7 +325,8 @@ ctx.needs_input(prompt, schema=None, options=None, key=None)   # the answer once
 ctx.checkpoint(key, fn)       # fn runs once per run; a resumed run reads the stored value
 ctx.http                      # HTTPS to the declared hosts (any library works too: HTTPS_PROXY is set)
 ctx.files                     # its folder, a pathlib.Path
-ctx.data                      # its persistent data folder ("data": true), else None
+ctx.data                      # its persistent data folder ("data": true, or a SQLite database), else None
+ctx.db                        # its SQLite database ("databases": ["sqlite"]): a sqlite3.Connection, see below
 ctx.home                      # its code (the folder program.py is in)
 ctx.clearance                 # who asks, 0 to 1; 1 unless the call says (the program decides what it means)
 ctx.caller                    # who called: "claude", or "schedule" for a run its schedule started (5.6)
@@ -337,9 +339,13 @@ ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 - **Approvals and inputs are re-entrant.** A `continue` calls the same function again with the same inputs: steps
   done are skipped by `ctx.checkpoint`, and `ctx.ask_approval(step, …)` then answers the decision for that step
   (`{"approved": true}`). A step not named in the function's `approvals` fails the run (`E_STEP_UNDECLARED`).
+- **`ctx.db`** is the standard library's `sqlite3.Connection` on `db.sqlite3` in the program's data folder, opened
+  inside the sandbox on first use and closed when the run ends: `with ctx.db:` commits, and what is not committed is
+  rolled back. On a cluster's follower it opens read-only (`mode=ro`), though a program with a database runs on the
+  head. A program that does not declare it gets `E_DATABASE_UNDECLARED`.
 - **`rrotor.testing`** gives a program's own tests a `Ctx` with no sandbox (`Harness`): inputs, answers, a folder,
-  an `http` that answers what the test says, and `secrets={...}` (with `declared=[...]`, the names the manifest
-  declares).
+  an `http` that answers what the test says, `secrets={...}` (with `declared=[...]`, the names the manifest
+  declares) and `database=<a file>` for `ctx.db`.
 
 ### 5.4 A run
 
@@ -610,8 +616,9 @@ shown as `ha`.
 
 ## 10. Parts
 
-A **part** is what a program needs beside the base: the databases (`postgres`, `mongodb`, `neo4j`, rrotor's own) or
-any part a manifest names in `needs`. None is built yet, and the image carries none.
+A **part** is what a program needs beside the base: the server databases (`postgres`, `mongodb`, `neo4j`, rrotor's
+own; SQLite is in the base, no part) or any part a manifest names in `needs`. None is built yet, and the image
+carries none.
 
 - **What a part is:** a gzipped tarball with `part.json` at its top, `{name, version, mod, arch (amd64 | arm64 |
   any), rrotor (the lowest base version it needs), env: {PYTHONPATH: [folders]}, services}`, and its tree
@@ -935,8 +942,8 @@ write to the head.
 
 ## Not built yet
 
-- **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a program's `databases` (`ctx.db` answers
-  `E_PART_MISSING`).
+- **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a program's `databases` (a run of a program
+  that declares one fails `E_PART_MISSING`; `ctx.db` is SQLite, built).
 - **SSO and SAML, roles (RBAC).**
 - **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
   ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
