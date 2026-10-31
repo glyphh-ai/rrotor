@@ -57,11 +57,13 @@ Free (Community) is one node and has no head: everything here is off and rrotor 
 **Never syncs:** runs (`runs/<id>/`: their records, checkpoints and logs: a run lives on the node that ran it),
 sandbox state and `/tmp`, parts (each node's come from its image), `runtime.json` (every node has the same id and
 token from its own environment), `machine-id`, the link's outbox (the head's alone), the local audit store (each
-node's own, gathered at the head, [7](#7-logging-audit-and-drains)), and every program's data folder.
+node's own, gathered at the head, [7](#7-logging-audit-and-drains)), every program's data folder, and the vault
+(`vault/`: the rrotor's key and the programs' secrets, node-local; a follower refuses to set or delete one).
 
 **No program's state replicates.** A program with `"data": true` keeps its state in its data folder on the head, and
-runs on the head only: every call to it is forwarded, whatever its functions are marked (`head_only`). A program
-without data runs its reads on the node asked, its folders read-only. (Ada, with its precedent stores, is not a
+runs on the head only: every call to it is forwarded, whatever its functions are marked (`head_only`). So does a
+program that declares `secrets`: the head's vault holds them. A program without either runs its reads on the node
+asked, its folders read-only. (Ada, with its precedent stores, is not a
 program rrotor runs: it lives in Ada Cloud on the server.)
 
 ## 3. Replication

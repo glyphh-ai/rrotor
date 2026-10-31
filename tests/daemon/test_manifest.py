@@ -114,3 +114,9 @@ def test_writes_defaults_to_the_programs_data_and_a_program_with_data_is_the_hea
     )
     plain = m.Manifest.model_validate({"name": "p", "functions": {"start": {}, "save": {"writes": True}}})
     assert (plain.writes("start"), plain.writes("save"), plain.head_only) == (False, True, False)
+
+
+def test_a_program_that_reads_secrets_is_the_heads():
+    """Secrets are node-local and the head keeps them: every call of a program that declares one runs there."""
+    keyed = m.Manifest.model_validate({"name": "k", "secrets": ["API_KEY"], "functions": {"start": {"writes": False}}})
+    assert (keyed.head_only, keyed.writes("start")) == (True, True)

@@ -27,6 +27,7 @@ from rrotord.programs import Programs
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
+from rrotord.vault import Vault
 from tests.fakes import FakeLink, LocalLauncher, keys, ready, token
 
 PORT = 7777
@@ -71,6 +72,7 @@ def services(root: Path, sock: Path, local_token: str, fetch: Any = None) -> Ser
         sdk=config.sdk,
         layers=layers,
         parts=parts,
+        vault=Vault(config.data),
     )
     deployer = Deployer(
         programs,

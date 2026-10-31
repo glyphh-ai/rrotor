@@ -19,7 +19,7 @@ from typing import Any
 from rrotor._worker.channel import Channel
 from rrotor._worker.forward import Forwarder
 from rrotor._worker.landlock import Landlock, Rules
-from rrotor.ctx import Ctx, RunState
+from rrotor.ctx import Ctx, RunState, Secrets
 from rrotor.http import Http
 from rrotor.invoke import Outcome, crash, failure, invoke, lifecycle
 from rrotor.result import Result
@@ -112,6 +112,7 @@ class Worker:
         function = str(start["function"])
         state = RunState.from_json(start.get("state"))
         box = start.get("sandbox") or {}
+        secrets = start.pop("secrets", None) or {}  # {declared, values}: the values kept in ctx alone
         ctx = Ctx(
             inputs=dict(start.get("inputs") or {}),
             approvals=frozenset(start.get("approvals") or ()),
@@ -125,6 +126,7 @@ class Worker:
             clearance=float(start.get("clearance", 1.0)),
             caller=str(start.get("caller", "claude")),
             readonly=bool(start.get("readonly")),
+            secrets=Secrets(secrets.get("declared") or (), secrets.get("values") or {}),
         )
         try:
             program = import_program(str(start.get("program", "/program")))

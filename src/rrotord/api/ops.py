@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rrotord.api import forward
-from rrotord.errors import BadRequest, RrotorError
+from rrotord.cluster.transport import ClusterError
+from rrotord.errors import BadRequest, RrotorError, Unavailable
 from rrotord.programs import Version
 from rrotord.runner.record import Run
+from rrotord.vault import Vault
 
 if TYPE_CHECKING:
     from rrotord.api.routes import Services
@@ -168,6 +170,63 @@ async def approvals(s: Services) -> list[dict[str, Any]]:
         except RrotorError:
             continue
         found += list((got.get("result") or {}).get("approvals") or [])
+    return found
+
+
+def on_head(s: Services, what: str) -> None:
+    """What only the head keeps (the vault) is changed there: a follower refuses, naming the head."""
+    if forward.follower(s):
+        assert s.cluster is not None  # noqa: S101  (a follower is a member)
+        head = s.cluster.state.get("head")
+        raise ClusterError(
+            f"{what} on the cluster's head ({head}), which keeps them; this node is a follower.",
+            code="E_NOT_HEAD",
+            head=head,
+        )
+
+
+def vault(s: Services) -> Vault:
+    if s.runner.vault is None:
+        raise Unavailable("This rrotor has no vault.", code="E_VAULT")
+    return s.runner.vault
+
+
+async def secrets_list(s: Services, program: str) -> dict[str, Any]:
+    """A program's secrets by name: whether its active version declares each, and whether it is set here. Never a
+    value. A follower asks its head, which keeps them."""
+    if forward.follower(s):
+        return await forward.relayed(s, "secrets", {"program": program})
+    declared = set(s.programs.get(program).manifest.secrets)
+    held = set(vault(s).names(program))
+    listed = [{"name": n, "declared": n in declared, "set": n in held} for n in sorted(declared | held)]
+    return {"program": program, "secrets": listed}
+
+
+async def secret_set(s: Services, program: str, name: str, value: Any) -> dict[str, Any]:
+    """A secret's value kept, encrypted, for a program here; an audit event naming it (never the value)."""
+    if not isinstance(value, str):
+        raise BadRequest("Send {value}: the secret's value, a string.")
+    on_head(s, "Secrets are set")
+    s.programs.get(program)
+    vault(s).set(program, name, value)
+    if s.audit is not None:
+        s.audit.emit("secret.set", program=program, secret=name, outcome={"status": "done", "code": None})
+    return {"program": program, "name": name, "set": True}
+
+
+async def secret_delete(s: Services, program: str, name: str) -> dict[str, Any]:
+    on_head(s, "Secrets are deleted")
+    s.programs.get(program)
+    vault(s).delete(program, name)
+    if s.audit is not None:
+        s.audit.emit("secret.delete", program=program, secret=name, outcome={"status": "done", "code": None})
+    return {"program": program, "name": name, "set": False}
+
+
+def text_of(data: dict[str, Any], key: str) -> str:
+    found = data.get(key)
+    if not isinstance(found, str) or not found:
+        raise BadRequest(f"Send {{{key}}}.")
     return found
 
 

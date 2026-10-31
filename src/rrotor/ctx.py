@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, overload
 
-from rrotor.errors import NotJson, PartMissing, ProgramError, StepUndeclared, Wait
+from rrotor.errors import NotJson, PartMissing, SecretMissing, SecretUndeclared, StepUndeclared, Wait
 from rrotor.http import Http
 from rrotor.result import Result
 
@@ -50,6 +50,40 @@ def _json_value(value: Any, what: str) -> Any:
 Sink = Callable[[str, dict[str, Any]], None]
 
 
+class Secrets:
+    """`ctx.secrets`: the values of the secrets the manifest declares, by name. A name it does not declare is refused
+    (E_SECRET_UNDECLARED); rrotor stops a run with a declared one unset before the function runs."""
+
+    __slots__ = ("_declared", "_values")
+
+    def __init__(self, declared: Iterable[str] = (), values: Mapping[str, str] | None = None) -> None:
+        self._declared = frozenset(declared)
+        self._values = dict(values or {})
+
+    def __getitem__(self, name: str) -> str:
+        value = self.get(name)
+        if value is None:
+            raise SecretMissing(name)
+        return value
+
+    @overload
+    def get(self, name: str) -> str | None: ...
+
+    @overload
+    def get(self, name: str, default: str) -> str: ...
+
+    def get(self, name: str, default: str | None = None) -> str | None:
+        if name not in self._declared:
+            raise SecretUndeclared(name)
+        return self._values.get(name, default)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._declared and name in self._values
+
+    def __repr__(self) -> str:
+        return f"Secrets({sorted(self._declared)})"  # the names, never a value
+
+
 class Ctx:
     """The run's context. Programs read `inputs`, `answer`, `files`, `data`, `home`, `clearance` and `caller`, and call
     the methods below."""
@@ -70,8 +104,10 @@ class Ctx:
         clearance: float = 1.0,
         caller: str = "claude",
         readonly: bool = False,
+        secrets: Secrets | None = None,
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
+        self._secrets = secrets or Secrets()
         self.readonly = readonly  # a cluster follower's run: its folders read-only
         self.inputs: dict[str, Any] = inputs
         self.answer: Any = answer
@@ -128,7 +164,6 @@ class Ctx:
         raise PartMissing("Databases (ctx.db)", "database")
 
     @property
-    def secrets(self) -> NoReturn:
-        err = ProgramError("Secrets (ctx.secrets) come with rrotor's vault, which is not built yet.")
-        err.code = "E_NOT_BUILT"
-        raise err
+    def secrets(self) -> Secrets:
+        """The secrets the manifest declares, set on this rrotor: `ctx.secrets["NAME"]`, `ctx.secrets.get("NAME")`."""
+        return self._secrets

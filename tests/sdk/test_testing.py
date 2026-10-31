@@ -36,6 +36,20 @@ def test_fake_http_answers_404_without_a_route():
     assert http.get("https://a.example.com/").status == 404
 
 
+def test_harness_hands_secrets_by_declared_name(tmp_path):
+    def start(ctx, inputs):
+        return Result.done([ctx.secrets["API_KEY"], ctx.secrets.get("UNSET", "none")])
+
+    def sneak(ctx, inputs):
+        return Result.done(ctx.secrets["OTHER"])
+
+    h = Harness(module(start=start, sneak=sneak), tmp_path, secrets={"API_KEY": "k"}, declared=["API_KEY", "UNSET"])
+    assert h.call("start").data == ["k", "none"]
+    assert Harness(module(start=start), tmp_path, secrets={"API_KEY": "k"}).call("start").status == "failed"
+    refused = Harness(module(sneak=sneak), tmp_path, secrets={"API_KEY": "k"}).call("sneak")
+    assert (refused.status, refused.data["code"]) == ("failed", "E_SECRET_UNDECLARED")
+
+
 def test_harness_runs_load_function_and_end(tmp_path):
     seen = []
     prog = module(

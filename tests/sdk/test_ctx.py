@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from rrotor.ctx import Ctx, RunState
-from rrotor.errors import NotJson, PartMissing, ProgramError, StepUndeclared, Wait
+from rrotor.ctx import Ctx, RunState, Secrets
+from rrotor.errors import NotJson, PartMissing, ProgramError, SecretMissing, SecretUndeclared, StepUndeclared, Wait
 from rrotor.http import Http
 
 
@@ -113,7 +113,24 @@ def test_parts_not_installed_raise_part_missing(tmp_path, name):
         getattr(make(tmp_path), name)
 
 
-def test_secrets_are_not_built(tmp_path):
-    with pytest.raises(ProgramError) as caught:
-        _ = make(tmp_path).secrets
-    assert caught.value.code == "E_NOT_BUILT"
+def test_a_ctx_without_secrets_refuses_every_name(tmp_path):
+    with pytest.raises(SecretUndeclared) as caught:
+        _ = make(tmp_path).secrets["API_KEY"]
+    assert caught.value.code == "E_SECRET_UNDECLARED" and caught.value.name == "API_KEY"
+
+
+def test_secrets_read_by_declared_name_only():
+    found = Secrets(["API_KEY", "OTHER"], {"API_KEY": "s3cr3t-value"})
+    assert found["API_KEY"] == "s3cr3t-value" and found.get("API_KEY") == "s3cr3t-value"
+    assert found.get("OTHER") is None and found.get("OTHER", "fallback") == "fallback"
+    assert "API_KEY" in found and "OTHER" not in found and "NOPE" not in found
+    with pytest.raises(SecretMissing) as missing:
+        _ = found["OTHER"]
+    assert missing.value.code == "E_SECRET_MISSING" and missing.value.name == "OTHER"
+    with pytest.raises(SecretUndeclared):
+        found.get("NOPE")
+    assert repr(found) == "Secrets(['API_KEY', 'OTHER'])" and "s3cr3t" not in repr(found)
+
+
+def test_errors_are_program_errors():
+    assert issubclass(SecretMissing, ProgramError) and issubclass(SecretUndeclared, ProgramError)

@@ -264,7 +264,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
     ]
     await until(lambda: not link.client.outbox.pending)
     await until(lambda: "a message from the Cloud failed" in caplog.text)
-    assert "unreadable message skipped" in caplog.text and "message not handled yet" in caplog.text
+    assert "unreadable message skipped" in caplog.text  # an earlier server's secret_set among them
     await link.stop()
     await cloud.server.close()
 

@@ -6,6 +6,10 @@ each call in a sandbox, and answers over REST and MCP at its own address. Custom
 connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh` SDKs (`glyphh-ai/glyphh`). Image:
 `ghcr.io/glyphh-ai/rrotor`. Ada models do not run here: they run in Ada Cloud, on the Glyphh server.
 
+Everything about a program stays on the runtime: its code, its runs, and its secrets, kept encrypted with the
+runtime's own key and read by the program as `ctx.secrets["NAME"]` ([architecture, 5.5](docs/architecture.md#55-secrets)).
+The Glyphh server only grants the licence.
+
 | Where | What |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, the licence, parts, CI |

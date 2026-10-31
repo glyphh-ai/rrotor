@@ -28,7 +28,8 @@ INSTRUCTIONS = (
     "program_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
     "program_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
     "waiting for the person; program_deploy deploys a commit of a program's GitHub repo; audit_query reads the audit "
-    "log (Enterprise); cluster_status shows the runtime's cluster."
+    "log (Enterprise); cluster_status shows the runtime's cluster; secrets_list, secret_set and secret_delete keep a "
+    "program's secrets (values are never shown back)."
 )
 
 
@@ -93,6 +94,18 @@ async def cluster_status(s: Services, _: dict[str, Any]) -> dict[str, Any]:
     from rrotord.api.routes import clustered
 
     return clustered(s)
+
+
+async def secrets_list(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.secrets_list(s, ops.text_of(args, "program"))
+
+
+async def secret_set(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.secret_set(s, ops.text_of(args, "program"), ops.text_of(args, "name"), args.get("value"))
+
+
+async def secret_delete(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.secret_delete(s, ops.text_of(args, "program"), ops.text_of(args, "name"))
 
 
 RUN = _obj({"run_id": {"type": "string"}}, ["run_id"])
@@ -166,6 +179,28 @@ TOOLS: tuple[Tool, ...] = (
         _obj({}),
         cluster_status,
         True,
+    ),
+    Tool(
+        "secrets_list",
+        "A program's secrets by name: whether its active version declares each and whether it is set. Never a value.",
+        _obj({"program": {"type": "string"}}, ["program"]),
+        secrets_list,
+        True,
+    ),
+    Tool(
+        "secret_set",
+        "Set a program's secret (a name its glyphh.json declares), kept encrypted on this runtime; never shown back.",
+        _obj(
+            {"program": {"type": "string"}, "name": {"type": "string"}, "value": {"type": "string"}},
+            ["program", "name", "value"],
+        ),
+        secret_set,
+    ),
+    Tool(
+        "secret_delete",
+        "Delete a program's secret.",
+        _obj({"program": {"type": "string"}, "name": {"type": "string"}}, ["program", "name"]),
+        secret_delete,
     ),
 )
 BY_NAME = {t.name: t for t in TOOLS}

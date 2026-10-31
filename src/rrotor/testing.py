@@ -3,6 +3,7 @@
 from rrotor.testing import Harness, FakeHttp
 h = Harness(program, tmp_path, approvals={"start": {"write"}}, http=FakeHttp({"https://api.x/": {"ok": 1}}))
 # a program with data: data=<its data folder>, home=<its folder>, clearance=<who asks, 0 to 1>
+# secrets: secrets={"API_KEY": "test"} (declared: the names glyphh.json declares, those by default)
 r = h.call("start", {"day": "2026-10-14"})   # Result needs_approval
 r = h.resume({"approved": True})               # Result done
 """
@@ -10,12 +11,12 @@ r = h.resume({"approved": True})               # Result done
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from rrotor.ctx import Ctx, RunState
+from rrotor.ctx import Ctx, RunState, Secrets
 from rrotor.http import Http, Response
 from rrotor.invoke import Outcome, invoke, lifecycle
 from rrotor.result import Result
@@ -85,8 +86,11 @@ class Harness:
         home: Path | None = None,
         clearance: float = 1.0,
         caller: str = "claude",
+        secrets: Mapping[str, str] | None = None,
+        declared: Iterable[str] | None = None,
     ) -> None:
         self.program, self.files = program, files
+        self.secrets = Secrets(declared if declared is not None else (secrets or {}), secrets)
         self.data, self.clearance, self.caller = data, clearance, caller
         self.home = home if home is not None else Path(str(getattr(program, "__file__", "."))).parent
         self.approvals = {k: frozenset(v) for k, v in (approvals or {}).items()}
@@ -117,6 +121,7 @@ class Harness:
             home=self.home,
             clearance=self.clearance,
             caller=self.caller,
+            secrets=self.secrets,
         )
 
     def _run(self, answer: Any) -> Result:

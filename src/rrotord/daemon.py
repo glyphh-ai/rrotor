@@ -44,6 +44,7 @@ from rrotord.runner.launch import Launcher, SandboxLauncher
 from rrotord.runner.record import Records
 from rrotord.sandbox.probe import Layers, container_needs, probe
 from rrotord.store import read_json, write_json
+from rrotord.vault import Vault
 
 log = logging.getLogger("rrotor")
 EXPIRE_EVERY = 30.0
@@ -133,6 +134,7 @@ class Daemon:
             telemetry=self.drain.telemetry if self.drain is not None else None,
             node=lambda: c.node_id if self.cluster.member else None,
             readonly=lambda: self.cluster.role == "follower",
+            vault=Vault(c.data),
         )
         self.cluster.deposed = self._deposed
         handler.runner = self.runner

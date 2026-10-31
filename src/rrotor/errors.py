@@ -34,6 +34,26 @@ class StepUndeclared(ProgramError):
         self.step = step
 
 
+class SecretUndeclared(ProgramError):
+    """A secret read that the manifest's `secrets` does not name."""
+
+    code = "E_SECRET_UNDECLARED"
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"The secret {name!r} is not in this program's secrets in glyphh.json.")
+        self.name = name
+
+
+class SecretMissing(ProgramError):
+    """A declared secret with no value set (rrotor itself stops such a run before the function, `step: secrets`)."""
+
+    code = "E_SECRET_MISSING"
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"The secret {name!r} is not set on this rrotor.")
+        self.name = name
+
+
 class NotJson(ProgramError):
     """A checkpoint's value or a Result's data that JSON cannot carry."""
 

@@ -141,4 +141,6 @@ async def _serve(s: Services, op: Any, args: dict[str, Any]) -> dict[str, Any]:
             return {"approvals": s.runner.approvals()}
         case "audit":
             return await routes.audited(s, args)
+        case "secrets":
+            return await ops.secrets_list(s, str(args.get("program") or ""))
     raise BadRequest(f"There is no forwarded operation {op!r}.", code="E_CLUSTER_MESSAGE")

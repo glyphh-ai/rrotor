@@ -8,7 +8,11 @@ Every call, continue and cancel is an audit event with its outcome, and every ru
 its sandbox's start and its function are spans, and its end counted (rrotord/otel.py).
 
 In a cluster (docs/specs/cluster.md, 3) a run's id names the node that holds it (`node`), and a follower's runs
-mount the program's folders read-only (`readonly`)."""
+mount the program's folders read-only (`readonly`).
+
+A program that declares secrets gets their values from the vault (rrotord/vault.py) in its worker's start message,
+and nowhere else: a declared one not set stops the run before `load`, `failed {step: secrets, missing: [...]}`, and
+the values are masked in the run's log lines."""
 
 from __future__ import annotations
 
@@ -37,17 +41,33 @@ from rrotord.runner.record import WAITING, Records, Run, new_id, now
 from rrotord.runner.worker import Worker
 from rrotord.sandbox import bwrap
 from rrotord.sandbox.probe import Layers
+from rrotord.vault import Vault
 
 log = logging.getLogger("rrotor.runner")
 GRACE = 15.0  # past a run's seconds before its worker is killed (the worker stops itself first)
 END_WAIT = 35.0
 WAIT_LIMIT = 15 * 60.0
+MASK = "[secret]"
+MASK_MIN = 4  # a secret's value shorter than this is not masked (it would mask ordinary text)
 
 Notify = Callable[[Run], Awaitable[None]]
 
 
 def failed(step: str, code: str, reason: str) -> dict[str, Any]:
     return {"status": "failed", "data": {"reason": reason, "code": code}, "step": step, "prompt": None}
+
+
+def masked(value: Any, hidden: list[str]) -> Any:
+    """`value` with every secret's value in its strings replaced by [secret]."""
+    if isinstance(value, str):
+        for secret in hidden:
+            value = value.replace(secret, MASK)
+        return value
+    if isinstance(value, dict):
+        return {k: masked(v, hidden) for k, v in value.items()}
+    if isinstance(value, list):
+        return [masked(v, hidden) for v in value]
+    return value
 
 
 def about(run: Run) -> dict[str, Any]:
@@ -79,8 +99,10 @@ class Runner:
         telemetry: Telemetry | None = None,
         node: Callable[[], str | None] = lambda: None,
         readonly: Callable[[], bool] = lambda: False,
+        vault: Vault | None = None,
     ) -> None:
-        self.node, self.readonly = node, readonly
+        self.node, self.readonly, self.vault = node, readonly, vault
+        self.hidden: dict[str, list[str]] = {}  # each run's secret values, masked in its log lines
         self.programs, self.records, self.proxy, self.launcher = programs, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
         self.parts, self.audit, self.telemetry = parts, audit, telemetry
@@ -270,8 +292,36 @@ class Runner:
             self.readonly(),
         )
 
+    def _secrets(self, run: Run, found: Version) -> tuple[dict[str, str], dict[str, Any] | None]:
+        """The values of the secrets the version declares, or why the run cannot go: one not set, or one the
+        rrotor's key does not open."""
+        declared = found.manifest.secrets
+        if not declared:
+            return {}, None
+        try:
+            values, missing = self.vault.values(run.program, declared) if self.vault else ({}, list(declared))
+        except RrotorError as err:
+            return {}, failed("secrets", err.code, err.message)
+        if not missing:
+            return values, None
+        many = len(missing) > 1
+        reason = (
+            f"{run.program} needs the secret{'s' if many else ''} {', '.join(missing)}, not set on this rrotor: "
+            f"set {'them' if many else 'it'} with PUT /v1/programs/{run.program}/secrets/<name> or secret_set."
+        )
+        refused = failed("secrets", "E_SECRET_MISSING", reason)
+        refused["data"]["missing"] = missing
+        return {}, refused
+
     async def _go(self, run: Run, found: Version, answer: Any) -> None:
         manifest = found.manifest
+        values, refused = self._secrets(run, found)
+        if refused is not None:
+            await self._finish(run, refused)
+            return
+        hidden = sorted((v for v in values.values() if len(v) >= MASK_MIN), key=len, reverse=True)
+        if hidden:
+            self.hidden[run.id] = hidden
         hosts = frozenset(manifest.hosts)
         socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
         mounts = self._mounts(run.program, found, socket)
@@ -301,6 +351,7 @@ class Runner:
             clearance=run.clearance,
             caller=run.caller,
             readonly=mounts.readonly,
+            secrets={"declared": manifest.secrets, "values": values},
             **self.launcher.paths(mounts),
         )
         await self._await_result(run, worker, found)
@@ -353,6 +404,7 @@ class Runner:
 
     async def _finish(self, run: Run, result: dict[str, Any]) -> None:
         self.workers.pop(run.id, None)
+        self.hidden.pop(run.id, None)
         await self.proxy.close(run.id)
         run.status, run.result, run.pending, run.ended_at, run.waiting_since = (
             result["status"],
@@ -379,10 +431,14 @@ class Runner:
             state.checkpoints[str(message.get("key"))] = message.get("value")
             run.state = state.to_json()
             self.records.save(run)
-        elif message.get("op") == "log":
-            self.records.log(run.id, {"message": message.get("message", ""), "detail": message.get("detail") or {}})
         else:
-            self.records.log(run.id, {k: v for k, v in message.items() if k != "op"})
+            entry = (
+                {"message": message.get("message", ""), "detail": message.get("detail") or {}}
+                if message.get("op") == "log"
+                else {k: v for k, v in message.items() if k != "op"}
+            )
+            hidden = self.hidden.get(run.id)
+            self.records.log(run.id, masked(entry, hidden) if hidden else entry)
 
     async def expire(self, at: dt.datetime | None = None) -> list[str]:
         """Waiting runs past 15 minutes end, `expired`; `end` runs."""

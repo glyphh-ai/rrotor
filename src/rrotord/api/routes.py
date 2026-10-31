@@ -176,6 +176,17 @@ def setup(app: web.Application, s: Services) -> None:
     async def deploy(request: web.Request) -> web.Response:
         return web.json_response(await ops.deploy(s, await body(request)), status=201)
 
+    async def secrets_list(request: web.Request) -> web.Response:
+        return web.json_response(await ops.secrets_list(s, request.match_info["name"]))
+
+    async def secret_set(request: web.Request) -> web.Response:
+        m, data = request.match_info, await body(request)
+        return web.json_response(await ops.secret_set(s, m["name"], m["secret"], data.get("value")))
+
+    async def secret_delete(request: web.Request) -> web.Response:
+        m = request.match_info
+        return web.json_response(await ops.secret_delete(s, m["name"], m["secret"]))
+
     async def call(request: web.Request) -> web.Response:
         return web.json_response(await ops.call(s, await body(request)))
 
@@ -265,6 +276,9 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_put("/v1/runtime/token", local_only(s.config.mode, runtime_token))
     app.router.add_get("/v1/programs", programs)
     app.router.add_post("/v1/programs/deploy", deploy)
+    app.router.add_get("/v1/programs/{name}/secrets", secrets_list)
+    app.router.add_put("/v1/programs/{name}/secrets/{secret}", secret_set)
+    app.router.add_delete("/v1/programs/{name}/secrets/{secret}", secret_delete)
     app.router.add_post("/v1/runs", call)
     app.router.add_post("/v1/runs/{run_id}/continue", resume)
     app.router.add_post("/v1/runs/{run_id}/cancel", cancel)

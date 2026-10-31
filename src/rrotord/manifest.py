@@ -16,6 +16,7 @@ from rrotord.errors import BadRequest, DeployError
 
 NAME = r"^[a-z][a-z0-9_]{0,62}$"
 FUNCTION = r"^[a-z][a-z0-9_]{0,62}$"
+CAPS = r"^[A-Z][A-Z0-9_]{0,63}$"  # a secret's name
 HOST = re.compile(r"^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 PYTHON = "3.13"
 RESERVED = frozenset({"load", "end"})
@@ -52,7 +53,7 @@ class Manifest(BaseModel):
     python: str = PYTHON
     functions: dict[Annotated[str, Field(pattern=FUNCTION)], Function]
     hosts: list[str] = []
-    secrets: list[Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")]] = []
+    secrets: list[Annotated[str, Field(pattern=CAPS)]] = []  # what it reads from the vault (rrotord/vault.py)
     databases: list[Literal["postgres", "mongodb", "neo4j"]] = []
     needs: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,39}$")]] = []  # parts by name
     limits: Limits = Limits()
@@ -88,8 +89,9 @@ class Manifest(BaseModel):
 
     @property
     def head_only(self) -> bool:
-        """A program that keeps state in its data folder, which never replicates: every call to it runs on the head."""
-        return self.data
+        """A program that keeps state in its data folder, which never replicates, or reads secrets, which only the
+        head's vault holds: every call to it runs on the head."""
+        return self.data or bool(self.secrets)
 
     def writes(self, function: str) -> bool:
         """Whether a call of `function` runs on the cluster's head: it writes, or its program is the head's alone. A

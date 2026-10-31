@@ -242,6 +242,7 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 | `programs/<name>/active.json` | Which version is active |
 | `programs/<name>/files/` | The program's own folder, seeded from the commit's `files/` on its first deploy |
 | `programs/<name>/data/` | Its persistent data, outside git (`"data": true`) |
+| `vault/key`, `vault/<name>.json` | The rrotor's own key (32 bytes, 0600, made on first use); a program's secrets, each encrypted with it ([5.5](#55-secrets)) |
 | `models/` | An earlier release's name for `programs/`: moved to `programs/` when the daemon starts, if `programs/` is not there; its runs' and audit events' `model` reads as `program` |
 | `runs/<run_id>/` | Each run's `run.json` (with its checkpoints) and `log.jsonl` |
 | `parts/<name>/<version>/`, `parts/<name>/current` | An installed part, and the version in use |
@@ -293,7 +294,8 @@ A git repo; a version is a commit.
 | `needs` | The parts it imports from, by name ([10](#10-parts)) |
 | `data` | `true` mounts its persistent data folder at `/data` |
 | `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
-| `secrets`, `databases`, `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
+| `secrets` | The secrets it reads by name, `^[A-Z][A-Z0-9_]{0,63}$` ([5.5](#55-secrets)) |
+| `databases`, `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `program.py` does not
 define (read from its syntax tree: no program code runs outside the sandbox).
@@ -323,6 +325,7 @@ ctx.home                      # its code (the folder program.py is in)
 ctx.clearance                 # who asks, 0 to 1; 1 unless the call says (the program decides what it means)
 ctx.caller                    # who called
 ctx.readonly                  # a cluster follower's run: its folders are read-only
+ctx.secrets["NAME"], ctx.secrets.get("NAME")   # a secret the manifest declares (5.5)
 ctx.log(message, **detail)
 ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 ```
@@ -330,8 +333,9 @@ ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 - **Approvals and inputs are re-entrant.** A `continue` calls the same function again with the same inputs: steps
   done are skipped by `ctx.checkpoint`, and `ctx.ask_approval(step, …)` then answers the decision for that step
   (`{"approved": true}`). A step not named in the function's `approvals` fails the run (`E_STEP_UNDECLARED`).
-- **`rrotor.testing`** gives a program's own tests a `Ctx` with no sandbox (`Harness`): inputs, answers, a folder, and
-  an `http` that answers what the test says.
+- **`rrotor.testing`** gives a program's own tests a `Ctx` with no sandbox (`Harness`): inputs, answers, a folder,
+  an `http` that answers what the test says, and `secrets={...}` (with `declared=[...]`, the names the manifest
+  declares).
 
 ### 5.4 A run
 
@@ -361,6 +365,36 @@ stateDiagram-v2
 - **`end` always runs**, on `done`, `failed`, a limit, a cancel or an expiry.
 - **Every call answers a `Result`**, never an exception: a crash is `failed` with the error and the step.
 - **Seconds** are the time a run spent running, not waiting.
+
+### 5.5 Secrets
+
+A program reads an API key or a password as `ctx.secrets["ANALYTICS_KEY"]`; its manifest declares the name
+(`"secrets": ["ANALYTICS_KEY"]`), and the person sets the value on the runtime, never in the repo
+(`rrotord/vault.py`):
+
+- **Set, listed, deleted** with `PUT /v1/programs/{name}/secrets/{secret}` `{value}`, `GET
+  /v1/programs/{name}/secrets` and `DELETE /v1/programs/{name}/secrets/{secret}`, or MCP's `secret_set`,
+  `secrets_list` and `secret_delete` ([7](#7-the-api)), behind the same gate as every other route. Listing answers
+  each name, whether the active version declares it and whether it is set: never a value. A value is a string of 1
+  byte to 64 KB, for a program deployed here.
+- **Encrypted at rest** with AES-256-GCM under the rrotor's own key, `/data/vault/key` (32 random bytes, made 0600 on
+  first use, never logged, never sent anywhere). Each value has its own nonce, and the program and the name are its
+  associated data, so a value moved to another name or program does not open. Another key (a lost or replaced
+  `/data/vault/key`) opens nothing: the run fails `E_VAULT` at `step: secrets`, and the secrets are set again.
+- **Only the run gets a value:** the runner reads the declared ones when it starts a run's worker and hands them over
+  in its start message, on the worker's own socket; a name the manifest does not declare is refused in the program
+  (`E_SECRET_UNDECLARED`). A declared secret not set stops the run before `load`:
+  `failed {step: secrets, code: E_SECRET_MISSING, missing: ["ANALYTICS_KEY"]}`, so the caller knows what to ask the
+  person for.
+- **Never kept anywhere else:** no route, tool, run record or audit event carries a value; setting and deleting are
+  audit events (`secret.set`, `secret.delete`) naming the program and the secret. A value of 4 characters or more
+  that a program prints or logs is masked as `[secret]` in the run's log; what a program returns or checkpoints
+  is its own.
+- **The server never sets one:** secrets go from the person to the runtime, not through Glyphh.
+- **In a cluster, secrets are node-local:** they are not in the replicated log or a snapshot. The head keeps them: a
+  follower refuses to set or delete one (503 `E_NOT_HEAD`, naming the head) and asks the head for the list, and every
+  call of a program that declares secrets runs on the head ([14](#14-the-cluster)). A node made head has its own
+  vault: the secrets are set on it again.
 
 ## 6. The link: protocol 2
 
@@ -400,7 +434,8 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
   {"type": "usage", "id": "<hex>", "seq": 7, "keys": [{"key_sha256": "<hex>", "calls": 2, "last_used_at": "2026-10-18T09:00:00+00:00"}]}
   ```
 
-- **`secret_set`** is parsed and logged `E_NOT_BUILT`; the link stays.
+- **No secrets on the link:** the server never sets a program's secret ([5.5](#55-secrets)); an earlier server's
+  `secret_set` is an unknown type, skipped like any unreadable message, and the link stays.
 - **Runs called at the runtime's address** stay on it: their results never go up the link.
 - **The link off** (`RROTOR_LINK=off`, self-hosted only) means no link, no heartbeat and no introspection.
 
@@ -438,6 +473,8 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `GET /v1/health` | Version, mode, runtime id, the link's state (`no_token`, `connecting`, `online`, `backoff`, `refused`, `replaced`, `upgrade_needed`, `bad_hello`, `off`), each sandbox layer (self-hosted: `container_needs`), the parts, the licence key's view (as `GET /v1/licence`), the last heartbeat (self-hosted), how many keys it holds, runs waiting for approval, the number of programs, `cluster` (`{role: standalone}`, or the cluster's id, this node's role and status, whether it is ready, the head, the term and the members' count), `drains` (per signal: `state` (`off`, `waiting`, `ok`, `failing`), `buffered`, `dropped`, `last_export_at`) and `server_logs` (`on`, and the warning while it is) |
 | `GET /v1/programs` | Each program, its versions (number, commit, when), the active one, its functions |
 | `POST /v1/programs/deploy` | `{repo, commit, token?}` or `{bundle, commit}` ([2.2](#22-build-deploy-and-call)): `201 {program, version, commit_sha, deployed_at}` |
+| `GET /v1/programs/{name}/secrets` | `{program, secrets: [{name, declared, set}]}`: never a value ([5.5](#55-secrets)) |
+| `PUT /v1/programs/{name}/secrets/{secret}`, `DELETE …` | `{value}`: a secret set, encrypted with the rrotor's key; deleted. `{program, name, set}` |
 | `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
 | `POST /v1/runs/{id}/continue` | `{answer}`: the next `Result` |
 | `POST /v1/runs/{id}/cancel` | Stops it; `end` runs; `cancelled` |
@@ -464,6 +501,7 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `approvals` | The runs waiting for the person's approval |
 | `audit_query` `{since?, until?, kind?, program?, run_id?, limit?}` | `GET /v1/audit` |
 | `cluster_status` | `GET /v1/cluster` |
+| `secrets_list` `{program}`, `secret_set` `{program, name, value}`, `secret_delete` `{program, name}` | A program's secrets ([5.5](#55-secrets)): names only back, never a value |
 
 A refusal is a tool error carrying the API's `{error}`.
 
@@ -781,7 +819,9 @@ write to the head.
   ([13](#13-logs-audit-and-drains)).
 - **Which calls write** (`manifest.py`): each function's `"writes"`, default the program's `data`. Every call of a
   program with `"data": true` runs on the head (`head_only`), whatever its functions say: its data folder never
-  replicates. A follower runs a `false` function of a program without data itself, with `/files` mounted read-only
+  replicates; so does every call of a program that declares `secrets`, which only the head's vault holds
+  ([5.5](#55-secrets): node-local, a follower refuses to set one). A follower runs a `false` function of a program
+  without data or secrets itself, with `/files` mounted read-only
   (`--ro-bind`, and Landlock read-only; `ctx.readonly` is true): a function marked `false` that writes fails
   `E_READ_ONLY`, naming it, and the folder is untouched.
 - **Forwarding** (`api/forward.py`, `cluster/node.py`): a writing call, a deploy, and continue, cancel, status and
@@ -846,8 +886,6 @@ write to the head.
 
 ## Not built yet
 
-- **Secrets:** a vault for a program's `secrets` (`ctx.secrets` answers `E_NOT_BUILT`; `secret_set` on the link is
-  logged and skipped).
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a program's `databases` (`ctx.db` answers
   `E_PART_MISSING`).
 - **SSO and SAML, roles (RBAC).**
