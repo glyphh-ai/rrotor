@@ -1,9 +1,9 @@
 """The API in a cluster (docs/specs/cluster.md, 3): what a follower sends to its head, what goes to the node that holds
 a run, and what a forwarded request does where it lands.
 
-- **Writes go to the head:** a call of a function marked `"writes": true` (the default for a model with data), any
-  call of a model with data that is not Ada (the head's alone), a deploy. Reads (`"writes": false`) run here, on
-  this node's replica.
+- **Writes go to the head:** a call of a function marked `"writes": true`, any call of a model with data (its data
+  folder is the head's alone), a deploy. Calls of a model without data marked `"writes": false` run here, on this
+  node's copy of the model.
 - **A run lives on the node that ran it** (`<node id>~<uuid>`): its continue, cancel, status and log go there, by
   way of the head (`E_RUN_LOST`, 410, when that node is gone). `GET /v1/approvals` gathers every node's.
 - **Commit:** a write done on the head (here, or forwarded to it) is answered once committed: at once without HA

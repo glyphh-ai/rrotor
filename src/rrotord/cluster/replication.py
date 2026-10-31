@@ -2,15 +2,13 @@
 ships it to every follower as one ordered log; a follower applies it in order, and a new or lagging one catches up
 from a snapshot first.
 
-**On the head.** Every run of an Ada model is bracketed (`before`, `after`, and every second while runs are in
-hand): the store's change capture is installed (capture.py) and what changed since is appended to the log as one
-`rows` entry per model; a store captured for the first time is shipped whole first (`rows` with `reset` and its
-schema). A version made active (any deploy or activation, by the API, its MCP or the link) is a `deploy` entry
-{model, version, commit_sha, manifest}; a version removed, `remove`; the runtime keys' list changed, `keys
-{hashes}`; the licence key held changed, `licence {key}`. Each follower has a shipper: it sends `append {term,
-entries, commit_seq}` past what the follower acknowledged, and waits for new entries when it is in step; a follower
-that is new, or behind the log the head still holds (`RROTOR_CLUSTER_LOG_KEEP`), is sent `snapshot` instead. The log
-is trimmed to what every member has applied.
+**On the head.** A version made active (any deploy or activation, by the API, its MCP or the link) is a `deploy`
+entry {model, version, commit_sha, manifest}; a version removed, `remove`; the runtime keys' list changed, `keys
+{hashes}`; the licence key held changed, `licence {key}`. No model's state is in the log: a model with data keeps
+it in its data folder on the head, and every call of it runs there (`head_only`). Each follower has a shipper: it
+sends `append {term, entries, commit_seq}` past what the follower acknowledged, and waits for new entries when it is
+in step; a follower that is new, or behind the log the head still holds (`RROTOR_CLUSTER_LOG_KEEP`), is sent
+`snapshot` instead. The log is trimmed to what every member has applied.
 
 **Raft's rules** (raft.py) decide what is sent and what is taken: each append names the entry before it (`prev_seq`,
 `prev_term`) and the follower takes it only if its log holds that entry; a diverged tail it has not applied is
@@ -19,20 +17,19 @@ and a lower one is refused. **Commit:** without HA (Pro, Team) an entry is commi
 HA (Enterprise) once a majority of voters hold it.
 
 **On a follower.** An `append`'s entries are appended to its own log, and those committed applied one by one:
-`rows` in one SQLite transaction on the replica (capture.py), `deploy` by fetching the version from the head (`GET
-/cluster/v1/versions/<model>/<commit>.tar`: its `src/` and `venv/`, the head's build; a node of another architecture
-refuses it, `E_CLUSTER_ARCH`) and making it active, `remove`, `keys` (the access list), `licence` (offered to its own
-licence, which checks the signature itself), `member` (the members, which Raft took when the entry arrived), `head`
-(nothing). `applied_seq` is kept in `cluster/state.json`. An entry that does not apply (a full disk, an unknown
-kind) stops the applying there: the node goes not ready, logs it, and tries again with the head's next append.
-`snapshot`: the follower fetches `GET /cluster/v1/snapshot` (one tar: every Ada store by SQLite's online backup,
-every version, the keys, the licence, the seq and term it stands at, the members), installs it and starts its log
-after that seq; a snapshot of another term than the head's request is refused. A follower is ready once it has
-applied all the head had committed when it last heard, and stays ready unless it has been behind for more than a
-second. A node made head applies all its log holds before it leads (`own`).
+`deploy` by fetching the version from the head (`GET /cluster/v1/versions/<model>/<commit>.tar`: its `src/` and
+`venv/`, the head's build; a node of another architecture refuses it, `E_CLUSTER_ARCH`) and making it active,
+`remove`, `keys` (the access list), `licence` (offered to its own licence, which checks the signature itself),
+`member` (the members, which Raft took when the entry arrived), `head` (nothing), and `rows` (nothing: an earlier
+release's model-state entry, still in a log written before the upgrade). `applied_seq` is kept in
+`cluster/state.json`. An entry that does not apply (a full disk, an unknown kind) stops the applying there: the node
+goes not ready, logs it, and tries again with the head's next append. `snapshot`: the follower fetches `GET
+/cluster/v1/snapshot` (one tar: every version, the keys, the licence, the seq and term it stands at, the members),
+installs it and starts its log after that seq; a snapshot of another term than the head's request is refused. A
+follower is ready once it has applied all the head had committed when it last heard, and stays ready unless it has
+been behind for more than a second. A node made head applies all its log holds before it leads (`own`).
 
-**Never syncs:** runs, sandboxes, parts, `runtime.json`, the link's outbox, audit, and any data-folder file but
-`precedents.sqlite`. A model with data that is not Ada (`head_only`) runs on the head only."""
+**Never syncs:** runs, sandboxes, parts, `runtime.json`, the link's outbox, audit, and any model's data folder."""
 
 from __future__ import annotations
 
@@ -43,7 +40,6 @@ import logging
 import os
 import platform
 import shutil
-import sqlite3
 import tarfile
 import tempfile
 import time
@@ -51,10 +47,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from rrotor import ada
 from rrotord import manifest as manifests
 from rrotord.access import Access
-from rrotord.cluster import capture
 from rrotord.cluster.log import Log
 from rrotord.cluster.raft import Raft, Timing
 from rrotord.cluster.transport import Channel, ClusterError
@@ -64,7 +58,6 @@ from rrotord.models import Models, Version
 
 log = logging.getLogger("rrotor.cluster")
 ARCH = platform.machine()
-CAPTURE_EVERY = 1.0  # while runs are in hand, the head ships what they changed this often
 IDLE = 5.0  # a shipper in step looks again at least this often (without HA: with it, every heartbeat)
 LAG = 1.0  # a follower behind the head for longer than this is not ready
 APPEND_WITHIN = 120.0  # an append's answer (a deploy entry fetches its version)
@@ -95,7 +88,6 @@ class Replication:
         role: Callable[[], str],
         saved: Callable[[int], None],
         applied: int = 0,
-        busy: Callable[[], bool] = lambda: False,
         wall: Callable[[], float] = time.time,
         *,
         me: str = "",
@@ -106,14 +98,13 @@ class Replication:
     ) -> None:
         self.log = Log(folder, keep)
         self.scratch, self.models, self.access, self.licence = scratch, models, access, licence
-        self.role, self.saved, self.busy, self.wall, self.clock, self.ha = role, saved, busy, wall, clock, ha
+        self.role, self.saved, self.wall, self.clock, self.ha = role, saved, wall, clock, ha
         self.raft = Raft(me, self.log, state or {}, ha=ha, save=persist, now=clock(), applied=applied, timing=TIMING)
         self.moved: Callable[[], None] = lambda: None  # Raft's role, term or head may have changed: the node looks
-        self.lock = asyncio.Lock()  # the head's capture and snapshots; a follower's applying
+        self.lock = asyncio.Lock()  # the head's snapshots; a follower's applying
         self.acked: dict[str, int | None] = {}  # the head's: each follower's applied seq (None: a snapshot first)
         self.shippers: dict[str, asyncio.Task[None]] = {}
         self.woken: dict[str, asyncio.Event] = {}
-        self.ticker: asyncio.Task[None] | None = None
         self.synced = False  # a follower's: it has applied what the head had when it last heard
         self.behind_since: float | None = None
         self.failure: dict[str, Any] | None = None  # a follower's: the entry that did not apply
@@ -128,7 +119,7 @@ class Replication:
 
     @property
     def applied(self) -> int:
-        """The last seq applied to this node's stores (a head's: every one it holds)."""
+        """The last seq applied to this node (a head's: every one it holds)."""
         return self.raft.applied
 
     @applied.setter
@@ -149,7 +140,7 @@ class Replication:
             return False
         return self.behind_since is None or self.wall() - self.behind_since <= LAG
 
-    # The head: capture
+    # The head: what syncs
 
     def _append(self, kind: str, **body: Any) -> dict[str, Any]:
         entry = self.raft.propose({"kind": kind, **body})
@@ -160,51 +151,6 @@ class Replication:
         """Every shipper: there is something to send."""
         for event in self.woken.values():
             event.set()
-
-    def _store(self, model: str) -> Path:
-        return self.models.data(model) / ada.STORE
-
-    def _capture(self, model: str) -> None:
-        """What changed in a model's store, appended as one `rows` entry (the whole store, the first time)."""
-        store = self._store(model)
-        if not store.is_file() or self.raft.role != "head":
-            return
-        if capture.install(store):
-            whole = capture.everything(store)
-            self._append("rows", model=model, reset=True, schema=whole["schema"], rows=whole["rows"])
-        rows, upto = capture.collect(store)
-        if rows:
-            self._append("rows", model=model, rows=rows)
-        if upto:
-            capture.clear(store, upto)
-
-    def _ada(self) -> list[str]:
-        return [n for n in self.models.names() if any("ada" in v.manifest.needs for v in self.models.versions(n))]
-
-    async def capture(self, model: str) -> None:
-        if self.role() != "head":
-            return
-        async with self.lock:
-            try:
-                await asyncio.to_thread(self._capture, model)
-            except sqlite3.Error as err:
-                log.error("cluster: a store's changes were not captured", extra={"model": model, "reason": str(err)})
-
-    async def before(self, found: Version) -> None:
-        """Before a run on the head: the store's capture in place (and the store shipped whole, the first time)."""
-        if "ada" in found.manifest.needs:
-            await self.capture(found.model)
-
-    async def after(self, model: str) -> None:
-        """After a run on the head (or its step): what it changed, shipped."""
-        await self.capture(model)
-
-    async def _tick(self) -> None:
-        while True:
-            await asyncio.sleep(CAPTURE_EVERY)
-            if self.busy():
-                for model in self._ada():
-                    await self.capture(model)
 
     def version_changed(self, kind: str, found: Version) -> None:
         """A version made active or removed on the head (models.py): a `deploy` or `remove` entry."""
@@ -230,17 +176,14 @@ class Replication:
         """This node became the head: what it holds is what syncs from here."""
         held = self.licence.held
         self.shipped_licence = held.raw if held is not None else None
-        if self.ticker is None:
-            self.ticker = asyncio.create_task(self._tick())
 
     async def stop(self) -> None:
-        tasks = [*self.shippers.values(), *([self.ticker] if self.ticker else [])]
+        tasks = list(self.shippers.values())
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.shippers.clear()
         self.woken.clear()
-        self.ticker = None
 
     # The head: shipping
 
@@ -333,15 +276,11 @@ class Replication:
         return Path(name)
 
     async def snapshot(self) -> tuple[Path, int]:
-        """Everything that syncs as one tar, and the seq it stands at: every Ada store's changes shipped first, then
-        each copied by SQLite's online backup. A change a run makes meanwhile is in the copy and in a later entry,
-        which applies again to the same row: the replica ends the same."""
+        """Everything that syncs as one tar, and the seq it stands at."""
         async with self.lock:
             return await asyncio.to_thread(self._snapshot)
 
     def _snapshot(self) -> tuple[Path, int]:
-        for model in self._ada():
-            self._capture(model)
         seq = self.log.last
         work = Path(tempfile.mkdtemp(dir=self._folder()))
         try:
@@ -358,11 +297,6 @@ class Replication:
                     for v in versions:
                         tar.add(v.src, f"versions/{name}/{v.commit_sha}/src")
                         tar.add(v.venv, f"versions/{name}/{v.commit_sha}/venv")
-                    store = self._store(name)
-                    if store.is_file():
-                        copy = work / f"{name}.sqlite"
-                        capture.backup(store, copy)
-                        tar.add(copy, f"stores/{name}.sqlite")
                 held = self.licence.held
                 about = {
                     "seq": seq,
@@ -413,7 +347,7 @@ class Replication:
                     break
                 try:
                     await self._apply(entry)
-                except (RrotorError, OSError, ValueError, KeyError, sqlite3.Error, tarfile.TarError) as err:
+                except (RrotorError, OSError, ValueError, KeyError, tarfile.TarError) as err:
                     self._failed(entry, err)
                     return False
                 self.applied = entry["seq"]
@@ -422,7 +356,7 @@ class Replication:
 
     async def own(self) -> bool:
         """A node made head: all its log holds applied before it writes (Raft's head commits it all), and the
-        seq kept. False when an entry does not apply: it cannot lead on a store behind its log."""
+        seq kept. False when an entry does not apply: it cannot lead on a node behind its log."""
         async with self.lock:
             done = await self._apply_upto(self.log.last)
         if not done:
@@ -442,12 +376,7 @@ class Replication:
 
     async def _apply(self, entry: dict[str, Any]) -> None:
         kind = entry.get("kind")
-        if kind == "rows":
-            store = self._store(str(entry["model"]))
-            await asyncio.to_thread(
-                capture.apply, store, list(entry.get("rows") or []), entry.get("schema"), bool(entry.get("reset"))
-            )
-        elif kind == "deploy":
+        if kind == "deploy":
             await self._deploy(entry)
         elif kind == "remove":
             found = self.models.by_sha(str(entry["model"]), str(entry["commit_sha"]))
@@ -460,7 +389,7 @@ class Replication:
                 self.licence.offer(entry["key"], "cluster")
         elif kind == "member":
             self.member(entry)
-        elif kind != "head":  # a head's first entry in its term: nothing to apply
+        elif kind not in ("head", "rows"):  # a head's first entry in its term, an earlier release's rows: nothing
             raise RrotorError(f"An entry of a kind this node does not know: {kind!r}.", code="E_CLUSTER_KIND")
 
     async def _deploy(self, entry: dict[str, Any]) -> None:
@@ -515,7 +444,7 @@ class Replication:
             try:
                 await self._fetch("/cluster/v1/snapshot", tar)
                 about = await asyncio.to_thread(self._install, tar, msg.get("term"))
-            except (RrotorError, OSError, ValueError, KeyError, sqlite3.Error, tarfile.TarError) as err:
+            except (RrotorError, OSError, ValueError, KeyError, tarfile.TarError) as err:
                 self._failed({"seq": None, "kind": "snapshot"}, err)
                 assert self.failure is not None  # noqa: S101  (just set)
                 raise RrotorError(str(err), code=str(self.failure["code"]), status=503) from None
@@ -563,14 +492,6 @@ class Replication:
             active = self.models.by_sha(name, described["active"]) if described.get("active") else None
             if active is not None:
                 self.models.activate(active)
-            store = self._store(name)
-            with tarfile.open(tar) as t:
-                copy = t.extractfile(f"stores/{name}.sqlite") if f"stores/{name}.sqlite" in t.getnames() else None
-                if copy is not None:
-                    store.parent.mkdir(parents=True, exist_ok=True)
-                    staged = store.with_name(f".{store.name}.snapshot")
-                    staged.write_bytes(copy.read())
-                    os.replace(staged, store)  # a run reading the old one keeps it: the swap is atomic
         self.access.set_keys(list(about.get("keys") or []))
         if about.get("licence") is not None:
             self.licence.offer(about["licence"], "cluster")

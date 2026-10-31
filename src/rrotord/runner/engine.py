@@ -7,9 +7,8 @@ Every call, continue and cancel is an audit event with its outcome, and every ru
 (rrotord/audit.py); while a run is handled its id, model, version and function are on every log line; with a drain,
 its sandbox's start and its function are spans, and its end counted (rrotord/otel.py).
 
-In a cluster (docs/specs/cluster.md, 3) a run's id names the node that holds it (`node`); a follower's runs mount
-the model's folders read-only and open its Ada store read-only (`readonly`); and on the head each run is bracketed
-by `changes`, which installs the change capture in its store before and ships what changed after."""
+In a cluster (docs/specs/cluster.md, 3) a run's id names the node that holds it (`node`), and a follower's runs
+mount the model's folders read-only (`readonly`)."""
 
 from __future__ import annotations
 
@@ -17,21 +16,17 @@ import asyncio
 import contextlib
 import datetime as dt
 import logging
-import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from opentelemetry.trace import Span
 
 from rrotor.ctx import RunState
 from rrotord import log as logs
-from rrotord import precedents
 from rrotord.audit import Audit
 from rrotord.errors import Conflict, NotFound, RrotorError, Unavailable
-from rrotord.licence import Licence
-from rrotord.licence_key import COMMUNITY
 from rrotord.manifest import check_inputs
 from rrotord.models import Models, Version
 from rrotord.otel import Telemetry
@@ -49,14 +44,6 @@ END_WAIT = 35.0
 WAIT_LIMIT = 15 * 60.0
 
 Notify = Callable[[Run], Awaitable[None]]
-
-
-class Changes(Protocol):
-    """What a cluster's head does around the runs that may change what syncs (rrotord/cluster/replication.py)."""
-
-    async def before(self, found: Version) -> None: ...
-
-    async def after(self, model: str) -> None: ...
 
 
 def failed(step: str, code: str, reason: str) -> dict[str, Any]:
@@ -88,17 +75,15 @@ class Runner:
         notify: Notify | None = None,
         wait_limit: float = WAIT_LIMIT,
         parts: Parts | None = None,
-        licence: Licence | None = None,
         audit: Audit | None = None,
         telemetry: Telemetry | None = None,
         node: Callable[[], str | None] = lambda: None,
         readonly: Callable[[], bool] = lambda: False,
-        changes: Changes | None = None,
     ) -> None:
-        self.node, self.readonly, self.changes = node, readonly, changes
+        self.node, self.readonly = node, readonly
         self.models, self.records, self.proxy, self.launcher = models, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
-        self.parts, self.licence, self.audit, self.telemetry = parts, licence, audit, telemetry
+        self.parts, self.audit, self.telemetry = parts, audit, telemetry
         self.notify = notify
         self.workers: dict[str, Worker] = {}
         self.stopping: dict[str, dict[str, Any]] = {}  # runs stopped from outside, with the Result they end with
@@ -285,69 +270,12 @@ class Runner:
             self.readonly(),
         )
 
-    def _limits(self, found: Version) -> dict[str, Any]:
-        """An Ada version's precedent cap: the licence key's `max_precedents` (Community's without one; null is
-        unlimited), the plan's name for the caller's message, and, with a cap, `precedents_elsewhere`, the other
-        models' total now (the node's cap is on its total)."""
-        if "ada" not in found.manifest.needs:
-            return {}
-        plan = self.licence.limits() if self.licence is not None else COMMUNITY
-        name = self.licence.plan_name if self.licence is not None else "Community"
-        out: dict[str, Any] = {"precedents": plan.max_precedents, "plan": name}
-        if plan.max_precedents is not None:
-            out["precedents_elsewhere"] = self._elsewhere(found.model)
-        return out
-
-    def _elsewhere(self, model: str) -> int:
-        """The precedents the runtime's other Ada models hold now: the plan's cap is on the total, and the model
-        counts its own. A store that does not read counts none (logged)."""
-        try:
-            return precedents.total(self.models, skip=model)
-        except sqlite3.Error as err:
-            log.warning("a precedent store did not read", extra={"model": model, "reason": str(err)})
-            return 0
-
-    async def maintain(self, found: Version, op: str) -> dict[str, Any]:
-        """rrotor's own work in a version's sandbox (a re-encode on deploy): one call of `op`, its Result."""
-        refused = self._parts_refused(found.manifest.name, found)
-        if refused:
-            return refused
-        mounts = self._mounts(found.manifest.name, found, None)
-        limits = bwrap.Limits(found.manifest.limits.memory_mb, found.manifest.limits.seconds + 5)
-        await self._before(found)
-        try:
-            worker = await Worker.start(self.launcher, lambda fd: Spec(mounts, limits, fd), lambda m: None)
-        except OSError as err:
-            return failed("sandbox", "E_SANDBOX", f"The sandbox did not start: {err}")
-        try:
-            await worker.send(
-                "start",
-                function=op,
-                inputs={},
-                approvals=[],
-                state={},
-                answer=None,
-                seconds_left=float(found.manifest.limits.seconds),
-                sandbox=self.launcher.sandbox(mounts),
-                hosts=[],
-                caller="rrotor",
-                **self.launcher.paths(mounts),
-            )
-            message = await worker.next(found.manifest.limits.seconds + GRACE)
-        finally:
-            await worker.stop(grace=5.0)
-            await self._after(found.model)
-        if message is None or message.get("op") != "result":
-            return failed(op, "E_WORKER", "The model's process stopped before it answered.")
-        return dict(message["result"])
-
     async def _go(self, run: Run, found: Version, answer: Any) -> None:
         manifest = found.manifest
         hosts = frozenset(manifest.hosts)
         socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
         mounts = self._mounts(run.model, found, socket)
         limits = bwrap.Limits(manifest.limits.memory_mb, manifest.limits.seconds + 5)
-        await self._before(found)
         try:
             with self._span("rrotor.sandbox.start", run):
                 worker = await Worker.start(
@@ -372,7 +300,6 @@ class Runner:
             hosts=sorted(hosts),
             clearance=run.clearance,
             caller=run.caller,
-            limits=self._limits(found),
             readonly=mounts.readonly,
             **self.launcher.paths(mounts),
         )
@@ -410,7 +337,6 @@ class Runner:
             )
             self.records.save(run)
             self.records.log(run.id, {"event": "waiting", "status": result["status"], "step": result.get("step")})
-            await self._after(run.model)
             await self._tell(run)
             return
         await self._end(run, worker, result)
@@ -425,17 +351,8 @@ class Runner:
             await worker.stop()
         await self._finish(run, result)
 
-    async def _before(self, found: Version) -> None:
-        if self.changes is not None:
-            await self.changes.before(found)
-
-    async def _after(self, model: str) -> None:
-        if self.changes is not None:
-            await self.changes.after(model)
-
     async def _finish(self, run: Run, result: dict[str, Any]) -> None:
         self.workers.pop(run.id, None)
-        await self._after(run.model)
         await self.proxy.close(run.id)
         run.status, run.result, run.pending, run.ended_at, run.waiting_since = (
             result["status"],

@@ -24,7 +24,7 @@ LEGACY = ("2025-11-25", "2025-06-18", "2025-03-26")
 VERSION_META = "io.modelcontextprotocol/protocolVersion"
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS = -32700, -32600, -32601, -32602
 INSTRUCTIONS = (
-    "This person's Glyphh runtime (rrotor): their Ada models, deployed by commit and run here. models_list shows them; "
+    "This person's Glyphh runtime (rrotor): their models, deployed by commit and run here. models_list shows them; "
     "model_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
     "model_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
     "waiting for the person; model_deploy deploys a commit of a model's GitHub repo; audit_query reads the audit log "

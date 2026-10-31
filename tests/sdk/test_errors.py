@@ -7,9 +7,9 @@ def test_model_error_keeps_its_message_and_code():
 
 
 def test_part_missing_names_what_and_the_mod():
-    err = PartMissing("The Ada kernel", "Ada")
-    assert (err.code, err.what, err.mod) == ("E_PART_MISSING", "The Ada kernel", "Ada")
-    assert "Ada mod's part" in err.message
+    err = PartMissing("The graph database", "Neo4j")
+    assert (err.code, err.what, err.mod) == ("E_PART_MISSING", "The graph database", "Neo4j")
+    assert "Neo4j mod's part" in err.message
 
 
 def test_step_undeclared_names_the_step():

@@ -38,17 +38,6 @@ def start(ctx, inputs):
     return Result.done(ctx.answer)
 """
 
-FULL = """
-from rrotor import Result, ada
-
-def start(ctx, inputs):
-    ctx.log("recording")
-    raise ada.LimitExceeded(50000, 50000, "Pro")
-
-def end(ctx):
-    ctx.log("ended", reason="done")
-"""
-
 
 class Env:
     def __init__(self, root: Path, sock: Path, launcher: Any = None, layers: Layers | None = None) -> None:
@@ -100,23 +89,6 @@ async def test_a_call_answers_done_and_ends(env):
         {k: v for k, v in line.items() if k != "at"} for line in env.records.lines(run.id)
     ]
     assert env.events(run)[0] == "called" and env.events(run)[-1] == "ended"
-
-
-async def test_a_run_whose_record_is_refused_by_the_cap_ends_done_not_failed_and_end_runs(env):
-    env.deploy(FULL)
-    run = await env.runner.call(model="sample", function="start", inputs={})
-    assert (run.status, run.final, outcome(run)["step"]) == ("done", True, None)
-    assert outcome(run)["data"] == {
-        "status": "limit_exceeded",
-        "indexed": False,
-        "message": "Precedent store capacity limit reached (50,000 max for the Pro plan). "
-        "Upgrade the key to index further precedents.",
-        "precedents": 50000,
-        "cap": 50000,
-    }
-    assert env.told == [(run.id, "done")] and "end failed" not in env.events(run)
-    messages = [line.get("message") for line in env.records.lines(run.id)]
-    assert "recording" in messages and "ended" in messages  # `end` ran
 
 
 async def test_a_waiting_run_continues_in_the_same_worker(env):

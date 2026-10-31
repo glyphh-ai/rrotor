@@ -38,7 +38,6 @@ from rrotord.link.handler import LinkHandler
 from rrotord.link.outbox import Outbox
 from rrotord.models import Models
 from rrotord.parts import Parts
-from rrotord.precedents import Precedents
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
@@ -61,7 +60,6 @@ class Daemon:
     parts: Parts = field(init=False)
     licence: Licence = field(init=False)
     access: Access = field(init=False)
-    precedents: Precedents = field(init=False)
     runner: Runner = field(init=False)
     link: LinkClient = field(init=False)
     handler: LinkHandler = field(init=False)
@@ -121,7 +119,6 @@ class Daemon:
         self.aggregate = Aggregate(self.audit, self.gathered, self.cluster)
         self.aggregate.drain = self.drain
         self.cluster.on_telemetry = self.aggregate.received
-        self.precedents = Precedents(models, cap=lambda: self.licence.limits().max_precedents)
         self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access, self.audit)  # type: ignore[arg-type]
         self.runner = Runner(
             models=models,
@@ -132,14 +129,11 @@ class Daemon:
             layers=self.layers,
             notify=handler.notify,
             parts=self.parts,
-            licence=self.licence,
             audit=self.audit,
             telemetry=self.drain.telemetry if self.drain is not None else None,
             node=lambda: c.node_id if self.cluster.member else None,
             readonly=lambda: self.cluster.role == "follower",
-            changes=self.cluster.replication,
         )
-        self.cluster.replication.busy = lambda: bool(self.runner.workers)
         self.cluster.deposed = self._deposed
         handler.runner = self.runner
         self.link = LinkClient(
@@ -166,7 +160,6 @@ class Daemon:
                 data=c.data,
                 version=VERSION,
                 node_id=c.node_id,
-                precedents=self.precedents.current,
                 cluster=self.cluster.identity,
             )
             if c.mode == "self" and c.link
@@ -176,13 +169,8 @@ class Daemon:
             self._gauges(self.drain)
 
     def _gauges(self, drain: Drain) -> None:
-        """What the drain's metrics watch: each model's precedents and the cap, the link's state."""
+        """What the drain's metrics watch: the link's state, the cluster's term and each follower's lag."""
         t = drain.telemetry
-        t.gauge("rrotor.precedents", lambda: [(n, {"model": m}) for m, n in self.precedents.by_model.items()])
-        t.gauge(
-            "rrotor.precedents.cap",
-            lambda: [(float(cap), {})] if (cap := self.licence.limits().max_precedents) is not None else [],
-        )
         t.gauge("rrotor.link.state", lambda: [(1.0, {"state": self.link.state})])
         t.gauge("rrotor.cluster.term", self._term)
         t.gauge("rrotor.cluster.lag", self._lag)
@@ -270,7 +258,6 @@ class Daemon:
             else None,
             self.handler.report,
             self.heartbeat,
-            self.precedents,
             self.audit,
             self.drain,
             self.cluster,
@@ -325,22 +312,16 @@ class Daemon:
             log.exception("reading the licence key again failed")
 
     async def report_usage(self) -> None:
-        """The runtime keys' calls since the last report and the runtime's precedents, owed up the link as one
-        numbered `usage`: when there were calls, or when the precedents' total is due (`rrotord/precedents.py`);
-        nothing otherwise, or when there is no runtime token to owe them under. A cluster's follower sends its calls
-        to its head with each ping instead, and the head's `usage` is the cluster's (the synced store's precedents
-        once)."""
+        """The runtime keys' calls since the last report, owed up the link as one numbered `usage` when there were
+        any; nothing otherwise, or when there is no runtime token to owe them under. A cluster's follower sends its
+        calls to its head with each ping instead, and the head's `usage` is the cluster's."""
         if self.cluster.role == "follower":
-            self.precedents.due()
             return
         keys = self.access.usage.take()
-        due = self.precedents.due()  # read on every node, linked or not: the cap's warning, the health
         if not self.link.configured:
             return
-        if keys or due:
-            total = self.precedents.total
-            await self.link.owe(lambda seq: p.usage(seq, keys, total))
-            self.precedents.reported = total
+        if keys:
+            await self.link.owe(lambda seq: p.usage(seq, keys))
 
     async def _usage(self) -> None:
         while True:

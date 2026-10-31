@@ -221,7 +221,7 @@ async def test_a_welcomes_licence_key_is_offered_preferred_to_its_legacy_licence
     env.handler.licence = Licence(tmp_path / "lic")
     await env.handler.on_welcome(p.Welcome(type="welcome"))
     assert env.handler.licence.state == "none"
-    given = keys().licence(["ada"], plan="Team")
+    given = keys().licence(["rrotor"], plan="Team")
     await env.handler.on_welcome(p.Welcome(type="welcome", licence=p.Signed(**given)))
     assert env.handler.licence.limits().tier == "team"  # release N: the legacy licence alone, mapped
     key = keys().key(tier="pro")

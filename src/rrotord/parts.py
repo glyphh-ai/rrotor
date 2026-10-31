@@ -26,7 +26,7 @@ ARCHIVE_MAX = 256 * 1024 * 1024
 # Which mod brings each part the base knows (by the mod's slug, as the licence names it): what a run is told when
 # the part is missing. The database parts are rrotor's own and need no plan.
 BASE_MOD = "rrotor"
-KNOWN: dict[str, str] = {"ada": "ada", "postgres": BASE_MOD, "mongodb": BASE_MOD, "neo4j": BASE_MOD}
+KNOWN: dict[str, str] = {"postgres": BASE_MOD, "mongodb": BASE_MOD, "neo4j": BASE_MOD}
 
 
 class PartInfo(BaseModel):

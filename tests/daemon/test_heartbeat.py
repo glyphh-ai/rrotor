@@ -57,7 +57,6 @@ def beating(tmp_path: Path, post: Any, token: str | None = TOKEN, machine: str |
         data=tmp_path / "data",
         version="0.1.0",
         node_id="rrotor-1",
-        precedents=lambda: 1200,
         machine_id=machine_id,
     )
 
@@ -79,7 +78,6 @@ async def test_a_heartbeat_sends_exactly_its_body_and_holds_the_key_answered(tmp
         "node_id": "rrotor-1",
         "cluster_id": None,
         "role": "standalone",
-        "precedents": 1200,
     }
     assert first == ("https://api.glyphh.example/v1/license/verify", {"Authorization": f"Bearer {TOKEN}"}, body)
     assert second[2] == body | {"licence_id": "2c7f0d9e-0000-4000-8000-000000000001"}
@@ -88,7 +86,9 @@ async def test_a_heartbeat_sends_exactly_its_body_and_holds_the_key_answered(tmp
 
 
 async def test_the_key_is_preferred_to_the_legacy_licence_answered_beside_it_and_either_alone_is_taken(tmp_path):
-    given = keys().licence(["ada"], runtime_id=RUNTIME, kind="heartbeat", licence_id="l-1", grace_days=14, plan="Team")
+    given = keys().licence(
+        ["rrotor"], runtime_id=RUNTIME, kind="heartbeat", licence_id="l-1", grace_days=14, plan="Team"
+    )
     key = keys().key(tier="pro")
     beat = beating(tmp_path, Server((200, {"licence": given, "license_key": key}), (200, {"licence": given})))
     assert await beat.beat() and beat.licence.limits().tier == "pro"
@@ -112,7 +112,7 @@ def test_without_a_machine_id_a_random_one_is_made_once_and_kept_on_data(tmp_pat
 
 
 async def test_a_failed_heartbeat_is_logged_and_says_why(tmp_path, caplog):
-    tampered = keys().licence(["ada"])
+    tampered = keys().licence(["rrotor"])
     tampered["payload"]["plan"] = "Team"
     server = Server(
         ConnectionError("down"),
@@ -180,16 +180,10 @@ async def test_the_heartbeat_reaches_a_real_server_through_the_daemons_post(tmp_
             "licence_id",
             "machine",
             "node_id",
-            "precedents",
             "role",
             "version",
         ]
-        assert (body["active_runs"], body["node_id"], body["role"], body["precedents"]) == (
-            0,
-            "rrotor-1",
-            "standalone",
-            0,
-        )
+        assert (body["active_runs"], body["node_id"], body["role"]) == (0, "rrotor-1", "standalone")
         assert d.licence.held is not None and d.licence.held.raw == key
     finally:
         if d.session is not None:
@@ -210,5 +204,4 @@ def test_in_a_cluster_the_heartbeat_names_the_cluster_and_this_nodes_role(tmp_pa
         "node_id",
         "cluster_id",
         "role",
-        "precedents",
     }

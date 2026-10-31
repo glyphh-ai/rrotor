@@ -71,13 +71,11 @@ def services(root: Path, sock: Path, local_token: str, fetch: Any = None) -> Ser
         sdk=config.sdk,
         layers=layers,
         parts=parts,
-        licence=licence,
     )
     deployer = Deployer(
         models,
         root / "scratch",
         Tools(python=sys.executable, uv=shutil.which("uv") or "uv", github=f"file://{root / 'github'}"),
-        maintain=runner.maintain,
     )
     return Services(
         config, models, deployer, runner, Credentials(config.data), LinkView(), layers, parts, licence, fetch

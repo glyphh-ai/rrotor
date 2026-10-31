@@ -68,14 +68,10 @@ def test_no_key_anywhere_is_community_said_once(tmp_path, caplog):
         "state": "none",
         "days_left": None,
         "max_nodes": 1,
-        "max_precedents": 5000,
         "cluster_sync_enabled": False,
         "ha": False,
-        "precedents": {"held": None, "cap": 5000, "over": False},
     }
     assert not (tmp_path / "data" / "licence.json").exists()
-    assert lic.view(5000)["precedents"] == {"held": 5000, "cap": 5000, "over": False}  # at the cap, not over
-    assert lic.view(5001)["precedents"] == {"held": 5001, "cap": 5000, "over": True}
     assert lic.plan_name == "Community"
 
 
@@ -105,7 +101,7 @@ def test_a_good_key_sets_its_own_limits_and_shows_as_the_spec_says(tmp_path):
     text = keys().key(license_id="2c7f0d9e-0000-4000-8000-000000000001", issued_at=at(-18), expires_at=at(12))
     lic = licence(tmp_path)
     lic.start([("GLYPHH_LICENSE_KEY", text)])
-    assert lic.limits() == Plan("pro", 3, 50000, True) and not lic.community
+    assert lic.limits() == Plan("pro", 3, True) and not lic.community
     assert lic.view() == {
         "tier": "pro",
         "community": False,
@@ -117,16 +113,14 @@ def test_a_good_key_sets_its_own_limits_and_shows_as_the_spec_says(tmp_path):
         "state": "live",
         "days_left": 12,
         "max_nodes": 3,
-        "max_precedents": 50000,
         "cluster_sync_enabled": True,
         "ha": False,
-        "precedents": {"held": None, "cap": 50000, "over": False},
     }
     assert lic.plan_name == "Pro"
     assert json.loads((tmp_path / "data" / "licence.json").read_text()) == {"key": text, "source": "GLYPHH_LICENSE_KEY"}
     enterprise = keys().key(tier="enterprise", max_nodes=None, max_precedents=None, issued_at=at(-1))
     lic.offer(enterprise, "heartbeat")
-    assert lic.view(10**9)["precedents"] == {"held": 10**9, "cap": None, "over": False}
+    assert lic.view()["max_nodes"] is None
     assert lic.plan_name == "Enterprise" and lic.view()["ha"] is True  # Enterprise elects its cluster's head
 
 
@@ -138,7 +132,7 @@ def test_an_expired_key_holds_its_limits_through_14_days_of_grace_warned_daily_t
         lic.tick()  # the same day: said once
     assert caplog.text.count("licence key expired 2026-10-17; Community limits from 2026-10-31") == 1
     assert (lic.state, lic.days_left(), lic.limits().tier, lic.community) == ("grace", 12, "pro", False)
-    assert lic.view()["state"] == "grace" and lic.view()["max_precedents"] == 50000
+    assert lic.view()["state"] == "grace" and lic.view()["max_nodes"] == 3
     clock.now = NOW + timedelta(days=1)
     with caplog.at_level(logging.WARNING, logger="rrotor.licence"):
         lic.tick()
@@ -150,10 +144,10 @@ def test_an_expired_key_holds_its_limits_through_14_days_of_grace_warned_daily_t
     assert "licence key expired 2026-10-17; Community limits since 2026-10-31" in caplog.text
     view = lic.view()
     assert (lic.state, lic.community, lic.limits(), lic.days_left()) == ("expired", True, COMMUNITY, 0)
-    assert (view["tier"], view["state"], view["max_precedents"], view["expires_at"]) == (
+    assert (view["tier"], view["state"], view["max_nodes"], view["expires_at"]) == (
         "pro",
         "expired",
-        5000,
+        1,
         at(-2),
     )  # what expired is still shown; Community's limits apply
 
@@ -243,7 +237,7 @@ def test_a_legacy_licence_is_still_taken_in_release_n_from_every_source(tmp_path
     lic = licence(tmp_path, runtime_id=RUNTIME)
     lic.start([("RROTOR_LICENCE", token)])
     assert lic.held is not None and lic.held.legacy and lic.licence_id == "l-env"
-    assert lic.limits() == Plan("team", 10, 500000, False) and lic.view()["issued_at"] is None
+    assert lic.limits() == Plan("team", 10, False) and lic.view()["issued_at"] is None
     saved = json.loads((tmp_path / "data" / "licence.json").read_text())
     assert saved == {"licence": signed, "source": "RROTOR_LICENCE"}
     assert licence(tmp_path, runtime_id=RUNTIME).licence_id == "l-env"  # kept across a restart

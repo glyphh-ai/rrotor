@@ -11,13 +11,10 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from rrotor import ada
-from rrotor.errors import ModelError
 from rrotord import manifest as manifests
 from rrotord.errors import BadRequest, DeployError
 from rrotord.models import Models, Version
@@ -42,54 +39,9 @@ def check_sha(commit: str) -> str:
     return commit
 
 
-Maintain = Callable[[Version, str], Awaitable[dict[str, Any]]]
-
-
 class Deployer:
-    def __init__(
-        self, models: Models, scratch: Path, tools: Tools | None = None, maintain: Maintain | None = None
-    ) -> None:
+    def __init__(self, models: Models, scratch: Path, tools: Tools | None = None) -> None:
         self.models, self.scratch, self.tools = models, scratch, tools or Tools()
-        self.maintain = maintain  # runs rrotor's own operation in a version's sandbox (the runner's)
-
-    @staticmethod
-    def ada_spec(src: Path, found: manifests.Manifest) -> dict[str, Any] | None:
-        """An Ada model's spec (it names the part `ada`): read and checked, with its data folder required."""
-        if "ada" not in found.needs:
-            return None
-        if not found.data:
-            raise DeployError(
-                'An Ada model keeps its precedents in its data folder: set "data": true.', code="E_MANIFEST"
-            )
-        try:
-            return ada.read_spec(src)
-        except ModelError as err:
-            raise DeployError(err.message, code="E_MANIFEST") from None
-
-    async def _ada_ready(self, made: Version, spec: dict[str, Any] | None) -> None:
-        """Before an Ada version goes active: a changed encoding re-encodes the store, or the deploy is refused."""
-        if spec is None:
-            return
-        before = self.models.active(made.model)
-        store = self.models.data(made.model) / ada.STORE
-        if before is None or before.commit_sha == made.commit_sha or not store.is_file():
-            return
-        try:
-            old = ada.read_spec(before.src)
-        except ModelError:
-            return
-        if ada.encoding_of(old) == ada.encoding_of(spec):
-            return
-        if self.maintain is None:
-            raise DeployError(
-                "The spec's encoding changed and the store cannot be re-encoded here.", code="E_ADA_ENCODING"
-            )
-        result = await self.maintain(made, ada.REENCODE)
-        if result.get("status") != "done":
-            why = (result.get("data") or {}).get("reason", "the re-encode did not finish")
-            raise DeployError(
-                f"The spec's encoding changed and the store could not be re-encoded: {why}", code="E_ADA_ENCODING"
-            )
 
     def _git_env(self, home: Path, token: str | None = None) -> dict[str, str]:
         env = {
@@ -150,7 +102,6 @@ class Deployer:
             )
         if version is not None and version != found.version:
             found = self.models.renumber(found, version)
-        await self._ada_ready(found, self.ada_spec(found.src, found.manifest))
         self.models.activate(found)
         return found
 
@@ -164,7 +115,6 @@ class Deployer:
         if head != commit:
             raise DeployError(f"The commit fetched is {head[:12]}, not {commit[:12]}.", code="E_SHA")
         found = manifests.read(src)
-        spec = self.ada_spec(src, found)
         shutil.rmtree(src / ".git")
         existing = self.models.by_sha(found.name, commit)
         if existing is not None:
@@ -183,11 +133,6 @@ class Deployer:
             raise
         self._seed(found.name, root / "src" / "files")
         made = self.models.record(found.name, version or self.models.next_number(found.name), commit, found)
-        try:
-            await self._ada_ready(made, spec)
-        except DeployError:
-            self.models.remove(made)
-            raise
         self.models.activate(made)
         return made
 

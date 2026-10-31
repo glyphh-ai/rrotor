@@ -11,7 +11,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from rrotor.ada import LimitExceeded
 from rrotor.ctx import Ctx
 from rrotor.errors import ModelError, Wait
 from rrotor.result import Result
@@ -37,8 +36,8 @@ def crash(step: str, err: BaseException) -> Result:
 
 
 def wrote(err: BaseException, ctx: Ctx) -> bool:
-    """Whether a failure is a write refused because this run is read-only (a cluster's follower): the kernel's
-    ReadOnlyError (`code` E_READ_ONLY) anywhere, and on a read-only run SQLite's or the file system's refusal."""
+    """Whether a failure is a write refused because this run is read-only (a cluster's follower): an error whose
+    `code` is E_READ_ONLY anywhere, and on a read-only run SQLite's or the file system's refusal."""
     if getattr(err, "code", None) == "E_READ_ONLY":
         return True
     if not ctx.readonly:
@@ -63,8 +62,6 @@ def invoke(step: str, fn: Callable[..., Any], ctx: Ctx, *args: Any) -> Outcome:
     except Wait as wait:
         waited = wait.result if isinstance(wait.result, Result) else failure(step, "E_BAD_RESULT", "bad wait")
         return Outcome(waited, wait.pending)
-    except LimitExceeded as full:  # the precedent cap: a finished run that indexed nothing, never a failure
-        return Outcome(Result.done(full.data))
     except ModelError as err:
         return Outcome(failure(step, err.code, err.message))
     except Exception as err:  # noqa: BLE001  (a model's crash is a failed Result, never an exception)

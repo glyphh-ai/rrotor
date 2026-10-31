@@ -221,12 +221,10 @@ class Licence:
         until = {"live": held.expires_at, "grace": held.expires_at + GRACE}.get(held.state(now))
         return 0 if until is None else math.ceil((until - now) / DAY)
 
-    def view(self, precedents: int | None = None) -> dict[str, Any]:
-        """The key held, its state, the limits that apply (`GET /v1/licence`, the health), and the node's precedents
-        against the cap (`over` after a downgrade: nothing deleted, growth refused)."""
+    def view(self) -> dict[str, Any]:
+        """The key held, its state and the limits that apply (`GET /v1/licence`, the health)."""
         found, limits = self.held_from, self.limits()
         source, held = found if found is not None else (None, None)
-        cap = limits.max_precedents
         return {
             "tier": held.plan.tier if held is not None else COMMUNITY.tier,
             "community": self.community,
@@ -238,12 +236,6 @@ class Licence:
             "state": self.state,
             "days_left": self.days_left(),
             "max_nodes": limits.max_nodes,
-            "max_precedents": limits.max_precedents,
             "cluster_sync_enabled": limits.cluster_sync_enabled,
             "ha": limits.ha,
-            "precedents": {
-                "held": precedents,
-                "cap": cap,
-                "over": precedents is not None and cap is not None and precedents > cap,
-            },
         }

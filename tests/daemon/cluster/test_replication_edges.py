@@ -22,7 +22,7 @@ from rrotord.errors import BadRequest, RrotorError
 from rrotord.licence import Licence
 from rrotord.models import Models
 from tests.daemon.cluster.conftest import Nodes, until
-from tests.daemon.cluster.ring import Ring, tickets
+from tests.daemon.cluster.ring import Ring, models
 from tests.fakes import install, manifest
 
 
@@ -94,7 +94,9 @@ async def test_a_follower_behind_its_head_for_long_is_not_ready(tmp_path):
     assert await applied(r, append(1, [], 9)) == 1 and r.behind_since == since
     r.wall = lambda: 10**10
     assert not r.current()
-    assert await applied(r, append(1, [entry(2, "rows", model="m", rows=[{"tbl": "x"}])], 2)) == 1
+    rows = entry(2, "rows", model="m", rows=[{"tbl": "x"}])  # an earlier release's model state: nothing to apply
+    assert await applied(r, append(1, [rows], 2)) == 2 and r.failure is None
+    assert await applied(r, append(2, [entry(3, "remove")], 3)) == 2  # it names no model
     assert r.failure is not None and r.failure["code"] == "E_CLUSTER_APPLY"
 
 
@@ -166,14 +168,8 @@ async def test_a_snapshot_that_is_not_one_is_refused_and_one_that_is_replaces_wh
     assert (stale["accepted"], stale["term"]) == (False, 2)
 
 
-async def test_the_heads_capture_and_shippers_when_things_go_wrong(tmp_path, caplog):
+async def test_the_heads_shippers_when_things_go_wrong(tmp_path, caplog):
     r = follower(tmp_path, role="head")
-    install(r.models, manifest("m", needs=["ada"], data=True), "", sha="a" * 40)
-    store = r.models.data("m") / "precedents.sqlite"
-    store.parent.mkdir(parents=True)
-    store.write_text("not a database")
-    await r.capture("m")
-    assert "were not captured" in caplog.text
     r.heard_from("n1", "x")
     r.trim([])
     with pytest.raises(RrotorError) as caught:
@@ -204,9 +200,6 @@ async def test_the_heads_capture_and_shippers_when_things_go_wrong(tmp_path, cap
     finally:
         rep.IDLE = rep_idle
     r.lead()
-    ticker = r.ticker
-    r.lead()
-    assert r.ticker is ticker
     await r.stop()
 
 
@@ -215,7 +208,7 @@ async def test_forwarding_without_a_caller_a_head_or_a_server_and_what_may_be_as
     try:
         head = await ring.add("n0", ["n0", "n1"])
         await until(lambda: head.cluster.role == "head")
-        tickets(head)
+        models(head)
         one = await ring.add("n1", ["n0", "n1"])
         await until(lambda: one.cluster.ready()[0])
         got = await one.cluster.forward("approvals", {})  # no caller in hand: the head does it as rrotor
@@ -232,7 +225,7 @@ async def test_forwarding_without_a_caller_a_head_or_a_server_and_what_may_be_as
             await one.cluster._local({"op": "nothing"})
         tmp = one.config.run_dir / "x.tar"
         with pytest.raises(ClusterError) as caught:
-            await one.cluster._fetch(f"/cluster/v1/versions/tickets/{'f' * 40}.tar", tmp)
+            await one.cluster._fetch(f"/cluster/v1/versions/notes/{'f' * 40}.tar", tmp)
         assert (caught.value.code, caught.value.status) == ("E_VERSION_MISSING", 404) and not tmp.exists()
         one.cluster.serve_forward = None
         with pytest.raises(RrotorError, match="does not serve"):

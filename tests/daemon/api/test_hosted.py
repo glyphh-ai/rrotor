@@ -214,8 +214,8 @@ async def test_a_self_hosted_rrotor_names_its_public_host_as_the_resource_and_is
 
 CHANGES = [
     ("PUT", "/v1/runtime/token", {"runtime_id": "8f8f8f8f-8f8f-4f8f-8f8f-8f8f8f8f8f8f", "token": "t" * 32}),
-    ("POST", "/v1/parts", {"name": "ada", "version": "0.1.0", "sha256": "0" * 64, "signature": "x", "url": "u"}),
-    ("DELETE", "/v1/parts/ada", None),
+    ("POST", "/v1/parts", {"name": "tools", "version": "0.1.0", "sha256": "0" * 64, "signature": "x", "url": "u"}),
+    ("DELETE", "/v1/parts/tools", None),
     ("PUT", "/v1/licence", {"token": "x"}),
 ]
 

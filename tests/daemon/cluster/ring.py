@@ -1,51 +1,94 @@
 """Daemons of one cluster in one event loop, for replication's tests: each its own /data, its API on a test server,
-its cluster listener on 127.0.0.1 with real mutual TLS, the Ada part (the kernel in tests/kernel) installed, runs in
-the test launcher (the host's Python, no sandbox) on a real SQLite store."""
+its cluster listener on 127.0.0.1 with real mutual TLS, runs in the test launcher (the host's Python, no sandbox).
+
+Two models: `notes`, with data (its data folder is the head's alone, so every call of it runs there), and `lookup`,
+without (its reads run on the node asked). A write that replicates is `Ring.write`: `notes.record` asked on any node
+(it runs on the head), then one runtime key more on the head, which every member applies from the log."""
 
 from __future__ import annotations
 
 import hashlib
-import json
-import sqlite3
 import sys
 import uuid
-from pathlib import Path
 from typing import Any
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from rrotor import ada
 from rrotord.api.app import make
 from rrotord.daemon import Daemon
 from rrotord.deploy import Tools
-from rrotord.parts import Parts
 from tests.daemon.cluster.conftest import Nodes, node_config
-from tests.fakes import LocalLauncher, ada_part, install, keys, ready
+from tests.fakes import LocalLauncher, install, keys, ready
 
 KEY = "rk_" + "r" * 30
+KEY_SHA = hashlib.sha256(KEY.encode()).hexdigest()
 HOST = "rrotor.acme.com"
-TICKETS = Path(__file__).parent.parent.parent.parent / "examples" / "ada_tickets"
-_PART: dict[str, tuple[bytes, str, str]] = {}
+
+NOTES = {
+    "name": "notes",
+    "data": True,
+    "functions": {"record": {}, "count": {}, "decide": {}},
+}
+NOTES_MODEL = '''
+import json
+
+from rrotor import Result
 
 
-def part(root: Path) -> tuple[bytes, str, str]:
-    if "ada" not in _PART:
-        _PART["ada"] = ada_part(root)
-    return _PART["ada"]
+def _notes(ctx):
+    return ctx.data / "notes.jsonl"
 
 
-def ticket(i: int, title: str = "login fails", area: str = "auth", severity: int = 8) -> dict[str, Any]:
-    return {
-        "issue": {"body": {"title": title, "component": area, "severity": severity, "id": i}},
-        "meta": {"time": {"opened": "2026-10-01T12:00:00Z"}, "owner": {"team": "infra"}},
-    }
+def _count(ctx):
+    path = _notes(ctx)
+    return len(path.read_text().splitlines()) if path.is_file() else 0
 
 
-SNEAK = '''
+def _add(ctx, note):
+    with _notes(ctx).open("a") as f:
+        f.write(json.dumps(note) + "\\n")
+
+
+def record(ctx, inputs):
+    _add(ctx, inputs.get("data"))
+    return Result.done({"count": _count(ctx)})
+
+
+def count(ctx, inputs):
+    return Result.done({"count": _count(ctx)})
+
+
+def decide(ctx, inputs):
+    """Waits for the person's answer, then records it: its run is held by the head, which ran it."""
+    said = ctx.needs_input("What should happen?", key="outcome")
+    _add(ctx, said)
+    return Result.done({"outcome": said})
+'''
+
+LOOKUP = {
+    "name": "lookup",
+    "functions": {
+        "query": {"writes": False},
+        "sneak": {"writes": False},
+        "ask": {"writes": False, "approvals": ["ok"]},
+    },
+}
+LOOKUP_MODEL = '''
+import errno
+
+from rrotor import Result
+
+
+def query(ctx, inputs):
+    return Result.done({"echo": inputs.get("data"), "readonly": ctx.readonly})
+
 
 def sneak(ctx, inputs):
-    """Marked "writes": false, and records anyway."""
-    ctx.ada.record(inputs["data"], "sneaked")
+    """Marked "writes": false, and writes anyway. On a follower its folders are mounted read-only, which the test
+    launcher (no sandbox) cannot do: the refusal is the one the mount gives."""
+    if ctx.readonly:
+        raise OSError(errno.EROFS, "Read-only file system", str(ctx.files / "sneaked"))
+    (ctx.files / "sneaked").write_text("x")
     return Result.done({"sneaked": True})
 
 
@@ -55,30 +98,21 @@ def ask(ctx, inputs):
 '''
 
 
-def tickets(d: Daemon, sha: str = "a" * 40, version: int = 1) -> None:
-    """The tickets example, as a deploy leaves it, with one function more that is mislabelled."""
-    data = json.loads((TICKETS / "glyphh.json").read_text())
-    data["functions"]["sneak"] = {"writes": False, "inputs": {"type": "object"}}
-    data["functions"]["ask"] = {"writes": False, "approvals": ["ok"]}
-    made = install(d.runner.models, data, (TICKETS / "model.py").read_text() + SNEAK, sha=sha, version=version)
-    (made.src / "spec.json").write_text((TICKETS / "spec.json").read_text())
+def models(d: Daemon, sha: str = "a" * 40, version: int = 1) -> None:
+    """Both models, as a deploy leaves them, on the head: their versions ship to every follower."""
+    install(d.runner.models, NOTES, NOTES_MODEL, sha=sha, version=version)
+    install(d.runner.models, LOOKUP, LOOKUP_MODEL, sha=sha, version=version)
 
 
-def rows(d: Daemon, model: str = "tickets") -> int:
-    store = d.runner.models.data(model) / ada.STORE
-    if not store.is_file():
-        return 0
-    return ada.count(store)
+def notes(d: Daemon) -> int:
+    """The notes this node's data folder holds (only the head's has any)."""
+    path = d.runner.models.data("notes") / "notes.jsonl"
+    return len(path.read_text().splitlines()) if path.is_file() else 0
 
 
-def meta(d: Daemon, key: str, model: str = "tickets") -> Any:
-    store = d.runner.models.data(model) / ada.STORE
-    db = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True)
-    try:
-        row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-    finally:
-        db.close()
-    return json.loads(row[0]) if row else None
+def held(d: Daemon) -> int:
+    """The writes that replicated which this node has applied: the runtime keys past the ring's own."""
+    return len([k for k in d.access.keys if k != KEY_SHA])
 
 
 class Ring:
@@ -97,15 +131,12 @@ class Ring:
             runtime_id=self.runtime_id,
             runtime_token="tok_" + "t" * 20,
             public_host=HOST,
-            keys_sha256=(hashlib.sha256(KEY.encode()).hexdigest(),),
+            keys_sha256=(KEY_SHA,),
             licence_env=(("GLYPHH_LICENSE_KEY", licence or keys().key()),),
             cluster_head=ids[0],
             **extra,
         )
         d = Daemon(c, ready(), launcher=LocalLauncher())
-        d.parts = Parts(c.data, keys().public, "arm64")
-        d.parts.install("ada", "3.10.0", *part(self.nodes.root))
-        d.runner.parts = d.parts
         d.deployer.tools = Tools(python=sys.executable)
         return d
 
@@ -132,12 +163,22 @@ class Ring:
             await self.stop(node_id)
 
     async def call(
-        self, node_id: str, function: str, data: Any = None, outcome: str | None = None, **body: Any
+        self, node_id: str, function: str, data: Any = None, model: str = "notes", **body: Any
     ) -> tuple[int, Any, Any]:
-        inputs = ({} if data is None else {"data": data}) | ({} if outcome is None else {"outcome": outcome})
-        sent = {"model": "tickets", "function": function, "inputs": inputs, **body}
+        inputs = {} if data is None else {"data": data}
+        sent = {"model": model, "function": function, "inputs": inputs, **body}
         res = await self.clients[node_id].post("/v1/runs", json=sent, headers=self.headers())
         return res.status, await res.json(), res.headers
+
+    async def write(self, node_id: str, note: Any = "note") -> tuple[int, Any, Any]:
+        """A write asked on a node: `notes.record`, which runs on the head; once done there, one runtime key more on
+        the node that ran it (the head), a `keys` entry every member applies."""
+        status, body, headers = await self.call(node_id, "record", note)
+        if status == 200 and body.get("status") == "done":
+            head = self.daemons[str(body["run_id"]).split("~")[0]]
+            more = hashlib.sha256(f"write {held(head) + 1}".encode()).hexdigest()
+            head.access.set_keys([*head.access.keys, more])
+        return status, body, headers
 
     def headers(self, **more: str) -> dict[str, str]:
         return {"Host": HOST, "Authorization": f"Bearer {KEY}", **more}

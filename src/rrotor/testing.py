@@ -2,7 +2,7 @@
 
 from rrotor.testing import Harness, FakeHttp
 h = Harness(model, tmp_path, approvals={"start": {"write"}}, http=FakeHttp({"https://api.x/": {"ok": 1}}))
-# an Ada model: data=<its data folder> (the store), home=<where spec.json is>, clearance=<who asks>
+# a model with data: data=<its data folder>, home=<its folder>, clearance=<who asks, 0 to 1>
 r = h.call("start", {"day": "2026-10-14"})   # Result needs_approval
 r = h.resume({"approved": True})               # Result done
 """

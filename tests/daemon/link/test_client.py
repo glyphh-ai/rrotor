@@ -36,7 +36,7 @@ async def receive(ws: web.WebSocketResponse) -> dict[str, Any]:
             return data
 
 
-LICENCE = {"payload": {"plan": "Pro", "mods": {"ada": {"limits": {}}}}, "signature": "c2ln"}
+LICENCE = {"payload": {"plan": "Pro", "mods": {"rrotor": {"limits": {}}}}, "signature": "c2ln"}
 
 
 async def welcome(ws: web.WebSocketResponse, cloud: Cloud) -> None:

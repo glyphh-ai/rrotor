@@ -35,7 +35,6 @@ from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
 from rrotord.models import Models, Version
 from rrotord.parts import Parts
-from rrotord.precedents import Precedents
 from rrotord.runner.engine import Runner
 from rrotord.sandbox.probe import Layers
 
@@ -76,7 +75,6 @@ class Services:
     introspect: Introspector | None = None  # hosted: a Glyphh sign-in checked with the Cloud
     report: Report | None = None  # after every deploy, `deployed` up the link; none in tests without a link
     heartbeat: HeartbeatView | None = None  # self, the link on: the last heartbeat
-    precedents: Precedents | None = None  # the daemon's nine-minute count; counted here when there is none
     audit: Audit | None = None  # the audit events: kept (Enterprise) and read by GET /v1/audit, or logged
     drain: Drain | None = None  # the customer's collector and server-side logging, when either is on
     cluster: Cluster | None = None  # this node's place in its cluster; none: standalone
@@ -131,10 +129,8 @@ def clustered(s: Services) -> dict[str, Any]:
 
 
 def setup(app: web.Application, s: Services) -> None:
-    counted = s.precedents or Precedents(s.models)
-
     def licence() -> dict[str, Any]:
-        return s.licence.view(counted.now())
+        return s.licence.view()
 
     async def healthz(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})

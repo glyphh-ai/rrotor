@@ -128,9 +128,9 @@ def keys() -> Keys:
 
 def part_archive(
     tmp: Path,
-    name: str = "ada",
+    name: str = "tools",
     version: str = "1.0.0",
-    mod: str = "ada",
+    mod: str = "tools",
     arch: str = "arm64",
     files: dict[str, str | bytes] | None = None,
     **info: Any,
@@ -215,21 +215,6 @@ def install(
 
 def ready() -> Layers:
     return Layers({"bubblewrap": {"ok": True, "detail": "test"}})
-
-
-KERNEL = Path(__file__).parent / "kernel"
-
-
-def ada_part(tmp: Path, version: str = "3.10.0") -> tuple[bytes, str, str]:
-    """The Ada part as the tests build it: the vendored kernel and its lexicon (the two seeds) under lib/ (numpy
-    comes from the test's own Python)."""
-    files: dict[str, str | bytes] = {
-        f"lib/{name}": (KERNEL / name).read_text()
-        for name in ("glyphh_kernel.py", "glyphh_spec.py", "glyphh_nsm.py", "glyphh_lexicon.py")
-    }
-    for seed in (KERNEL / "lexicon").iterdir():
-        files[f"lib/lexicon/{seed.name}"] = seed.read_bytes()
-    return part_archive(tmp / "ada-part", name="ada", version=version, mod="ada", files=files)
 
 
 def _part_folders(path: Path) -> list[str]:

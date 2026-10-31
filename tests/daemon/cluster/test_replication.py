@@ -1,7 +1,7 @@
 """Replication with a fixed head (docs/specs/cluster.md, 3), daemons of one cluster in one event loop: a new node
-catches up from a snapshot, a record on any node is read on every node, `learn` on the head changes every follower's
-answers, writes are forwarded and reads stay local, a follower never writes (a mislabelled function is refused),
-runs are reached on the node that holds them, and the cap is on the synced store."""
+catches up from a snapshot, a model with data runs on the head alone and its data folder never syncs, writes are
+forwarded and reads stay local, a follower never writes (a mislabelled function is refused), runs are reached on the
+node that holds them, and deploys, keys and the licence ship from the head."""
 
 from __future__ import annotations
 
@@ -11,10 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from rrotor import ada
 from rrotord.cluster import log as log_module
 from tests.daemon.cluster.conftest import Nodes, until
-from tests.daemon.cluster.ring import Ring, meta, rows, ticket, tickets
+from tests.daemon.cluster.ring import Ring, held, models, notes
 from tests.fakes import GitRepo, keys, manifest
 
 
@@ -29,28 +28,34 @@ def ready(ring: Ring, *ids: str) -> bool:
     return all(ring.daemons[i].cluster.ready()[0] for i in ids)
 
 
-async def test_a_record_on_any_node_is_read_on_every_node_and_a_new_node_catches_up_from_a_snapshot(ring: Ring):
+async def test_writes_run_on_the_head_reads_stay_local_and_a_new_node_catches_up_from_a_snapshot(ring: Ring):
     ids = ["n0", "n1", "n2"]
     head = await ring.add("n0", ids)
     await until(lambda: head.cluster.role == "head")
-    tickets(head)
-    status, body, _ = await ring.call("n0", "record", ticket(1), outcome="page oncall")
-    assert (status, body["status"]) == (200, "done"), body
+    models(head)
+    status, body, _ = await ring.write("n0")
+    assert (status, body["status"], body["data"]) == (200, "done", {"count": 1}), body
     one = await ring.add("n1", ids)
     await until(lambda: one.cluster.role == "follower" and ready(ring, "n1"))
-    assert rows(one) == 1 and one.runner.models.active("tickets") is not None  # the snapshot: the store, the version
-    # a write on a follower goes to the head, and is read there at once (read-your-writes)
-    status, body, headers = await ring.call("n1", "record", ticket(2), outcome="page oncall")
+    assert one.runner.models.active("notes") is not None and held(one) == 1  # the snapshot: the versions, the keys
+    assert notes(one) == 0  # a data folder never syncs
+    # a write on a follower goes to the head and runs there
+    status, body, headers = await ring.write("n1")
     assert (status, body["status"]) == (200, "done") and body["run_id"].startswith("n0~"), body
-    assert int(headers["Rrotor-Cluster-Seq"]) >= 2 and rows(one) == 2 and rows(head) == 2
-    status, body, headers = await ring.call("n1", "query", ticket(9))
-    assert body["status"] == "done" and body["run_id"].startswith("n1~"), body  # a read: local
-    assert body["data"]["count"] == 2 and body["data"]["top"] == "page oncall"
+    assert int(headers["Rrotor-Cluster-Seq"]) >= 1 and notes(head) == 2 and notes(one) == 0
+    await until(lambda: held(one) == 2)
+    # every call of a model with data runs on the head, even one marked as a read
+    status, body, _ = await ring.call("n1", "count")
+    assert (body["status"], body["data"]) == ("done", {"count": 2}) and body["run_id"].startswith("n0~"), body
+    # a read of a model without data runs here, its folders read-only
+    status, body, _ = await ring.call("n1", "query", {"q": 9}, model="lookup")
+    assert body["status"] == "done" and body["run_id"].startswith("n1~"), body
+    assert body["data"] == {"echo": {"q": 9}, "readonly": True}
     spec = ring.daemons["n1"].launcher.specs[-1]  # type: ignore[attr-defined]
-    assert spec.mounts.readonly and spec.mounts.data == one.runner.models.data("tickets")
+    assert spec.mounts.readonly and spec.mounts.data is None
     two = await ring.add("n2", ids)
     await until(lambda: ready(ring, "n2"))
-    assert rows(two) == 2
+    assert held(two) == 2
     _, view = await ring.get("n0", "/v1/cluster")
     assert view["commit_seq"] == view["applied_seq"] >= 2
     await until(lambda: all(m["lag"] == 0 for m in ring.daemons["n0"].cluster.view()["members"]))
@@ -58,87 +63,42 @@ async def test_a_record_on_any_node_is_read_on_every_node_and_a_new_node_catches
     assert view["status"] == "ready" and view["applied_seq"] == view["commit_seq"]
 
 
-async def test_a_mislabelled_function_is_refused_on_a_follower_and_the_store_is_untouched(ring: Ring):
+async def test_a_mislabelled_function_is_refused_on_a_follower_and_its_folders_are_untouched(ring: Ring):
     ids = ["n0", "n1"]
     head = await ring.add("n0", ids)
     await until(lambda: head.cluster.role == "head")
-    tickets(head)
-    await ring.call("n0", "record", ticket(1), outcome="page oncall")
+    models(head)
     one = await ring.add("n1", ids)
     await until(lambda: ready(ring, "n1"))
-    status, body, _ = await ring.call("n1", "sneak", ticket(5))
+    status, body, _ = await ring.call("n1", "sneak", model="lookup")
     assert status == 200 and body["status"] == "failed", body
     assert body["data"]["code"] == "E_READ_ONLY" and "sneak" in body["data"]["reason"]
-    assert rows(one) == 1 and rows(head) == 1
-    status, body, _ = await ring.call("n0", "sneak", ticket(5))  # on the head it is not read-only
-    assert body["status"] == "done" and rows(head) == 2
-    await until(lambda: rows(one) == 2)
-    assert ada.count(one.runner.models.data("tickets") / ada.STORE) == 2
-
-
-async def test_learn_on_the_head_changes_every_followers_answers(ring: Ring):
-    ids = ["n0", "n1"]
-    head = await ring.add("n0", ids)
-    await until(lambda: head.cluster.role == "head")
-    tickets(head)
-    for i in range(12):
-        said = "page oncall" if i % 2 else "file a bug"
-        title, area = ("login fails", "auth") if i % 2 else ("typo on page", "docs")
-        await head.runner.call(
-            model="tickets", function="record", inputs={"data": ticket(i, title, area, 8 - i % 2), "outcome": said}
-        )
-    one = await ring.add("n1", ids)
-    await until(lambda: ready(ring, "n1"))
-    assert meta(one, "learned") is None
-    _, body, _ = await ring.call("n1", "learn", None)
-    assert body["status"] == "done", body
-    learned = meta(head, "learned")
-    assert learned is not None and meta(one, "learned") == learned
-    _, here, _ = await ring.call("n0", "probabilities", ticket(99))
-    _, there, _ = await ring.call("n1", "probabilities", ticket(99))
-    assert here["data"] == there["data"] and there["run_id"].startswith("n1~")
-
-
-async def test_the_cap_is_on_the_synced_store(ring: Ring):
-    ids = ["n0", "n1"]
-    capped = keys().key(max_precedents=2)
-    head = await ring.add("n0", ids, capped)
-    await until(lambda: head.cluster.role == "head")
-    tickets(head)
-    one = await ring.add("n1", ids, capped)
-    await until(lambda: ready(ring, "n1"))
-    for i in range(2):
-        _, body, _ = await ring.call("n1", "record", ticket(i), outcome="page oncall")
-        assert body["status"] == "done" and body["data"]["precedents"] == i + 1, body
-    _, body, _ = await ring.call("n1", "record", ticket(3), outcome="page oncall")
-    assert body["status"] == "done" and body["data"]["status"] == "limit_exceeded", body
-    assert body["data"]["cap"] == 2 and body["data"]["indexed"] is False
-    assert rows(head) == rows(one) == 2  # the same two on each node: not two per node
-    _, licence = await ring.get("n1", "/v1/licence")
-    assert licence["licence"]["precedents"]["held"] == 2
+    assert not (one.runner.models.files("lookup") / "sneaked").exists()
+    status, body, _ = await ring.call("n0", "sneak", model="lookup")  # on the head it is not read-only
+    assert body["status"] == "done" and (head.runner.models.files("lookup") / "sneaked").is_file()
 
 
 async def test_runs_are_reached_on_the_node_that_holds_them(ring: Ring):
     ids = ["n0", "n1", "n2"]
     head = await ring.add("n0", ids)
     await until(lambda: head.cluster.role == "head")
-    tickets(head)
+    models(head)
     await ring.add("n1", ids)
     await ring.add("n2", ids)
     await until(lambda: ready(ring, "n1", "n2"))
     # a write asked on n1 runs on the head, and waits there; n2 answers it
-    _, waiting, _ = await ring.call("n1", "decide", ticket(1))
+    _, waiting, _ = await ring.call("n1", "decide")
     assert waiting["status"] == "needs_input" and waiting["run_id"].startswith("n0~"), waiting
     run_id = waiting["run_id"]
     status, seen = await ring.get("n2", f"/v1/runs/{run_id}")
     assert (status, seen["status"], seen["run_id"]) == (200, "needs_input", run_id)
     status, done = await ring.post("n2", f"/v1/runs/{run_id}/continue", {"answer": "page oncall"})
     assert (status, done["status"]) == (200, "done") and done["data"]["outcome"] == "page oncall", done
-    await until(lambda: rows(ring.daemons["n2"]) == 1)
+    assert notes(head) == 1
     status, lines = await ring.get("n1", f"/v1/runs/{run_id}/log")
     assert status == 200 and any(line.get("event") == "continued" for line in lines["lines"])
     # a read on n1 is held by n1: n2 reaches it through the head, and gathers its approval
-    _, asked, _ = await ring.call("n1", "ask")
+    _, asked, _ = await ring.call("n1", "ask", model="lookup")
     assert asked["status"] == "needs_approval" and asked["run_id"].startswith("n1~"), asked
     status, approvals = await ring.get("n2", "/v1/approvals")
     assert [a["run_id"] for a in approvals["approvals"]] == [asked["run_id"]]
@@ -195,7 +155,7 @@ async def test_a_node_of_another_architecture_refuses_the_head_and_is_not_ready(
     ids = ["n0", "n1"]
     head = await ring.add("n0", ids)
     await until(lambda: head.cluster.role == "head")
-    tickets(head)
+    models(head)
     one = ring.daemon("n1", ids)
     one.cluster.replication.arch = "riscv64"
     await ring.start(one)
@@ -210,17 +170,15 @@ async def test_a_lagging_follower_catches_up_from_a_snapshot_past_the_log_kept(r
     ids = ["n0", "n1"]
     head = await ring.add("n0", ids, cluster_log_keep=1024)
     await until(lambda: head.cluster.role == "head")
-    tickets(head)
     one = await ring.add("n1", ids, cluster_log_keep=1024)
     await until(lambda: ready(ring, "n1"))
     await ring.stop("n1")
-    for i in range(3):
-        await ring.call("n0", "record", ticket(i), outcome="page oncall")
+    models(head)
     for i in range(20):
         head.access.set_keys([f"{i:064x}"])
     assert head.cluster.replication.log.first > one.cluster.replication.applied + 1  # what it missed is gone
     again = await ring.add("n1", ids, cluster_log_keep=1024)
-    await until(lambda: ready(ring, "n1") and rows(again) == 3)
+    await until(lambda: ready(ring, "n1") and again.runner.models.active("notes") is not None)
     assert (
         again.access.keys == [f"{19:064x}"] and again.cluster.replication.applied == head.cluster.replication.log.last
     )
@@ -237,24 +195,23 @@ async def test_reads_go_on_without_the_head_and_writes_wait_for_it(ring: Ring):
     ids = ["n0", "n1"]
     head = await ring.add("n0", ids)
     await until(lambda: head.cluster.role == "head")
-    tickets(head)
-    await ring.call("n0", "record", ticket(1), outcome="page oncall")
+    models(head)
     await ring.add("n1", ids)
     await until(lambda: ready(ring, "n1"))
-    status, body, headers = await ring.call("n1", "query", ticket(1))
+    status, body, headers = await ring.call("n1", "query", {"q": 1}, model="lookup")
     seq = int(headers["Rrotor-Cluster-Seq"])
     # a caller that saw a later seq: n1 waits for it, then asks the head
     res = await ring.clients["n1"].post(
         "/v1/runs",
-        json={"model": "tickets", "function": "query", "inputs": {"data": ticket(1)}},
+        json={"model": "lookup", "function": "query", "inputs": {"data": 1}},
         headers=ring.headers(**{"Rrotor-Min-Seq": str(seq + 50)}),
     )
     assert (await res.json())["run_id"].startswith("n0~")
     await ring.stop("n0")
     await until(lambda: ring.daemons["n1"].cluster.head_channel is None)
-    status, body, _ = await ring.call("n1", "query", ticket(1))
-    assert status == 200 and body["data"]["top"] == "page oncall"
-    status, body, _ = await ring.call("n1", "record", ticket(2), outcome="x")
+    status, body, _ = await ring.call("n1", "query", {"q": 1}, model="lookup")
+    assert status == 200 and body["data"]["echo"] == {"q": 1}
+    status, body, _ = await ring.write("n1")
     assert (status, body["error"]["code"]) == (503, "E_NO_HEAD")
     status, approvals = await ring.get("n1", "/v1/approvals")
     assert (status, approvals) == (200, {"approvals": []})  # its own, when the head does not answer

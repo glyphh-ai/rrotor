@@ -35,18 +35,6 @@ def test_crash_outside_the_model_has_no_line():
     assert crash("start", RuntimeError("x")).data["reason"] == "RuntimeError: x"
 
 
-def test_the_precedent_cap_is_a_finished_result_that_indexed_nothing_never_a_failure(tmp_path):
-    from rrotor.ada import LimitExceeded
-
-    def full(c: Ctx, i: dict[str, object]) -> Result:
-        raise LimitExceeded(5000, 5000, "Community")
-
-    outcome = invoke("record", full, ctx(tmp_path), {})
-    assert outcome.result.status == "done" and outcome.pending is None
-    assert outcome.result.data["status"] == "limit_exceeded" and outcome.result.data["indexed"] is False
-    assert "(5,000 max for the Community plan)" in outcome.result.data["message"]
-
-
 def test_invoke_answers_the_result(tmp_path):
     outcome = invoke("start", lambda c, i: Result.done(i), ctx(tmp_path), {"a": 1})
     assert (outcome.result, outcome.pending) == (Result.done({"a": 1}), None)
@@ -116,7 +104,7 @@ def test_a_write_on_a_read_only_run_is_e_read_only_naming_the_function(tmp_path)
     import errno
     import sqlite3
 
-    class ReadOnlyError(Exception):  # the kernel's, as 3.10 defines it
+    class ReadOnlyError(Exception):  # a library's own refusal, with the code
         code = "E_READ_ONLY"
 
     def raising(err: BaseException):

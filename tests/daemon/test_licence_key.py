@@ -41,10 +41,18 @@ def test_glyphhs_production_key_is_the_codes_and_raw_32_bytes():
 def test_a_key_signed_by_a_key_in_the_tuple_parses_with_its_own_numbers():
     text = keys().key(tier="team", max_nodes=10, max_precedents=None, cluster_sync_enabled=False, extra={"x": 1})
     key = parse(text + "\n")
-    assert key.plan == Plan("team", 10, None, False) and key.raw == text and not key.legacy
+    assert key.plan == Plan("team", 10, False) and key.raw == text and not key.legacy
     assert key.issued_at == datetime(2026, 10, 1, tzinfo=UTC) and key.expires_at.year == 2999
     assert key.customer_id == "cus_1" and len(key.license_id or "") == 36
-    assert parse(keys().key(max_nodes=None, max_precedents=0)).plan.max_precedents == 0
+    assert parse(keys().key(max_nodes=None)).plan.max_nodes is None
+
+
+def test_max_precedents_is_ada_clouds_and_not_read_here():
+    """The server still writes it into a key; rrotor runs no Ada models, so whatever it says, or its absence, changes
+    nothing."""
+    for given in ({"max_precedents": -1}, {"max_precedents": "5000"}, {}):
+        drop = ("max_precedents",) if not given else ()
+        assert parse(keys().key(drop=drop, **given)).plan == Plan("pro", 3, True)
 
 
 def test_a_rotation_takes_either_key_in_the_tuple(monkeypatch):
@@ -97,8 +105,6 @@ def test_a_payload_that_is_not_a_utf8_json_object_is_bad():
         ({"tier": "gold"}, "tier is not one of free, pro, team, enterprise"),
         ({"max_nodes": 0}, "max_nodes is not a whole number of at least 1, or null"),
         ({"max_nodes": True}, "max_nodes is not a whole number of at least 1, or null"),
-        ({"max_precedents": -1}, "max_precedents is not a whole number of at least 0, or null"),
-        ({"max_precedents": "5000"}, "max_precedents is not a whole number of at least 0, or null"),
         ({"cluster_sync_enabled": 1}, "cluster_sync_enabled is not true or false"),
         ({"customer_id": None}, "customer_id is not a string"),
         ({"issued_at": "2026-10-01"}, "issued_at is not an RFC 3339 UTC time"),
@@ -134,7 +140,7 @@ def test_rrotor_licence_public_key_is_not_trusted(tmp_path, short_dir):
 
 
 def legacy_licence(**fields: Any) -> tuple[dict[str, Any], str]:
-    payload = {"plan": "Team", "mods": {"ada": {"limits": {}}}, "expires_at": "2026-10-20T00:00:00Z"} | fields
+    payload = {"plan": "Team", "mods": {"rrotor": {"limits": {}}}, "expires_at": "2026-10-20T00:00:00Z"} | fields
     return payload, keys().sign(canonical(payload))
 
 
@@ -144,14 +150,14 @@ def test_a_legacy_licence_is_mapped_in_release_n():
     )
     key = legacy(payload, signature, RUNTIME)
     assert key.legacy and key.raw == {"payload": payload, "signature": signature} and key.issued_at is None
-    assert key.plan == Plan("team", 10, 500000, True) and (key.license_id, key.customer_id) == ("l-1", "o-1")
+    assert key.plan == Plan("team", 10, True) and (key.license_id, key.customer_id) == ("l-1", "o-1")
     assert key.expires_at == datetime(2026, 10, 20, tzinfo=UTC) + timedelta(days=14)  # expires_at plus grace_days
     payload, signature = legacy_licence(plan="Hobby")
     plain = legacy(payload, signature, None)  # an unknown plan is free; no grace_days, no sync, no ids
     assert plain.plan == COMMUNITY and plain.expires_at == datetime(2026, 10, 20, tzinfo=UTC)
     assert (plain.license_id, plain.customer_id) == (None, None)
     unsynced = legacy(*legacy_licence(plan="enterprise", features=["sync"]), None)
-    assert unsynced.plan == Plan("enterprise", None, None, False)
+    assert unsynced.plan == Plan("enterprise", None, False)
 
 
 def test_a_legacy_licence_that_does_not_verify_names_another_runtime_or_has_no_dates_is_refused():

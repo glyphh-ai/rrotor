@@ -101,18 +101,16 @@ def test_check_inputs_names_where_the_first_error_is():
         m.check_inputs(fn, {})
 
 
-def test_writes_defaults_to_the_models_data_and_a_model_with_data_but_no_ada_is_the_heads():
-    ada = m.Manifest.model_validate(
-        {"name": "m", "data": True, "needs": ["ada"], "functions": {"record": {}, "query": {"writes": False}}}
+def test_writes_defaults_to_the_models_data_and_a_model_with_data_is_the_heads():
+    kept = m.Manifest.model_validate(
+        {"name": "m", "data": True, "functions": {"record": {}, "query": {"writes": False}}}
     )
-    assert ada.functions["record"].writes is True and ada.functions["query"].writes is False
-    assert (ada.writes("record"), ada.writes("query"), ada.writes("missing"), ada.head_only) == (
+    assert kept.functions["record"].writes is True and kept.functions["query"].writes is False
+    assert (kept.writes("record"), kept.writes("query"), kept.writes("missing"), kept.head_only) == (
         True,
-        False,
+        True,  # marked a read, and still the head's: its data folder is there alone
         True,
-        False,
+        True,
     )
     plain = m.Manifest.model_validate({"name": "p", "functions": {"start": {}, "save": {"writes": True}}})
     assert (plain.writes("start"), plain.writes("save"), plain.head_only) == (False, True, False)
-    kept = m.Manifest.model_validate({"name": "k", "data": True, "functions": {"read": {"writes": False}}})
-    assert kept.head_only and kept.writes("read")

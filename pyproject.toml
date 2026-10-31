@@ -62,12 +62,7 @@ module = ["tests.*"]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
-[[tool.mypy.overrides]]
-module = ["tests.kernel.*"]  # the Ada kernel, a pinned copy for the tests: not ours to type
-ignore_errors = true
-
 [tool.ruff]
-extend-exclude = ["tests/kernel"]  # the Ada kernel, a pinned copy for the tests
 line-length = 120
 target-version = "py313"
 src = ["src", "tests"]
@@ -78,6 +73,5 @@ ignore = ["S603", "S607", "ASYNC109", "ASYNC240", "PT018"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/rrotord/sandbox/bwrap.py" = ["S108"]
-"src/rrotord/cluster/capture.py" = ["S608"]  # the tables and key columns named are capture.TABLES, never a caller's
 "tests/**" = ["S101", "S105", "S106", "S108", "S311"]
 "examples/**/tests/**" = ["S101"]

@@ -273,7 +273,7 @@ class Collect(SpanProcessor):
 
 class Telemetry:
     """The tracer and the meter: `rrotor.runs` (counter: model, function, status), `rrotor.run.seconds` (histogram),
-    and gauges added by what they watch (`gauge`): the precedents, the link's state, the drain's drops."""
+    and gauges added by what they watch (`gauge`): the link's state, the cluster's term and lag, the drain's drops."""
 
     def __init__(
         self, res: Resource, sample: sampling.Sampler, take: Callable[[ReadableSpan], None], payloads: bool = False

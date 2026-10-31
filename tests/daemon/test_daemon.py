@@ -8,7 +8,6 @@ import dataclasses
 import logging
 import os
 import signal
-import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,13 +19,11 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 import rrotor
-from rrotor import ada
-from rrotord import daemon, precedents
+from rrotord import daemon
 from rrotord.config import Config
 from rrotord.daemon import Daemon
 from rrotord.errors import RrotorError
 from rrotord.link.credentials import digest
-from rrotord.manifest import Manifest
 from rrotord.runner.launch import SandboxLauncher
 from rrotord.runner.record import Run
 from rrotord.sandbox.probe import Layers
@@ -128,13 +125,13 @@ async def test_a_part_is_fetched_by_url_and_a_refusal_is_an_error(tmp_path, shor
         return web.Response(status=404)
 
     app = web.Application()
-    app.router.add_get("/ada.tar.gz", ok)
+    app.router.add_get("/tools.tar.gz", ok)
     app.router.add_get("/missing.tar.gz", gone)
     server = TestServer(app)
     await server.start_server()
     d = Daemon(config(tmp_path, short_dir), ready())
     try:
-        assert await d._fetch(f"http://127.0.0.1:{server.port}/ada.tar.gz") == b"tarball bytes"
+        assert await d._fetch(f"http://127.0.0.1:{server.port}/tools.tar.gz") == b"tarball bytes"
         with pytest.raises(RrotorError) as caught:
             await d._fetch(f"http://127.0.0.1:{server.port}/missing.tar.gz")
         assert (caught.value.code, caught.value.status) == ("E_PART_FETCH", 502)
@@ -197,10 +194,10 @@ async def test_a_sign_in_is_asked_of_the_cloud_as_json(tmp_path, short_dir):
 async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged(tmp_path, short_dir, caplog):
     builtin = tmp_path / "builtin"
     builtin.mkdir()
-    data, sha, sig = part_archive(tmp_path / "p", name="ada", version="3.10.0", arch="any")
-    (builtin / "ada-3.10.0-any.tar.gz").write_bytes(data)
-    (builtin / "ada-3.10.0-any.sha256").write_text(sha + "\n")
-    (builtin / "ada-3.10.0-any.sig").write_text(sig + "\n")
+    data, sha, sig = part_archive(tmp_path / "p", name="tools", version="3.10.0", arch="any")
+    (builtin / "tools-3.10.0-any.tar.gz").write_bytes(data)
+    (builtin / "tools-3.10.0-any.sha256").write_text(sha + "\n")
+    (builtin / "tools-3.10.0-any.sig").write_text(sig + "\n")
     (builtin / "zeta-1.0.0-any.tar.gz").write_bytes(b"not a part")  # no .sha256 beside it
     c = Config(
         tmp_path / "data",
@@ -216,7 +213,7 @@ async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged
     )
     d = Daemon(c, ready(), launcher=LocalLauncher())
     with caplog.at_level("WARNING", logger="rrotor"):
-        assert d.install_builtin() == ["ada-3.10.0-any"]
+        assert d.install_builtin() == ["tools-3.10.0-any"]
     assert "a built-in part was not installed" in caplog.text
     assert [i.info.version for i in d.parts.installed()] == ["3.10.0"]
     assert d.install_builtin() == []  # already there at this version
@@ -230,19 +227,6 @@ async def test_built_in_parts_are_installed_at_boot_once_and_a_bad_one_is_logged
 
 
 TOKEN = "tok_" + "b" * 20
-
-
-def model(d: Daemon, name: str, rows: int) -> None:
-    """An Ada model's version recorded, its store holding `rows` precedents."""
-    found = {"name": name, "functions": {"start": {}}, "needs": ["ada"], "data": True}
-    d.runner.models.record(name, 1, "a" * 40, Manifest.model_validate(found))
-    path = d.runner.models.data(name) / ada.STORE
-    path.parent.mkdir(parents=True)
-    db = sqlite3.connect(path)
-    db.execute("CREATE TABLE precedents (id TEXT PRIMARY KEY)")
-    db.executemany("INSERT INTO precedents VALUES (?)", [(f"p{i}",) for i in range(rows)])
-    db.commit()
-    db.close()
 
 
 def hosted_daemon(tmp_path: Path, short_dir: Path, runtime_token: str | None = TOKEN) -> Daemon:
@@ -267,7 +251,6 @@ def hosted_daemon(tmp_path: Path, short_dir: Path, runtime_token: str | None = T
 
 async def test_usage_is_owed_as_one_numbered_message_and_the_counts_start_again(tmp_path, short_dir):
     d = hosted_daemon(tmp_path, short_dir)
-    d.precedents.reported = 0  # the start's total already gone up
     await d.report_usage()
     assert d.link.outbox.pending == [] and d.link.outbox.seq == 0  # idle: nothing owed
     d.access.usage.count("a" * 64)
@@ -283,36 +266,10 @@ async def test_usage_is_owed_as_one_numbered_message_and_the_counts_start_again(
             {"key_sha256": "a" * 64, "calls": 2, "last_used_at": owed["keys"][0]["last_used_at"]},
             {"key_sha256": "b" * 64, "calls": 1, "last_used_at": owed["keys"][1]["last_used_at"]},
         ],
-        "precedents": 0,
     }
     assert d.access.usage.counts == {}
     await d.report_usage()
     assert len(d.link.outbox.pending) == 1 and d.link.outbox.seq == 1
-
-
-async def test_the_precedents_go_up_once_after_a_start_then_when_they_change(tmp_path, short_dir, monkeypatch):
-    d = hosted_daemon(tmp_path, short_dir)
-    model(d, "tickets", 2)
-    await d.report_usage()
-    [first] = d.link.outbox.pending
-    assert (first["seq"], first["keys"], first["precedents"]) == (1, [], 2)
-    await d.report_usage()
-    assert len(d.link.outbox.pending) == 1  # unchanged: nothing more owed
-    model(d, "incidents", 3)
-    monkeypatch.setattr(d.precedents, "read_at", -precedents.READ_EVERY)  # nine minutes on
-    await d.report_usage()
-    assert [(m["seq"], m["precedents"]) for m in d.link.outbox.pending] == [(1, 2), (2, 5)]
-    d.link.outbox.ack(first["id"])
-    assert [m["seq"] for m in d.link.outbox.pending] == [2]  # kept until acknowledged, like any usage
-
-
-async def test_calls_go_up_without_the_precedents_while_no_store_has_read(tmp_path, short_dir, monkeypatch):
-    d = hosted_daemon(tmp_path, short_dir)
-    monkeypatch.setattr(d.precedents, "count", lambda: None)
-    d.access.usage.count("a" * 64)
-    await d.report_usage()
-    [owed] = d.link.outbox.pending
-    assert owed["keys"][0]["calls"] == 1 and "precedents" not in owed
 
 
 async def test_no_usage_is_owed_without_a_runtime_token(tmp_path, short_dir):
@@ -402,17 +359,17 @@ async def test_a_self_hosted_daemon_links_and_introspects_unless_its_link_is_off
 
 
 @pytest.mark.parametrize(
-    ("given", "state", "tier", "cap"),
+    ("given", "state", "tier", "nodes"),
     [
-        (None, "none", "free", 5000),
-        ("not-a-key", "bad", "free", 5000),
-        (30, "live", "pro", 50000),
-        (-2, "grace", "pro", 50000),
-        (-20, "expired", "pro", 5000),
+        (None, "none", "free", 1),
+        ("not-a-key", "bad", "free", 1),
+        (30, "live", "pro", 3),
+        (-2, "grace", "pro", 3),
+        (-20, "expired", "pro", 1),
     ],
 )
 async def test_a_node_runs_on_no_key_a_bad_key_a_good_key_and_an_expired_one(
-    tmp_path, short_dir, given, state, tier, cap
+    tmp_path, short_dir, given, state, tier, nodes
 ):
     c = self_daemon(tmp_path / "first", short_dir, link=False).config
     if isinstance(given, int):
@@ -422,7 +379,7 @@ async def test_a_node_runs_on_no_key_a_bad_key_a_good_key_and_an_expired_one(
         c = dataclasses.replace(c, licence_env=(("GLYPHH_LICENSE_KEY", given),))
     d = Daemon(dataclasses.replace(c, data=tmp_path / "data"), ready(), launcher=LocalLauncher())
     view = d.services().licence.view()
-    assert (view["state"], view["tier"], view["max_precedents"]) == (state, tier, cap)
+    assert (view["state"], view["tier"], view["max_nodes"]) == (state, tier, nodes)
     stop = asyncio.Event()
     stop.set()
     await d.serve(stop)  # serves, and stops, whatever the key
@@ -431,8 +388,8 @@ async def test_a_node_runs_on_no_key_a_bad_key_a_good_key_and_an_expired_one(
 def test_the_environments_key_and_a_legacy_offline_licence_are_read_at_boot(tmp_path, short_dir):
     d = self_daemon(tmp_path, short_dir, link=False)
     runtime_id = d.config.runtime_id
-    offline = keys().licence(["ada"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline", plan="Team")
-    own = keys().licence(["ada"], runtime_id=runtime_id, kind="offline", licence_id="own")
+    offline = keys().licence(["rrotor"], expires="2998-01-01T00:00:00Z", grace_days=14, kind="offline", plan="Team")
+    own = keys().licence(["rrotor"], runtime_id=runtime_id, kind="offline", licence_id="own")
     c = dataclasses.replace(d.config, data=tmp_path / "booted")
     booted = Daemon(
         dataclasses.replace(c, licence_env=(("RROTOR_LICENCE", keys().token(offline)),)),
@@ -449,16 +406,6 @@ def test_the_environments_key_and_a_legacy_offline_licence_are_read_at_boot(tmp_
     both = (("GLYPHH_LICENSE_KEY", keys().key(tier="team", max_nodes=10)), ("RROTOR_LICENCE", keys().token(offline)))
     keyed = Daemon(dataclasses.replace(c, data=tmp_path / "keyed", licence_env=both), ready(), launcher=LocalLauncher())
     assert keyed.licence.view()["source"] == "GLYPHH_LICENSE_KEY"  # the key preferred to the legacy licence
-
-
-async def test_an_unlinked_node_still_counts_its_precedents_and_warns_when_over_the_cap(tmp_path, short_dir, caplog):
-    d = self_daemon(tmp_path, short_dir, link=False)
-    model(d, "tickets", 7)
-    d.licence.offer(keys().key(tier="free", max_nodes=1, max_precedents=5), "test")
-    await d.report_usage()
-    assert d.precedents.total == 7 and "over the licence key's cap" in caplog.text
-    assert d.link.outbox.pending == [] and d.services().precedents is d.precedents
-    assert d.services().licence.view(d.precedents.current())["precedents"] == {"held": 7, "cap": 5, "over": True}
 
 
 async def test_the_key_file_is_read_again_every_hour_and_a_failure_is_logged(tmp_path, short_dir, monkeypatch, caplog):
@@ -569,7 +516,6 @@ def drained(tmp_path: Path, short_dir: Path, url: str, **kw: Any) -> Daemon:
 async def test_a_drain_is_wired_with_its_gauges_and_flushed_at_stop(tmp_path, short_dir, monkeypatch):
     from tests.fakes import FakeCollector
 
-    monkeypatch.setattr(precedents, "counts", lambda models, skip=None: {"incidents": 12})
     fake = FakeCollector()
     url = await fake.start()
     root = logging.getLogger()
@@ -589,14 +535,14 @@ async def test_a_drain_is_wired_with_its_gauges_and_flushed_at_stop(tmp_path, sh
     lines = [r["body"] for r in fake.logs()]
     assert "rrotor up" in lines and "rrotor stopped" in lines
     assert all(r["node_id"] == "rrotor-1" for r in fake.logs())
-    assert {"rrotor.precedents", "rrotor.precedents.cap", "rrotor.link.state"} <= fake.metrics()
-    unlimited = drained(tmp_path / "e", short_dir, url, licence_env=(("GLYPHH_LICENSE_KEY", enterprise()),))
-    assert unlimited.drain is not None
-    data = unlimited.drain.telemetry.collect()
+    assert "rrotor.link.state" in fake.metrics()
+    standalone = drained(tmp_path / "e", short_dir, url, licence_env=(("GLYPHH_LICENSE_KEY", enterprise()),))
+    assert standalone.drain is not None
+    data = standalone.drain.telemetry.collect()
     assert data is not None
     names = {m.name for rm in data.resource_metrics for sm in rm.scope_metrics for m in sm.metrics}
-    assert "rrotor.precedents.cap" not in names and "rrotor.link.state" in names  # no cap: none to show
-    unlimited.drain.telemetry.shutdown()
+    assert "rrotor.cluster.term" not in names and "rrotor.link.state" in names  # no cluster: no term to show
+    standalone.drain.telemetry.shutdown()
 
 
 async def test_server_side_logging_is_said_at_every_start_and_turning_it_on_or_off_is_audited(

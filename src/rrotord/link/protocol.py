@@ -177,10 +177,6 @@ def deployed(
     }
 
 
-def usage(seq: int, keys: list[dict[str, Any]], precedents: int | None = None) -> dict[str, Any]:
-    """Each runtime key's calls since the last report: `{key_sha256, calls, last_used_at}`, never the key; and the
-    runtime's precedents across its Ada models, the total now, whenever one has been read."""
-    message: dict[str, Any] = {"type": "usage", "id": new_id(), "seq": seq, "keys": keys}
-    if precedents is not None:
-        message["precedents"] = precedents
-    return message
+def usage(seq: int, keys: list[dict[str, Any]]) -> dict[str, Any]:
+    """Each runtime key's calls since the last report: `{key_sha256, calls, last_used_at}`, never the key."""
+    return {"type": "usage", "id": new_id(), "seq": seq, "keys": keys}

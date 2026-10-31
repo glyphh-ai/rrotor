@@ -26,7 +26,7 @@ class Function(BaseModel):
     description: str = ""
     inputs: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
     approvals: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]] = []
-    writes: bool | None = None  # whether it changes what syncs; unset: the model's `data` (docs/specs/cluster.md, 3)
+    writes: bool | None = None  # whether it runs on the head; unset: the model's `data` (docs/specs/cluster.md, 3)
 
     @field_validator("inputs")
     @classmethod
@@ -54,7 +54,7 @@ class Manifest(BaseModel):
     hosts: list[str] = []
     secrets: list[Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")]] = []
     databases: list[Literal["postgres", "mongodb", "neo4j"]] = []
-    needs: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,39}$")]] = []  # parts by name (Ada: ada)
+    needs: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,39}$")]] = []  # parts by name
     limits: Limits = Limits()
     connectors: list[str] = []
     data: bool = False
@@ -88,8 +88,8 @@ class Manifest(BaseModel):
 
     @property
     def head_only(self) -> bool:
-        """A model that keeps state no replication carries (data without Ada): every call to it runs on the head."""
-        return self.data and "ada" not in self.needs
+        """A model that keeps state in its data folder, which never replicates: every call to it runs on the head."""
+        return self.data
 
     def writes(self, function: str) -> bool:
         """Whether a call of `function` runs on the cluster's head: it writes, or its model is the head's alone. A
@@ -99,7 +99,7 @@ class Manifest(BaseModel):
 
     def parts(self) -> list[str]:
         """The parts this model needs beside the base (docs/architecture.md, 10): its databases, and the ones it
-        names (Ada's kernel), each once, in order."""
+        names, each once, in order."""
         return list(dict.fromkeys([*self.databases, *self.needs]))
 
 
