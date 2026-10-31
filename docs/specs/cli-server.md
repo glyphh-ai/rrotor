@@ -23,7 +23,7 @@ runs:
   "name": "github",
   "kind": "cli",
   "cli": {
-    "install": {"npm": "@github/gh-wrapper@2.62.0", "sha256": "…"},
+    "install": {"url": "https://github.com/cli/cli/releases/download/v<version>/gh_<version>_linux_amd64.tar.gz", "sha256": "<checksum>"},
     "command": "gh",
     "allow": ["pr *", "issue *", "repo view *", "api repos/*"],
     "env": {"GH_TOKEN": "secret:GH_TOKEN"},
