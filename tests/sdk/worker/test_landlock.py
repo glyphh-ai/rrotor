@@ -92,3 +92,15 @@ def test_restrict_fails_when_a_rule_is_refused(tmp_path):
     kernel = Kernel(2, fail_on=ll.SYS_ADD_RULE)
     with pytest.raises(LandlockError, match="Landlock refused"):
         Landlock(kernel, ok_prctl).restrict(Rules((str(tmp_path),), ()))
+
+
+def test_a_clis_run_executes_nothing_it_may_write(tmp_path):
+    """A CLI's run: its writable folders lose the right to execute; a program's keep every right."""
+    allowed = []
+    for exec_writes in (True, False):
+        kernel = Kernel(6)
+        Landlock(kernel, ok_prctl).restrict(Rules((), (str(tmp_path),), (), exec_writes))
+        add = next(c for c in kernel.calls if c[0] == ll.SYS_ADD_RULE)
+        allowed.append(add[3]._obj.allowed)  # type: ignore[attr-defined]
+    assert allowed[0] & ll.EXECUTE and not allowed[1] & ll.EXECUTE
+    assert allowed[0] & ~ll.EXECUTE == allowed[1]

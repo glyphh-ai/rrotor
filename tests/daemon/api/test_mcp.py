@@ -60,6 +60,8 @@ async def test_initialize_discover_ping_and_the_tools_listed(api):
         "schedules_list",
         "schedule_pause",
         "schedule_resume",
+        "clis_list",
+        "cli_run",
     ]
     assert tools[0]["annotations"]["readOnlyHint"] is True and tools[1]["inputSchema"]["required"] == ["program"]
 

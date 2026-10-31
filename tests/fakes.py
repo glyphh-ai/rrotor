@@ -13,6 +13,7 @@ import secrets
 import subprocess
 import sys
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -239,6 +240,9 @@ class LocalLauncher:
             "program": str(mounts.src),
             "files": str(mounts.files),
             "data": str(mounts.data) if mounts.data else None,
+            "cli_root": str(mounts.cli) if mounts.cli else None,
+            "work": str(mounts.work) if mounts.work else None,
+            "cli_home": str(mounts.home) if mounts.home else None,
         }
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process:
@@ -405,3 +409,106 @@ class FakeCollector:
     def raw(self, who: str) -> bytes:
         """Everything received, serialized again: to grep for what must never be there."""
         return b"".join(req.SerializeToString() for _, req, _ in self.got[who])
+
+
+# CLIs: archives made here and a fetcher that answers them, never the network
+
+
+class FakeFetch:
+    """Answers each URL with the bytes it was given (or raises what it was given); records what was asked."""
+
+    def __init__(self, answers: Mapping[str, bytes | BaseException] | None = None) -> None:
+        self.answers = dict(answers or {})
+        self.asked: list[tuple[str, frozenset[str]]] = []
+
+    async def __call__(self, url: str, hosts: frozenset[str]) -> bytes:
+        from rrotord.clis import check_url
+
+        self.asked.append((url, hosts))
+        check_url(url, hosts)
+        found = self.answers.get(url)
+        if isinstance(found, BaseException):
+            raise found
+        if found is None:
+            from rrotord.errors import DeployError
+
+            raise DeployError(f"{url} answered 404.", code="E_CLI_INSTALL")
+        return found
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def tarball(files: dict[str, str | bytes], modes: dict[str, int] | None = None) -> bytes:
+    """A gzipped tarball of `files` (path: content), each 0644 unless `modes` says (0755 for an executable)."""
+    import io
+    import tarfile
+
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as tar:
+        for name, content in files.items():
+            raw = content.encode() if isinstance(content, str) else content
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(raw), (modes or {}).get(name, 0o644)
+            tar.addfile(info, io.BytesIO(raw))
+    return out.getvalue()
+
+
+def zipped(files: dict[str, str | bytes], executable: frozenset[str] = frozenset()) -> bytes:
+    import io
+    import zipfile
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, content in files.items():
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (0o755 if name in executable else 0o644) << 16
+            archive.writestr(info, content)
+    return out.getvalue()
+
+
+ECHO = '#!/bin/sh\necho "args: $*"\necho "token: $TOKEN"\necho "home: $HOME"\necho "to stderr" 1>&2\nexit 3\n'
+
+
+def cli_manifest(name: str = "tool", cli: dict[str, Any] | None = None, **extra: Any) -> dict[str, Any]:
+    """A CLI's manifest: the ECHO script from a release tarball, unless `cli` says otherwise."""
+    block = {"install": {"url": "https://example.com/tool.tar.gz", "sha256": sha(tarball({"bin/tool": ECHO}))}}
+    block |= {"command": "tool"} | (cli or {})
+    return {"name": name, "kind": "cli", "cli": block, **extra}
+
+
+def console_wheel(module: str = "hello", script: str = "hello", body: str | None = None) -> bytes:
+    """A wheel with one console script, `script = module:main`, made here."""
+    source = body or "import sys\n\ndef main():\n    print('hello', *sys.argv[1:])\n    return 0\n"
+    return zipped(
+        {
+            f"{module}/__init__.py": source,
+            f"{module}-1.0.dist-info/METADATA": f"Metadata-Version: 2.1\nName: {module}\nVersion: 1.0\n",
+            f"{module}-1.0.dist-info/entry_points.txt": f"[console_scripts]\n{script} = {module}:main\n",
+            f"{module}-1.0.data/purelib/{module}_extra.py": "EXTRA = 1\n",
+            f"{module}-1.0.data/scripts/ignored": "#!/bin/sh\n",
+        }
+    )
+
+
+async def install_cli(
+    programs: Programs,
+    data: dict[str, Any],
+    fetch: FakeFetch,
+    sha_: str = "c" * 40,
+    version: int = 1,
+) -> Version:
+    """A CLI version on /data as a deploy leaves it: its install made by the real installer from `fetch`, no venv
+    (the test launcher runs the host's Python)."""
+    from rrotord.clis import Installer
+
+    found = manifests.Manifest.model_validate(data)
+    root = programs.version_root(found.name, sha_)
+    (root / "src").mkdir(parents=True)
+    (root / "venv").mkdir()
+    await Installer(fetch, python=sys.executable).install(found, root / "cli", root / "src")
+    programs.files(found.name).mkdir(parents=True, exist_ok=True)
+    made = programs.record(found.name, version, sha_, found)
+    programs.activate(made)
+    return made

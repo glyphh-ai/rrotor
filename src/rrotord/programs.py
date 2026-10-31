@@ -151,6 +151,31 @@ class Programs:
             if (v := self.active(n))
         ]
 
+    def clis(self) -> list[dict[str, Any]]:
+        """The CLIs here, each by its active version: what it installs and runs, the arguments it allows and those
+        that wait for the person's approval."""
+        out = []
+        for name in self.names():
+            active = self.active(name)
+            cli = active.manifest.cli if active else None
+            if active is None or cli is None:
+                continue
+            out.append(
+                {
+                    "name": name,
+                    "description": active.manifest.description,
+                    "version": active.version,
+                    "command": cli.command,
+                    "install": {"source": cli.install.source, "pinned": cli.install.pinned},
+                    "allow": cli.allow,
+                    "approvals": cli.approvals,
+                    "needs_approval": bool(cli.approvals),
+                    "home": cli.home,
+                    "hosts": active.manifest.hosts,
+                }
+            )
+        return out
+
     def describe(self) -> list[dict[str, Any]]:
         out = []
         for name in self.names():
@@ -160,6 +185,7 @@ class Programs:
             out.append(
                 {
                     "name": name,
+                    "kind": shown.manifest.kind if shown else "program",
                     "description": shown.manifest.description if shown else "",
                     "active": active.version if active else None,
                     "functions": {k: f.model_dump() for k, f in shown.manifest.functions.items()} if shown else {},

@@ -1,7 +1,8 @@
 # The CLI server: sandboxed command-line tools Claude drives through rrotor
 
-**Status: approved (2026-10-31), being built.** The founder's rulings: a CLI is a kind of program; one-shot commands
-first (interactive sessions later); program databases start with SQLite.
+**Status: approved (2026-10-31); steps 1, 2 and 4 built, step 3 (interactive sessions) not built.** The founder's
+rulings: a CLI is a kind of program; one-shot commands first (interactive sessions later); program databases start
+with SQLite (built: `ctx.db`). How it is built: [`architecture.md`, 5.7](../architecture.md#57-clis).
 
 ## What it is
 
@@ -27,16 +28,19 @@ runs:
     "install": {"url": "https://github.com/cli/cli/releases/download/v<version>/gh_<version>_linux_amd64.tar.gz", "sha256": "<checksum>"},
     "command": "gh",
     "allow": ["pr *", "issue *", "repo view *", "api repos/*"],
+    "approvals": ["pr merge *", "pr close *"],
     "env": {"GH_TOKEN": "secret:GH_TOKEN"},
     "home": true,
     "interactive": false
   },
   "hosts": ["api.github.com", "github.com"],
   "secrets": ["GH_TOKEN"],
-  "approvals": ["pr merge *", "repo delete *"],
   "limits": {"seconds": 120, "memory_mb": 512}
 }
 ```
+
+As built, `approvals` sits in the `cli` block (a program's approvals are per function), and an install is kept under
+the version's folder, `/data/programs/<name>/versions/<sha>/cli/`.
 
 - **install**: pinned to an exact version and checksum, from npm, PyPI, a release tarball URL, or a binary already in
   the image. Installed once per version under `/data/programs/<name>/<version>/`; a new version is a new deploy and
@@ -71,14 +75,15 @@ Files go in and out through a per-call working folder, not the person's filesyst
 
 ## Build order
 
-1. `kind: "cli"` in the manifest and its checks; install from a pinned npm/PyPI/tarball with checksum.
-2. `cli_run` (one-shot), allow and approval patterns, env from the vault, the private `HOME`, audit.
-3. Interactive sessions on a pseudo-terminal.
-4. The glyphh CLI as the first packaged CLI, with an example manifest for `gh`.
+1. **Built.** `kind: "cli"` in the manifest and its checks; install from a pinned npm/PyPI/tarball (or an image
+   binary) with checksum.
+2. **Built.** `cli_run` (one-shot), allow and approval patterns, env from the vault, the private `HOME`, audit.
+3. **Not built.** Interactive sessions on a pseudo-terminal (`"interactive": true` is refused, `E_MANIFEST`).
+4. **Built.** The glyphh CLI as the first packaged CLI (`examples/cli_glyphh/`), with an example manifest for `gh`
+   (`examples/cli_gh/`); their version and checksum pins are placeholders.
 
-## Open questions for the founder
+## The founder's answers (2026-10-31)
 
-1. CLIs as a **kind of program** (one manifest, one set of tools, recommended) or a separate first-class thing?
-2. **Interactive sessions** in the first release, or one-shot commands first?
-3. **Databases** for programs (`ctx.db`, today a stub): start with SQLite in the program's data folder (no extra
-   process, recommended), then a Postgres part; or Postgres first?
+1. CLIs are a **kind of program** (one manifest, one set of tools).
+2. **One-shot commands first**; interactive sessions later.
+3. **Databases** start with SQLite in the program's data folder (`ctx.db`); a Postgres part later.

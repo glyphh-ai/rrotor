@@ -121,6 +121,27 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dic
     return answer(run)
 
 
+async def clis_list(s: Services) -> dict[str, Any]:
+    """The CLIs here: each one's version, command, install, allowed patterns and approval patterns."""
+    return {"clis": s.programs.clis()}
+
+
+async def cli_run(s: Services, data: dict[str, Any], caller: str = "claude") -> dict[str, Any]:
+    """One command of a CLI, run in the sandbox: its Result (exit code, stdout, stderr, files) or `needs_approval`.
+    A CLI runs on the cluster's head (its install and home are there): a follower sends the call to it."""
+    cli = data.get("cli")
+    if not isinstance(cli, str) or not cli:
+        raise BadRequest("Send {cli, args, stdin?, files?}.")
+    if forward.follower(s):
+        return await forward.relayed(s, "cli", {"data": data, "caller": caller})
+    term = forward.leading(s)
+    run = await s.runner.cli_run(
+        cli=cli, args=data.get("args", []), stdin=data.get("stdin"), files=data.get("files"), caller=caller
+    )
+    await forward.committed(s, term)
+    return answer(run)
+
+
 async def resume(s: Services, run_id: str, value: Any) -> dict[str, Any]:
     far, node = forward.elsewhere(s, run_id)
     if far:

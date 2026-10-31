@@ -2,7 +2,10 @@
 
 The runner sends `start`, then `continue` or `end`, and `cancel` while a function runs; the worker answers `result`
 (with what a waiting run waits for), `checkpoint` and `log` as they happen, and `ended`. A function past its seconds
-or cancelled stops where it is (a signal in the main thread) and `end` still runs."""
+or cancelled stops where it is (a signal in the main thread) and `end` still runs.
+
+A CLI's run (`cli` in `start`) imports no program: once locked down, the worker runs its one command
+(rrotor/_worker/command.py), timed and cancellable the same way, answers its `result` and, at `end`, `ended`."""
 
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ from pathlib import Path
 from types import FrameType, ModuleType
 from typing import Any
 
+from rrotor._worker import command
 from rrotor._worker.channel import Channel
 from rrotor._worker.forward import Forwarder
 from rrotor._worker.landlock import Landlock, Rules
@@ -80,7 +84,12 @@ class Worker:
             assert self.landlock is not None  # noqa: S101  (main() always passes one)
             rules = box["landlock"]
             self.landlock.restrict(
-                Rules(tuple(rules["read"]), tuple(rules["write"]), tuple(rules.get("tcp_ports", ())))
+                Rules(
+                    tuple(rules["read"]),
+                    tuple(rules["write"]),
+                    tuple(rules.get("tcp_ports", ())),
+                    bool(rules.get("exec_writes", True)),
+                )
             )
         if box.get("proxy_socket"):
             Forwarder(box["proxy_socket"]).start()
@@ -110,6 +119,12 @@ class Worker:
             self.channel.send("result", result=failure("sandbox", "E_SANDBOX", str(err)).to_json(), pending=None)
             return self._finish(None, None)
         threading.Thread(target=self._read, daemon=True).start()
+        if start.get("cli"):  # a CLI's run: its one command, no program
+            spec = dict(start["cli"])
+            outcome = self._timed(float(start.get("seconds_left", 300)), lambda: Outcome(command.run(spec)), "cli")
+            self.channel.send("result", result=outcome.result.to_json(), pending=None)
+            self.inbox.get()  # `end`, or the runner gone
+            return self._finish(None, None)
         function = str(start["function"])
         state = RunState.from_json(start.get("state"))
         box = start.get("sandbox") or {}

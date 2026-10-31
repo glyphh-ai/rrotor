@@ -30,7 +30,9 @@ INSTRUCTIONS = (
     "waiting for the person; program_deploy deploys a commit of a program's GitHub repo; audit_query reads the audit "
     "log (Enterprise); cluster_status shows the runtime's cluster; secrets_list, secret_set and secret_delete keep a "
     "program's secrets (values are never shown back); schedules_list, schedule_pause and schedule_resume show and "
-    "pause the schedules this runtime fires itself."
+    "pause the schedules this runtime fires itself. clis_list shows the command-line tools installed here, and "
+    "cli_run runs one command of one in the sandbox (args checked against its allow patterns; one that needs approval "
+    "answers needs_approval, then program_continue runs it once the person approves)."
 )
 
 
@@ -107,6 +109,14 @@ async def secret_set(s: Services, args: dict[str, Any]) -> dict[str, Any]:
 
 async def secret_delete(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.secret_delete(s, ops.text_of(args, "program"), ops.text_of(args, "name"))
+
+
+async def clis_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
+    return await ops.clis_list(s)
+
+
+async def cli_run(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.cli_run(s, args)
 
 
 async def schedules_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
@@ -230,6 +240,38 @@ TOOLS: tuple[Tool, ...] = (
         schedule_pause,
     ),
     Tool("schedule_resume", "Resume a paused schedule.", SCHEDULE_ARGS, schedule_resume),
+    Tool(
+        "clis_list",
+        "The command-line tools here: each one's version, command, install, allowed argument patterns and the "
+        "patterns that need the person's approval.",
+        _obj({}),
+        clis_list,
+        True,
+    ),
+    Tool(
+        "cli_run",
+        "Run one command of a CLI in the sandbox (no shell): its exit code, stdout and stderr (64 KB each, the rest "
+        "in run_log) and the files it made or changed in its working folder; needs_approval when its arguments need "
+        "the person's approval. files: path to text, or {base64}.",
+        _obj(
+            {
+                "cli": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}, "maxItems": 256},
+                "stdin": {"type": "string"},
+                "files": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "anyOf": [
+                            {"type": "string"},
+                            _obj({"base64": {"type": "string"}}, ["base64"]),
+                        ]
+                    },
+                },
+            },
+            ["cli", "args"],
+        ),
+        cli_run,
+    ),
 )
 BY_NAME = {t.name: t for t in TOOLS}
 

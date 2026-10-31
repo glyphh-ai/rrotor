@@ -252,6 +252,20 @@ def test_the_worker_locks_itself_down_before_the_program(tmp_path):
     assert (lock.rules.read, lock.rules.write, lock.rules.tcp_ports) == (("/usr",), ("/files",), (3128,))
 
 
+def test_a_clis_run_runs_its_command_locked_without_exec_of_what_it_writes(tmp_path):
+    tool = tmp_path / "tool"
+    tool.write_text('#!/bin/sh\necho "hi $1"\n')
+    tool.chmod(0o755)
+    lock = Lock()
+    box = {"landlock": {"read": ["/usr"], "write": ["/work"], "exec_writes": False}}
+    spec = {"run": "exec", "path": str(tool), "args": ["there"], "env": {"PATH": "/usr/bin:/bin"}, "cwd": str(tmp_path)}
+    runner = run({"function": "cli", "cli": spec, "sandbox": box, "seconds_left": 10}, landlock=lock)
+    assert lock.rules.exec_writes is False
+    assert runner.ops() == ["result", "ended"]
+    result = runner.results()[0]
+    assert (result["status"], result["data"]["stdout"], result["data"]["exit_code"]) == ("done", "hi there\n", 0)
+
+
 def test_a_sandbox_that_cannot_lock_fails_the_run(tmp_path):
     folder = write(tmp_path / "p", PROGRAM)
     box: dict[str, Any] = {"landlock": {"read": [], "write": []}}

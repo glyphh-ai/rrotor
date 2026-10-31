@@ -1,0 +1,17 @@
+{
+  "name": "glyphh",
+  "kind": "cli",
+  "description": "The glyphh command (PyPI package glyphh). PLACEHOLDER: the version and sha256 are placeholders; pin the wheel to install and its checksum before deploying",
+  "cli": {
+    "install": {
+      "pypi": "glyphh==3.5.0",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "command": "glyphh",
+    "env": { "GLYPHH_API_KEY": "secret:GLYPHH_API_KEY" },
+    "home": true
+  },
+  "hosts": ["ada.glyphh.ai", "platform.glyphh.ai"],
+  "secrets": ["GLYPHH_API_KEY"],
+  "limits": { "seconds": 120, "memory_mb": 256 }
+}

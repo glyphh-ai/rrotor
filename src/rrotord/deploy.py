@@ -2,7 +2,7 @@
 a private one; the Cloud mints a short-lived one per deploy), or one this rrotor already holds. The commit's SHA is
 checked, the manifest read, a venv made and `requirements.lock` installed (binary wheels only, with hashes: no program
 code runs outside the sandbox, not even a package's setup), and the version becomes active (docs/architecture.md,
-2.2 and 5)."""
+2.2 and 5). A CLI's version also gets its install, pinned and checked, under `cli/` (rrotord/clis.py)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from rrotord import clis
 from rrotord import manifest as manifests
 from rrotord.errors import BadRequest, DeployError
 from rrotord.proc import run
@@ -40,8 +41,11 @@ def check_sha(commit: str) -> str:
 
 
 class Deployer:
-    def __init__(self, programs: Programs, scratch: Path, tools: Tools | None = None) -> None:
+    def __init__(
+        self, programs: Programs, scratch: Path, tools: Tools | None = None, fetch: clis.Fetch | None = None
+    ) -> None:
         self.programs, self.scratch, self.tools = programs, scratch, tools or Tools()
+        self.installer = clis.Installer(fetch, uv=self.tools.uv, python=self.tools.python)
 
     def _git_env(self, home: Path, token: str | None = None) -> dict[str, str]:
         env = {
@@ -125,7 +129,9 @@ class Deployer:
         staging.mkdir(parents=True)
         try:
             shutil.move(src, staging / "src")
-            await self._venv(staging)
+            await self._venv(staging, lock=found.kind == "program")
+            if found.kind == "cli":  # its install, pinned and checked, beside the venv its worker runs in
+                await self.installer.install(found, staging / "cli", staging / "src")
             shutil.rmtree(root, ignore_errors=True)
             staging.rename(root)
         except BaseException:
@@ -136,13 +142,14 @@ class Deployer:
         self.programs.activate(made)
         return made
 
-    async def _venv(self, root: Path) -> None:
+    async def _venv(self, root: Path, lock: bool = True) -> None:
+        """The version's venv, and its requirements.lock in it (a CLI's lock is its install's, not the venv's)."""
         venv = root / "venv"
         done = await run([self.tools.python, "-m", "venv", "--without-pip", str(venv)], timeout=120)
         if done.code != 0:
             raise DeployError(f"The venv could not be made: {done.why()}", code="E_VENV")
-        lock = root / "src" / "requirements.lock"
-        if not lock.is_file():
+        locked = root / "src" / "requirements.lock"
+        if not lock or not locked.is_file():
             return
         argv = [
             self.tools.uv,
@@ -155,7 +162,7 @@ class Deployer:
             ":all:",
             "--no-deps",
             "-r",
-            str(lock),
+            str(locked),
         ]
         done = await run(
             argv, env={"PATH": os.environ.get("PATH", ""), "HOME": str(root), "UV_NO_CACHE": "1"}, timeout=600

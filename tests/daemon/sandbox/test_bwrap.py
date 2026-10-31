@@ -75,3 +75,20 @@ def test_a_followers_run_has_its_folder_and_data_read_only():
     argv = bwrap.command(mounts, Limits(256, 10), 7, 9, exists=lambda p: False)
     assert ["/f", "/files"] in after(argv, "--ro-bind") and ["/data/x", "/data"] in after(argv, "--ro-bind")
     assert after(argv, "--bind") == []
+
+
+def test_a_clis_run_mounts_its_install_working_folder_and_home():
+    mounts = Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, None, cli=Path("/i"), work=Path("/w"))
+    mounts_home = Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, None, cli=Path("/i"), home=Path("/h"))
+    rules = bwrap.landlock_rules(mounts)
+    assert "/cli" in rules["read"] and rules["write"] == ["/files", "/tmp", "/dev", "/work"]  # type: ignore[operator]
+    assert rules["exec_writes"] is False and bwrap.landlock_rules(MOUNTS)["exec_writes"] is True
+    assert "/home/cli" in bwrap.landlock_rules(mounts_home)["write"]  # type: ignore[operator]
+    argv = bwrap.command(mounts, Limits(256, 10), 7, 9, exists=lambda p: False)
+    assert ["/i", "/cli"] in after(argv, "--ro-bind") and ["/w", "/work"] in after(argv, "--bind")
+    home = bwrap.command(mounts_home, Limits(256, 10), 7, 9, exists=lambda p: False)
+    assert ["/h", "/home/cli"] in after(home, "--bind")
+    follower = Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, None, home=Path("/h"), readonly=True)
+    on_follower = bwrap.command(follower, Limits(256, 10), 7, 9, exists=lambda p: False)
+    assert ["/h", "/home/cli"] in after(on_follower, "--ro-bind")
+    assert "/home/cli" in bwrap.landlock_rules(follower)["read"]  # type: ignore[operator]

@@ -270,6 +270,10 @@ A git repo; a version is a commit.
 | `requirements.lock` | Optional: its Python dependencies, pinned with hashes, installed at deploy, never at run |
 | `files/` | Optional: seed files, copied into its folder on the first deploy |
 
+A **CLI** is a kind of program (`"kind": "cli"`, [5.7](#57-clis)): the same repo, manifest, deploy, sandbox, vault,
+egress proxy, approvals, limits and audit, with no `program.py`: its manifest names a command-line tool to install
+and the arguments it may be run with.
+
 ### 5.2 The manifest: `glyphh.json`
 
 ```json
@@ -290,6 +294,7 @@ A git repo; a version is a commit.
 | Key | What |
 |---|---|
 | `name` | `^[a-z][a-z0-9_]{0,62}$`; a deploy names the program by it |
+| `kind` | `program` (the default) or `cli`: a CLI has a `cli` block and no functions, schedules, data, databases or parts ([5.7](#57-clis)) |
 | `version` | Optional, 1 or more |
 | `description`, `python` | Free text; `python` must be `3.13` |
 | `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it runs on a cluster's head: `true` runs it there, `false` on whichever node the call reaches, read-only there; default whether the program keeps data (`data` or a SQLite database); every call of a program that keeps data runs on the head whatever it says) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
@@ -445,6 +450,92 @@ A program says when the runtime should call it, in its manifest; the daemon fire
 - **In a cluster only the head fires** (or the one node an unlicensed cluster serves from). Schedules' state is the
   head's, node-local like the vault: a follower asks the head for the list and refuses a pause (503 `E_NOT_HEAD`).
 
+### 5.7 CLIs
+
+A CLI is a command-line tool (the glyphh CLI, `gh`, `stripe`, a team's own) that rrotor installs at deploy and runs
+one command at a time in the same sandbox as programs, so Claude can use the tool without it touching the person's
+machine, their files or the open network (`rrotord/clis.py`, the build spec
+[`specs/cli-server.md`](specs/cli-server.md)). Examples: `examples/cli_gh/`, `examples/cli_glyphh/`.
+
+```json
+{
+  "name": "github",
+  "kind": "cli",
+  "cli": {
+    "install": { "url": "https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_linux_amd64.tar.gz", "sha256": "<64 hex>" },
+    "command": "gh",
+    "allow": ["pr *", "issue *", "repo view *"],
+    "approvals": ["pr merge *"],
+    "env": { "GH_TOKEN": "secret:GH_TOKEN", "GH_PROMPT_DISABLED": "1" },
+    "home": true
+  },
+  "hosts": ["api.github.com", "github.com"],
+  "secrets": ["GH_TOKEN"],
+  "limits": { "seconds": 120, "memory_mb": 512 }
+}
+```
+
+- **`install`**, one source, pinned: `url` (an `https://` release asset on 443: a tarball, `.tar.gz`, `.tgz`,
+  `.tar.xz`, `.tar.bz2`, `.tar`, a `.zip`, or else a bare binary), `npm` (`name@1.2.3`, exact), `pypi`
+  (`name==1.2.3`, exact) or `image` (a binary already in the image: its name on `PATH` or its path under `/usr`).
+  `sha256` is the checksum of what is downloaded, required but for `image` (where, given, it is checked against the
+  binary). A deploy downloads it, checks the SHA-256 **before unpacking anything** (`E_CLI_CHECKSUM`, naming the one
+  it got), unpacks it under the version's folder (`/data/programs/<name>/versions/<sha>/cli/`; a tarball with the
+  `data` filter, a zip refusing any path outside its folder, 1 GB unpacked at most) and writes `installed.json`; a
+  new version is a new deploy and rolls back like any program. No code of the CLI runs at install.
+  - **url**: `command` is a path inside the archive, or a file name found in it (the nearest the top); a bare binary
+    is saved as `command`. Made executable; run directly.
+  - **npm**: the package's tarball, `https://registry.npmjs.org/<name>/-/<basename>-<version>.tgz`; `command` is
+    one of its `bin` entries, run with the image's `node`. No install scripts run and no dependency is fetched: a
+    package with `dependencies` not all in its `bundleDependencies` is refused (`E_CLI_INSTALL`).
+  - **pypi**: PyPI's JSON API (`https://pypi.org/pypi/<name>/<version>/json`) names the wheel whose SHA-256 is
+    `sha256`; rrotor downloads it from `files.pythonhosted.org`, unpacks it itself into `cli/site/` (its `.data`
+    `purelib` and `platlib`, nothing else) and writes `cli/bin/<command>` for the wheel's console script, run with
+    the image's Python. Its dependencies come from a `requirements.lock` beside `glyphh.json` (hashed, binary wheels
+    only, `--no-deps`, into `cli/site/` by `uv`, as a program's lock goes into its venv). Pin a wheel this runtime can
+    import (`py3-none-any`, or CPython 3.13 on Linux of the runtime's architecture).
+  - **image**: nothing is downloaded; `command` is the binary's name.
+- **Hosts an install reaches:** the manifest's `hosts`, plus what the source implies: a `url`'s own host (and, for
+  `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com`, where GitHub serves
+  release assets), `registry.npmjs.org` for npm, `pypi.org` and `files.pythonhosted.org` for PyPI. Every redirect is
+  checked against the same list, HTTPS on 443 only, to public addresses only (as the egress proxy does), 512 MB at
+  most (`E_CLI_INSTALL` otherwise). A PyPI CLI's `requirements.lock` is fetched by `uv` from PyPI, as a program's is.
+- **`command`, `allow`, `approvals`:** there is no shell; the command is the only thing a call can run. The arguments
+  are joined as a shell would quote them (`shlex.join`, so one argument with a space is quoted) and matched against
+  glob patterns: `allow` empty takes any arguments; otherwise one must match, or the call is refused 403
+  `E_CLI_DENIED` (an audit event, never a run). A pattern matches the whole line, so a trailing `*` also takes any
+  further flags. One that matches `approvals` makes the run wait, `needs_approval` at step `cli` with the command
+  line in its prompt (listed in `GET /v1/approvals`, expiring after 15 minutes); `program_continue` with
+  `{"approved": true}` runs it, `false` ends it `failed`, `E_CLI_DECLINED`.
+- **`env`:** the process's environment beside rrotor's own (`PATH`, `HOME`, `TMPDIR`, `LANG`, the proxy's
+  `HTTPS_PROXY`/`HTTP_PROXY` and `NODE_USE_ENV_PROXY`, which a manifest may not set, nor any `LD_*`). `secret:NAME`
+  takes a secret the manifest declares from the vault ([5.5](#55-secrets)), passed in the worker's start message
+  only, never written to disk; its value is masked (`[secret]`) in the run's log, its Result, its record and the
+  audit event's command line.
+- **`home`:** `true` gives the CLI a private `HOME`, `/data/programs/<name>/home`, mounted at `/home/cli` and kept
+  across calls (its config, a login it keeps); otherwise `HOME` is the run's own `/tmp`.
+- **`interactive`:** only `false`; `true` is refused, `E_MANIFEST` (interactive sessions are not built yet).
+- **A run** (`POST /v1/clis/{name}/run`, MCP `cli_run`, `{args, stdin?, files?}`): at most 256 arguments of 8192
+  characters, stdin up to 1 MB of text, files up to 64 and 1 MB (by relative path: text, or `{"base64": …}`),
+  `E_CLI_INPUTS` otherwise. The files are written to a fresh working folder for the call (`/work`, the command's
+  current folder), kept with the run's record while it waits and removed when it ends. The worker starts in the
+  sandbox as a program's does (bwrap, seccomp, rlimits, Landlock, the egress proxy for `hosts`), with the CLI's
+  install read-only at `/cli`, and runs the command there, timed by the manifest's `limits.seconds` (past it,
+  `E_LIMIT_SECONDS`) and cancellable; a command that cannot start is `E_CLI_EXEC`. Landlock lets a CLI's run (and
+  everything it starts) execute only the system, its install and the version's venv: nothing it may write
+  (`/work`, `/tmp`, its `HOME`). The Result is `done` with `{exit_code, stdout, stderr, stdout_bytes, stderr_bytes,
+  truncated, files, files_skipped}`: stdout and stderr each their first 64 KB (all of each goes to the run's log,
+  line by line, up to 4 MB each and the log's 2000 lines), `files` the files the command made or changed in its
+  working folder (64 and 1 MB at most; past that only named, in `files_skipped`). A nonzero exit is still `done`.
+- **Every call is a run**: `run_status`, `run_log` (its `called` line carries the command line, secrets masked), the
+  audit log's `run.call` (with `command`) and `run.end`; its function is `cli`. `program_call` on a CLI is refused
+  400 `E_NOT_PROGRAM`, and `cli_run` on a program 400 `E_NOT_CLI`.
+- **In a cluster** a CLI runs on the head: its install is the head's build (versions replicate their code and venv,
+  not `cli/`) and its home and secrets are the head's; a follower sends every command there.
+- **Not enforced** by rrotor: what the command itself does inside the sandbox with the arguments it was allowed
+  (a pattern is only as narrow as it is written), and a CLI process's memory is limited per process, so the worker and
+  the command each get `limits.memory_mb`.
+
 ## 6. The link: protocol 2
 
 JSON messages over the WebSocket `{RROTOR_SERVER}/v1/runtime/link` (`Authorization: Bearer <runtime token>`, never
@@ -527,6 +618,8 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `GET /v1/schedules` | `{schedules: [{id, program, name, version, function, cron, tz, input, paused, next_at, last, skipped}]}` ([5.6](#56-schedules)) |
 | `POST /v1/schedules/{program}/{name}/pause`, `…/resume` | The schedule paused or resumed, kept across restarts: the schedule as listed |
 | `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
+| `GET /v1/clis` | `{clis: [{name, description, version, command, install: {source, pinned}, allow, approvals, needs_approval, home, hosts}]}` ([5.7](#57-clis)) |
+| `POST /v1/clis/{name}/run` | `{args, stdin?, files?}`: one command of the CLI, a run: `{run_id, …, status, data: {exit_code, stdout, stderr, stdout_bytes, stderr_bytes, truncated, files, files_skipped}}`, or `needs_approval`; 403 `E_CLI_DENIED` when `allow` does not take the arguments |
 | `POST /v1/runs/{id}/continue` | `{answer}`: the next `Result` |
 | `POST /v1/runs/{id}/cancel` | Stops it; `end` runs; `cancelled` |
 | `GET /v1/runs/{id}` | Status, function, times, seconds, the last `Result` |
@@ -554,6 +647,8 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `cluster_status` | `GET /v1/cluster` |
 | `secrets_list` `{program}`, `secret_set` `{program, name, value}`, `secret_delete` `{program, name}` | A program's secrets ([5.5](#55-secrets)): names only back, never a value |
 | `schedules_list`, `schedule_pause` `{program, name}`, `schedule_resume` `{program, name}` | `GET /v1/schedules`; pause and resume ([5.6](#56-schedules)) |
+| `clis_list` | `GET /v1/clis` ([5.7](#57-clis)) |
+| `cli_run` `{cli, args, stdin?, files?}` | `POST /v1/clis/{name}/run`; a command that needs approval is answered with `program_continue` like a program's run |
 
 A refusal is a tool error carrying the API's `{error}`.
 
@@ -562,7 +657,7 @@ with the refusal's code to everything but `/healthz`, `/readyz`, `/v1/health` an
 ([14](#14-the-cluster)).
 
 **In a cluster** ([14](#14-the-cluster)) every route and tool answers the same on every node: a follower sends a
-writing call (`"writes": true`, or any call of a program with data), a deploy, and anything about a run
+writing call (`"writes": true`, or any call of a program with data), any command of a CLI, a deploy, and anything about a run
 another node holds (run ids are `<node id>~<uuid>`) to its head, which does it as the same caller; `GET
 /v1/approvals` gathers every node's. A member's answers carry `Rrotor-Cluster-Seq` (the head's last seq, a
 follower's applied one); a follower that forwarded a write answers once it has applied it (up to 2 s), and a request
@@ -945,6 +1040,8 @@ write to the head.
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a program's `databases` (a run of a program
   that declares one fails `E_PART_MISSING`; `ctx.db` is SQLite, built).
 - **SSO and SAML, roles (RBAC).**
+- **Interactive CLI sessions:** `cli_start`, `cli_send`, `cli_read`, `cli_stop` on a pseudo-terminal, for tools that
+  prompt (`"interactive": true`, refused today) ([`specs/cli-server.md`](specs/cli-server.md), build step 3).
 - **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
   ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
 - **The gateway:** programs behind OpenAI- and Anthropic-compatible endpoints, configured at the head

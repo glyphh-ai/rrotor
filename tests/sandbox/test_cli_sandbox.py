@@ -1,0 +1,110 @@
+"""A CLI and a SQLite database in the real sandbox: the image's `sh` deployed as a CLI runs in its working folder with
+its private HOME, reaches nothing else of /data, cannot execute what it writes; ctx.db opens in the program's data
+folder.
+
+Linux only, inside the image: `pytest -m sandbox -o addopts='' tests/sandbox`."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import rrotor
+from rrotord.deploy import Deployer
+from rrotord.programs import Programs
+from rrotord.proxy import EgressProxy
+from rrotord.runner.engine import Runner
+from rrotord.runner.launch import SandboxLauncher
+from rrotord.runner.record import Records
+from rrotord.sandbox.probe import probe
+from tests.fakes import GitRepo, cli_manifest, manifest, token
+
+pytestmark = pytest.mark.sandbox
+
+COUNTS = """
+from rrotor import Result
+
+def start(ctx, inputs):
+    with ctx.db:
+        ctx.db.execute("create table if not exists seen (n integer)")
+        ctx.db.execute("insert into seen values (1)")
+    return Result.done(ctx.db.execute("select count(*) from seen").fetchone()[0])
+"""
+
+PROBE = r"""
+try_() { if "$@" >/dev/null 2>&1; then echo open; else echo blocked; fi; }
+echo "home=$HOME"
+echo "read_runtime_json=$(try_ cat "$1")"
+echo "write_cli=$(try_ touch /cli/owned)"
+echo "write_program=$(try_ touch /program/owned)"
+printf '#!/bin/sh\necho ran\n' > /work/x.sh && chmod +x /work/x.sh
+echo "exec_work=$(try_ /work/x.sh)"
+echo "exec_tmp=$(cp /work/x.sh /tmp/x.sh && try_ /tmp/x.sh)"
+echo kept >> "$HOME/count"
+echo "calls=$(wc -l < "$HOME/count")"
+echo made > /work/out.txt
+"""
+
+
+async def deploy(deployer: Deployer, name: str, files: dict[str, str]) -> None:
+    repo = GitRepo(Path(tempfile.mkdtemp(prefix="rr-repo-")) / name)
+    commit = repo.commit(files)
+    await deployer.from_bundle(repo.bundle(repo.path.parent / f"{name}.bundle"), commit)
+
+
+@pytest.fixture
+async def runner() -> AsyncIterator[tuple[Path, Runner]]:
+    layers = await probe()
+    assert layers.ready, layers.why()
+    root = Path(tempfile.mkdtemp(prefix="sandbox-cli-", dir="/data"))
+    (root / "runtime.json").write_text(f'{{"token": "{token()}"}}')
+    programs = Programs(root)
+    deployer = Deployer(programs, Path(tempfile.mkdtemp(prefix="rr-deploy-")))
+    sh = cli_manifest("shell", cli={"install": {"image": "sh"}, "command": "sh", "home": True})
+    await deploy(deployer, "shell", {"glyphh.json": json.dumps(sh)})
+    db = manifest("counts", databases=["sqlite"])
+    await deploy(deployer, "counts", {"glyphh.json": json.dumps(db), "program.py": COUNTS})
+    made = Runner(
+        programs=programs,
+        records=Records(root),
+        proxy=EgressProxy(Path(tempfile.mkdtemp(prefix="rr-proxy-", dir="/tmp"))),
+        launcher=SandboxLauncher(),
+        sdk=Path(rrotor.__file__).parent,
+        layers=layers,
+    )
+    yield root, made
+    await made.shutdown()
+
+
+async def shell(runner: Runner, root: Path) -> dict[str, Any]:
+    run = await runner.cli_run(cli="shell", args=["-c", PROBE, "probe", str(root / "runtime.json")])
+    assert run.status == "done", run.result
+    data: dict[str, Any] = run.result["data"]  # type: ignore[index]
+    return data
+
+
+async def test_a_cli_runs_in_its_folders_and_reaches_nothing_else(runner):
+    root, made = runner
+    data = await shell(made, root)
+    found = dict(line.split("=", 1) for line in data["stdout"].splitlines())
+    assert data["exit_code"] == 0, data["stderr"]
+    assert found["home"] == "/home/cli" and found["calls"].strip() == "1"
+    assert found["read_runtime_json"] == "blocked"
+    assert (found["write_cli"], found["write_program"]) == ("blocked", "blocked")
+    assert (found["exec_work"], found["exec_tmp"]) == ("blocked", "blocked")
+    assert data["files"]["out.txt"] == "made\n" and "x.sh" in data["files"]
+    again = dict(line.split("=", 1) for line in (await shell(made, root))["stdout"].splitlines())
+    assert again["calls"].strip() == "2"  # its HOME kept across calls
+
+
+async def test_ctx_db_opens_in_the_programs_data_folder(runner):
+    root, made = runner
+    first = await made.call(program="counts", function="start", inputs={})
+    second = await made.call(program="counts", function="start", inputs={})
+    assert (first.status, first.result["data"], second.result["data"]) == ("done", 1, 2), first.result
+    assert (Programs(root).data("counts") / "db.sqlite3").is_file()

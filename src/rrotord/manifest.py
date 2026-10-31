@@ -9,6 +9,7 @@ import json
 import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 import jsonschema
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -22,6 +23,23 @@ CAPS = r"^[A-Z][A-Z0-9_]{0,63}$"  # a secret's name
 HOST = re.compile(r"^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 PYTHON = "3.13"
 RESERVED = frozenset({"load", "end"})
+NPM = re.compile(
+    r"^(?P<name>(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*)@"
+    r"(?P<version>\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$"
+)
+PYPI = re.compile(r"^(?P<name>[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)==(?P<version>[0-9][0-9A-Za-z.!+_-]*)$")
+IMAGE = re.compile(r"^(/usr/[A-Za-z0-9._+/-]+|[A-Za-z0-9._+-]{1,64})$")
+COMMAND = re.compile(r"^[A-Za-z0-9._+-]{1,128}(/[A-Za-z0-9._+-]{1,128}){0,15}$")
+ENV_NAME = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+SECRET_REF = re.compile(r"^secret:(?P<name>[A-Z][A-Z0-9_]{0,63})$")
+# What rrotor sets in a CLI's environment itself: its PATH, HOME and temporary folder, and the egress proxy
+ENV_RESERVED = frozenset({"PATH", "HOME", "TMPDIR", "NODE_USE_ENV_PROXY"})
+PROXY_ENV = re.compile(r"^(http|https|all|no)_proxy$", re.IGNORECASE)
+# The hosts an install source reaches beside the manifest's own (docs/architecture.md, 5.7): a release URL's host
+# (GitHub serves its release assets from its object storage), npm's registry, PyPI's API and its files
+GITHUB_ASSETS = frozenset({"objects.githubusercontent.com", "release-assets.githubusercontent.com"})
+NPM_REGISTRY = "registry.npmjs.org"
+PYPI_HOSTS = frozenset({"pypi.org", "files.pythonhosted.org"})
 
 
 class Function(BaseModel):
@@ -77,13 +95,120 @@ class Limits(BaseModel):
     memory_mb: int = Field(512, ge=64, le=8192)
 
 
+SOURCES = ("url", "npm", "pypi", "image")
+
+
+class Install(BaseModel):
+    """Where a CLI comes from, pinned (docs/architecture.md, 5.7): one source, and the SHA-256 of what is downloaded
+    (optional for a binary already in the image, checked when given)."""
+
+    model_config = ConfigDict(extra="forbid")
+    url: str | None = None  # a release's tarball, zip or binary, over HTTPS
+    npm: str | None = None  # name@exact-version
+    pypi: str | None = None  # name==exact-version: the wheel whose SHA-256 is sha256
+    image: str | None = None  # a binary in the image: its name on PATH or its path under /usr
+    sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+
+    @model_validator(mode="after")
+    def _source(self) -> Install:
+        given = [k for k in SOURCES if getattr(self, k) is not None]
+        if len(given) != 1:
+            raise ValueError("install names one source: url, npm, pypi or image")
+        if self.sha256 is None and self.source != "image":
+            raise ValueError(f"install from {self.source} needs its sha256, the checksum of what is downloaded")
+        if self.url is not None:
+            parts = urlsplit(self.url)
+            if parts.scheme != "https" or not HOST.match(parts.hostname or "") or parts.username or parts.port:
+                raise ValueError("install.url is an https:// address on port 443, with no user or password")
+        if self.npm is not None and not NPM.match(self.npm):
+            raise ValueError("install.npm is name@version, an exact version (1.2.3)")
+        if self.pypi is not None and not PYPI.match(self.pypi):
+            raise ValueError("install.pypi is name==version, an exact version")
+        if self.image is not None and (not IMAGE.match(self.image) or ".." in self.image.split("/")):
+            raise ValueError("install.image is a binary's name on PATH, or its path under /usr")
+        return self
+
+    @property
+    def source(self) -> str:
+        return next(k for k in SOURCES if getattr(self, k) is not None)
+
+    @property
+    def pinned(self) -> str:
+        """What is installed, as the manifest names it."""
+        return str(getattr(self, self.source))
+
+    def implied_hosts(self) -> frozenset[str]:
+        """The hosts the install reaches beside the manifest's own `hosts`."""
+        if self.url is not None:
+            host = urlsplit(self.url).hostname or ""
+            return frozenset({host} | (GITHUB_ASSETS if host == "github.com" else set()))
+        if self.npm is not None:
+            return frozenset({NPM_REGISTRY})
+        if self.pypi is not None:
+            return PYPI_HOSTS
+        return frozenset()
+
+
+Pattern = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[^\x00\n\r]+$")]
+
+
+class Cli(BaseModel):
+    """A command-line tool rrotor runs in the sandbox (`"kind": "cli"`, docs/architecture.md, 5.7)."""
+
+    model_config = ConfigDict(extra="forbid")
+    install: Install
+    command: str  # what runs: a path in the install (or a name found in it), npm's bin, PyPI's console script
+    allow: list[Pattern] = []  # globs over the arguments, joined as a shell would quote them; none: any
+    approvals: list[Pattern] = []  # the arguments that wait for the person's approval first
+    env: dict[Annotated[str, Field(pattern=ENV_NAME)], Annotated[str, Field(max_length=4096)]] = {}
+    home: bool = False  # a private HOME kept across calls
+    interactive: bool = False
+
+    @field_validator("command")
+    @classmethod
+    def _command(cls, value: str) -> str:
+        if not COMMAND.match(value) or {".", ".."} & set(value.split("/")):
+            raise ValueError("command is a name, or a relative path inside the install")
+        return value
+
+    @field_validator("env")
+    @classmethod
+    def _env(cls, value: dict[str, str]) -> dict[str, str]:
+        for name, text in value.items():
+            if name in ENV_RESERVED or name.startswith("LD_") or PROXY_ENV.match(name):
+                raise ValueError(f"{name} is set by rrotor (PATH, HOME, TMPDIR, the proxy, LD_*): leave it out")
+            if text.startswith("secret:") and not SECRET_REF.match(text):
+                raise ValueError(f"{name}: secret:NAME names a secret, ^[A-Z][A-Z0-9_]{{0,63}}$")
+        return value
+
+    @field_validator("interactive")
+    @classmethod
+    def _interactive(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("interactive sessions are not built yet: this release runs one-shot commands only")
+        return value
+
+    @model_validator(mode="after")
+    def _image(self) -> Cli:
+        image = self.install.image
+        if image is not None and self.command != image.rsplit("/", 1)[-1]:
+            raise ValueError(f"command is the image binary's name, {image.rsplit('/', 1)[-1]}")
+        return self
+
+    def secret_refs(self) -> dict[str, str]:
+        """Each variable that takes a secret, and the secret's name."""
+        return {k: m["name"] for k, v in self.env.items() if (m := SECRET_REF.match(v))}
+
+
 class Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: Annotated[str, Field(pattern=NAME)]
+    kind: Literal["program", "cli"] = "program"  # what runs: program.py's functions, or a CLI's command
     version: int | None = Field(None, ge=1)
     description: str = ""
     python: str = PYTHON
-    functions: dict[Annotated[str, Field(pattern=FUNCTION)], Function]
+    functions: dict[Annotated[str, Field(pattern=FUNCTION)], Function] = {}  # a program's: at least one
+    cli: Cli | None = None  # a CLI's: what it installs and runs
     hosts: list[str] = []
     secrets: list[Annotated[str, Field(pattern=CAPS)]] = []  # what it reads from the vault (rrotord/vault.py)
     # sqlite: a database file in its data folder, opened as ctx.db (rrotor's own); the others are parts, not built yet
@@ -111,6 +236,10 @@ class Manifest(BaseModel):
 
     @model_validator(mode="after")
     def _functions(self) -> Manifest:
+        if self.kind == "cli":
+            return self._a_cli()
+        if self.cli is not None:
+            raise ValueError('cli is for a manifest of "kind": "cli"')
         if not self.functions:
             raise ValueError("functions names at least one function")
         reserved = RESERVED & set(self.functions)
@@ -119,6 +248,27 @@ class Manifest(BaseModel):
         for function in self.functions.values():
             if function.writes is None:
                 function.writes = self.keeps_data  # safe: a program with data writes unless it says one does not
+        return self
+
+    def _a_cli(self) -> Manifest:
+        if self.cli is None:
+            raise ValueError('a manifest of "kind": "cli" has a cli block: install, command, allow, approvals, env')
+        given = [
+            key
+            for key, value in (
+                ("functions", self.functions),
+                ("schedules", self.schedules),
+                ("data", self.data),
+                ("databases", self.databases),
+                ("needs", self.needs),
+            )
+            if value
+        ]
+        if given:
+            raise ValueError(f"a cli runs its command, so it has no {', '.join(given)}")
+        unset = sorted(set(self.cli.secret_refs().values()) - set(self.secrets))
+        if unset:
+            raise ValueError(f"cli.env takes the secret {', '.join(unset)}, not in secrets: declare it there")
         return self
 
     @model_validator(mode="after")
@@ -146,8 +296,9 @@ class Manifest(BaseModel):
     @property
     def head_only(self) -> bool:
         """A program that keeps state in its data folder (its SQLite database too), which never replicates, or reads
-        secrets, which only the head's vault holds: every call to it runs on the head."""
-        return self.keeps_data or bool(self.secrets)
+        secrets, which only the head's vault holds, or a CLI (its install, the head's build, and its home never
+        replicate): every call to it runs on the head."""
+        return self.keeps_data or bool(self.secrets) or self.kind == "cli"
 
     def writes(self, function: str) -> bool:
         """Whether a call of `function` runs on the cluster's head: it writes, or its program is the head's alone. A
@@ -174,10 +325,12 @@ def read(src: Path) -> Manifest:
     path, program = src / "glyphh.json", src / "program.py"
     if not path.is_file():
         raise DeployError("The commit has no glyphh.json.", code="E_MANIFEST")
-    if not program.is_file():
-        raise DeployError("The commit has no program.py.", code="E_MANIFEST")
     try:
-        manifest = Manifest.model_validate(json.loads(path.read_text()))
+        raw = json.loads(path.read_text())
+        cli = isinstance(raw, dict) and raw.get("kind") == "cli"  # a CLI needs no program.py
+        if not cli and not program.is_file():
+            raise DeployError("The commit has no program.py.", code="E_MANIFEST")
+        manifest = Manifest.model_validate(raw)
     except (ValueError, ValidationError) as err:
         errors = err.errors(include_url=False, include_input=False) if isinstance(err, ValidationError) else None
         why = (
@@ -186,6 +339,8 @@ def read(src: Path) -> Manifest:
             else str(err)
         )
         raise DeployError(f"glyphh.json is refused: {why}", code="E_MANIFEST") from None
+    if manifest.kind == "cli":
+        return manifest
     missing = sorted(set(manifest.functions) - _defined(program))
     if missing:
         raise DeployError(f"program.py has no function {', '.join(missing)}.", code="E_MANIFEST")

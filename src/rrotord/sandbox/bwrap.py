@@ -1,6 +1,7 @@
 """The `bwrap` command line for one run: new namespaces, a read-only system, the version's code and venv, its folder
 writable, the SDK, the proxy's socket and nothing else of /data. On a cluster's follower (`readonly`) the folder and
-the data folder are mounted read-only too: the head is the only writer of what syncs (docs/specs/cluster.md, 3)."""
+the data folder are mounted read-only too: the head is the only writer of what syncs (docs/specs/cluster.md, 3). A
+CLI's run adds its install (read-only), its per-call working folder and, when it keeps one, its private HOME."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROGRAM, VENV, SDK, FILES, DATA, PARTS = "/program", "/venv", "/opt/rrotor", "/files", "/data", "/opt/parts"
+CLI, WORK, CLI_HOME = "/cli", "/work", "/home/cli"
 PROXY_SOCKET = "/run/rrotor/proxy.sock"
 SYSTEM_RO = ("/usr", "/etc/ssl", "/etc/ca-certificates", "/etc/localtime", "/etc/alternatives")
 LINKS = (("usr/bin", "/bin"), ("usr/sbin", "/sbin"), ("usr/lib", "/lib"), ("usr/lib64", "/lib64"))
@@ -24,6 +26,9 @@ class Mounts:
     parts: tuple[tuple[str, Path], ...] = ()  # the parts its manifest asks for: (name, where it is installed)
     pythonpath: tuple[str, ...] = ()  # the parts' PYTHONPATH entries, as paths inside the sandbox
     readonly: bool = False  # a follower's run: /files and /data read-only
+    cli: Path | None = None  # a CLI's run: its version's install, read-only at /cli
+    work: Path | None = None  # its per-call working folder, at /work
+    home: Path | None = None  # its private persistent HOME ("home": true), at /home/cli
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,14 +40,16 @@ class Limits:
 
 
 def landlock_rules(mounts: Mounts) -> dict[str, object]:
-    """What the worker locks itself to, as paths inside the sandbox."""
-    mine = [FILES] + ([DATA] if mounts.data else [])
+    """What the worker locks itself to, as paths inside the sandbox. A CLI's run (and every process it starts)
+    executes nothing it may write: only the system, its install and the version's venv."""
+    mine = [FILES] + ([DATA] if mounts.data else []) + ([CLI_HOME] if mounts.home else [])
     write = [FILES, "/tmp", "/dev", *mine[1:]] if not mounts.readonly else ["/tmp", "/dev"]
     read = [*SYSTEM_RO, PROGRAM, VENV, SDK, "/proc", *(f"{PARTS}/{name}" for name, _ in mounts.parts)]
     return {
-        "read": read + (mine if mounts.readonly else []),
-        "write": write,
+        "read": read + ([CLI] if mounts.cli else []) + (mine if mounts.readonly else []),
+        "write": write + ([WORK] if mounts.work else []),
         "tcp_ports": [3128] if mounts.proxy else [],
+        "exec_writes": mounts.cli is None,
     }
 
 
@@ -108,6 +115,12 @@ def command(
         argv += ["--ro-bind" if mounts.readonly else "--bind", str(mounts.data), DATA]
     for name, where in mounts.parts:
         argv += ["--ro-bind", str(where), f"{PARTS}/{name}"]
+    if mounts.cli:
+        argv += ["--ro-bind", str(mounts.cli), CLI]
+    if mounts.work:
+        argv += ["--bind", str(mounts.work), WORK]
+    if mounts.home:
+        argv += ["--ro-bind" if mounts.readonly else "--bind", str(mounts.home), CLI_HOME]
     if mounts.proxy:
         argv += ["--bind", str(mounts.proxy), PROXY_SOCKET]
     env = {

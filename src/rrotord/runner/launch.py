@@ -26,7 +26,8 @@ class Launcher(Protocol):
 
     def paths(self, mounts: bwrap.Mounts) -> dict[str, str | None]:
         """Where the worker finds the program, its folder and its data folder (its start message's `program`, `files`
-        and `data`, the last None when the manifest asks for none)."""
+        and `data`, the last None when the manifest asks for none), and a CLI's install, working folder and HOME
+        (`cli_root`, `work`, `cli_home`, None for a program)."""
         ...
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process: ...
@@ -40,7 +41,14 @@ class SandboxLauncher:
         return {"landlock": bwrap.landlock_rules(mounts), "proxy_socket": bwrap.PROXY_SOCKET if mounts.proxy else None}
 
     def paths(self, mounts: bwrap.Mounts) -> dict[str, str | None]:
-        return {"program": bwrap.PROGRAM, "files": bwrap.FILES, "data": bwrap.DATA if mounts.data else None}
+        return {
+            "program": bwrap.PROGRAM,
+            "files": bwrap.FILES,
+            "data": bwrap.DATA if mounts.data else None,
+            "cli_root": bwrap.CLI if mounts.cli else None,
+            "work": bwrap.WORK if mounts.work else None,
+            "cli_home": bwrap.CLI_HOME if mounts.home else None,
+        }
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process:
         seccomp = (self._seccomp or Filter()).build()

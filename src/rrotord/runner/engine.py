@@ -12,14 +12,22 @@ mount the program's folders read-only (`readonly`).
 
 A program that declares secrets gets their values from the vault (rrotord/vault.py) in its worker's start message,
 and nowhere else: a declared one not set stops the run before `load`, `failed {step: secrets, missing: [...]}`, and
-the values are masked in the run's log lines."""
+the values are masked in the run's log lines.
+
+A CLI (`"kind": "cli"`, rrotord/clis.py) runs the same way, one command per run (`cli_run`): its arguments checked
+against `allow` first (E_CLI_DENIED, never a run), a run that waits for the person's approval when `approvals` names
+them (resumed by a continue like a program's), then the worker runs the command in the sandbox with the CLI's install,
+a fresh working folder for the call and its private HOME mounted; its Result (exit code, stdout, stderr) has its
+secrets' values masked, and the files the command made or changed added."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime as dt
 import logging
+import shutil
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
@@ -28,9 +36,10 @@ from typing import Any
 from opentelemetry.trace import Span
 
 from rrotor.ctx import RunState
+from rrotord import clis
 from rrotord import log as logs
 from rrotord.audit import Audit
-from rrotord.errors import Conflict, NotFound, RrotorError, Unavailable
+from rrotord.errors import BadRequest, Conflict, Forbidden, NotFound, RrotorError, Unavailable
 from rrotord.manifest import check_inputs
 from rrotord.otel import Telemetry
 from rrotord.parts import KNOWN, Parts
@@ -49,6 +58,10 @@ END_WAIT = 35.0
 WAIT_LIMIT = 15 * 60.0
 MASK = "[secret]"
 MASK_MIN = 4  # a secret's value shorter than this is not masked (it would mask ordinary text)
+CLI = "cli"  # a CLI's run's function, and the step its approval waits at
+WORK = "work"  # a CLI's run's working folder, in its record's folder
+CLI_PATH = "/usr/local/bin:/usr/bin:/bin"
+PROXY = "http://127.0.0.1:3128"
 
 Notify = Callable[[Run], Awaitable[None]]
 
@@ -171,6 +184,8 @@ class Runner:
                 f"The sandbox is not ready, so no program runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
             )
         found = self.programs.get(program, version)
+        if found.manifest.kind == "cli":
+            raise BadRequest(f"{program} is a CLI, not a program: run it with cli_run.", code="E_NOT_PROGRAM")
         fn = found.manifest.functions.get(function)
         if fn is None:
             raise NotFound(f"{program} has no function {function}.", code="E_FUNCTION_MISSING")
@@ -189,6 +204,138 @@ class Runner:
                 else:
                     await self._go(run, found, None)
         return run
+
+    async def cli_run(
+        self,
+        *,
+        cli: str,
+        args: Any,
+        stdin: Any = None,
+        files: Any = None,
+        caller: str = "claude",
+        origin: str = "local",
+    ) -> Run:
+        """One command of a CLI, a run like a program's call: refused (E_CLI_DENIED, never a run) when `allow` does
+        not take its arguments, waiting for the person when `approvals` names them; an audit event either way, with
+        the command line, secrets masked."""
+        line = None
+        try:
+            found, args = self._cli_found(cli, args)
+            line = masked(clis.command_line(args), self._hidden_now(found))
+            run = await self._cli_call(found, args, line, stdin, files, caller, origin)
+        except RrotorError as err:
+            asked = {"program": cli, "version": None, "function": CLI, "run_id": None, "command": line}
+            self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
+            raise
+        self._audit("run.call", **about(run), command=line, outcome=outcome(run), seconds=round(run.seconds, 3))
+        return run
+
+    def _cli_found(self, cli: str, args: Any) -> tuple[Version, list[str]]:
+        if not self.layers.ready:
+            raise Unavailable(
+                f"The sandbox is not ready, so no CLI runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
+            )
+        found = self.programs.get(cli)
+        if found.manifest.kind != "cli" or found.manifest.cli is None:
+            raise BadRequest(f"{cli} is a program, not a CLI: call its functions with program_call.", code="E_NOT_CLI")
+        return found, clis.check_args(args)
+
+    def _hidden_now(self, found: Version) -> list[str]:
+        """The secret values a CLI's command line is masked with in its audit event (none when unreadable)."""
+        try:
+            values, _ = self.vault.values(found.program, found.manifest.secrets) if self.vault else ({}, [])
+        except RrotorError:
+            return []
+        return sorted((v for v in values.values() if len(v) >= MASK_MIN), key=len, reverse=True)
+
+    async def _cli_call(
+        self, found: Version, args: list[str], line: str, stdin: Any, files: Any, caller: str, origin: str
+    ) -> Run:
+        cli = found.manifest.cli
+        assert cli is not None  # noqa: S101  (checked by _cli_found)
+        if not clis.allowed(cli.allow, args):
+            raise Forbidden(
+                f"{found.program} does not allow `{line}`: its allow patterns are {', '.join(cli.allow)}.",
+                code="E_CLI_DENIED",
+            )
+        text, given = clis.check_stdin(stdin), clis.check_files(files)
+        run = Run(new_id(self.node()), found.program, found.version, found.commit_sha, CLI, {}, caller, origin)
+        work = self.records.folder(run.id) / WORK
+        work.mkdir(parents=True)
+        run.inputs = {"args": args, "stdin": text, "files": clis.write_files(work, given)}
+        self.records.save(run)
+        self.records.log(run.id, {"event": "called", "command": line, "caller": caller, "version": found.version})
+        with logs.bind(**about(run)):
+            async with self._lock(run.id):
+                await self._go(run, found, None)
+        return run
+
+    async def _go_cli(self, run: Run, found: Version) -> None:
+        """A CLI's run: its approval first when its arguments need one, then its command in the sandbox."""
+        cli, manifest = found.manifest.cli, found.manifest
+        assert cli is not None  # noqa: S101  (a manifest of kind cli has one)
+        args = list(run.inputs.get("args") or [])
+        pattern = clis.matching(cli.approvals, args)
+        decided = RunState.from_json(run.state).approvals.get(CLI)
+        if pattern is not None and decided is None:
+            line = masked(clis.command_line(args), self._hidden_now(found))
+            prompt = f"Run `{found.program}: {line}`? It matches the approval pattern {pattern!r}."
+            run.status, run.pending, run.waiting_since = "needs_approval", {"kind": "approval", "key": CLI}, now()
+            run.result = {"status": "needs_approval", "data": {"command": line}, "step": CLI, "prompt": prompt}
+            self.records.save(run)
+            self.records.log(run.id, {"event": "waiting", "status": run.status, "step": CLI})
+            await self._tell(run)
+            return
+        if pattern is not None and not decided:
+            await self._finish(run, failed(CLI, "E_CLI_DECLINED", "The person declined the command."))
+            return
+        made = clis.installed(found.root / "cli")
+        if made is None:
+            missing = f"{run.program}'s install is missing: deploy it again."
+            await self._finish(run, failed(CLI, "E_CLI_INSTALL", missing))
+            return
+        values, refused = self._secrets(run, found)
+        if refused is not None:
+            await self._finish(run, refused)
+            return
+        hidden = sorted((v for v in values.values() if len(v) >= MASK_MIN), key=len, reverse=True)
+        if hidden:
+            self.hidden[run.id] = hidden
+        hosts = frozenset(manifest.hosts)
+        socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
+        home = self.programs.folder(run.program) / "home" if cli.home else None
+        if home is not None:
+            home.mkdir(parents=True, exist_ok=True)
+        mounts = dataclasses.replace(
+            self._mounts(run.program, found, socket),
+            cli=found.root / "cli",
+            work=self.records.folder(run.id) / WORK,
+            home=home,
+        )
+        paths = self.launcher.paths(mounts)
+        env = {
+            "PATH": CLI_PATH,
+            "HOME": paths.get("cli_home") or "/tmp",  # noqa: S108  (the sandbox's own tmpfs)
+            "TMPDIR": "/tmp",  # noqa: S108
+            "LANG": "C.UTF-8",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        if socket is not None:
+            env |= {k: PROXY for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")}
+            env["NODE_USE_ENV_PROXY"] = "1"
+        refs = cli.secret_refs()
+        env |= {k: (values[refs[k]] if k in refs else v) for k, v in cli.env.items()}
+        spec = {
+            "run": made.run,
+            "path": made.where(str(paths.get("cli_root"))),
+            "args": args,
+            "env": env,
+            "stdin": run.inputs.get("stdin"),
+            "cwd": paths.get("work"),
+            "cap": clis.OUTPUT_MAX,
+        }
+        await self._start(run, found, mounts, cli=spec, function=CLI, hosts=sorted(hosts), **paths)
 
     def _parts_refused(self, program: str, found: Version) -> dict[str, Any] | None:
         """Why the run cannot go: a part its manifest asks for is not installed (a licence never refuses a run)."""
@@ -315,6 +462,9 @@ class Runner:
 
     async def _go(self, run: Run, found: Version, answer: Any) -> None:
         manifest = found.manifest
+        if manifest.kind == "cli":
+            await self._go_cli(run, found)
+            return
         values, refused = self._secrets(run, found)
         if refused is not None:
             await self._finish(run, refused)
@@ -325,6 +475,26 @@ class Runner:
         hosts = frozenset(manifest.hosts)
         socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
         mounts = self._mounts(run.program, found, socket)
+        await self._start(
+            run,
+            found,
+            mounts,
+            function=run.function,
+            inputs=run.inputs,
+            approvals=manifest.functions[run.function].approvals,
+            state=RunState.from_json(run.state).to_json(),
+            answer=answer,
+            hosts=sorted(hosts),
+            clearance=run.clearance,
+            caller=run.caller,
+            secrets={"declared": manifest.secrets, "values": values},
+            sqlite="sqlite" in manifest.databases,
+            **self.launcher.paths(mounts),
+        )
+
+    async def _start(self, run: Run, found: Version, mounts: bwrap.Mounts, **start: Any) -> None:
+        """The run's worker started in its sandbox and sent `start`, then its first Result awaited."""
+        manifest = found.manifest
         limits = bwrap.Limits(manifest.limits.memory_mb, manifest.limits.seconds + 5)
         try:
             with self._span("rrotor.sandbox.start", run):
@@ -336,24 +506,12 @@ class Runner:
             await self._finish(run, failed("sandbox", "E_SANDBOX", f"The sandbox did not start: {err}"))
             return
         self.workers[run.id] = worker
-        state = RunState.from_json(run.state).to_json()
-        fn = manifest.functions[run.function]
         await worker.send(
             "start",
-            function=run.function,
-            inputs=run.inputs,
-            approvals=fn.approvals,
-            state=state,
-            answer=answer,
             seconds_left=self._left(run, found),
             sandbox=self.launcher.sandbox(mounts),
-            hosts=sorted(hosts),
-            clearance=run.clearance,
-            caller=run.caller,
             readonly=mounts.readonly,
-            secrets={"declared": manifest.secrets, "values": values},
-            sqlite="sqlite" in manifest.databases,
-            **self.launcher.paths(mounts),
+            **start,
         )
         await self._await_result(run, worker, found)
 
@@ -405,8 +563,10 @@ class Runner:
 
     async def _finish(self, run: Run, result: dict[str, Any]) -> None:
         self.workers.pop(run.id, None)
-        self.hidden.pop(run.id, None)
+        hidden = self.hidden.pop(run.id, None)
         await self.proxy.close(run.id)
+        if (self.records.folder(run.id) / WORK).is_dir():  # a CLI's run: only it has a working folder
+            result = self._cli_ended(run, result, hidden or [])
         run.status, run.result, run.pending, run.ended_at, run.waiting_since = (
             result["status"],
             result,
@@ -421,6 +581,20 @@ class Runner:
         if self.telemetry is not None:
             self.telemetry.ended(run.program, run.function, run.status, run.seconds)
         await self._tell(run)
+
+    def _cli_ended(self, run: Run, result: dict[str, Any], hidden: list[str]) -> dict[str, Any]:
+        """A CLI's run as it ends: the files its command made or changed added to its Result, its working folder and
+        stdin gone, its secrets' values masked in what it answers and keeps."""
+        work = self.records.folder(run.id) / WORK
+        data = result.get("data")
+        if result["status"] == "done" and isinstance(data, dict):
+            made, skipped = clis.collect(work, dict(run.inputs.get("files") or {}))
+            result = {**result, "data": {**data, "files": made, "files_skipped": skipped}}
+        shutil.rmtree(work, ignore_errors=True)
+        stdin = run.inputs.get("stdin")
+        run.inputs = masked({**run.inputs, "stdin": len(stdin.encode()) if isinstance(stdin, str) else None}, hidden)
+        answered: dict[str, Any] = masked(result, hidden)
+        return answered
 
     async def _tell(self, run: Run) -> None:
         if self.notify is not None:

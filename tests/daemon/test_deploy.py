@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import shutil
 import sys
 import zipfile
@@ -199,6 +200,43 @@ async def test_held_a_commit_not_here(tmp_path):
     with pytest.raises(DeployError) as caught:
         await deployer(tmp_path).held("sample", "c" * 40)
     assert caught.value.code == "E_COMMIT_MISSING"
+
+
+async def test_a_cli_deploys_with_its_install_and_no_program_py(tmp_path, repo: GitRepo):
+    from tests.fakes import ECHO, FakeFetch, cli_manifest, console_wheel, sha, tarball
+
+    archive = tarball({"bin/tool": ECHO})
+    url = "https://example.com/tool.tar.gz"
+    d = deployer(tmp_path)
+    d.installer.fetch = FakeFetch({url: archive})
+    block = {"install": {"url": url, "sha256": sha(archive)}}
+    commit = repo.commit({"glyphh.json": json.dumps(cli_manifest(cli=block))})
+    v = await d.from_bundle(repo.bundle(tmp_path / "b.bundle"), commit)
+    assert v.manifest.kind == "cli" and (v.root / "cli" / "installed.json").is_file()
+    assert (v.venv / "bin" / "python").exists() and not (v.src / "program.py").exists()
+    path, digest = wheel(tmp_path)  # a CLI's lock is its install's: never the venv's
+    wheel_bytes = console_wheel()
+    pypi = {"install": {"pypi": "hello==1.0", "sha256": sha(wheel_bytes)}, "command": "hello"}
+    whl = "https://files.pythonhosted.org/hello-1.0-py3-none-any.whl"
+    listing = {"urls": [{"packagetype": "bdist_wheel", "digests": {"sha256": sha(wheel_bytes)}, "url": whl}]}
+    answers = {"https://pypi.org/pypi/hello/1.0/json": json.dumps(listing).encode(), whl: wheel_bytes}
+    d.installer.fetch = FakeFetch(answers)
+    lock = f"tinypkg @ {path.as_uri()} --hash=sha256:{digest}\n"
+    second = repo.commit({"glyphh.json": json.dumps(cli_manifest(cli=pypi)), "requirements.lock": lock})
+    v2 = await d.from_bundle(repo.bundle(tmp_path / "c.bundle"), second)
+    assert (v2.root / "cli" / "site" / "tinypkg").is_dir()
+    assert not list(v2.venv.glob("lib/python*/site-packages/tinypkg"))
+
+
+async def test_a_cli_whose_install_fails_leaves_nothing(tmp_path, repo: GitRepo):
+    from tests.fakes import FakeFetch, cli_manifest
+
+    d = deployer(tmp_path)
+    d.installer.fetch = FakeFetch()
+    commit = repo.commit({"glyphh.json": json.dumps(cli_manifest())})
+    with pytest.raises(DeployError) as caught:
+        await d.from_bundle(repo.bundle(tmp_path / "b.bundle"), commit)
+    assert caught.value.code == "E_CLI_INSTALL" and d.programs.versions("tool") == []
 
 
 def test_git_env_carries_extra_config_and_the_token_in_the_environment(tmp_path):

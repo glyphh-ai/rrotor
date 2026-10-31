@@ -62,6 +62,7 @@ class Rules:
     read: tuple[str, ...]
     write: tuple[str, ...]
     tcp_ports: tuple[int, ...] = ()
+    exec_writes: bool = True  # whether what may be written may also be executed (not in a CLI's run)
 
 
 class Landlock:
@@ -96,7 +97,7 @@ class Landlock:
         ruleset = self._call(SYS_CREATE_RULESET, ctypes.byref(attr), size, 0)
         try:
             self._paths(ruleset, rules.read, READ & fs)
-            self._paths(ruleset, rules.write, fs)
+            self._paths(ruleset, rules.write, fs if rules.exec_writes else fs & ~EXECUTE)
             if net:
                 for port in rules.tcp_ports:
                     rule = NetPort(net, port)
