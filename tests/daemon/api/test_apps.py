@@ -322,7 +322,7 @@ async def test_publishing_is_a_persons_act_on_a_self_hosted_rrotor(hosted: Hoste
 
 async def test_a_browser_signs_in_to_glyphh_and_opens_what_its_roles_and_the_review_allow(hosted: Hosted):
     await publish_as_person(hosted)
-    client, s = hosted.api.client, hosted.api.services
+    client = hosted.api.client
     res = await client.get("/apps/board/", allow_redirects=False)
     assert res.status == 302 and res.headers["Location"] == "/auth/start?next=/apps/board/"
     res = await client.get("/auth/start?next=/apps/board/", allow_redirects=False)
