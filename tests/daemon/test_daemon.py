@@ -171,19 +171,28 @@ async def test_a_sign_in_is_asked_of_the_cloud_as_json(tmp_path, short_dir):
     async def broken(_: web.Request) -> web.Response:
         return web.Response(status=502, text="bad gateway")
 
+    async def token_endpoint(request: web.Request) -> web.Response:
+        form = await request.post()
+        seen.append((request.content_type, dict(form)))
+        return web.json_response({"access_token": "at"})
+
     app = web.Application()
     app.router.add_post("/v1/runtime/introspect", introspect)
     app.router.add_post("/broken", broken)
+    app.router.add_post("/oauth/token", token_endpoint)
     server = TestServer(app)
     await server.start_server()
     d = Daemon(config(tmp_path, short_dir), ready())
     try:
         url = f"http://127.0.0.1:{server.port}"
+        assert await d._post_form(f"{url}/oauth/token", {}, {"grant_type": "x"}) == (200, {"access_token": "at"})
+        assert seen == [("application/x-www-form-urlencoded", {"grant_type": "x"})]
+        assert await d._post_form(f"{url}/broken", {}, {}) == (502, None)
         assert await d._post(f"{url}/v1/runtime/introspect", {"Authorization": "Bearer r"}, {"token": "t"}) == (
             200,
             {"active": True},
         )
-        assert seen == [("Bearer r", {"token": "t"})]
+        assert seen[-1] == ("Bearer r", {"token": "t"})
         assert await d._post(f"{url}/broken", {}, {}) == (502, None)
     finally:
         if d.session is not None:
@@ -345,6 +354,11 @@ def self_daemon(tmp_path: Path, short_dir: Path, link: bool = True) -> Daemon:
 async def test_a_self_hosted_daemon_links_and_introspects_unless_its_link_is_off(tmp_path, short_dir):
     on = self_daemon(tmp_path / "on", short_dir)
     assert on.link.configured and on.link.state == "no_token" and on.services().introspect is not None
+    browser = on.services().browser
+    assert browser is not None and browser.address == "https://rrotor.acme.com" and on.services().artifacts.linked
+    assert browser.redirect_uri == "https://rrotor.acme.com/auth/callback" and on.handler.artifacts is on.artifacts
+    assert self_daemon(tmp_path / "off2", short_dir, link=False).services().browser is None
+    assert Daemon(config(tmp_path, short_dir), ready()).services().browser is None  # local: no sign-in to make
     assert on.heartbeat is not None and on.services().heartbeat is on.heartbeat
     off = self_daemon(tmp_path / "off", short_dir, link=False)
     assert off.link.credentials.token == TOKEN and not off.link.configured

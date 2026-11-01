@@ -256,6 +256,31 @@ async def test_a_cli_whose_install_fails_leaves_nothing(tmp_path, repo: GitRepo)
     assert caught.value.code == "E_CLI_INSTALL" and d.programs.versions("tool") == []
 
 
+APP = {"name": "board", "kind": "app", "app": {"title": "Board"}}
+
+
+async def test_from_files_commits_the_page_and_deploys_it_as_an_app(tmp_path):
+    d = deployer(tmp_path)
+    files = {"glyphh.json": json.dumps(APP).encode(), "index.html": b"<p>one</p>", "css/a.css": b"p{}"}
+    v, made = await d.from_files(files)
+    assert made and (v.program, v.version, v.manifest.kind) == ("board", 1, "app")
+    assert (v.src / "css" / "a.css").read_bytes() == b"p{}" and not (v.src / ".git").exists()
+    assert d.programs.active("board") == v and (v.venv / "bin" / "python").exists()
+    again, made = await d.from_files(files)  # the same files: the same commit, held already
+    assert not made and again.commit_sha == v.commit_sha and d.programs.versions("board") == [v]
+    files["index.html"] = b"<p>two</p>"
+    two, made = await d.from_files(files, activate=False)
+    assert made and two.version == 2 and d.programs.active("board") == v  # deployed, not active
+    assert list((tmp_path / "scratch").iterdir()) == []
+
+
+async def test_from_files_with_a_refused_manifest_leaves_nothing(tmp_path):
+    d = deployer(tmp_path)
+    with pytest.raises(DeployError) as caught:
+        await d.from_files({"glyphh.json": b'{"name": "board", "kind": "app"}', "index.html": b"x"})
+    assert caught.value.code == "E_MANIFEST" and d.programs.names() == []
+
+
 def test_git_env_carries_extra_config_and_the_token_in_the_environment(tmp_path):
     secret = token()
     env = deployer(tmp_path, git_env={"protocol.file.allow": "always"})._git_env(tmp_path, secret)

@@ -45,6 +45,15 @@ class Signed(BaseModel):
     signature: str
 
 
+class Reviewed(BaseModel):
+    """What the catalogue says of one of this rrotor's apps (docs/architecture.md, 5.8)."""
+
+    program: Name
+    version: int = Field(ge=1)
+    state: Literal["draft", "approved", "rejected", "retired"]
+    roles: list[str] = []
+
+
 class Welcome(Message):
     type: Literal["welcome"]
     accepted: bool = True
@@ -52,6 +61,14 @@ class Welcome(Message):
     licence: Signed | None = None
     license_key: str | None = None  # the licence key, preferred to `licence`
     keys: list[str] | None = None  # hosted: the runtime keys' SHA-256s, the whole list
+    artifacts: list[Reviewed] | None = None  # the catalogue's whole word on this rrotor's apps (None: an older server)
+    reviewers: list[str] | None = None  # the groups that review the org's apps, beside its admin
+
+
+class Artifact(Reviewed, Message):
+    """An app's review changed: approved (the version named is served, and activated), rejected or retired."""
+
+    type: Literal["artifact"]
 
 
 class Keys(Message):
@@ -117,7 +134,7 @@ class Ack(Message):
 
 
 Down = Annotated[
-    Welcome | Call | Continue | Cancel | Deploy | Keys | Pause | Resume | Ping | Pong | Ack,
+    Welcome | Call | Continue | Cancel | Deploy | Keys | Pause | Resume | Artifact | Ping | Pong | Ack,
     Field(discriminator="type"),
 ]
 DOWN: TypeAdapter[Down] = TypeAdapter(Down)
@@ -160,9 +177,15 @@ def event(seq: int, program: str, kind: str, data: Any) -> dict[str, Any]:
 
 
 def deployed(
-    program: str, version: int, commit_sha: str, repo: str | None = None, manifest: dict[str, Any] | None = None
+    program: str,
+    version: int,
+    commit_sha: str,
+    repo: str | None = None,
+    manifest: dict[str, Any] | None = None,
+    by: str | None = None,
 ) -> dict[str, Any]:
-    """After every deploy, however it was asked for: `repo` only for a deploy from a repo."""
+    """After every deploy, however it was asked for: `repo` only for a deploy from a repo; `by` the Glyphh subject
+    who published an app (null for a key, the local token or a deploy from a repo)."""
     return {
         "type": "deployed",
         "id": new_id(),
@@ -171,6 +194,7 @@ def deployed(
         "commit_sha": commit_sha,
         "repo": repo,
         "manifest": manifest,
+        "by": by,
     }
 
 

@@ -97,9 +97,30 @@ def test_deployed_carries_the_repo_and_the_manifest_or_nulls():
         "commit_sha": SHA,
         "repo": "owner/x",
         "manifest": {"name": "x"},
+        "by": None,
     }
     bare = p.deployed("x", 2, SHA)
     assert (bare["repo"], bare["manifest"]) == (None, None) and len(bare["id"]) == 32 and bare["id"] != full["id"]
+    assert p.deployed("x", 2, SHA, by="user_1")["by"] == "user_1"
+
+
+def test_artifact_messages_and_the_welcomes_word_on_the_apps():
+    reviewed = p.DOWN.validate_python(
+        {"type": "artifact", "program": "board", "version": 2, "state": "approved", "roles": ["sre"]}
+    )
+    assert isinstance(reviewed, p.Artifact) and (reviewed.version, reviewed.roles) == (2, ["sre"])
+    with pytest.raises(ValidationError):
+        p.DOWN.validate_python({"type": "artifact", "program": "board", "version": 2, "state": "pending"})
+    welcome = p.DOWN.validate_python(
+        {
+            "type": "welcome",
+            "artifacts": [{"program": "board", "version": 1, "state": "draft"}],
+            "reviewers": ["Platform-Admins"],
+        }
+    )
+    assert isinstance(welcome, p.Welcome) and welcome.artifacts is not None
+    assert (welcome.artifacts[0].roles, welcome.reviewers) == ([], ["Platform-Admins"])
+    assert p.DOWN.validate_python({"type": "welcome"}).artifacts is None  # type: ignore[union-attr]
 
 
 def test_usage_is_numbered_and_carries_each_keys_calls():

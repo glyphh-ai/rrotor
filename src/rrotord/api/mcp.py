@@ -35,7 +35,9 @@ INSTRUCTIONS = (
     "answers needs_approval, then program_continue runs it once the person approves). The vendors' agent CLIs (claude, "
     "codex, gemini, cursor, grok, copilot) and glyphh come built in; cli_login signs one in from the person's phone: "
     "it answers needs_input with an address (and a device code) to open, and program_continue brings back the code "
-    "the page shows. A program runs a CLI it names in its clis with ctx.cli."
+    "the page shows. A program runs a CLI it names in its clis with ctx.cli. app_publish puts a page Claude wrote (a "
+    "Claude Code artifact, .html or .md) on this runtime as an app for the org's people, reviewed in Glyphh's "
+    "catalogue before it is served at /apps/<name>/; apps_list shows the apps here and each one's review state."
 )
 
 
@@ -126,6 +128,14 @@ async def cli_login(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.cli_login(s, {"cli": ops.text_of(args, "cli")})
 
 
+async def apps_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
+    return await ops.apps_list(s)
+
+
+async def app_publish(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.app_publish(s, args)
+
+
 async def schedules_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
     return await ops.schedules(s)
 
@@ -140,7 +150,47 @@ async def schedule_resume(s: Services, args: dict[str, Any]) -> dict[str, Any]:
 
 RUN = _obj({"run_id": {"type": "string"}}, ["run_id"])
 SCHEDULE_ARGS = _obj({"program": {"type": "string"}, "name": {"type": "string"}}, ["program", "name"])
+FILES = {
+    "type": "object",
+    "additionalProperties": {"anyOf": [{"type": "string"}, _obj({"base64": {"type": "string"}}, ["base64"])]},
+}
 TOOLS: tuple[Tool, ...] = (
+    Tool(
+        "apps_list",
+        "The apps here (pages published from Claude for the org's people): each one's title, version, roles, the "
+        "catalogue's review state (draft, approved, rejected, retired, unknown) and the address a browser opens it at.",
+        _obj({}),
+        apps_list,
+        True,
+    ),
+    Tool(
+        "app_publish",
+        "Publish a page Claude wrote (a Claude Code artifact: one .html or .md file, and any files beside it) to this "
+        "runtime as an app for the org's people: name (the program's name, kebab-free: lower-case, digits, _), title, "
+        "description, roles (groups, admin, member; empty: everyone in the org), files (path to text or {base64}; 64 "
+        "and 16 MiB at most), entry (default index.html), and, when the page calls functions, functions ({name: "
+        "{description, inputs}}) with program (the text of program.py; a function runs as the viewer, with their "
+        "CLIs). The app awaits the org's review in Glyphh (an admin or a reviewer approves it), then is served at the "
+        "url answered. A new version of an approved app keeps the approved one serving until it is approved.",
+        _obj(
+            {
+                "name": {"type": "string"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "roles": {"type": "array", "items": {"type": "string"}, "maxItems": 50},
+                "files": FILES,
+                "entry": {"type": "string"},
+                "functions": {"type": "object", "additionalProperties": {"type": "object"}},
+                "program": {"type": "string"},
+                "hosts": {"type": "array", "items": {"type": "string"}},
+                "secrets": {"type": "array", "items": {"type": "string"}},
+                "clis": {"type": "array", "items": {"type": "string"}},
+                "limits": {"type": "object"},
+            },
+            ["name", "title", "files"],
+        ),
+        app_publish,
+    ),
     Tool(
         "programs_list",
         "The programs here: each one's versions, the active one and its functions.",

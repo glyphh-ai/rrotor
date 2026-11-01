@@ -74,3 +74,15 @@ async def test_the_subject_signed_in_is_kept_with_the_answer(tmp_path):
     i = Introspector("https://c", credentials(tmp_path), cloud.post)
     assert await i.check("a") == (True, "user_1") and await i.check("a") == (True, "user_1")
     assert await i.check("b") == (True, None) and len(cloud.calls) == 2
+
+
+async def test_the_role_and_groups_the_cloud_names_make_the_viewers_roles_and_the_actor(tmp_path):
+    named = {"active": True, "sub": "user_1", "role": "member", "groups": ["SRE", "Platform-Admins"]}
+    cloud = Cloud([(200, named), (200, {"active": True, "sub": "user_2", "role": 3, "groups": "sre"})])
+    i = Introspector("https://c", credentials(tmp_path), cloud.post)
+    who = await i.who("a")
+    assert (who.sub, who.role, who.groups) == ("user_1", "member", ("SRE", "Platform-Admins"))
+    assert who.roles == {"member", "sre", "platform-admins"}
+    assert who.actor() == {"type": "sign-in", "sub": "user_1", "role": "member", "groups": ["SRE", "Platform-Admins"]}
+    odd = await i.who("b")
+    assert (odd.role, odd.groups, odd.roles, odd.actor()) == (None, (), set(), {"type": "sign-in", "sub": "user_2"})

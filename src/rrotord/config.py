@@ -99,6 +99,16 @@ class Config:
         return self.mode in ("hosted", "self")
 
     @property
+    def address(self) -> str:
+        """This rrotor's address as a browser reaches it: its one public host (self), its machine's (hosted), or
+        the host's loopback (local)."""
+        if self.public_host is not None:
+            return f"https://{self.public_host}"
+        if self.mode == "hosted" and self.machine_id:
+            return f"https://{self.machine_id}.{self.public_domain}"
+        return f"http://127.0.0.1:{self.host_port}"
+
+    @property
     def otel_env(self) -> dict[str, str]:
         return dict(self.otel)
 

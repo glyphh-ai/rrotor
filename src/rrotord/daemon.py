@@ -21,7 +21,9 @@ from rrotord.access import Access
 from rrotord.aggregate import Aggregate, ClusterAudit
 from rrotord.api.app import make
 from rrotord.api.routes import Services
+from rrotord.artifacts import Artifacts
 from rrotord.audit import SERVER, Audit, current
+from rrotord.browser import Browser
 from rrotord.cluster.node import Cluster
 from rrotord.config import Config
 from rrotord.deploy import Deployer
@@ -72,6 +74,8 @@ class Daemon:
     drain: Drain | None = field(init=False)
     cluster: Cluster = field(init=False)
     scheduler: Scheduler = field(init=False)
+    artifacts: Artifacts = field(init=False)
+    browser: Browser | None = field(init=False)
     session: aiohttp.ClientSession | None = None
 
     def __post_init__(self) -> None:
@@ -122,7 +126,16 @@ class Daemon:
         self.aggregate = Aggregate(self.audit, self.gathered, self.cluster)
         self.aggregate.drain = self.drain
         self.cluster.on_telemetry = self.aggregate.received
-        self.handler = handler = LinkHandler(programs, None, self.deployer, self.licence, self.access, self.audit)  # type: ignore[arg-type]
+        self.artifacts = Artifacts(c.data, linked=c.link)
+        self.handler = handler = LinkHandler(
+            programs,
+            None,  # type: ignore[arg-type]
+            self.deployer,
+            self.licence,
+            self.access,
+            self.audit,
+            self.artifacts,
+        )
         self.runner = Runner(
             programs=programs,
             records=Records(c.data),
@@ -161,6 +174,11 @@ class Daemon:
         )
         self.cluster.roled = self.link.regate.set
         handler.link = self.link
+        self.browser = (
+            Browser(c.data, c.server, c.address, c.node_id, self._post, self._post_form)
+            if c.public and c.link
+            else None
+        )
         self.heartbeat = (
             Heartbeat(
                 server=c.server,
@@ -244,6 +262,16 @@ class Daemon:
             except (aiohttp.ContentTypeError, ValueError):
                 return res.status, None
 
+    async def _post_form(self, url: str, headers: dict[str, str], form: dict[str, str]) -> tuple[int, Any]:
+        """A form-encoded POST to the Cloud (OAuth's token endpoint, rrotord/browser.py), answered as (status, body)."""
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+        async with self.session.post(url, headers=headers, data=form, timeout=aiohttp.ClientTimeout(total=10)) as res:
+            try:
+                return res.status, await res.json()
+            except (aiohttp.ContentTypeError, ValueError):
+                return res.status, None
+
     async def _connect(self, url: str, headers: dict[str, str]) -> aiohttp.ClientWebSocketResponse:
         if self.session is None:
             self.session = aiohttp.ClientSession()
@@ -274,6 +302,8 @@ class Daemon:
             self.cluster,
             self.gathered,
             self.scheduler,
+            self.artifacts,
+            self.browser,
         )
 
     def install_builtin(self) -> list[str]:

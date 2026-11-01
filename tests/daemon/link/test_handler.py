@@ -12,6 +12,7 @@ import pytest
 
 import rrotor
 from rrotord.access import Access
+from rrotord.artifacts import Artifacts
 from rrotord.deploy import Deployer, Tools
 from rrotord.licence import Licence
 from rrotord.link import protocol as p
@@ -151,6 +152,7 @@ async def test_deploy_from_the_repo_answers_deployed(env, tmp_path):
             "commit_sha": sha,
             "repo": "owner/sample",
             "manifest": env.programs.active("sample").manifest.model_dump(mode="json"),
+            "by": None,
         }
     ]
     assert env.link.sent[0]["manifest"]["name"] == "sample"
@@ -212,6 +214,55 @@ async def test_deploy_without_a_link_says_nothing(env):
     await env.handler.on_deploy(deploy("activate", "c" * 40))
     await env.handler.on_deploy(deploy("activate", "d" * 40))
     assert env.link.sent == []
+
+
+APP = {"name": "board", "kind": "app", "app": {"title": "Board"}}
+
+
+def app_versions(env: Env, n: int) -> None:
+    for i in range(1, n + 1):
+        install(env.programs, APP, "", sha=str(i) * 40, version=i)
+
+
+async def test_the_catalogues_word_on_an_app_is_kept_and_an_approved_version_activated(env, tmp_path):
+    env.handler.artifacts = Artifacts(tmp_path / "data")
+    app_versions(env, 2)
+    assert env.programs.active("board").version == 2
+    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=1, state="approved"))
+    assert env.handler.artifacts.get("board") == {"version": 1, "state": "approved", "roles": []}
+    assert env.programs.active("board").version == 1  # the version approved is the one served
+    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=1, state="approved"))
+    assert env.programs.active("board").version == 1  # already active: nothing more
+    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=2, state="rejected"))
+    assert env.programs.active("board").version == 1 and env.handler.artifacts.state("board", 2) == "rejected"
+    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=9, state="approved"))
+    assert env.programs.active("board").version == 1  # a version not held here: kept, nothing activated
+    await env.handler.on_artifact(p.Artifact(type="artifact", program="nope", version=1, state="approved"))
+    assert env.handler.artifacts.get("nope") == {"version": 1, "state": "approved", "roles": []}
+    env.handler.artifacts = None
+    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=2, state="approved"))
+    assert env.programs.active("board").version == 1  # no catalogue here: ignored
+
+
+async def test_a_welcome_carries_the_catalogues_whole_word_and_the_reviewers(env, tmp_path):
+    env.handler.artifacts = Artifacts(tmp_path / "data")
+    app_versions(env, 2)
+    reviewed = [
+        p.Reviewed(program="board", version=1, state="approved", roles=["sre"]),
+        p.Reviewed(program="other", version=3, state="rejected"),
+    ]
+    await env.handler.on_welcome(p.Welcome(type="welcome", artifacts=reviewed, reviewers=["Ops"]))
+    assert env.handler.artifacts.get("board") == {"version": 1, "state": "approved", "roles": ["sre"]}
+    assert env.handler.artifacts.get("other") == {"version": 3, "state": "rejected", "roles": []}
+    assert env.handler.artifacts.reviewers == ["ops"] and env.programs.active("board").version == 1
+    await env.handler.on_welcome(p.Welcome(type="welcome"))  # an older server: nothing said, nothing changed
+    assert env.handler.artifacts.get("board") is not None
+
+
+async def test_report_carries_who_published(env):
+    install(env.programs, APP, "", sha="1" * 40)
+    await env.handler.report(env.programs.active("board"), None, "user_1")
+    assert env.link.sent[0]["by"] == "user_1" and env.link.sent[0]["manifest"]["kind"] == "app"
 
 
 async def test_a_welcomes_licence_key_is_offered_preferred_to_its_legacy_licence_and_a_bad_one_logged(
