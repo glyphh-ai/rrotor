@@ -5,7 +5,8 @@ the signature is Ed25519 over the payload's exact bytes as decoded, checked with
 
 A good key lifts Community's limits to its own until `expires_at`, and holds them `GRACE_DAYS` past it (rrotor's
 constant, not a field: a key cannot grant itself more). Release N still takes the plan's legacy `{payload,
-signature}` licence, mapped to a key (`legacy`); release N+1 drops it (docs/architecture.md, 9)."""
+signature}` licence, mapped to a key (`legacy`); release N+1 drops it (docs/architecture.md, 9). A key's
+`max_precedents` (an Ada Cloud limit the server still writes) is not read here: rrotor runs no Ada models."""
 
 from __future__ import annotations
 
@@ -34,7 +35,6 @@ FIELDS = (
     "license_id",
     "tier",
     "max_nodes",
-    "max_precedents",
     "cluster_sync_enabled",
     "issued_at",
     "expires_at",
@@ -48,7 +48,6 @@ class Plan:
 
     tier: str
     max_nodes: int | None
-    max_precedents: int | None
     cluster_sync_enabled: bool
 
     @property
@@ -57,12 +56,12 @@ class Plan:
         return self.tier == "enterprise" and self.cluster_sync_enabled
 
 
-COMMUNITY = Plan("free", 1, 5000, False)  # no key, or one that has stopped counting
+COMMUNITY = Plan("free", 1, False)  # no key, or one that has stopped counting
 PLANS = {  # the server's table, used only to map a legacy licence: a key's own numbers are what rrotor acts on
     "free": COMMUNITY,
-    "pro": Plan("pro", 3, 50000, True),
-    "team": Plan("team", 10, 500000, True),
-    "enterprise": Plan("enterprise", None, None, True),
+    "pro": Plan("pro", 3, True),
+    "team": Plan("team", 10, True),
+    "enterprise": Plan("enterprise", None, True),
 }
 
 
@@ -168,7 +167,6 @@ def parse(text: str) -> Key:
     plan = Plan(
         data["tier"],
         _count(data, "max_nodes", 1),
-        _count(data, "max_precedents", 0),
         data["cluster_sync_enabled"],
     )
     return Key(license_id, plan, _when(data, "issued_at"), _when(data, "expires_at"), data["customer_id"], text.strip())
@@ -203,7 +201,7 @@ def legacy(payload: Any, signature: Any, runtime_id: str | None) -> Key:
     named_id, customer = payload.get("licence_id"), payload.get("org_id")
     return Key(
         str(named_id) if named_id is not None else None,
-        Plan(table.tier, table.max_nodes, table.max_precedents, sync),
+        Plan(table.tier, table.max_nodes, sync),
         None,
         expires + timedelta(days=grace),
         str(customer) if customer is not None else None,

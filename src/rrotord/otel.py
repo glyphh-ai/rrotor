@@ -272,8 +272,8 @@ class Collect(SpanProcessor):
 
 
 class Telemetry:
-    """The tracer and the meter: `rrotor.runs` (counter: model, function, status), `rrotor.run.seconds` (histogram),
-    and gauges added by what they watch (`gauge`): the precedents, the link's state, the drain's drops."""
+    """The tracer and the meter: `rrotor.runs` (counter: program, function, status), `rrotor.run.seconds` (histogram),
+    and gauges added by what they watch (`gauge`): the link's state, the cluster's term and lag, the drain's drops."""
 
     def __init__(
         self, res: Resource, sample: sampling.Sampler, take: Callable[[ReadableSpan], None], payloads: bool = False
@@ -326,9 +326,9 @@ class Telemetry:
         if self.payloads:
             span.set_attributes({f"rrotor.{k}": clip(v) for k, v in given.items()})
 
-    def ended(self, model: str, function: str, status: str, seconds: float) -> None:
-        self.runs.add(1, {"model": model, "function": function, "status": status})
-        self.seconds.record(seconds, {"model": model, "function": function})
+    def ended(self, program: str, function: str, status: str, seconds: float) -> None:
+        self.runs.add(1, {"program": program, "function": function, "status": status})
+        self.seconds.record(seconds, {"program": program, "function": function})
 
     def collect(self) -> MetricsData | None:
         return self.reader.get_metrics_data()

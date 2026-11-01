@@ -1,9 +1,9 @@
 """The API in a cluster (docs/specs/cluster.md, 3): what a follower sends to its head, what goes to the node that holds
 a run, and what a forwarded request does where it lands.
 
-- **Writes go to the head:** a call of a function marked `"writes": true` (the default for a model with data), any
-  call of a model with data that is not Ada (the head's alone), a deploy. Reads (`"writes": false`) run here, on
-  this node's replica.
+- **Writes go to the head:** a call of a function marked `"writes": true`, any call of a program with data (its data
+  folder is the head's alone), any command of a CLI (its install and home are the head's), a deploy. Calls of a
+  program without data marked `"writes": false` run here, on this node's copy of the program.
 - **A run lives on the node that ran it** (`<node id>~<uuid>`): its continue, cancel, status and log go there, by
   way of the head (`E_RUN_LOST`, 410, when that node is gone). `GET /v1/approvals` gathers every node's.
 - **Commit:** a write done on the head (here, or forwarded to it) is answered once committed: at once without HA
@@ -45,11 +45,11 @@ def follower(s: Services) -> bool:
     return s.cluster is not None and s.cluster.role == "follower"
 
 
-def writes(s: Services, model: str, function: str, version: int | None) -> bool:
-    """Whether a call runs on the head: its function writes, or its model is the head's alone. A model or version
+def writes(s: Services, program: str, function: str, version: int | None) -> bool:
+    """Whether a call runs on the head: its function writes, or its program is the head's alone. A program or version
     this node does not hold (yet) is the head's to answer for."""
     try:
-        found = s.models.get(model, version)
+        found = s.programs.get(program, version)
     except RrotorError:
         return True
     return found.manifest.writes(function)
@@ -125,6 +125,8 @@ async def _serve(s: Services, op: Any, args: dict[str, Any]) -> dict[str, Any]:
     match op:
         case "call":
             return await ops.call(s, dict(args.get("data") or {}), str(args.get("caller") or "claude"))
+        case "cli":
+            return await ops.cli_run(s, dict(args.get("data") or {}), str(args.get("caller") or "claude"))
         case "deploy":
             return await ops.deploy(s, dict(args.get("data") or {}))
         case "resume":
@@ -141,4 +143,8 @@ async def _serve(s: Services, op: Any, args: dict[str, Any]) -> dict[str, Any]:
             return {"approvals": s.runner.approvals()}
         case "audit":
             return await routes.audited(s, args)
+        case "secrets":
+            return await ops.secrets_list(s, str(args.get("program") or ""))
+        case "schedules":
+            return await ops.schedules(s)
     raise BadRequest(f"There is no forwarded operation {op!r}.", code="E_CLUSTER_MESSAGE")

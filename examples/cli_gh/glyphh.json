@@ -1,0 +1,20 @@
+{
+  "name": "github",
+  "kind": "cli",
+  "description": "GitHub's gh, from its release tarball. PLACEHOLDER: the version and sha256 are placeholders; pin a real release and its checksum before deploying",
+  "cli": {
+    "install": {
+      "url": "https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_linux_amd64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "command": "gh",
+    "allow": ["pr *", "issue *", "repo view *", "api repos/*"],
+    "approvals": ["pr merge *", "pr close *", "issue close *"],
+    "env": { "GH_TOKEN": "secret:GH_TOKEN", "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1" },
+    "home": true,
+    "interactive": false
+  },
+  "hosts": ["api.github.com", "github.com"],
+  "secrets": ["GH_TOKEN"],
+  "limits": { "seconds": 120, "memory_mb": 512 }
+}

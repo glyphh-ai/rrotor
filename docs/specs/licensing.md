@@ -14,7 +14,6 @@ honest accounting rather than a lock ([Threat model](#threat-model)).
 |---|---|---|---|---|
 | Price | $0 | $99/month | $299/month | by contract |
 | `max_nodes`: nodes in one cluster | 1 | 3 | 10 | unlimited (`null`) |
-| `max_precedents`: per node, across all its models | 5,000 | 50,000 | 500,000 (TBD) | unlimited (`null`) |
 | `cluster_sync_enabled` | no | yes | yes | yes |
 | Failover ([cluster.md](cluster.md#4-membership-and-the-head)) | none | by restart or by hand | by restart or by hand | automatic (HA) |
 | Air-gapped | no | optional | optional | yes |
@@ -33,12 +32,13 @@ Ed25519 over the payload's **exact bytes** as decoded (no canonicalisation: what
 | `license_id` | UUID | This key |
 | `tier` | `free` \| `pro` \| `team` \| `enterprise` | The plan; HA and the audit log follow from `enterprise` |
 | `max_nodes` | int ≥ 1, or `null` | Members one cluster may have |
-| `max_precedents` | int ≥ 0, or `null` | Precedents one node may hold, across its models |
 | `cluster_sync_enabled` | bool | Whether the cluster transport may start |
 | `issued_at`, `expires_at` | RFC 3339 UTC | Issued at a payment; expires at the end of the paid month |
 | `customer_id` | string | The paying customer (the server's id, no name or address) |
 
-Unknown fields are ignored; a missing or mistyped known field makes the key **bad**.
+Unknown fields are ignored; a missing or mistyped known field makes the key **bad**. The server also writes
+`max_precedents` into a key: a limit of Ada, which lives in Ada Cloud on the server, not in rrotor. rrotor neither
+requires nor reads it ([2](#2-precedents-are-not-rrotors)).
 
 **The public key is in the code**, `rrotord/licence_key.py`: a tuple of raw Ed25519 public keys (base64url), the
 current one and, during a rotation, the next. A key is good if any of them verifies it. `RROTOR_LICENCE_PUBLIC_KEY`
@@ -82,19 +82,18 @@ can say what expired) and Community limits apply.
 
 ### Replacing today's licence (the migration)
 
-One model: the key. Today's `{payload, signature}` licence (plan, limits, mods, features, `runtime_id`, `kind`,
+One program: the key. Today's `{payload, signature}` licence (plan, limits, mods, features, `runtime_id`, `kind`,
 24 hours plus `grace_days`) goes, in two releases.
 
 1. **rrotor N** reads the key from every source above, and still takes a legacy licence wherever one arrives,
-   mapped: `plan` to `tier` (unknown: `free`), `max_nodes` and `max_precedents` from the plan table above,
+   mapped: `plan` to `tier` (unknown: `free`), `max_nodes` from the plan table above,
    `cluster_sync_enabled` from `features.sync`, `expires_at` plus its `grace_days` as `expires_at`. The server
    sends both `licence` and `license_key` in `welcome` and the heartbeat's answer; rrotor prefers the key.
 2. **rrotor N+1** drops the legacy path: `rrotord/keys.py`'s `canonical`, the `runtime_id` check, `kind`, `mods`,
    `features` and `E_NOT_IN_PLAN` for an expired licence.
 
-What changes for a caller: **an Ada model runs with no key**. Today no licence, or an expired one, refuses Ada runs
-(`E_NOT_IN_PLAN`); under the key the worst case is Community's 5,000 precedents. Nothing a licence does refuses a
-run. The key is not bound to a runtime (it carries no `runtime_id`): one customer's key serves each of their
+What changes for a caller: **a program runs with no key**. Nothing a licence does refuses a run; the worst case is
+Community's limits (one node, no sync). The key is not bound to a runtime (it carries no `runtime_id`): one customer's key serves each of their
 clusters, and `max_nodes` bounds each cluster, not the customer ([3](#3-the-node-cap)).
 
 `GET /v1/licence` and the health answer:
@@ -102,58 +101,15 @@ clusters, and `max_nodes` bounds each cluster, not the customer ([3](#3-the-node
 ```json
 {"tier": "pro", "community": false, "license_id": "…", "customer_id": "…", "source": "heartbeat",
  "issued_at": "…", "expires_at": "…", "state": "live", "days_left": 12,
- "max_nodes": 3, "max_precedents": 50000, "cluster_sync_enabled": true,
- "precedents": {"held": 1200, "cap": 50000, "over": false}}
+ "max_nodes": 3, "cluster_sync_enabled": true, "ha": false}
 ```
 
-## 2. The precedent cap
+## 2. Precedents are not rrotor's
 
-**The cap is per node, across all of the node's Ada models**: `max_precedents` against the sum of every Ada store's
-rows (`rrotor.ada.count`, as today). In a cluster every node holds the whole synced store, so the cap is on the
-synced store's size, and the head, the only writer, enforces it ([cluster.md](cluster.md#5-licensing-in-a-cluster)).
-
-### Where it is checked
-
-| Path | Checked | How |
-|---|---|---|
-| `ctx.ada.record(...)` | Yes | The SDK's wrapper (`rrotor/ada.py`, `_cap`), as today: the model's own count live, plus the others' as counted when the run started (`limits.precedents_elsewhere`) |
-| A `record` whose key is already in the store | Allowed at the cap | It replaces a row and does not grow the store (the kernel's `INSERT OR REPLACE` by the spec's key); the wrapper looks the key up first |
-| `ctx.ada.space.merge(path)`, the kernel's bulk union | Yes, all or nothing | The wrapper counts the rows the merge would add; past the cap the whole merge is refused |
-| `learn`, `calibrate`, `refresh`, `configure`, a re-encode | Never | They add no precedent |
-| A deploy | Never | No deploy brings precedents: the store lives in the model's data folder, outside git, and a re-encode keeps its rows |
-| A follower applying the head's log | Never | The head checked it |
-
-### What the caller gets
-
-Over the cap, the wrapper raises `rrotor.ada.LimitExceeded`. A model may catch it; uncaught, the worker turns it
-into a finished run, not a failed one: `Result.done` whose data is
-
-```json
-{"status": "limit_exceeded", "indexed": false,
- "message": "Precedent store capacity limit reached (50,000 max for the Pro plan). Upgrade the key to index further precedents.",
- "precedents": 50000, "cap": 50000}
-```
-
-The REST answer is 200 with that as `data`; MCP's `model_call` returns it as the tool's result, not a tool error;
-the SDKs (`glyphh-ai/glyphh`) add `result.limit_exceeded`. Never a crash, never an exception to the caller, never
-`failed`. `E_LIMIT_PRECEDENTS` goes. Inside a bulk loop the call ends at the first refused record; the precedents
-already recorded in the run stay.
-
-### Concurrency: the overshoot stays, bounded
-
-Today two runs of different Ada models at once each see the other's count from when they started, and can overshoot
-by what the other records meanwhile; the next run of each is refused. **Kept.** Closing it needs a counter shared
-across sandboxes on the hot path of every record (a call out of the sandbox, or one SQLite file every store writes
-through); the overshoot is at most what concurrent runs of *other* models record in one run, and the cap is a plan
-limit, not a safety property. Runs of the same model share its store and count it live. In a cluster the head is the
-only writer, so this is the same there.
-
-### Over the cap after a downgrade
-
-Nothing is deleted and nothing goes read-only. Every store keeps every row; queries, `facts`, `probabilities`,
-`learn`, `calibrate` and settings work; records that would grow the store answer `limit_exceeded` until the total is
-below the cap (by an upgrade, or by the owner removing a model or rows). `GET /v1/licence` shows `precedents.over:
-true`; the daemon's nine-minute count logs a warning once per change.
+rrotor runs no Ada models: Ada, its precedent stores and the `max_precedents` cap live in Ada Cloud on the server.
+rrotor ignores a key's `max_precedents` (present or not, whatever its value), counts no precedents, and shows none:
+`GET /v1/licence` and the health have no `max_precedents` or `precedents`, the heartbeat and `usage` carry no
+precedent count, and the drain has no precedent gauge. A program's own data folder is not capped by the licence.
 
 ## 3. The node cap
 
@@ -181,11 +137,11 @@ node.
 ## 5. The heartbeat
 
 Unchanged in where and when (self-hosted with the link on, at boot and every 24 hours, `POST
-{RROTOR_SERVER}/v1/license/verify`, the runtime token, fail-open). The body gains four fields:
+{RROTOR_SERVER}/v1/license/verify`, the runtime token, fail-open). The body gains three fields:
 
 ```json
 {"machine": "<64 hex>", "licence_id": "<uuid or null>", "version": "0.2.0", "active_runs": 0,
- "node_id": "rrotor-1", "cluster_id": "<uuid or null>", "role": "standalone | head | follower", "precedents": 1200}
+ "node_id": "rrotor-1", "cluster_id": "<uuid or null>", "role": "standalone | head | follower"}
 ```
 
 The answer gains `license_key`: the newest key the server holds for the runtime's customer. A fresh key per payment
@@ -195,17 +151,14 @@ machine or its data is added.
 
 ## Threat model
 
-- **Against callers, the caps hold.** A runtime key or a sign-in cannot record past the cap, change the key or join
-  a node: the key comes from the environment, a file, the heartbeat or the head; `PUT /v1/licence` is local only;
+- **Against callers, the caps hold.** A runtime key or a sign-in cannot change the key or join a node: the key comes from the environment, a file, the heartbeat or the head; `PUT /v1/licence` is local only;
   joining needs the cluster secret.
-- **Against the operator, they are accounting.** The operator owns the box: they can patch rrotor, write rows into
-  a store from their own model code with raw SQLite, or run more standalone nodes. What is worth having, and is
-  cheap:
+- **Against the operator, they are accounting.** The operator owns the box: they can patch rrotor or run more
+  standalone nodes. What is worth having, and is cheap:
   - the key is signed, and the public key is in the code, not the environment, so a higher tier cannot be forged
     without changing rrotor itself;
-  - the count is the store's rows, read from the store each time, not a counter that can be edited;
-  - the daemon's own nine-minute count is reported (health, heartbeat `precedents`), so a store far past its cap
-    shows on the platform;
+  - every node heartbeats with its `node_id`, `cluster_id` and `role`, so more nodes than the plan shows on the
+    platform;
   - newest-key-wins, so an old higher-tier key cannot be replayed over a downgrade.
 - **Not attempted:** binding a key to hardware, obfuscation, refusing to run when the server is unreachable. A
   self-hosted customer who removes the checks is in breach of contract, and the server's soft counts are how that
@@ -221,10 +174,7 @@ machine or its data is added.
 | The file re-read every hour and on `SIGHUP` | An air-gapped renewal without a restart |
 | A legacy `{payload, signature}` mapped (N); refused (N+1) | The migration |
 | `RROTOR_LICENCE_PUBLIC_KEY` set to an attacker's key: their key is still refused | The public key is the code's |
-| `tests/sdk/test_ada.py`: at `max_precedents` a new key gives `limit_exceeded` and `indexed: false`, the store's count unchanged; a replace at the cap goes; a merge past it adds nothing | The cap on each path |
-| `test_engine.py`: a run whose record is refused ends `done` with the data above, `end` runs, the run is not `failed`; MCP's `model_call` result is not an error | What the caller gets |
-| Two models, cap 10, each with 6: the second's run is refused at its first record | Across models |
-| A store of 60 under a cap of 50: queries and `learn` answer, record refuses, nothing deleted | After a downgrade |
+| A key with `max_precedents` mistyped, or without it, parses to the same plan | `max_precedents` is not read |
 | `cluster_sync_enabled: false` with `RROTOR_CLUSTER=on`: no listener on the cluster port, the log line | Sync gated |
 | A head with `max_nodes: 2` and three nodes: the third's join is `E_CLUSTER_FULL`, its `/readyz` is 503 | The node cap ([cluster.md](cluster.md#11-build-order)) |
 | The heartbeat's body is exactly the fields above | Nothing else goes up |

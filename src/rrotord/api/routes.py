@@ -2,10 +2,10 @@
 hosted one's callers, at its one public host for a self-hosted one's. The operations themselves are in ops.py, shared
 with the MCP server (mcp.py).
 
-What changes the runtime itself, not its models (its link's token, its parts, its licence), answers only on a local
+What changes the runtime itself, not its programs (its link's token, its parts, its licence), answers only on a local
 rrotor, to its owner's mod with the local token. A hosted or self-hosted rrotor takes those from its environment, its
 image and Glyphh (the link, the heartbeat, a licence key in GLYPHH_LICENSE_KEY or /etc/rrotor/license.key), never
-from a caller: a runtime key or a Glyphh sign-in calls and deploys models, and is refused E_LOCAL_ONLY there."""
+from a caller: a runtime key or a Glyphh sign-in calls and deploys programs, and is refused E_LOCAL_ONLY there."""
 
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ from rrotord.errors import BadRequest, Forbidden, RrotorError
 from rrotord.introspect import Introspector
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
-from rrotord.models import Models, Version
 from rrotord.parts import Parts
-from rrotord.precedents import Precedents
+from rrotord.programs import Programs, Version
 from rrotord.runner.engine import Runner
 from rrotord.sandbox.probe import Layers
+from rrotord.scheduler import Scheduler
 
 BODY_MAX = 96 * 1024 * 1024  # a bundle in base64, with room
 
@@ -63,7 +63,7 @@ class HeartbeatView(Protocol):
 @dataclass(slots=True)
 class Services:
     config: Config
-    models: Models
+    programs: Programs
     deployer: Deployer
     runner: Runner
     credentials: Credentials
@@ -76,11 +76,11 @@ class Services:
     introspect: Introspector | None = None  # hosted: a Glyphh sign-in checked with the Cloud
     report: Report | None = None  # after every deploy, `deployed` up the link; none in tests without a link
     heartbeat: HeartbeatView | None = None  # self, the link on: the last heartbeat
-    precedents: Precedents | None = None  # the daemon's nine-minute count; counted here when there is none
     audit: Audit | None = None  # the audit events: kept (Enterprise) and read by GET /v1/audit, or logged
     drain: Drain | None = None  # the customer's collector and server-side logging, when either is on
     cluster: Cluster | None = None  # this node's place in its cluster; none: standalone
     gathered: ClusterAudit | None = None  # the cluster's audit store, read on its head
+    scheduler: Scheduler | None = None  # the programs' schedules: fired by the daemon, listed and paused here
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -131,10 +131,8 @@ def clustered(s: Services) -> dict[str, Any]:
 
 
 def setup(app: web.Application, s: Services) -> None:
-    counted = s.precedents or Precedents(s.models)
-
     def licence() -> dict[str, Any]:
-        return s.licence.view(counted.now())
+        return s.licence.view()
 
     async def healthz(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
@@ -165,7 +163,7 @@ def setup(app: web.Application, s: Services) -> None:
                 "access": s.access.view() if s.access is not None else None,
                 **drains.view(s.drain),
                 "approvals": len(s.runner.approvals()),  # this node's
-                "models": len(s.models.names()),
+                "programs": len(s.programs.names()),
             }
         )
 
@@ -174,14 +172,42 @@ def setup(app: web.Application, s: Services) -> None:
         s.credentials.set(data.get("runtime_id"), data.get("token"))  # type: ignore[arg-type]
         return web.json_response({"runtime_id": s.credentials.runtime_id, "link": "connecting"})
 
-    async def models(_: web.Request) -> web.Response:
-        return web.json_response({"models": s.models.describe()})
+    async def programs(_: web.Request) -> web.Response:
+        return web.json_response({"programs": s.programs.describe()})
 
     async def deploy(request: web.Request) -> web.Response:
         return web.json_response(await ops.deploy(s, await body(request)), status=201)
 
+    async def secrets_list(request: web.Request) -> web.Response:
+        return web.json_response(await ops.secrets_list(s, request.match_info["name"]))
+
+    async def secret_set(request: web.Request) -> web.Response:
+        m, data = request.match_info, await body(request)
+        return web.json_response(await ops.secret_set(s, m["name"], m["secret"], data.get("value")))
+
+    async def secret_delete(request: web.Request) -> web.Response:
+        m = request.match_info
+        return web.json_response(await ops.secret_delete(s, m["name"], m["secret"]))
+
+    async def schedules(_: web.Request) -> web.Response:
+        return web.json_response(await ops.schedules(s))
+
+    def pausing(paused: bool) -> Handler:
+        async def handler(request: web.Request) -> web.Response:
+            m = request.match_info
+            return web.json_response(await ops.schedule_pause(s, m["program"], m["name"], paused))
+
+        return handler
+
     async def call(request: web.Request) -> web.Response:
         return web.json_response(await ops.call(s, await body(request)))
+
+    async def clis_list(_: web.Request) -> web.Response:
+        return web.json_response(await ops.clis_list(s))
+
+    async def cli_run(request: web.Request) -> web.Response:
+        data = await body(request)
+        return web.json_response(await ops.cli_run(s, {**data, "cli": request.match_info["name"]}))
 
     async def resume(request: web.Request) -> web.Response:
         data = await body(request)
@@ -267,8 +293,16 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get(METADATA + "/mcp", resource_metadata)
     app.router.add_get("/v1/health", health)
     app.router.add_put("/v1/runtime/token", local_only(s.config.mode, runtime_token))
-    app.router.add_get("/v1/models", models)
-    app.router.add_post("/v1/models/deploy", deploy)
+    app.router.add_get("/v1/programs", programs)
+    app.router.add_post("/v1/programs/deploy", deploy)
+    app.router.add_get("/v1/programs/{name}/secrets", secrets_list)
+    app.router.add_put("/v1/programs/{name}/secrets/{secret}", secret_set)
+    app.router.add_delete("/v1/programs/{name}/secrets/{secret}", secret_delete)
+    app.router.add_get("/v1/schedules", schedules)
+    app.router.add_post("/v1/schedules/{program}/{name}/pause", pausing(True))
+    app.router.add_post("/v1/schedules/{program}/{name}/resume", pausing(False))
+    app.router.add_get("/v1/clis", clis_list)
+    app.router.add_post("/v1/clis/{name}/run", cli_run)
     app.router.add_post("/v1/runs", call)
     app.router.add_post("/v1/runs/{run_id}/continue", resume)
     app.router.add_post("/v1/runs/{run_id}/cancel", cancel)

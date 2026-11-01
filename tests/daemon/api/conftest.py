@@ -22,11 +22,13 @@ from rrotord.deploy import Deployer, Tools
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
 from rrotord.link.handler import LinkHandler
-from rrotord.models import Models
 from rrotord.parts import Parts
+from rrotord.programs import Programs
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
+from rrotord.scheduler import Scheduler
+from rrotord.vault import Vault
 from tests.fakes import FakeLink, LocalLauncher, keys, ready, token
 
 PORT = 7777
@@ -59,35 +61,44 @@ def services(root: Path, sock: Path, local_token: str, fetch: Any = None) -> Ser
         sdk=Path(rrotor.__file__).parent,
         run_dir=root / "run",
     )
-    models = Models(config.data)
+    programs = Programs(config.data)
     layers = ready()
     parts = Parts(config.data, keys().public, "arm64")
     licence = Licence(config.data)
     runner = Runner(
-        models=models,
+        programs=programs,
         records=Records(config.data),
         proxy=EgressProxy(sock),
         launcher=LocalLauncher(),
         sdk=config.sdk,
         layers=layers,
         parts=parts,
-        licence=licence,
+        vault=Vault(config.data),
     )
     deployer = Deployer(
-        models,
+        programs,
         root / "scratch",
         Tools(python=sys.executable, uv=shutil.which("uv") or "uv", github=f"file://{root / 'github'}"),
-        maintain=runner.maintain,
     )
     return Services(
-        config, models, deployer, runner, Credentials(config.data), LinkView(), layers, parts, licence, fetch
+        config,
+        programs,
+        deployer,
+        runner,
+        Credentials(config.data),
+        LinkView(),
+        layers,
+        parts,
+        licence,
+        fetch,
+        scheduler=Scheduler(programs, runner, config.data),
     )
 
 
 def linked(api: Api) -> FakeLink:
     """The API's deploys reported through a real link handler to a fake link, as the daemon wires them."""
     s = api.services
-    handler = LinkHandler(s.models, s.runner, s.deployer)
+    handler = LinkHandler(s.programs, s.runner, s.deployer)
     link = FakeLink()
     handler.link = cast(Any, link)
     s.report = handler.report

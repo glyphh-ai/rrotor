@@ -20,9 +20,9 @@ from rrotord.cluster.replication import Replication
 from rrotord.cluster.transport import ClusterError
 from rrotord.errors import BadRequest, RrotorError
 from rrotord.licence import Licence
-from rrotord.models import Models
+from rrotord.programs import Programs
 from tests.daemon.cluster.conftest import Nodes, until
-from tests.daemon.cluster.ring import Ring, tickets
+from tests.daemon.cluster.ring import Ring, programs
 from tests.fakes import install, manifest
 
 
@@ -32,7 +32,7 @@ def follower(tmp_path: Path, role: str = "follower") -> Replication:
         tmp_path / "log",
         tmp_path / "scratch",
         1 << 20,
-        Models(tmp_path),
+        Programs(tmp_path),
         Access(tmp_path),
         Licence(tmp_path),
         role=lambda: role,
@@ -70,7 +70,7 @@ async def test_a_follower_applies_what_is_committed_and_stops_at_what_does_not_a
     sent = [
         entry(1, "keys", hashes=["a" * 64]),
         entry(2, "licence", key=None),
-        entry(3, "remove", model="gone", commit_sha="b" * 40),
+        entry(3, "remove", program="gone", commit_sha="b" * 40),
         entry(4, "head", node="h"),
         entry(5, "member", op="add", node="f", members=[{"node_id": "h"}, {"node_id": "f"}]),
     ]
@@ -85,6 +85,14 @@ async def test_a_follower_applies_what_is_committed_and_stops_at_what_does_not_a
     assert await applied(r, append(6, [], 6)) == 5  # tried again with every append: an upgrade lets it apply
 
 
+async def test_an_entry_an_earlier_release_logged_names_its_program_model_and_still_applies(tmp_path):
+    r = follower(tmp_path)
+    install(r.programs, manifest("old"), "def start(ctx, inputs): pass\n", sha="c" * 40)
+    assert r.programs.names() == ["old"]
+    assert await applied(r, append(0, [entry(1, "remove", model="old", commit_sha="c" * 40)], 1)) == 1
+    assert r.programs.by_sha("old", "c" * 40) is None and r.failure is None
+
+
 async def test_a_follower_behind_its_head_for_long_is_not_ready(tmp_path):
     r = follower(tmp_path)
     assert await applied(r, append(0, [entry(1, "keys", hashes=[])], 1)) == 1 and r.current()
@@ -94,14 +102,16 @@ async def test_a_follower_behind_its_head_for_long_is_not_ready(tmp_path):
     assert await applied(r, append(1, [], 9)) == 1 and r.behind_since == since
     r.wall = lambda: 10**10
     assert not r.current()
-    assert await applied(r, append(1, [entry(2, "rows", model="m", rows=[{"tbl": "x"}])], 2)) == 1
+    rows = entry(2, "rows", model="m", rows=[{"tbl": "x"}])  # an earlier release's Ada store entry: nothing to apply
+    assert await applied(r, append(1, [rows], 2)) == 2 and r.failure is None
+    assert await applied(r, append(2, [entry(3, "remove")], 3)) == 2  # it names no program
     assert r.failure is not None and r.failure["code"] == "E_CLUSTER_APPLY"
 
 
 async def test_a_version_is_fetched_from_the_head_of_this_architecture_only(tmp_path):
     r = follower(tmp_path)
     found = manifest("m")
-    deploy = entry(1, "deploy", model="m", version=2, commit_sha="a" * 40, manifest=found)
+    deploy = entry(1, "deploy", program="m", version=2, commit_sha="a" * 40, manifest=found)
     assert await applied(r, append(0, [deploy], 1)) == 0
     assert r.failure is not None and r.failure["code"] == "E_NO_HEAD"
 
@@ -112,9 +122,9 @@ async def test_a_version_is_fetched_from_the_head_of_this_architecture_only(tmp_
     r.fetch = foreign
     assert await applied(r, append(1, [], 1)) == 0
     assert r.failure is not None and r.failure["code"] == "E_CLUSTER_ARCH"
-    install(r.models, found, "def start(ctx, inputs): pass\n", sha="a" * 40)  # held already: nothing fetched
+    install(r.programs, found, "def start(ctx, inputs): pass\n", sha="a" * 40)  # held already: nothing fetched
     assert await applied(r, append(1, [], 1)) == 1
-    active = r.models.active("m")
+    active = r.programs.active("m")
     assert active is not None and active.version == 2
 
 
@@ -130,7 +140,7 @@ def tar_of(members: dict[str, bytes]) -> bytes:
 
 async def test_a_snapshot_that_is_not_one_is_refused_and_one_that_is_replaces_what_the_follower_had(tmp_path):
     r = follower(tmp_path)
-    install(r.models, manifest("old"), "def start(ctx, inputs): pass\n", sha="c" * 40)
+    install(r.programs, manifest("old"), "def start(ctx, inputs): pass\n", sha="c" * 40)
     sent: dict[str, bytes] = {}
 
     async def fetch(path: str, dest: Path) -> dict[str, str]:
@@ -151,7 +161,7 @@ async def test_a_snapshot_that_is_not_one_is_refused_and_one_that_is_replaces_wh
         "keys": [],
         "licence": None,
         "members": [],
-        "models": {"old": {"active": None, "versions": []}},
+        "programs": {"old": {"active": None, "versions": []}},
     }
     sent["tar"] = tar_of({"snapshot.json": json.dumps(about).encode()})
     with pytest.raises(RrotorError) as caught:
@@ -160,20 +170,14 @@ async def test_a_snapshot_that_is_not_one_is_refused_and_one_that_is_replaces_wh
     sent["tar"] = tar_of({"snapshot.json": json.dumps(about | {"term": 2}).encode()})
     got = await r.install(asked)
     assert (got["accepted"], got["match"], got["applied_seq"]) == (True, 7, 7)
-    assert r.models.versions("old") == [] and r.log.last == 7 and r.log.term_at(7) == 2 and r.current()
+    assert r.programs.versions("old") == [] and r.log.last == 7 and r.log.term_at(7) == 2 and r.current()
     assert r.raft.commit == 5  # what the head had committed: the rest of the snapshot is not known committed
     stale = await r.install({"term": 1, "head": "h", "commit_seq": 0})
     assert (stale["accepted"], stale["term"]) == (False, 2)
 
 
-async def test_the_heads_capture_and_shippers_when_things_go_wrong(tmp_path, caplog):
+async def test_the_heads_shippers_when_things_go_wrong(tmp_path, caplog):
     r = follower(tmp_path, role="head")
-    install(r.models, manifest("m", needs=["ada"], data=True), "", sha="a" * 40)
-    store = r.models.data("m") / "precedents.sqlite"
-    store.parent.mkdir(parents=True)
-    store.write_text("not a database")
-    await r.capture("m")
-    assert "were not captured" in caplog.text
     r.heard_from("n1", "x")
     r.trim([])
     with pytest.raises(RrotorError) as caught:
@@ -204,9 +208,6 @@ async def test_the_heads_capture_and_shippers_when_things_go_wrong(tmp_path, cap
     finally:
         rep.IDLE = rep_idle
     r.lead()
-    ticker = r.ticker
-    r.lead()
-    assert r.ticker is ticker
     await r.stop()
 
 
@@ -215,7 +216,7 @@ async def test_forwarding_without_a_caller_a_head_or_a_server_and_what_may_be_as
     try:
         head = await ring.add("n0", ["n0", "n1"])
         await until(lambda: head.cluster.role == "head")
-        tickets(head)
+        programs(head)
         one = await ring.add("n1", ["n0", "n1"])
         await until(lambda: one.cluster.ready()[0])
         got = await one.cluster.forward("approvals", {})  # no caller in hand: the head does it as rrotor
@@ -224,22 +225,22 @@ async def test_forwarding_without_a_caller_a_head_or_a_server_and_what_may_be_as
         # a run whose id names no node: the head's, unless this node holds it
         status, body = await ring.get("n1", "/v1/runs/00000000-0000-4000-8000-000000000000")
         assert (status, body["error"]["code"]) == (404, "E_RUN_MISSING")
-        status, body = await ring.post("n1", "/v1/runs", {"model": "nothing", "inputs": {}})
-        assert (status, body["error"]["code"]) == (404, "E_MODEL_MISSING")  # not here: the head says so
+        status, body = await ring.post("n1", "/v1/runs", {"program": "nothing", "inputs": {}})
+        assert (status, body["error"]["code"]) == (404, "E_PROGRAM_MISSING")  # not here: the head says so
         with pytest.raises(BadRequest):
             await one.cluster._local({"op": "call", "args": "x"})
         with pytest.raises(BadRequest, match="no forwarded operation"):
             await one.cluster._local({"op": "nothing"})
         tmp = one.config.run_dir / "x.tar"
         with pytest.raises(ClusterError) as caught:
-            await one.cluster._fetch(f"/cluster/v1/versions/tickets/{'f' * 40}.tar", tmp)
+            await one.cluster._fetch(f"/cluster/v2/versions/notes/{'f' * 40}.tar", tmp)
         assert (caught.value.code, caught.value.status) == ("E_VERSION_MISSING", 404) and not tmp.exists()
         one.cluster.serve_forward = None
         with pytest.raises(RrotorError, match="does not serve"):
             await one.cluster._local({"op": "approvals"})
         one.cluster.state.pop("head_address")
         with pytest.raises(ClusterError, match="No head"):
-            await one.cluster._fetch("/cluster/v1/snapshot", tmp)
+            await one.cluster._fetch("/cluster/v2/snapshot", tmp)
 
         # the head gathers approvals without a follower that does not answer
         async def refuse(*_: Any, **__: Any) -> dict[str, Any]:

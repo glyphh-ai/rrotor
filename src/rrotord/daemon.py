@@ -36,15 +36,16 @@ from rrotord.link.client import LinkClient
 from rrotord.link.credentials import Credentials
 from rrotord.link.handler import LinkHandler
 from rrotord.link.outbox import Outbox
-from rrotord.models import Models
 from rrotord.parts import Parts
-from rrotord.precedents import Precedents
+from rrotord.programs import Programs
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.launch import Launcher, SandboxLauncher
 from rrotord.runner.record import Records
 from rrotord.sandbox.probe import Layers, container_needs, probe
+from rrotord.scheduler import Scheduler
 from rrotord.store import read_json, write_json
+from rrotord.vault import Vault
 
 log = logging.getLogger("rrotor")
 EXPIRE_EVERY = 30.0
@@ -61,7 +62,6 @@ class Daemon:
     parts: Parts = field(init=False)
     licence: Licence = field(init=False)
     access: Access = field(init=False)
-    precedents: Precedents = field(init=False)
     runner: Runner = field(init=False)
     link: LinkClient = field(init=False)
     handler: LinkHandler = field(init=False)
@@ -71,6 +71,7 @@ class Daemon:
     aggregate: Aggregate = field(init=False)
     drain: Drain | None = field(init=False)
     cluster: Cluster = field(init=False)
+    scheduler: Scheduler = field(init=False)
     session: aiohttp.ClientSession | None = None
 
     def __post_init__(self) -> None:
@@ -79,8 +80,8 @@ class Daemon:
         if c.mode == "self" and self.layers.checks.get("bubblewrap", {}).get("ok") is False:
             self.layers.needs = container_needs()  # its owner runs the container: say what it lacks
             log.warning("bwrap cannot start: the container lacks", extra={"needs": self.layers.needs})
-        models = Models(c.data)
-        self.deployer = Deployer(models, c.run_dir / "deploy")
+        programs = Programs(c.data)
+        self.deployer = Deployer(programs, c.run_dir / "deploy")
         self.parts = Parts(c.data, public_key(c.release_key) if c.release_key else None)
         self.licence = Licence(c.data, c.runtime_id)
         self.audit = Audit(
@@ -92,7 +93,7 @@ class Daemon:
             payloads=c.log_payloads,
         )
         self.access = Access(c.data, c.keys_sha256, on_change=self._keys_changed)
-        self.cluster = Cluster(c, self.licence, self.audit, VERSION, models=models, access=self.access)
+        self.cluster = Cluster(c, self.licence, self.audit, VERSION, programs=programs, access=self.access)
         self.cluster.usage, self.cluster.taken = self.access.usage.merge, self.access.usage.take
         self.licence.on_event = self._licence_event
         self.licence.start(c.licence_env)  # never fatal: a bad key is logged and the node runs as Community
@@ -121,10 +122,9 @@ class Daemon:
         self.aggregate = Aggregate(self.audit, self.gathered, self.cluster)
         self.aggregate.drain = self.drain
         self.cluster.on_telemetry = self.aggregate.received
-        self.precedents = Precedents(models, cap=lambda: self.licence.limits().max_precedents)
-        self.handler = handler = LinkHandler(models, None, self.deployer, self.licence, self.access, self.audit)  # type: ignore[arg-type]
+        self.handler = handler = LinkHandler(programs, None, self.deployer, self.licence, self.access, self.audit)  # type: ignore[arg-type]
         self.runner = Runner(
-            models=models,
+            programs=programs,
             records=Records(c.data),
             proxy=EgressProxy(c.run_dir / "proxy"),
             launcher=self.launcher,
@@ -132,14 +132,19 @@ class Daemon:
             layers=self.layers,
             notify=handler.notify,
             parts=self.parts,
-            licence=self.licence,
             audit=self.audit,
             telemetry=self.drain.telemetry if self.drain is not None else None,
             node=lambda: c.node_id if self.cluster.member else None,
             readonly=lambda: self.cluster.role == "follower",
-            changes=self.cluster.replication,
+            vault=Vault(c.data),
         )
-        self.cluster.replication.busy = lambda: bool(self.runner.workers)
+        self.scheduler = Scheduler(
+            programs,
+            self.runner,
+            c.data,
+            leading=lambda: self.cluster.role == "head" or self.cluster.status == "standalone",
+            audit=self.audit,
+        )
         self.cluster.deposed = self._deposed
         handler.runner = self.runner
         self.link = LinkClient(
@@ -166,7 +171,6 @@ class Daemon:
                 data=c.data,
                 version=VERSION,
                 node_id=c.node_id,
-                precedents=self.precedents.current,
                 cluster=self.cluster.identity,
             )
             if c.mode == "self" and c.link
@@ -176,13 +180,8 @@ class Daemon:
             self._gauges(self.drain)
 
     def _gauges(self, drain: Drain) -> None:
-        """What the drain's metrics watch: each model's precedents and the cap, the link's state."""
+        """What the drain's metrics watch: the link's state, the cluster's term and each follower's lag."""
         t = drain.telemetry
-        t.gauge("rrotor.precedents", lambda: [(n, {"model": m}) for m, n in self.precedents.by_model.items()])
-        t.gauge(
-            "rrotor.precedents.cap",
-            lambda: [(float(cap), {})] if (cap := self.licence.limits().max_precedents) is not None else [],
-        )
         t.gauge("rrotor.link.state", lambda: [(1.0, {"state": self.link.state})])
         t.gauge("rrotor.cluster.term", self._term)
         t.gauge("rrotor.cluster.lag", self._lag)
@@ -255,7 +254,7 @@ class Daemon:
     def services(self) -> Services:
         return Services(
             self.config,
-            self.runner.models,
+            self.runner.programs,
             self.deployer,
             self.runner,
             self.link.credentials,
@@ -270,11 +269,11 @@ class Daemon:
             else None,
             self.handler.report,
             self.heartbeat,
-            self.precedents,
             self.audit,
             self.drain,
             self.cluster,
             self.gathered,
+            self.scheduler,
         )
 
     def install_builtin(self) -> list[str]:
@@ -325,22 +324,16 @@ class Daemon:
             log.exception("reading the licence key again failed")
 
     async def report_usage(self) -> None:
-        """The runtime keys' calls since the last report and the runtime's precedents, owed up the link as one
-        numbered `usage`: when there were calls, or when the precedents' total is due (`rrotord/precedents.py`);
-        nothing otherwise, or when there is no runtime token to owe them under. A cluster's follower sends its calls
-        to its head with each ping instead, and the head's `usage` is the cluster's (the synced store's precedents
-        once)."""
+        """The runtime keys' calls since the last report, owed up the link as one numbered `usage` when there were
+        any; nothing otherwise, or when there is no runtime token to owe them under. A cluster's follower sends its
+        calls to its head with each ping instead, and the head's `usage` is the cluster's."""
         if self.cluster.role == "follower":
-            self.precedents.due()
             return
         keys = self.access.usage.take()
-        due = self.precedents.due()  # read on every node, linked or not: the cap's warning, the health
         if not self.link.configured:
             return
-        if keys or due:
-            total = self.precedents.total
-            await self.link.owe(lambda seq: p.usage(seq, keys, total))
-            self.precedents.reported = total
+        if keys:
+            await self.link.owe(lambda seq: p.usage(seq, keys))
 
     async def _usage(self) -> None:
         while True:
@@ -367,6 +360,7 @@ class Daemon:
             asyncio.create_task(self._expire()),
             asyncio.create_task(self._usage()),
             asyncio.create_task(self._licence()),
+            asyncio.create_task(self.scheduler.run()),
         ]
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGHUP, self.reread)
@@ -386,6 +380,7 @@ class Daemon:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.cluster.stop()
+        await self.scheduler.stop()
         await self.runner.shutdown()
         await api.cleanup()
         if self.session is not None:

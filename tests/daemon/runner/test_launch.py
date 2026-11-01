@@ -1,5 +1,6 @@
 import asyncio
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -38,9 +39,19 @@ def test_sandbox_tells_the_worker_its_landlock_rules_and_proxy():
 
 
 def test_paths_are_the_sandboxs():
-    assert SandboxLauncher().paths(MOUNTS) == {"model": "/model", "files": "/files", "data": None}
+    assert SandboxLauncher().paths(MOUNTS) == {
+        "program": "/program",
+        "files": "/files",
+        "data": None,
+        "cli_root": None,
+        "work": None,
+        "cli_home": None,
+    }
     with_data = bwrap.Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, MOUNTS.proxy, Path("/d"))
     assert SandboxLauncher().paths(with_data)["data"] == "/data"
+    a_cli = replace(MOUNTS, cli=Path("/i"), work=Path("/w"), home=Path("/h"))
+    found = SandboxLauncher().paths(a_cli)
+    assert (found["cli_root"], found["work"], found["cli_home"]) == ("/cli", "/work", "/home/cli")
 
 
 def test_the_launcher_interface_has_no_behaviour():

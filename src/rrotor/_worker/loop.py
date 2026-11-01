@@ -2,7 +2,10 @@
 
 The runner sends `start`, then `continue` or `end`, and `cancel` while a function runs; the worker answers `result`
 (with what a waiting run waits for), `checkpoint` and `log` as they happen, and `ended`. A function past its seconds
-or cancelled stops where it is (a signal in the main thread) and `end` still runs."""
+or cancelled stops where it is (a signal in the main thread) and `end` still runs.
+
+A CLI's run (`cli` in `start`) imports no program: once locked down, the worker runs its one command
+(rrotor/_worker/command.py), timed and cancellable the same way, answers its `result` and, at `end`, `ended`."""
 
 from __future__ import annotations
 
@@ -16,16 +19,17 @@ from pathlib import Path
 from types import FrameType, ModuleType
 from typing import Any
 
-from rrotor import ada
+from rrotor._worker import command
 from rrotor._worker.channel import Channel
 from rrotor._worker.forward import Forwarder
 from rrotor._worker.landlock import Landlock, Rules
-from rrotor.ctx import Ctx, RunState
+from rrotor.ctx import Ctx, RunState, Secrets
 from rrotor.http import Http
 from rrotor.invoke import Outcome, crash, failure, invoke, lifecycle
 from rrotor.result import Result
 
 PROXY_URL = "http://127.0.0.1:3128"
+DATABASE = "db.sqlite3"  # ctx.db, in the program's data folder
 _DONE = Result.done()
 
 
@@ -43,13 +47,13 @@ def _on_cancel(_sig: int, _frame: FrameType | None) -> None:
     raise Stop("cancelled", "E_CANCELLED")
 
 
-def import_model(folder: str) -> ModuleType:
-    path = Path(folder) / "model.py"
-    spec = importlib.util.spec_from_file_location("model", path)
+def import_program(folder: str) -> ModuleType:
+    path = Path(folder) / "program.py"
+    spec = importlib.util.spec_from_file_location("program", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"{path} cannot be loaded")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["model"] = module
+    sys.modules["program"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -80,7 +84,12 @@ class Worker:
             assert self.landlock is not None  # noqa: S101  (main() always passes one)
             rules = box["landlock"]
             self.landlock.restrict(
-                Rules(tuple(rules["read"]), tuple(rules["write"]), tuple(rules.get("tcp_ports", ())))
+                Rules(
+                    tuple(rules["read"]),
+                    tuple(rules["write"]),
+                    tuple(rules.get("tcp_ports", ())),
+                    bool(rules.get("exec_writes", True)),
+                )
             )
         if box.get("proxy_socket"):
             Forwarder(box["proxy_socket"]).start()
@@ -110,9 +119,16 @@ class Worker:
             self.channel.send("result", result=failure("sandbox", "E_SANDBOX", str(err)).to_json(), pending=None)
             return self._finish(None, None)
         threading.Thread(target=self._read, daemon=True).start()
+        if start.get("cli"):  # a CLI's run: its one command, no program
+            spec = dict(start["cli"])
+            outcome = self._timed(float(start.get("seconds_left", 300)), lambda: Outcome(command.run(spec)), "cli")
+            self.channel.send("result", result=outcome.result.to_json(), pending=None)
+            self.inbox.get()  # `end`, or the runner gone
+            return self._finish(None, None)
         function = str(start["function"])
         state = RunState.from_json(start.get("state"))
         box = start.get("sandbox") or {}
+        secrets = start.pop("secrets", None) or {}  # {declared, values}: the values kept in ctx alone
         ctx = Ctx(
             inputs=dict(start.get("inputs") or {}),
             approvals=frozenset(start.get("approvals") or ()),
@@ -122,53 +138,51 @@ class Worker:
             answer=start.get("answer"),
             sink=self._sink,
             data=Path(start["data"]) if start.get("data") else None,
-            home=Path(start.get("model", "/model")),
+            home=Path(start.get("program", "/program")),
             clearance=float(start.get("clearance", 1.0)),
             caller=str(start.get("caller", "claude")),
-            limits=dict(start.get("limits") or {}),
             readonly=bool(start.get("readonly")),
+            secrets=Secrets(secrets.get("declared") or (), secrets.get("values") or {}),
+            database=Path(start["data"]) / DATABASE if start.get("sqlite") and start.get("data") else None,
         )
         try:
-            model = import_model(str(start.get("model", "/model")))
-        except BaseException as err:  # noqa: BLE001  (a model that cannot import is a failed run)
+            program = import_program(str(start.get("program", "/program")))
+        except BaseException as err:  # noqa: BLE001  (a program that cannot import is a failed run)
             self.channel.send("result", result=crash("load", err).to_json(), pending=None)
             return self._finish(None, ctx)
         seconds = float(start.get("seconds_left", 300))
-        # rrotor's own re-encode runs before the model could open its store under the new spec: no load for it
-        outcome = (
-            Outcome(_DONE) if function == ada.REENCODE else self._timed(seconds, lambda: self._load(model, ctx), "load")
-        )
+        outcome = self._timed(seconds, lambda: self._load(program, ctx), "load")
         if outcome.result.status == "done":
-            outcome = self._timed(seconds, lambda: self._call(model, function, ctx), function)
+            outcome = self._timed(seconds, lambda: self._call(program, function, ctx), function)
         while True:
             self.channel.send("result", result=outcome.result.to_json(), pending=outcome.pending)
             message = self.inbox.get()
             if message is None or message.get("op") != "continue":
-                return self._finish(model, ctx)
+                return self._finish(program, ctx)
             ctx._state = RunState.from_json(message.get("state"))
             ctx.answer = message.get("answer")
             left = float(message.get("seconds_left", seconds))
-            outcome = self._timed(left, lambda: self._call(model, function, ctx), function)
+            outcome = self._timed(left, lambda: self._call(program, function, ctx), function)
 
     @staticmethod
-    def _load(model: ModuleType, ctx: Ctx) -> Outcome:
-        return Outcome(lifecycle("load", getattr(model, "load", None), ctx) or _DONE)
+    def _load(program: ModuleType, ctx: Ctx) -> Outcome:
+        return Outcome(lifecycle("load", getattr(program, "load", None), ctx) or _DONE)
 
     @staticmethod
-    def _call(model: ModuleType, function: str, ctx: Ctx) -> Outcome:
-        if function == ada.REENCODE:  # rrotor's own maintenance on a deploy, never a model's function
-            return invoke(function, lambda c: Result.done({"reencoded": ada.reencode(c)}), ctx)
-        fn = getattr(model, function, None)
+    def _call(program: ModuleType, function: str, ctx: Ctx) -> Outcome:
+        fn = getattr(program, function, None)
         if function.startswith("_") or function in ("load", "end") or not callable(fn):
-            return Outcome(failure(function, "E_FUNCTION_MISSING", f"model.py has no function {function}."))
+            return Outcome(failure(function, "E_FUNCTION_MISSING", f"program.py has no function {function}."))
         return invoke(function, fn, ctx, ctx.inputs)
 
-    def _finish(self, model: ModuleType | None, ctx: Ctx | None) -> int:
-        """`end` always runs (when there is a model to end), then `ended`."""
+    def _finish(self, program: ModuleType | None, ctx: Ctx | None) -> int:
+        """`end` always runs (when there is a program to end), then `ended`."""
         result = None
-        if model is not None and ctx is not None:
-            ending = getattr(model, "end", None)
+        if program is not None and ctx is not None:
+            ending = getattr(program, "end", None)
             outcome = self._timed(30.0, lambda: Outcome(lifecycle("end", ending, ctx) or _DONE), "end")
             result = outcome.result.to_json() if outcome.result.status != "done" else None
+        if ctx is not None:
+            ctx.close()
         self.channel.send("ended", result=result)
         return 0

@@ -1,21 +1,21 @@
-"""What the SDK raises. A model never needs to catch these: the worker turns each into a `failed` Result with
+"""What the SDK raises. A program never needs to catch these: the worker turns each into a `failed` Result with
 its stable code."""
 
 from __future__ import annotations
 
 
-class ModelError(Exception):
+class ProgramError(Exception):
     """An error with a stable code, shown in the run's `failed` Result."""
 
-    code: str = "E_MODEL"
+    code: str = "E_PROGRAM"
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
 
 
-class PartMissing(ModelError):
-    """Something a model asked for comes with a part this rrotor does not have (docs/architecture.md, 10)."""
+class PartMissing(ProgramError):
+    """Something a program asked for comes with a part this rrotor does not have (docs/architecture.md, 10)."""
 
     code = "E_PART_MISSING"
 
@@ -24,7 +24,16 @@ class PartMissing(ModelError):
         self.what, self.mod = what, mod
 
 
-class StepUndeclared(ModelError):
+class DatabaseUndeclared(ProgramError):
+    """`ctx.db` read by a program whose manifest asks for no SQLite database."""
+
+    code = "E_DATABASE_UNDECLARED"
+
+    def __init__(self) -> None:
+        super().__init__('ctx.db is a SQLite database: add "databases": ["sqlite"] to glyphh.json.')
+
+
+class StepUndeclared(ProgramError):
     """A step asked approval for is not named in the function's `approvals` in the manifest."""
 
     code = "E_STEP_UNDECLARED"
@@ -34,7 +43,27 @@ class StepUndeclared(ModelError):
         self.step = step
 
 
-class NotJson(ModelError):
+class SecretUndeclared(ProgramError):
+    """A secret read that the manifest's `secrets` does not name."""
+
+    code = "E_SECRET_UNDECLARED"
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"The secret {name!r} is not in this program's secrets in glyphh.json.")
+        self.name = name
+
+
+class SecretMissing(ProgramError):
+    """A declared secret with no value set (rrotor itself stops such a run before the function, `step: secrets`)."""
+
+    code = "E_SECRET_MISSING"
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"The secret {name!r} is not set on this rrotor.")
+        self.name = name
+
+
+class NotJson(ProgramError):
     """A checkpoint's value or a Result's data that JSON cannot carry."""
 
     code = "E_NOT_JSON"
@@ -42,7 +71,7 @@ class NotJson(ModelError):
 
 class Wait(BaseException):
     """Raised by `ctx.ask_approval` and `ctx.needs_input` when the answer is not there yet: the function stops, and
-    the run answers the Result it carries. A BaseException, so a model's `except Exception` does not swallow it."""
+    the run answers the Result it carries. A BaseException, so a program's `except Exception` does not swallow it."""
 
     def __init__(self, result: object, pending: dict[str, str]) -> None:
         super().__init__("waiting")

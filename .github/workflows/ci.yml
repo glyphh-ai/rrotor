@@ -1,7 +1,7 @@
 # rrotor's checks on every push and pull request: lint, types, the tests with the 100% coverage gate, the sample
-# model's tests, the image with the sandbox tests inside it, the WSL root filesystem, and the self-hosting packages.
-# On main, with the repository variable PUBLISH_IMAGES set to true, the one published image (the base with the Ada
-# part built in, the Dockerfile's `hosted` target) is pushed to Fly's registry for the hosted machines and to
+# program's tests, the image with the sandbox tests inside it, the WSL root filesystem, and the self-hosting packages.
+# On main, with the repository variable PUBLISH_IMAGES set to true, the one published image (the Dockerfile's
+# `hosted` target) is pushed to Fly's registry for the hosted machines and to
 # ghcr.io/glyphh-ai/rrotor (multi-arch, :<version> and :latest) for everyone else, and its digests reported. The GHCR
 # push needs the package to let this repository write to it (an org admin: the package's settings, Manage Actions
 # access, glyphh-ai/rrotor with the Write role).
@@ -34,8 +34,8 @@ jobs:
         run: uv run mypy
       - name: Tests (100% line and branch coverage of rrotor and rrotord)
         run: uv run pytest
-      - name: The sample models' tests
-        run: uv run pytest examples/daily_sales/tests examples/ada_tickets examples/ada_incidents -o addopts="" -p no:cacheprovider --import-mode=importlib
+      - name: The sample program's tests
+        run: uv run pytest examples/daily_sales/tests -o addopts="" -p no:cacheprovider --import-mode=importlib
 
   # The self-hosting packages (deploy/, docs/self-hosting/): each is checked as written, nothing is started.
   deploy:
@@ -171,15 +171,15 @@ jobs:
           path: rrotor-wsl-*.tar.gz
           retention-days: 14
 
-  # The published image: the base with the Ada part built in, one image for hosted, self-hosted and local rrotors
-  # (RROTOR_MODE decides; the licence key sets its limits). Pushed first to Fly's own registry for the runtimes app
+  # The published image: the base, one image for hosted, self-hosted and local rrotors (RROTOR_MODE decides; the
+  # licence key sets its limits). Pushed first to Fly's own registry for the runtimes app
   # (vars.FLY_RUNTIME_APP, glyphh-ai-runtime), the one private registry Fly machines pull from, amd64, which is what
   # Fly runs (the server's GLYPHH_FLY_IMAGE names registry.fly.io/<app>:<version>); then to
-  # ghcr.io/glyphh-ai/rrotor:<version> and :latest, amd64 and arm64, for the deploy packages. Built only
-  # when the part was (both secrets set), images are published and FLY_API_TOKEN is set.
+  # ghcr.io/glyphh-ai/rrotor:<version> and :latest, amd64 and arm64, for the deploy packages. Built only when
+  # images are published and FLY_API_TOKEN is set.
   image-hosted:
     runs-on: ubuntu-24.04
-    needs: [image, part-ada]
+    needs: [image]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGES == 'true'
     permissions:
       contents: read
@@ -188,10 +188,6 @@ jobs:
       APP: ${{ vars.FLY_RUNTIME_APP || 'glyphh-ai-runtime' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: rrotor-part-ada
-          path: dist/parts
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Version
@@ -228,56 +224,3 @@ jobs:
             --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" \
             -t "$repo:$v" -t "$repo:latest" -t "$repo:$s" --push .
           echo "ghcr: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
-
-  # The Ada part, for both architectures: the kernel from glyphh-ai/ada-private (branch main, read
-  # with ADA_KERNEL_TOKEN) and numpy, signed with RROTOR_RELEASE_KEY when it is set (else built unsigned-checked:
-  # the signature step needs the key). The tarballs are kept as artifacts, and published as the release
-  # `part-ada-<kernel version>` (made the first time, its assets replaced after): each
-  # tarball, its .sha256 and its .sig; the hosted image builds them in.
-  part-ada:
-    runs-on: ubuntu-latest
-    needs: checks
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - uses: astral-sh/setup-uv@v5
-      - name: The Ada kernel
-        env:
-          TOKEN: ${{ secrets.ADA_KERNEL_TOKEN }}
-        run: |
-          [ -n "$TOKEN" ] || { echo "::notice::ADA_KERNEL_TOKEN is not set; the Ada part is not built."; exit 0; }
-          git clone -q --depth 1 --branch main "https://x-access-token:${TOKEN}@github.com/glyphh-ai/ada-private.git" kernel
-      - name: Build and sign, amd64 and arm64
-        if: hashFiles('kernel/glyphh_kernel.py') != ''
-        env:
-          RROTOR_RELEASE_KEY: ${{ secrets.RROTOR_RELEASE_KEY }}
-        run: |
-          [ -n "$RROTOR_RELEASE_KEY" ] || { echo "::notice::RROTOR_RELEASE_KEY is not set; the Ada part is not signed or kept."; exit 0; }
-          pip install -q cryptography
-          for arch in amd64 arm64; do parts/ada/build.sh --arch "$arch" --kernel kernel --out dist/parts; done
-          ls -la dist/parts && cat dist/parts/*.sha256
-      - uses: actions/upload-artifact@v4
-        if: hashFiles('dist/parts/*.tar.gz') != ''
-        with:
-          name: rrotor-part-ada
-          path: dist/parts/
-          retention-days: 30
-      - name: Publish the part as the release part-ada-<version>
-        if: hashFiles('dist/parts/*.tar.gz') != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          v=$(ls dist/parts/ada-*-amd64.tar.gz | sed -E 's#.*/ada-(.+)-amd64\.tar\.gz#\1#')
-          tag="part-ada-$v"
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "Ada part $v" \
-            --notes "The Ada part $v for rrotor: the kernel and numpy, signed with Glyphh's release key."
-          gh release upload "$tag" dist/parts/* --clobber
-          for arch in amd64 arm64; do
-            echo "$arch: https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/ada-$v-$arch.tar.gz sha256 $(cut -d' ' -f1 "dist/parts/ada-$v-$arch.sha256")" >> "$GITHUB_STEP_SUMMARY"
-          done
-

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from rrotor.ctx import Ctx, RunState
-from rrotor.errors import ModelError, Wait
+from rrotor.errors import ProgramError, Wait
 from rrotor.http import Http
 from rrotor.invoke import crash, failure, invoke, lifecycle
 from rrotor.result import Result
@@ -20,31 +20,19 @@ def test_failure_carries_code_and_reason():
     }
 
 
-def test_crash_names_the_model_line():
+def test_crash_names_the_program_line():
     namespace: dict[str, object] = {}
-    exec(compile("def fail():\n    raise ValueError('bad')\n", "/model/model.py", "exec"), namespace)  # noqa: S102
+    exec(compile("def fail():\n    raise ValueError('bad')\n", "/program/program.py", "exec"), namespace)  # noqa: S102
     try:
         namespace["fail"]()  # type: ignore[operator]
     except ValueError as err:
         result = crash("start", err)
-    assert result.data["reason"] == "ValueError: bad (model.py line 2)"
+    assert result.data["reason"] == "ValueError: bad (program.py line 2)"
     assert result.data["code"] == "E_CRASH"
 
 
-def test_crash_outside_the_model_has_no_line():
+def test_crash_outside_the_program_has_no_line():
     assert crash("start", RuntimeError("x")).data["reason"] == "RuntimeError: x"
-
-
-def test_the_precedent_cap_is_a_finished_result_that_indexed_nothing_never_a_failure(tmp_path):
-    from rrotor.ada import LimitExceeded
-
-    def full(c: Ctx, i: dict[str, object]) -> Result:
-        raise LimitExceeded(5000, 5000, "Community")
-
-    outcome = invoke("record", full, ctx(tmp_path), {})
-    assert outcome.result.status == "done" and outcome.pending is None
-    assert outcome.result.data["status"] == "limit_exceeded" and outcome.result.data["indexed"] is False
-    assert "(5,000 max for the Community plan)" in outcome.result.data["message"]
 
 
 def test_invoke_answers_the_result(tmp_path):
@@ -77,11 +65,11 @@ def test_invoke_a_wait_without_a_result_fails(tmp_path):
     assert invoke("start", fn, ctx(tmp_path)).result.data["code"] == "E_BAD_RESULT"
 
 
-def test_invoke_a_model_error_keeps_its_code(tmp_path):
+def test_invoke_a_program_error_keeps_its_code(tmp_path):
     def fn(c):
-        raise ModelError("no")
+        raise ProgramError("no")
 
-    assert invoke("start", fn, ctx(tmp_path)).result.data == {"reason": "no", "code": "E_MODEL"}
+    assert invoke("start", fn, ctx(tmp_path)).result.data == {"reason": "no", "code": "E_PROGRAM"}
 
 
 def test_invoke_a_crash_is_a_failed_result(tmp_path):
@@ -116,7 +104,7 @@ def test_a_write_on_a_read_only_run_is_e_read_only_naming_the_function(tmp_path)
     import errno
     import sqlite3
 
-    class ReadOnlyError(Exception):  # the kernel's, as 3.10 defines it
+    class ReadOnlyError(Exception):  # a library's own refusal, with the code
         code = "E_READ_ONLY"
 
     def raising(err: BaseException):

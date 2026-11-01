@@ -1,8 +1,8 @@
 """Deploying a version: exactly one commit, from a git bundle sent to the API, from a GitHub repo (with a token for
 a private one; the Cloud mints a short-lived one per deploy), or one this rrotor already holds. The commit's SHA is
-checked, the manifest read, a venv made and `requirements.lock` installed (binary wheels only, with hashes: no model
+checked, the manifest read, a venv made and `requirements.lock` installed (binary wheels only, with hashes: no program
 code runs outside the sandbox, not even a package's setup), and the version becomes active (docs/architecture.md,
-2.2 and 5)."""
+2.2 and 5). A CLI's version also gets its install, pinned and checked, under `cli/` (rrotord/clis.py)."""
 
 from __future__ import annotations
 
@@ -11,17 +11,15 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from rrotor import ada
-from rrotor.errors import ModelError
+from rrotord import clis
 from rrotord import manifest as manifests
 from rrotord.errors import BadRequest, DeployError
-from rrotord.models import Models, Version
 from rrotord.proc import run
+from rrotord.programs import Programs, Version
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 REPO = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
@@ -42,54 +40,12 @@ def check_sha(commit: str) -> str:
     return commit
 
 
-Maintain = Callable[[Version, str], Awaitable[dict[str, Any]]]
-
-
 class Deployer:
     def __init__(
-        self, models: Models, scratch: Path, tools: Tools | None = None, maintain: Maintain | None = None
+        self, programs: Programs, scratch: Path, tools: Tools | None = None, fetch: clis.Fetch | None = None
     ) -> None:
-        self.models, self.scratch, self.tools = models, scratch, tools or Tools()
-        self.maintain = maintain  # runs rrotor's own operation in a version's sandbox (the runner's)
-
-    @staticmethod
-    def ada_spec(src: Path, found: manifests.Manifest) -> dict[str, Any] | None:
-        """An Ada model's spec (it names the part `ada`): read and checked, with its data folder required."""
-        if "ada" not in found.needs:
-            return None
-        if not found.data:
-            raise DeployError(
-                'An Ada model keeps its precedents in its data folder: set "data": true.', code="E_MANIFEST"
-            )
-        try:
-            return ada.read_spec(src)
-        except ModelError as err:
-            raise DeployError(err.message, code="E_MANIFEST") from None
-
-    async def _ada_ready(self, made: Version, spec: dict[str, Any] | None) -> None:
-        """Before an Ada version goes active: a changed encoding re-encodes the store, or the deploy is refused."""
-        if spec is None:
-            return
-        before = self.models.active(made.model)
-        store = self.models.data(made.model) / ada.STORE
-        if before is None or before.commit_sha == made.commit_sha or not store.is_file():
-            return
-        try:
-            old = ada.read_spec(before.src)
-        except ModelError:
-            return
-        if ada.encoding_of(old) == ada.encoding_of(spec):
-            return
-        if self.maintain is None:
-            raise DeployError(
-                "The spec's encoding changed and the store cannot be re-encoded here.", code="E_ADA_ENCODING"
-            )
-        result = await self.maintain(made, ada.REENCODE)
-        if result.get("status") != "done":
-            why = (result.get("data") or {}).get("reason", "the re-encode did not finish")
-            raise DeployError(
-                f"The spec's encoding changed and the store could not be re-encoded: {why}", code="E_ADA_ENCODING"
-            )
+        self.programs, self.scratch, self.tools = programs, scratch, tools or Tools()
+        self.installer = clis.Installer(fetch, uv=self.tools.uv, python=self.tools.python)
 
     def _git_env(self, home: Path, token: str | None = None) -> dict[str, str]:
         env = {
@@ -140,18 +96,17 @@ class Deployer:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    async def held(self, model: str, commit: str, version: int | None = None) -> Version:
+    async def held(self, program: str, commit: str, version: int | None = None) -> Version:
         """A commit this rrotor already holds (a deploy without a repo): made active, renumbered to the Cloud's."""
-        found = self.models.by_sha(model, check_sha(commit))
+        found = self.programs.by_sha(program, check_sha(commit))
         if found is None:
             raise DeployError(
-                f"This rrotor does not hold {model} at {commit[:12]}; deploy it from its folder first.",
+                f"This rrotor does not hold {program} at {commit[:12]}; deploy it from its folder first.",
                 code="E_COMMIT_MISSING",
             )
         if version is not None and version != found.version:
-            found = self.models.renumber(found, version)
-        await self._ada_ready(found, self.ada_spec(found.src, found.manifest))
-        self.models.activate(found)
+            found = self.programs.renumber(found, version)
+        self.programs.activate(found)
         return found
 
     def _scratch(self) -> Path:
@@ -164,40 +119,37 @@ class Deployer:
         if head != commit:
             raise DeployError(f"The commit fetched is {head[:12]}, not {commit[:12]}.", code="E_SHA")
         found = manifests.read(src)
-        spec = self.ada_spec(src, found)
         shutil.rmtree(src / ".git")
-        existing = self.models.by_sha(found.name, commit)
+        existing = self.programs.by_sha(found.name, commit)
         if existing is not None:
             return await self.held(found.name, commit, version)
-        root = self.models.version_root(found.name, commit)
+        root = self.programs.version_root(found.name, commit)
         staging = root.with_name(f".{commit}.staging")
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
         try:
             shutil.move(src, staging / "src")
-            await self._venv(staging)
+            await self._venv(staging, lock=found.kind == "program")
+            if found.kind == "cli":  # its install, pinned and checked, beside the venv its worker runs in
+                await self.installer.install(found, staging / "cli", staging / "src")
             shutil.rmtree(root, ignore_errors=True)
             staging.rename(root)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
         self._seed(found.name, root / "src" / "files")
-        made = self.models.record(found.name, version or self.models.next_number(found.name), commit, found)
-        try:
-            await self._ada_ready(made, spec)
-        except DeployError:
-            self.models.remove(made)
-            raise
-        self.models.activate(made)
+        made = self.programs.record(found.name, version or self.programs.next_number(found.name), commit, found)
+        self.programs.activate(made)
         return made
 
-    async def _venv(self, root: Path) -> None:
+    async def _venv(self, root: Path, lock: bool = True) -> None:
+        """The version's venv, and its requirements.lock in it (a CLI's lock is its install's, not the venv's)."""
         venv = root / "venv"
         done = await run([self.tools.python, "-m", "venv", "--without-pip", str(venv)], timeout=120)
         if done.code != 0:
             raise DeployError(f"The venv could not be made: {done.why()}", code="E_VENV")
-        lock = root / "src" / "requirements.lock"
-        if not lock.is_file():
+        locked = root / "src" / "requirements.lock"
+        if not lock or not locked.is_file():
             return
         argv = [
             self.tools.uv,
@@ -210,7 +162,7 @@ class Deployer:
             ":all:",
             "--no-deps",
             "-r",
-            str(lock),
+            str(locked),
         ]
         done = await run(
             argv, env={"PATH": os.environ.get("PATH", ""), "HOME": str(root), "UV_NO_CACHE": "1"}, timeout=600
@@ -219,8 +171,8 @@ class Deployer:
             raise DeployError(f"requirements.lock could not be installed: {done.why()}", code="E_DEPS")
 
     def _seed(self, name: str, seed: Path) -> None:
-        """A version's files/ seed its folder on the model's first deploy; never over what is there."""
-        folder = self.models.files(name)
+        """A version's files/ seed its folder on the program's first deploy; never over what is there."""
+        folder = self.programs.files(name)
         if folder.exists():
             return
         if seed.is_dir():

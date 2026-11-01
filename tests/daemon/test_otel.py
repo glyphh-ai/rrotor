@@ -70,11 +70,11 @@ def record(name: str, message: str, level: str = "INFO") -> logging.LogRecord:
 
 
 def test_a_log_line_becomes_a_log_record_and_an_audit_line_is_named():
-    plain = log_record(record("rrotor", "up", "NOTICE"), {"at": "x", "message": "up", "model": "m"}, res())
+    plain = log_record(record("rrotor", "up", "NOTICE"), {"at": "x", "message": "up", "program": "m"}, res())
     assert plain.log_record.body == "up" and plain.log_record.event_name is None
     assert str(plain.log_record.severity_number) == "SeverityNumber.INFO" and dict(
         plain.log_record.attributes or {}
-    ) == {"model": "m"}
+    ) == {"program": "m"}
     assert plain.log_record.timestamp == 1_500_000_000
     audit = log_record(record("rrotor.audit", "run.call", "WARNING"), {"message": "run.call"}, res())
     assert (
@@ -93,7 +93,7 @@ def test_a_kept_audit_event_becomes_a_named_record():
 
 
 def test_what_goes_to_glyphh_has_no_client_and_no_payloads():
-    event = {"kind": "run.end", "client": "10.0.4.17", "inputs": "{}", "data": "{}", "model": "m"}
+    event = {"kind": "run.end", "client": "10.0.4.17", "inputs": "{}", "data": "{}", "program": "m"}
     batch = [audit_record(event, res())]
     customer = attributes_of(
         decoded("logs", encoded("logs", batch, False)).resource_logs[0].scope_logs[0].log_records[0].attributes
@@ -101,7 +101,7 @@ def test_what_goes_to_glyphh_has_no_client_and_no_payloads():
     glyphh = attributes_of(
         decoded("logs", encoded("logs", batch, True)).resource_logs[0].scope_logs[0].log_records[0].attributes
     )
-    assert {"client", "inputs", "data"} <= set(customer) and set(glyphh) == {"kind", "model"}
+    assert {"client", "inputs", "data"} <= set(customer) and set(glyphh) == {"kind", "program"}
 
 
 async def test_the_tracer_and_the_meter():
@@ -110,13 +110,13 @@ async def test_the_tracer_and_the_meter():
     parent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
     with (
         t.request_span("POST", "/v1/runs", {"traceparent": parent}) as request,
-        t.span("rrotor.function", {"rrotor.model": "m"}) as span,
+        t.span("rrotor.function", {"rrotor.program": "m"}) as span,
     ):
         t.payload(span, inputs={"a": 1})
         assert trace.get_current_span() is span
     assert [s.name for s in spans] == ["rrotor.function", "POST /v1/runs"]
     assert spans[1].context.trace_id == int("0af7651916cd43dd8448eb211c80319c", 16) and request.is_recording() is False
-    assert spans[0].attributes == {"rrotor.model": "m", "rrotor.inputs": '{"a":1}'}
+    assert spans[0].attributes == {"rrotor.program": "m", "rrotor.inputs": '{"a":1}'}
     quiet = Telemetry(res(), sampler({}), spans.append)
     with quiet.span("x") as span:
         quiet.payload(span, inputs={"a": 1})

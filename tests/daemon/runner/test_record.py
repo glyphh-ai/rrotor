@@ -1,3 +1,5 @@
+import json
+
 from rrotord.runner import record
 from rrotord.runner.record import Records, Run, new_id
 
@@ -19,6 +21,16 @@ def test_save_and_load(tmp_path):
     records, r = Records(tmp_path), run()
     records.save(r)
     assert records.load(r.id) == r
+
+
+def test_a_run_an_earlier_release_saved_names_its_program_model_and_still_loads(tmp_path):
+    records, r = Records(tmp_path), run()
+    records.save(r)
+    path = records.folder(r.id) / "run.json"
+    saved = json.loads(path.read_text())
+    saved["model"] = saved.pop("program")
+    path.write_text(json.dumps(saved))
+    assert records.load(r.id) == r and records.all() == [r]
 
 
 def test_load_refuses_what_is_not_a_run_id(tmp_path):

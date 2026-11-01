@@ -19,7 +19,7 @@ from rrotord.cluster.tls import Credentials
 from rrotord.cluster.transport import ClusterError, fetch
 from rrotord.errors import RrotorError
 from tests.daemon.cluster.conftest import SECRET, Nodes, until
-from tests.daemon.cluster.ring import Ring, rows, ticket, tickets
+from tests.daemon.cluster.ring import Ring, held, programs
 
 
 @pytest.fixture
@@ -55,12 +55,12 @@ async def three(ring: Ring) -> list[str]:
     ids = ["n0", "n1", "n2"]
     head = await ring.add("n0", ids)
     await until(lambda: head.cluster.role == "head")
-    tickets(head)
-    status, body, _ = await ring.call("n0", "record", ticket(1), outcome="page oncall")
+    programs(head)
+    status, body, _ = await ring.write("n0")
     assert (status, body["status"]) == (200, "done"), body
     for n in ids[1:]:
         await ring.add(n, ids)
-    await until(lambda: ready(ring, *ids) and rows(ring.daemons["n2"]) == 1)
+    await until(lambda: ready(ring, *ids) and held(ring.daemons["n2"]) == 1)
     return ids
 
 
@@ -78,7 +78,7 @@ async def test_a_follower_promoted_while_the_head_is_down_takes_the_writes_and_t
     assert kinds[:2] == ["member", "head"] and kinds.count("member") == 3
     await ring.stop("n0")
     await until(lambda: one.cluster.head_channel is None and two.cluster.head_channel is None)
-    status, body, _ = await ring.call("n1", "record", ticket(2), outcome="x")
+    status, body, _ = await ring.write("n1")
     assert (status, body["error"]["code"]) == (503, "E_NO_HEAD")
     code, said = await promote(ring, "n1")
     assert code == 1 and "E_CLUSTER_CONFIRM" in said and "--yes" in said and "n0: unreachable" in said
@@ -98,12 +98,12 @@ async def test_a_follower_promoted_while_the_head_is_down_takes_the_writes_and_t
     assert promoted[-1]["reason"] == "promoted" and promoted[-1]["actor"] == {"type": "local"}
     await until(lambda: two.cluster.role == "follower" and two.cluster.state.get("head") == "n1" and ready(ring, "n2"))
     # writes resume on the promoted node, forwarded from the other follower too
-    status, body, _ = await ring.call("n2", "record", ticket(3), outcome="page oncall")
+    status, body, _ = await ring.write("n2")
     assert (status, body["status"]) == (200, "done") and body["run_id"].startswith("n1~"), body
-    await until(lambda: rows(two) == 2 == rows(one))
+    await until(lambda: held(two) == 2 == held(one))
     # the old head comes back: a member it reaches knows term 2, so it follows instead of leading again
     zero = await ring.add("n0", ids)
-    await until(lambda: zero.cluster.role == "follower" and ready(ring, "n0") and rows(zero) == 2)
+    await until(lambda: zero.cluster.role == "follower" and ready(ring, "n0") and held(zero) == 2)
     assert heads(ring) == ["n1"] and zero.cluster.raft.term == 2
     code, said = await promote(ring, "n1", on="n2")  # passed to the node named, which is head already
     assert code == 0 and said["promoted"] is False
@@ -126,18 +126,18 @@ async def test_a_head_that_answers_hands_over_at_once_and_its_writing_runs_fail(
     deposed_events = [e for e in events if e["kind"] == "cluster.head"]
     assert deposed_events[-1]["reason"] == "deposed" and deposed_events[-1]["term"] == 2
     await until(lambda: ready(ring, "n0", "n1") and heads(ring) == ["n2"])
-    status, body, _ = await ring.call("n0", "record", ticket(5), outcome="x")
+    status, body, _ = await ring.write("n0")
     assert (status, body["status"]) == (200, "done") and body["run_id"].startswith("n2~"), body
-    await until(lambda: rows(zero) == rows(one) == 2)
+    await until(lambda: held(zero) == held(one) == 2)
 
 
 async def test_a_lagging_node_is_refused_unless_forced_and_the_writes_it_lacks_are_lost(ring: Ring):
     ids = await three(ring)
     await ring.stop("n2")
-    _, body, _ = await ring.call("n0", "record", ticket(2), outcome="only on n0 and n1")
+    _, body, _ = await ring.write("n0")  # only on n0 and n1
     assert body["status"] == "done"
     one = ring.daemons["n1"]
-    await until(lambda: rows(one) == 2)
+    await until(lambda: held(one) == 2)
     await ring.stop("n0")
     two = await ring.add("n2", ids)  # back, behind n1, with no head to catch up from
     await until(lambda: two.cluster.listener is not None and two.cluster.raft.ids() == ids)
@@ -145,8 +145,8 @@ async def test_a_lagging_node_is_refused_unless_forced_and_the_writes_it_lacks_a
     assert code == 1 and "E_CLUSTER_LAG" in said and "n1: seq" in said and "lag 0" in said
     code, done = await promote(ring, "n2", "--yes", "--force")
     assert code == 0 and done["forced"] and done["members"]["n2"]["lag"] > 0
-    await until(lambda: ready(ring, "n1") and one.cluster.role == "follower" and rows(one) == 1)  # lost, as warned
-    assert rows(two) == 1
+    await until(lambda: ready(ring, "n1") and one.cluster.role == "follower" and held(one) == 1)  # lost, as warned
+    assert held(two) == 1
 
 
 async def test_what_a_promotion_refuses(ring: Ring):
@@ -248,7 +248,7 @@ async def test_votes_that_cannot_be_asked_and_requests_that_cannot_be_read(ring:
                 session,
                 Credentials([SECRET], "x", tmp_path / "x"),
                 zero.cluster.address,
-                "/cluster/v1/snapshot",
+                "/cluster/v2/snapshot",
                 tmp_path / "s.tar",
                 5.0,
             )
@@ -278,7 +278,7 @@ async def test_a_head_restarted_leads_again_in_its_term_and_a_follower_that_cann
     two = ring.daemons["n2"]
     await until(lambda: zero.cluster.role == "head" and two.cluster.head_channel is not None and ready(ring, "n2"))
     assert zero.cluster.raft.term == 1 and heads(ring) == ["n0"]
-    status, body, _ = await ring.call("n2", "record", ticket(2), outcome="x")
+    status, body, _ = await ring.write("n2")
     assert (status, body["status"]) == (200, "done") and body["run_id"].startswith("n0~"), body
     one = ring.daemons["n1"]
 

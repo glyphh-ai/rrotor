@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections.abc import Callable
+import sqlite3
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, overload
 
-from rrotor.errors import ModelError, NotJson, PartMissing, StepUndeclared, Wait
+from rrotor.errors import DatabaseUndeclared, NotJson, SecretMissing, SecretUndeclared, StepUndeclared, Wait
 from rrotor.http import Http
 from rrotor.result import Result
 
@@ -50,9 +51,43 @@ def _json_value(value: Any, what: str) -> Any:
 Sink = Callable[[str, dict[str, Any]], None]
 
 
+class Secrets:
+    """`ctx.secrets`: the values of the secrets the manifest declares, by name. A name it does not declare is refused
+    (E_SECRET_UNDECLARED); rrotor stops a run with a declared one unset before the function runs."""
+
+    __slots__ = ("_declared", "_values")
+
+    def __init__(self, declared: Iterable[str] = (), values: Mapping[str, str] | None = None) -> None:
+        self._declared = frozenset(declared)
+        self._values = dict(values or {})
+
+    def __getitem__(self, name: str) -> str:
+        value = self.get(name)
+        if value is None:
+            raise SecretMissing(name)
+        return value
+
+    @overload
+    def get(self, name: str) -> str | None: ...
+
+    @overload
+    def get(self, name: str, default: str) -> str: ...
+
+    def get(self, name: str, default: str | None = None) -> str | None:
+        if name not in self._declared:
+            raise SecretUndeclared(name)
+        return self._values.get(name, default)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._declared and name in self._values
+
+    def __repr__(self) -> str:
+        return f"Secrets({sorted(self._declared)})"  # the names, never a value
+
+
 class Ctx:
-    """The run's context. Models read `inputs`, `answer`, `files`, `data`, `home`, `clearance` and `caller`, and call
-    the methods below."""
+    """The run's context. Programs read `inputs`, `answer`, `files`, `data`, `home`, `clearance`, `caller` and `db`,
+    and call the methods below."""
 
     def __init__(
         self,
@@ -69,13 +104,15 @@ class Ctx:
         home: Path | None = None,
         clearance: float = 1.0,
         caller: str = "claude",
-        limits: dict[str, Any] | None = None,
         readonly: bool = False,
+        secrets: Secrets | None = None,
+        database: Path | None = None,
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
-        self.readonly = readonly  # a cluster follower's run: its folders read-only, its Ada store opened read-only
-        self.limits: dict[str, Any] = dict(limits or {})  # an Ada model's precedent cap, from the licence key
-        self.ada: Any = None  # the Ada model, once rrotor.ada.open(ctx) has run
+        self._database = database  # the SQLite file, when the manifest asks for one
+        self._db: sqlite3.Connection | None = None  # opened on first use
+        self._secrets = secrets or Secrets()
+        self.readonly = readonly  # a cluster follower's run: its folders read-only
         self.inputs: dict[str, Any] = inputs
         self.answer: Any = answer
         self.files: Path = files
@@ -127,11 +164,26 @@ class Ctx:
         return (self._today() - dt.timedelta(days=1)).isoformat()
 
     @property
-    def db(self) -> NoReturn:
-        raise PartMissing("Databases (ctx.db)", "database")
+    def db(self) -> sqlite3.Connection:
+        """The program's SQLite database (`"databases": ["sqlite"]`), a file in its data folder, opened on first use
+        and closed when the run ends: commit with `with ctx.db:` (what is not committed is rolled back). Read-only on
+        a cluster's follower. Not declared: E_DATABASE_UNDECLARED."""
+        if self._database is None:
+            raise DatabaseUndeclared
+        if self._db is None:
+            if self.readonly:
+                self._db = sqlite3.connect(f"{self._database.as_uri()}?mode=ro", uri=True, timeout=5.0)
+            else:
+                self._db = sqlite3.connect(self._database, timeout=5.0)
+        return self._db
+
+    def close(self) -> None:
+        """The database closed, if it was opened (the run's end)."""
+        if self._db is not None:
+            self._db.close()
+            self._db = None
 
     @property
-    def secrets(self) -> NoReturn:
-        err = ModelError("Secrets (ctx.secrets) come with rrotor's vault, which is not built yet.")
-        err.code = "E_NOT_BUILT"
-        raise err
+    def secrets(self) -> Secrets:
+        """The secrets the manifest declares, set on this rrotor: `ctx.secrets["NAME"]`, `ctx.secrets.get("NAME")`."""
+        return self._secrets

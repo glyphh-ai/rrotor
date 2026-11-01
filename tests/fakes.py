@@ -1,4 +1,4 @@
-"""Shared fakes and helpers: git repos of sample models, a launcher with no sandbox, and small stand-ins."""
+"""Shared fakes and helpers: git repos of sample programs, a launcher with no sandbox, and small stand-ins."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import secrets
 import subprocess
 import sys
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 import rrotor
 from rrotord import manifest as manifests
 from rrotord.keys import canonical
-from rrotord.models import Models, Version
+from rrotord.programs import Programs, Version
 from rrotord.runner.launch import Spec
 from rrotord.sandbox import bwrap
 from rrotord.sandbox.probe import Layers
@@ -49,7 +50,7 @@ GIT_ENV = {
     "GIT_COMMITTER_EMAIL": "test@example.com",
 }
 
-DONE_MODEL = """
+DONE_PROGRAM = """
 from rrotor import Result
 
 def start(ctx, inputs):
@@ -128,9 +129,9 @@ def keys() -> Keys:
 
 def part_archive(
     tmp: Path,
-    name: str = "ada",
+    name: str = "tools",
     version: str = "1.0.0",
-    mod: str = "ada",
+    mod: str = "tools",
     arch: str = "arm64",
     files: dict[str, str | bytes] | None = None,
     **info: Any,
@@ -162,7 +163,7 @@ def git(cwd: Path, *args: str) -> str:
 
 
 class GitRepo:
-    """A model's repo: write files, commit, bundle."""
+    """A program's repo: write files, commit, bundle."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -181,8 +182,8 @@ class GitRepo:
         git(self.path, "commit", "-q", "--allow-empty", "-m", message)
         return git(self.path, "rev-parse", "HEAD")
 
-    def model(self, data: dict[str, Any] | None = None, source: str = DONE_MODEL, **files: str) -> str:
-        return self.commit({"glyphh.json": json.dumps(data or manifest()), "model.py": source, **files})
+    def program(self, data: dict[str, Any] | None = None, source: str = DONE_PROGRAM, **files: str) -> str:
+        return self.commit({"glyphh.json": json.dumps(data or manifest()), "program.py": source, **files})
 
     def bundle(self, out: Path) -> Path:
         git(self.path, "bundle", "create", "-q", str(out), "main")
@@ -198,38 +199,23 @@ class GitRepo:
 
 
 def install(
-    models: Models, data: dict[str, Any], source: str, sha: str = "a" * 40, version: int = 1, files: bool = True
+    programs: Programs, data: dict[str, Any], source: str, sha: str = "a" * 40, version: int = 1, files: bool = True
 ) -> Version:
     """A version on /data as a deploy leaves it, with no git and no venv (the test launcher runs the host Python)."""
     found = manifests.Manifest.model_validate(data)
-    root = models.version_root(found.name, sha)
+    root = programs.version_root(found.name, sha)
     (root / "src").mkdir(parents=True)
-    (root / "src" / "model.py").write_text(source)
+    (root / "src" / "program.py").write_text(source)
     (root / "venv").mkdir()
     if files:
-        models.files(found.name).mkdir(parents=True, exist_ok=True)
-    made = models.record(found.name, version, sha, found)
-    models.activate(made)
+        programs.files(found.name).mkdir(parents=True, exist_ok=True)
+    made = programs.record(found.name, version, sha, found)
+    programs.activate(made)
     return made
 
 
 def ready() -> Layers:
     return Layers({"bubblewrap": {"ok": True, "detail": "test"}})
-
-
-KERNEL = Path(__file__).parent / "kernel"
-
-
-def ada_part(tmp: Path, version: str = "3.10.0") -> tuple[bytes, str, str]:
-    """The Ada part as the tests build it: the vendored kernel and its lexicon (the two seeds) under lib/ (numpy
-    comes from the test's own Python)."""
-    files: dict[str, str | bytes] = {
-        f"lib/{name}": (KERNEL / name).read_text()
-        for name in ("glyphh_kernel.py", "glyphh_spec.py", "glyphh_nsm.py", "glyphh_lexicon.py")
-    }
-    for seed in (KERNEL / "lexicon").iterdir():
-        files[f"lib/lexicon/{seed.name}"] = seed.read_bytes()
-    return part_archive(tmp / "ada-part", name="ada", version=version, mod="ada", files=files)
 
 
 def _part_folders(path: Path) -> list[str]:
@@ -250,7 +236,14 @@ class LocalLauncher:
         return None
 
     def paths(self, mounts: bwrap.Mounts) -> dict[str, str | None]:
-        return {"model": str(mounts.src), "files": str(mounts.files), "data": str(mounts.data) if mounts.data else None}
+        return {
+            "program": str(mounts.src),
+            "files": str(mounts.files),
+            "data": str(mounts.data) if mounts.data else None,
+            "cli_root": str(mounts.cli) if mounts.cli else None,
+            "work": str(mounts.work) if mounts.work else None,
+            "cli_home": str(mounts.home) if mounts.home else None,
+        }
 
     async def spawn(self, spec: Spec) -> asyncio.subprocess.Process:
         self.specs.append(spec)
@@ -416,3 +409,106 @@ class FakeCollector:
     def raw(self, who: str) -> bytes:
         """Everything received, serialized again: to grep for what must never be there."""
         return b"".join(req.SerializeToString() for _, req, _ in self.got[who])
+
+
+# CLIs: archives made here and a fetcher that answers them, never the network
+
+
+class FakeFetch:
+    """Answers each URL with the bytes it was given (or raises what it was given); records what was asked."""
+
+    def __init__(self, answers: Mapping[str, bytes | BaseException] | None = None) -> None:
+        self.answers = dict(answers or {})
+        self.asked: list[tuple[str, frozenset[str]]] = []
+
+    async def __call__(self, url: str, hosts: frozenset[str]) -> bytes:
+        from rrotord.clis import check_url
+
+        self.asked.append((url, hosts))
+        check_url(url, hosts)
+        found = self.answers.get(url)
+        if isinstance(found, BaseException):
+            raise found
+        if found is None:
+            from rrotord.errors import DeployError
+
+            raise DeployError(f"{url} answered 404.", code="E_CLI_INSTALL")
+        return found
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def tarball(files: dict[str, str | bytes], modes: dict[str, int] | None = None) -> bytes:
+    """A gzipped tarball of `files` (path: content), each 0644 unless `modes` says (0755 for an executable)."""
+    import io
+    import tarfile
+
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as tar:
+        for name, content in files.items():
+            raw = content.encode() if isinstance(content, str) else content
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(raw), (modes or {}).get(name, 0o644)
+            tar.addfile(info, io.BytesIO(raw))
+    return out.getvalue()
+
+
+def zipped(files: dict[str, str | bytes], executable: frozenset[str] = frozenset()) -> bytes:
+    import io
+    import zipfile
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, content in files.items():
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (0o755 if name in executable else 0o644) << 16
+            archive.writestr(info, content)
+    return out.getvalue()
+
+
+ECHO = '#!/bin/sh\necho "args: $*"\necho "token: $TOKEN"\necho "home: $HOME"\necho "to stderr" 1>&2\nexit 3\n'
+
+
+def cli_manifest(name: str = "tool", cli: dict[str, Any] | None = None, **extra: Any) -> dict[str, Any]:
+    """A CLI's manifest: the ECHO script from a release tarball, unless `cli` says otherwise."""
+    block = {"install": {"url": "https://example.com/tool.tar.gz", "sha256": sha(tarball({"bin/tool": ECHO}))}}
+    block |= {"command": "tool"} | (cli or {})
+    return {"name": name, "kind": "cli", "cli": block, **extra}
+
+
+def console_wheel(module: str = "hello", script: str = "hello", body: str | None = None) -> bytes:
+    """A wheel with one console script, `script = module:main`, made here."""
+    source = body or "import sys\n\ndef main():\n    print('hello', *sys.argv[1:])\n    return 0\n"
+    return zipped(
+        {
+            f"{module}/__init__.py": source,
+            f"{module}-1.0.dist-info/METADATA": f"Metadata-Version: 2.1\nName: {module}\nVersion: 1.0\n",
+            f"{module}-1.0.dist-info/entry_points.txt": f"[console_scripts]\n{script} = {module}:main\n",
+            f"{module}-1.0.data/purelib/{module}_extra.py": "EXTRA = 1\n",
+            f"{module}-1.0.data/scripts/ignored": "#!/bin/sh\n",
+        }
+    )
+
+
+async def install_cli(
+    programs: Programs,
+    data: dict[str, Any],
+    fetch: FakeFetch,
+    sha_: str = "c" * 40,
+    version: int = 1,
+) -> Version:
+    """A CLI version on /data as a deploy leaves it: its install made by the real installer from `fetch`, no venv
+    (the test launcher runs the host's Python)."""
+    from rrotord.clis import Installer
+
+    found = manifests.Manifest.model_validate(data)
+    root = programs.version_root(found.name, sha_)
+    (root / "src").mkdir(parents=True)
+    (root / "venv").mkdir()
+    await Installer(fetch, python=sys.executable).install(found, root / "cli", root / "src")
+    programs.files(found.name).mkdir(parents=True, exist_ok=True)
+    made = programs.record(found.name, version, sha_, found)
+    programs.activate(made)
+    return made

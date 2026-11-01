@@ -279,3 +279,42 @@ async def test_a_fetch_nobody_answers_is_unreachable(tmp_path: Path):
                 session, Credentials([SECRET], "a", tmp_path / "a"), f"127.0.0.1:{free_port()}", "/x", tmp_path / "x", 2
             )
     assert err.value.code == "E_CLUSTER_UNREACHABLE"
+
+
+async def test_a_node_of_another_cluster_protocol_is_refused_by_name(tmp_path: Path, caplog):
+    """Dialling a listener with no /cluster/v2/link (an earlier release's: 404, or 426) is E_CLUSTER_VERSION, not
+    unreachable; any other refusal of the handshake is the next identity's, then unreachable."""
+    listener = Credentials([SECRET], "b", tmp_path / "l")
+    me = Credentials([SECRET], "a", tmp_path / "me")
+
+    async def gone(_: web.Request) -> web.Response:
+        return web.Response(status=500)
+
+    async with aiohttp.ClientSession() as session:
+        for path, code in (("/cluster/v1/link", "E_CLUSTER_VERSION"), (transport.PATH, "E_CLUSTER_UNREACHABLE")):
+            app = web.Application()
+            app.router.add_get(path, gone)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            await web.TCPSite(runner, "127.0.0.1", 0, ssl_context=listener.server).start()
+            with caplog.at_level(logging.ERROR), pytest.raises(ClusterError) as err:
+                await dial(session, me, f"127.0.0.1:{runner.addresses[0][1]}", {"node_id": "a"})
+            assert err.value.code == code
+            await runner.cleanup()
+    assert "peer speaks another cluster protocol" in caplog.text
+
+
+async def test_a_node_answers_an_earlier_protocols_request_426(nodes: Nodes, tmp_path: Path, caplog):
+    a = nodes.make("a", ["a"], cluster_head="a")
+    await a.start()
+    await until(lambda: a.role == "head")
+    x = Credentials([SECRET], "x", tmp_path / "x")
+    async with aiohttp.ClientSession() as session:
+        for path in ("/cluster/v1/link", "/cluster/v1/versions/p/abc.tar", "/cluster/v1/snapshot"):
+            async with session.get(
+                f"https://{a.address}{path}", ssl=x.identities[0].client, server_hostname=x.identities[0].server_name
+            ) as res:
+                body = await res.json()
+            assert res.status == 426 and body["error"]["code"] == "E_CLUSTER_VERSION"
+            assert body["error"]["message"] == transport.UPGRADE
+    assert "earlier cluster protocol" in caplog.text

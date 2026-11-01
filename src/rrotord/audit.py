@@ -12,7 +12,7 @@ Who did it is the `actor`: `key` (its SHA-256, never the key), `sign-in` (the su
 `local` (the local token), `server` (the link), `rrotor` (its own work: an expired run, a key read from a file), or
 `anonymous` (a 401: no credential that counted, the SHA-256 of what was sent if anything was). `client` is the
 request's address (the last `X-Forwarded-For` hop, which the packages' proxy sets), kept here and in the customer's
-own drain only. Never in an event: a model's inputs or outputs, a token or a key, a request's body; with
+own drain only. Never in an event: a program's inputs or outputs, a token or a key, a request's body; with
 `RROTOR_LOG_PAYLOADS=on`, `run.end` keeps its inputs and `Result.data`, 4 KB each, for the customer's drain only."""
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def matches(event: dict[str, Any], query: dict[str, Any]) -> bool:
     at = moment(str(event.get("at", "")), "at") if event.get("at") else None
     return (
         (query["kind"] is None or event.get("kind") == query["kind"])
-        and (query["model"] is None or event.get("model") == query["model"])
+        and (query["program"] is None or event.get("program", event.get("model")) == query["program"])  # earlier: model
         and (query["run_id"] is None or event.get("run_id") == query["run_id"])
         and (query["actor"] is None or query["actor"] in (actor.get("type"), actor.get("key_sha256"), actor.get("sub")))
         and (query["since"] is None or (at is not None and at >= query["since"]))
@@ -285,7 +285,7 @@ class Audit:
             name, offset = later[0], 0
 
     def query(self, given: dict[str, Any]) -> dict[str, Any]:
-        """`GET /v1/audit`: events newest first, filtered by since, until, kind, actor, model and run_id, `limit` at
+        """`GET /v1/audit`: events newest first, filtered by since, until, kind, actor, program and run_id, `limit` at
         a time (100, at most 1000), and the cursor for the next page (None at the end)."""
         query = self._query(given)
         limit, (from_day, from_offset) = query["limit"], query["cursor"]
@@ -335,7 +335,7 @@ class Audit:
         return {
             "kind": text("kind"),
             "actor": text("actor"),
-            "model": text("model"),
+            "program": text("program"),
             "run_id": text("run_id"),
             "since": moment(since, "since") if since else None,
             "until": moment(until, "until") if until else None,

@@ -24,11 +24,15 @@ LEGACY = ("2025-11-25", "2025-06-18", "2025-03-26")
 VERSION_META = "io.modelcontextprotocol/protocolVersion"
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS = -32700, -32600, -32601, -32602
 INSTRUCTIONS = (
-    "This person's Glyphh runtime (rrotor): their Ada models, deployed by commit and run here. models_list shows them; "
-    "model_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
-    "model_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
-    "waiting for the person; model_deploy deploys a commit of a model's GitHub repo; audit_query reads the audit log "
-    "(Enterprise); cluster_status shows the runtime's cluster."
+    "This person's Glyphh runtime (rrotor): their programs, deployed by commit and run here. programs_list shows them; "
+    "program_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
+    "program_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
+    "waiting for the person; program_deploy deploys a commit of a program's GitHub repo; audit_query reads the audit "
+    "log (Enterprise); cluster_status shows the runtime's cluster; secrets_list, secret_set and secret_delete keep a "
+    "program's secrets (values are never shown back); schedules_list, schedule_pause and schedule_resume show and "
+    "pause the schedules this runtime fires itself. clis_list shows the command-line tools installed here, and "
+    "cli_run runs one command of one in the sandbox (args checked against its allow patterns; one that needs approval "
+    "answers needs_approval, then program_continue runs it once the person approves)."
 )
 
 
@@ -51,19 +55,19 @@ def _obj(properties: dict[str, Any], required: list[str] | None = None) -> dict[
     return {"type": "object", "properties": properties, "required": required or [], "additionalProperties": False}
 
 
-async def models_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
-    return {"models": s.models.describe()}
+async def programs_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
+    return {"programs": s.programs.describe()}
 
 
-async def model_call(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+async def program_call(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.call(s, args)
 
 
-async def model_continue(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+async def program_continue(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.resume(s, ops.run_id_of(args), args.get("answer"))
 
 
-async def model_cancel(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+async def program_cancel(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.cancel(s, ops.run_id_of(args))
 
 
@@ -79,7 +83,7 @@ async def approvals(s: Services, _: dict[str, Any]) -> dict[str, Any]:
     return {"approvals": await ops.approvals(s)}
 
 
-async def model_deploy(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+async def program_deploy(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.deploy(s, args)
 
 
@@ -95,49 +99,86 @@ async def cluster_status(s: Services, _: dict[str, Any]) -> dict[str, Any]:
     return clustered(s)
 
 
+async def secrets_list(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.secrets_list(s, ops.text_of(args, "program"))
+
+
+async def secret_set(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.secret_set(s, ops.text_of(args, "program"), ops.text_of(args, "name"), args.get("value"))
+
+
+async def secret_delete(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.secret_delete(s, ops.text_of(args, "program"), ops.text_of(args, "name"))
+
+
+async def clis_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
+    return await ops.clis_list(s)
+
+
+async def cli_run(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.cli_run(s, args)
+
+
+async def schedules_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
+    return await ops.schedules(s)
+
+
+async def schedule_pause(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.schedule_pause(s, ops.text_of(args, "program"), ops.text_of(args, "name"), True)
+
+
+async def schedule_resume(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.schedule_pause(s, ops.text_of(args, "program"), ops.text_of(args, "name"), False)
+
+
 RUN = _obj({"run_id": {"type": "string"}}, ["run_id"])
+SCHEDULE_ARGS = _obj({"program": {"type": "string"}, "name": {"type": "string"}}, ["program", "name"])
 TOOLS: tuple[Tool, ...] = (
     Tool(
-        "models_list",
-        "The models here: each one's versions, the active one and its functions.",
+        "programs_list",
+        "The programs here: each one's versions, the active one and its functions.",
         _obj({}),
-        models_list,
+        programs_list,
         True,
     ),
     Tool(
-        "model_call",
-        "Run a function of a model: the first Result, with its data. Waits for the model.",
+        "program_call",
+        "Run a function of a program: the first Result, with its data. Waits for the program.",
         _obj(
             {
-                "model": {"type": "string"},
+                "program": {"type": "string"},
                 "function": {"type": "string", "default": "start"},
                 "inputs": {"type": "object"},
                 "version": {"type": "integer", "minimum": 1},
                 "clearance": {"type": "number", "minimum": 0, "maximum": 1},
             },
-            ["model"],
+            ["program"],
         ),
-        model_call,
+        program_call,
     ),
     Tool(
-        "model_continue",
+        "program_continue",
         "Answer a run that is waiting for input or an approval: the next Result.",
         _obj({"run_id": {"type": "string"}, "answer": {}}, ["run_id"]),
-        model_continue,
+        program_continue,
     ),
-    Tool("model_cancel", "Stop a run; its end runs.", RUN, model_cancel),
+    Tool("program_cancel", "Stop a run; its end runs.", RUN, program_cancel),
     Tool("run_status", "A run's status, timing and last Result.", RUN, run_status, True),
     Tool("run_log", "A run's log lines.", RUN, run_log, True),
     Tool(
-        "approvals", "The runs waiting for the person's approval: run, model, step, prompt.", _obj({}), approvals, True
+        "approvals",
+        "The runs waiting for the person's approval: run, program, step, prompt.",
+        _obj({}),
+        approvals,
+        True,
     ),
     Tool(
-        "model_deploy",
-        "Deploy a commit of a model's GitHub repo (owner/name) as its next version; a token for a private repo.",
+        "program_deploy",
+        "Deploy a commit of a program's GitHub repo (owner/name) as its next version; a token for a private repo.",
         _obj(
             {"repo": {"type": "string"}, "commit": {"type": "string"}, "token": {"type": "string"}}, ["repo", "commit"]
         ),
-        model_deploy,
+        program_deploy,
     ),
     Tool(
         "audit_query",
@@ -147,7 +188,7 @@ TOOLS: tuple[Tool, ...] = (
                 "since": {"type": "string", "format": "date-time"},
                 "until": {"type": "string", "format": "date-time"},
                 "kind": {"type": "string"},
-                "model": {"type": "string"},
+                "program": {"type": "string"},
                 "run_id": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
             }
@@ -162,6 +203,74 @@ TOOLS: tuple[Tool, ...] = (
         _obj({}),
         cluster_status,
         True,
+    ),
+    Tool(
+        "secrets_list",
+        "A program's secrets by name: whether its active version declares each and whether it is set. Never a value.",
+        _obj({"program": {"type": "string"}}, ["program"]),
+        secrets_list,
+        True,
+    ),
+    Tool(
+        "secret_set",
+        "Set a program's secret (a name its glyphh.json declares), kept encrypted on this runtime; never shown back.",
+        _obj(
+            {"program": {"type": "string"}, "name": {"type": "string"}, "value": {"type": "string"}},
+            ["program", "name", "value"],
+        ),
+        secret_set,
+    ),
+    Tool(
+        "secret_delete",
+        "Delete a program's secret.",
+        SCHEDULE_ARGS,
+        secret_delete,
+    ),
+    Tool(
+        "schedules_list",
+        "The programs' schedules: function, cron and zone, the next fire, the last run and skip, paused or not.",
+        _obj({}),
+        schedules_list,
+        True,
+    ),
+    Tool(
+        "schedule_pause",
+        "Pause a schedule (by program and name: the function's, unless it names itself); kept across restarts.",
+        SCHEDULE_ARGS,
+        schedule_pause,
+    ),
+    Tool("schedule_resume", "Resume a paused schedule.", SCHEDULE_ARGS, schedule_resume),
+    Tool(
+        "clis_list",
+        "The command-line tools here: each one's version, command, install, allowed argument patterns and the "
+        "patterns that need the person's approval.",
+        _obj({}),
+        clis_list,
+        True,
+    ),
+    Tool(
+        "cli_run",
+        "Run one command of a CLI in the sandbox (no shell): its exit code, stdout and stderr (64 KB each, the rest "
+        "in run_log) and the files it made or changed in its working folder; needs_approval when its arguments need "
+        "the person's approval. files: path to text, or {base64}.",
+        _obj(
+            {
+                "cli": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}, "maxItems": 256},
+                "stdin": {"type": "string"},
+                "files": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "anyOf": [
+                            {"type": "string"},
+                            _obj({"base64": {"type": "string"}}, ["base64"]),
+                        ]
+                    },
+                },
+            },
+            ["cli", "args"],
+        ),
+        cli_run,
     ),
 )
 BY_NAME = {t.name: t for t in TOOLS}

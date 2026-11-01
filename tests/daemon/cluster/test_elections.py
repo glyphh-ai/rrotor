@@ -17,7 +17,7 @@ from rrotord.cluster import node as cluster_node
 from rrotord.cluster.raft import Timing
 from rrotord.errors import RrotorError
 from tests.daemon.cluster.conftest import Nodes, until
-from tests.daemon.cluster.ring import Ring, rows, ticket, tickets
+from tests.daemon.cluster.ring import Ring, held, programs
 from tests.fakes import keys
 
 ENTERPRISE = keys().key(tier="enterprise", max_nodes=None, max_precedents=None)
@@ -54,12 +54,12 @@ async def three(ring: Ring) -> list[str]:
     ids = ["n0", "n1", "n2"]
     head = await ring.add("n0", ids, ENTERPRISE)
     await until(lambda: head.cluster.role == "head")
-    tickets(head)
-    status, body, _ = await ring.call("n0", "record", ticket(1), outcome="page oncall")
+    programs(head)
+    status, body, _ = await ring.write("n0")
     assert (status, body["status"]) == (200, "done"), body
     for n in ids[1:]:
         await ring.add(n, ids, ENTERPRISE)
-    await until(lambda: ready(ring, *ids) and rows(ring.daemons["n2"]) == 1)
+    await until(lambda: ready(ring, *ids) and held(ring.daemons["n2"]) == 1)
     return ids
 
 
@@ -75,7 +75,7 @@ async def test_the_head_lost_another_voter_is_elected_and_the_old_head_follows_w
     assert view["ha"] is True and [m["voter"] for m in view["members"]] == [True, True, True]
     await ring.stop("n0")
     await until(lambda: one.cluster.head_channel is None)
-    status, body, headers = await ring.call("n1", "record", ticket(2), outcome="x")
+    status, body, headers = await ring.write("n1")
     assert (status, body["error"]["code"], headers["Retry-After"]) == (503, "E_NO_HEAD", "2")  # an election is on
     await until(lambda: len(heads(ring)) == 1, within=10.0)
     new = heads(ring)[0]
@@ -83,11 +83,11 @@ async def test_the_head_lost_another_voter_is_elected_and_the_old_head_follows_w
     assert ring.daemons[new].cluster.raft.term >= 2
     assert [e["reason"] for e in seen[new] if e["kind"] == "cluster.head"] == ["elected"]
     await until(lambda: ready(ring, other) and ring.daemons[other].cluster.state.get("head") == new)
-    status, body, _ = await ring.call(other, "record", ticket(3), outcome="page oncall")  # writes resume
+    status, body, _ = await ring.write(other)  # writes resume
     assert (status, body["status"]) == (200, "done") and body["run_id"].startswith(f"{new}~"), body
-    await until(lambda: rows(one) == rows(two) == 2)
+    await until(lambda: held(one) == held(two) == 2)
     zero = await ring.add("n0", ids, ENTERPRISE)  # the old head, restarted: it follows whoever was elected
-    await until(lambda: ready(ring, "n0") and zero.cluster.role == "follower" and rows(zero) == 2)
+    await until(lambda: ready(ring, "n0") and zero.cluster.role == "follower" and held(zero) == 2)
     assert heads(ring) == [new]
 
 
@@ -101,15 +101,17 @@ async def test_a_head_out_of_touch_answers_not_committed_steps_down_and_what_it_
     seen = watch(zero)
     await ring.stop("n1")
     await ring.stop("n2")
-    status, body, _ = await ring.call("n0", "record", ticket(2), outcome="kept")
-    assert (status, body["error"]["code"]) == (503, "E_NOT_COMMITTED"), body
-    assert rows(zero) == 2  # written, and kept in its log
+    zero.access.set_keys([*zero.access.keys, "b" * 64])  # a write that replicates, on the head alone
+    with pytest.raises(RrotorError) as caught:
+        await zero.cluster.committed(zero.cluster.raft.term)
+    assert caught.value.code == "E_NOT_COMMITTED"
+    assert held(zero) == 2  # written, and kept in its log
     await until(lambda: zero.cluster.role == "follower")
     assert [e["reason"] for e in seen if e["kind"] == "cluster.head"] == ["no_majority"]
-    status, body, headers = await ring.call("n0", "record", ticket(3), outcome="x")
+    status, body, headers = await ring.write("n0")
     assert (status, body["error"]["code"], headers["Retry-After"]) == (503, "E_NO_HEAD", "2")
     one = await ring.add("n1", ids, ENTERPRISE)  # a majority again: n0's log is the longer, so n0 is elected
-    await until(lambda: heads(ring) == ["n0"] and ready(ring, "n1") and rows(one) == 2, within=20.0)
+    await until(lambda: heads(ring) == ["n0"] and ready(ring, "n1") and held(one) == 2, within=20.0)
     with pytest.raises(RrotorError) as caught:
         await zero.cluster.committed(zero.cluster.raft.term - 1)  # a write of an earlier term: deposed meanwhile
     assert caught.value.code == "E_NO_HEAD" and caught.value.headers == {"Retry-After": "2"}
@@ -122,7 +124,7 @@ async def test_promotion_under_ha_moves_the_head_only_to_an_up_to_date_voter(rin
     code, said = await command.run(ring.daemons["n1"].config, ["promote", "n1"])
     assert code == 0 and json.loads(said)["head"] == "n1"  # the head answers, and steps down as asked
     await until(lambda: heads(ring) == ["n1"] and ready(ring, "n0", "n2"))
-    status, body, _ = await ring.call("n0", "record", ticket(4), outcome="x")
+    status, body, _ = await ring.write("n0")
     assert (status, body["status"]) == (200, "done") and body["run_id"].startswith("n1~"), body
 
 

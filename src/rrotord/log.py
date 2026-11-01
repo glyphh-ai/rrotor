@@ -1,8 +1,8 @@
 """JSON logs on stdout, one object per line. Secrets never go in: anything that looks like a token is masked, and
-no code logs a token, a key or a model's inputs.
+no code logs a token, a key or a program's inputs.
 
 Every line carries `at`, `level`, `logger`, `message` and its own fields, and, added here: `node_id` (and, in a
-cluster, `cluster_id` and `role`), the run's `run_id`, `model`, `version` and `function` while a run is being
+cluster, `cluster_id` and `role`), the run's `run_id`, `program`, `version` and `function` while a run is being
 handled (`bind`), and `trace_id` and `span_id` while a span is being recorded (docs/specs/cluster.md, 7). A drain
 sends the same line, masked the same way (`masked`)."""
 
@@ -38,7 +38,7 @@ def identify(**given: Any) -> None:
 
 @contextlib.contextmanager
 def bind(**given: Any) -> Iterator[None]:
-    """Fields on every line logged inside the block, in this task and the tasks it starts: a run's id, model,
+    """Fields on every line logged inside the block, in this task and the tasks it starts: a run's id, program,
     version and function."""
     token = BOUND.set({**(BOUND.get() or {}), **{k: v for k, v in given.items() if v is not None}})
     try:

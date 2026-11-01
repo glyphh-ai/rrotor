@@ -9,7 +9,7 @@ from rrotord.errors import BadRequest, DeployError
 
 def src(tmp_path: Path, data: object, source: str = "def start(ctx, inputs):\n    pass\n") -> Path:
     (tmp_path / "glyphh.json").write_text(data if isinstance(data, str) else json.dumps(data))
-    (tmp_path / "model.py").write_text(source)
+    (tmp_path / "program.py").write_text(source)
     return tmp_path
 
 
@@ -45,9 +45,9 @@ def test_no_glyphh_json(tmp_path):
         m.read(tmp_path)
 
 
-def test_no_model_py(tmp_path):
+def test_no_program_py(tmp_path):
     (tmp_path / "glyphh.json").write_text("{}")
-    with pytest.raises(DeployError, match=r"no model\.py"):
+    with pytest.raises(DeployError, match=r"no program\.py"):
         m.read(tmp_path)
 
 
@@ -79,12 +79,12 @@ def test_refused_manifests(tmp_path, data, why):
     assert why in refusal(tmp_path, data)
 
 
-def test_a_function_missing_from_model_py(tmp_path):
+def test_a_function_missing_from_program_py(tmp_path):
     data = {"name": "p", "functions": {"start": {}, "other": {}}}
-    assert refusal(tmp_path, data) == "model.py has no function other."
+    assert refusal(tmp_path, data) == "program.py has no function other."
 
 
-def test_model_py_that_does_not_parse(tmp_path):
+def test_program_py_that_does_not_parse(tmp_path):
     assert "does not parse: line 1" in refusal(tmp_path, {"name": "p", "functions": {"start": {}}}, "def (")
 
 
@@ -101,18 +101,86 @@ def test_check_inputs_names_where_the_first_error_is():
         m.check_inputs(fn, {})
 
 
-def test_writes_defaults_to_the_models_data_and_a_model_with_data_but_no_ada_is_the_heads():
-    ada = m.Manifest.model_validate(
-        {"name": "m", "data": True, "needs": ["ada"], "functions": {"record": {}, "query": {"writes": False}}}
+def test_writes_defaults_to_the_programs_data_and_a_program_with_data_is_the_heads():
+    kept = m.Manifest.model_validate(
+        {"name": "m", "data": True, "functions": {"record": {}, "query": {"writes": False}}}
     )
-    assert ada.functions["record"].writes is True and ada.functions["query"].writes is False
-    assert (ada.writes("record"), ada.writes("query"), ada.writes("missing"), ada.head_only) == (
+    assert kept.functions["record"].writes is True and kept.functions["query"].writes is False
+    assert (kept.writes("record"), kept.writes("query"), kept.writes("missing"), kept.head_only) == (
         True,
-        False,
+        True,  # marked a read, and still the head's: its data folder is there alone
         True,
-        False,
+        True,
     )
     plain = m.Manifest.model_validate({"name": "p", "functions": {"start": {}, "save": {"writes": True}}})
     assert (plain.writes("start"), plain.writes("save"), plain.head_only) == (False, True, False)
-    kept = m.Manifest.model_validate({"name": "k", "data": True, "functions": {"read": {"writes": False}}})
-    assert kept.head_only and kept.writes("read")
+
+
+def test_a_sqlite_database_is_data_kept_on_the_head_and_needs_no_part():
+    db = m.Manifest.model_validate(
+        {"name": "d", "databases": ["sqlite", "postgres"], "functions": {"add": {}, "read": {"writes": False}}}
+    )
+    assert (db.keeps_data, db.head_only, db.functions["add"].writes, db.writes("read")) == (True, True, True, True)
+    assert db.parts() == ["postgres"]
+    assert m.Manifest.model_validate({"name": "p", "functions": {"start": {}}}).keeps_data is False
+
+
+def test_a_program_that_reads_secrets_is_the_heads():
+    """Secrets are node-local and the head keeps them: every call of a program that declares one runs there."""
+    keyed = m.Manifest.model_validate({"name": "k", "secrets": ["API_KEY"], "functions": {"start": {"writes": False}}})
+    assert (keyed.head_only, keyed.writes("start")) == (True, True)
+
+
+SCHEDULED = {"type": "object", "properties": {"day": {"type": "string"}}, "additionalProperties": False}
+
+
+def test_schedules_are_read(tmp_path):
+    data = {
+        "name": "p",
+        "functions": {"start": {"inputs": SCHEDULED}},
+        "schedules": [
+            {"function": "start", "cron": "15 6 * * *"},
+            {
+                "function": "start",
+                "cron": "0 9 * * MON",
+                "tz": "Europe/Amsterdam",
+                "input": {"day": "x"},
+                "name": "mon",
+            },
+        ],
+    }
+    found = m.read(src(tmp_path, data))
+    daily, monday = found.schedules
+    assert (daily.id, daily.tz, daily.input, monday.id) == ("start", "UTC", {}, "mon")
+    import datetime as dt
+
+    assert monday.next_after(dt.datetime(2026, 11, 1, tzinfo=dt.UTC)) == dt.datetime(2026, 11, 2, 8, tzinfo=dt.UTC)
+
+
+@pytest.mark.parametrize(
+    ("schedule", "why"),
+    [
+        ({"function": "start", "cron": "61 * * * *"}, "schedules.0.cron: Value error, '61' is not a minute (0-59)"),
+        ({"function": "start", "cron": "daily"}, "five fields"),
+        ({"function": "start", "cron": "* * * * *", "tz": "Mars/Base"}, "schedules.0.tz: Value error, 'Mars/Base'"),
+        ({"function": "other", "cron": "* * * * *"}, "schedules.0: other is not one of its functions"),
+        ({"function": "start", "cron": "* * * * *", "input": {"day": 5}}, "schedules.0.input does not fit start's"),
+        ({"function": "start", "cron": "* * * * *", "every": 1}, "schedules.0.every: Extra inputs"),
+        ({"cron": "* * * * *"}, "schedules.0.function: Field required"),
+    ],
+)
+def test_refused_schedules(tmp_path, schedule, why):
+    data = {"name": "p", "functions": {"start": {"inputs": SCHEDULED}}, "schedules": [schedule]}
+    assert why in refusal(tmp_path, data)
+
+
+def test_the_examples_manifest_is_read_with_its_schedule():
+    found = m.read(Path(__file__).resolve().parents[2] / "examples" / "daily_sales")
+    [daily] = found.schedules
+    assert (found.name, daily.id, daily.function, daily.cron) == ("daily_sales", "each_morning", "start", "15 6 * * *")
+
+
+def test_two_schedules_of_one_name_are_refused(tmp_path):
+    two = [{"function": "start", "cron": "0 6 * * *"}, {"function": "start", "cron": "0 18 * * *"}]
+    data = {"name": "p", "functions": {"start": {}}, "schedules": two}
+    assert "schedules.1: two schedules are named start; give each its own name" in refusal(tmp_path, data)

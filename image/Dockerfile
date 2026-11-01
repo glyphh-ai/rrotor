@@ -1,10 +1,10 @@
-# rrotor's image (docs/architecture.md, section 4): the base, and on it the published image with the Ada part built in.
+# rrotor's image (docs/architecture.md, section 4): the base, and on it the published image.
 #   docker buildx build -f image/Dockerfile --target hosted -t ghcr.io/glyphh-ai/rrotor:<version> .
 
 FROM debian:trixie-slim AS os
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-venv bubblewrap libseccomp2 util-linux git ca-certificates tini libstdc++6 \
+      python3 python3-venv bubblewrap libseccomp2 util-linux git ca-certificates tini libstdc++6 tzdata \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=node:22-trixie-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /usr/local/bin/uv
@@ -24,7 +24,9 @@ ARG VERSION=dev
 # The public key rrotor checks a part's signature with: Glyphh's release key, not a secret (it can also be set in the
 # environment). The licence key's public half is in the code (rrotord/licence_key.py), never the environment.
 ARG RELEASE_PUBLIC_KEY=
-LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/rrotor" \
+# The source label names the public repo (glyphh-ai/glyphh: the deploy files, SDKs and plugin), so the published
+# package is listed there; rrotor's own repo stays private.
+LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/glyphh" \
       org.opencontainers.image.description="rrotor: Glyphh's per-person runtime (base)" \
       org.opencontainers.image.version="${VERSION}"
 COPY --from=build /opt/rrotord /opt/rrotord
@@ -41,17 +43,12 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["rrotord"]
 
-# The published image, ghcr.io/glyphh-ai/rrotor (and Fly's registry for the hosted machines): the base with the Ada
-# part built in (dist/parts, from parts/ada/build.sh; this architecture's kept), installed at boot. One image for
-# every rrotor: the environment decides which it is (RROTOR_MODE: local, the default; hosted,
-# as the server provisions it; self, as the deploy packages run it), and the licence key sets Ada's limits.
+# The published image, ghcr.io/glyphh-ai/rrotor (and Fly's registry for the hosted machines): the base, as one image
+# for every rrotor. The environment decides which it is (RROTOR_MODE: local, the default; hosted, as the server
+# provisions it; self, as the deploy packages run it), and the licence key sets its limits. It carries no part
+# (no /opt/parts-builtin to install at boot); a local rrotor installs one with POST /v1/parts.
 FROM base AS hosted
-ARG TARGETARCH
-COPY --chown=rrotor:rrotor dist/parts/ /opt/parts-builtin/
-USER root
-RUN [ -z "$TARGETARCH" ] || find /opt/parts-builtin -type f ! -name "*-${TARGETARCH}.*" ! -name "*-any.*" -delete
-USER rrotor
-LABEL org.opencontainers.image.description="rrotor: Glyphh's per-person runtime, with the Ada part"
+LABEL org.opencontainers.image.description="rrotor: Glyphh's per-person runtime"
 
 # The sandbox's own tests, run inside the base image (they need bwrap, Landlock and libseccomp): CI only.
 FROM base AS sandbox-test

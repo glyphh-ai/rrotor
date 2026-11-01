@@ -270,8 +270,6 @@ class LinkClient:
             self._spawn(self.handler.on_deploy(message))
         elif isinstance(message, p.Keys | p.Pause | p.Resume):
             self._spawn(self.handler.on_access(message))
-        elif isinstance(message, p.Unbuilt):
-            log.info("message not handled yet", extra={"type": message.type, "code": "E_NOT_BUILT"})
 
     def _spawn(self, work: Awaitable[None]) -> None:
         async def guarded() -> None:

@@ -65,7 +65,7 @@ resource "aws_route_table_association" "rrotor" {
 
 # One node: HTTPS in (and HTTP, for the certificate and the redirect). A cluster: the API from the load balancer
 # and the cluster's port from the other nodes only (cluster.tf). Everything out: the link and the heartbeat to the
-# Glyphh server, the image pull, Let's Encrypt, and the egress models are allowed. No SSH: SSM instead.
+# Glyphh server, the image pull, Let's Encrypt, and the egress programs are allowed. No SSH: SSM instead.
 resource "aws_security_group" "rrotor" {
   name_prefix = "${var.name}-"
   description = "rrotor: HTTPS and HTTP in, all out"

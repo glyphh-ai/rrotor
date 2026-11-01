@@ -62,12 +62,12 @@ async def test_another_machines_address_is_replayed_and_the_rest_is_misdirected(
 
 async def test_a_paused_runtime_answers_402_to_everything_but_its_health(hosted):
     hosted.services.access.pause("runtime_hours")
-    res = await hosted.client.get("/v1/models", headers=hosted.auth())
+    res = await hosted.client.get("/v1/programs", headers=hosted.auth())
     body = await res.json()
     assert (res.status, body["error"]["code"], body["error"]["limit"]) == (402, "E_LIMIT", "runtime_hours")
     assert (await code_of(hosted, "/healthz"))[0] == 200
     hosted.services.access.resume()
-    assert (await code_of(hosted, "/v1/models", **hosted.auth()))[0] == 200
+    assert (await code_of(hosted, "/v1/programs", **hosted.auth()))[0] == 200
 
 
 async def test_in_development_one_exact_host_stands_in_for_the_machines_address(hosted):
@@ -104,17 +104,17 @@ async def test_a_glyphh_sign_in_the_cloud_vouches_for_lets_a_call_in_and_a_refus
     )
     await client.start_server()
     try:
-        res = await client.get("/v1/models", headers={"Authorization": f"Bearer {signed_in}"})
+        res = await client.get("/v1/programs", headers={"Authorization": f"Bearer {signed_in}"})
         assert res.status == 200
-        res = await client.get("/v1/models", headers=hosted.auth())  # a runtime key never asks the Cloud
+        res = await client.get("/v1/programs", headers=hosted.auth())  # a runtime key never asks the Cloud
         assert res.status == 200 and hosted.services.introspect.asked == [signed_in]
-        res = await client.get("/v1/models", headers={"Authorization": f"Bearer {token()}"})
+        res = await client.get("/v1/programs", headers={"Authorization": f"Bearer {token()}"})
         assert res.status == 401 and (await res.json())["error"]["code"] == "E_AUTH"
         metadata = (
             f'Bearer resource_metadata="https://{HOST}/.well-known/oauth-protected-resource/mcp", scope="account"'
         )
         assert res.headers["WWW-Authenticate"] == metadata + ', error="invalid_token"'
-        res = await client.get("/v1/models", headers={"Host": f"{HOST}:443"})
+        res = await client.get("/v1/programs", headers={"Host": f"{HOST}:443"})
         assert res.status == 401 and res.headers["WWW-Authenticate"] == (
             f'Bearer resource_metadata="https://{HOST}/.well-known/oauth-protected-resource/mcp", scope="account"'
         )
@@ -137,7 +137,7 @@ async def test_a_glyphh_sign_in_the_cloud_vouches_for_lets_a_call_in_and_a_refus
 
 async def test_without_the_cloud_only_a_runtime_key_gets_in(hosted):
     assert hosted.services.introspect is None
-    res = await hosted.client.get("/v1/models", headers={"Authorization": f"Bearer {token()}"})
+    res = await hosted.client.get("/v1/programs", headers={"Authorization": f"Bearer {token()}"})
     assert res.status == 401 and 'error="invalid_token"' in res.headers["WWW-Authenticate"]
 
 
@@ -147,7 +147,7 @@ async def test_only_the_requests_served_are_counted_for_the_key_that_let_them_in
     access.set_keys([digest(hosted.token), digest(other)])
     for _ in range(2):
         assert (await code_of(hosted, **hosted.auth()))[0] == 200
-    assert (await code_of(hosted, "/v1/models", Authorization=f"Bearer {other}"))[0] == 200
+    assert (await code_of(hosted, "/v1/programs", Authorization=f"Bearer {other}"))[0] == 200
     assert await code_of(hosted) == (401, "E_AUTH")
     assert await code_of(hosted, Authorization=f"Bearer {token()}") == (401, "E_AUTH")
     assert (await code_of(hosted, "/healthz"))[0] == 200  # open: no key, no call
@@ -201,27 +201,27 @@ async def test_a_self_hosted_rrotor_names_its_public_host_as_the_resource_and_is
     try:
         res = await client.get("/.well-known/oauth-protected-resource/mcp")
         assert res.status == 200 and (await res.json())["resource"] == f"https://{SELF_HOST}/mcp"
-        res = await client.get("/v1/models")
+        res = await client.get("/v1/programs")
         assert res.headers["WWW-Authenticate"] == (
             f'Bearer resource_metadata="https://{SELF_HOST}/.well-known/oauth-protected-resource/mcp", scope="account"'
         )
-        assert (await client.get("/v1/models", headers={"Authorization": f"Bearer {signed_in}"})).status == 200
+        assert (await client.get("/v1/programs", headers={"Authorization": f"Bearer {signed_in}"})).status == 200
         self_hosted.services.access.pause("runtime_hours")  # the server never sends it; were it sent, ignored
-        assert (await client.get("/v1/models", headers=self_hosted.auth())).status == 200
+        assert (await client.get("/v1/programs", headers=self_hosted.auth())).status == 200
     finally:
         await client.close()
 
 
 CHANGES = [
     ("PUT", "/v1/runtime/token", {"runtime_id": "8f8f8f8f-8f8f-4f8f-8f8f-8f8f8f8f8f8f", "token": "t" * 32}),
-    ("POST", "/v1/parts", {"name": "ada", "version": "0.1.0", "sha256": "0" * 64, "signature": "x", "url": "u"}),
-    ("DELETE", "/v1/parts/ada", None),
+    ("POST", "/v1/parts", {"name": "tools", "version": "0.1.0", "sha256": "0" * 64, "signature": "x", "url": "u"}),
+    ("DELETE", "/v1/parts/tools", None),
     ("PUT", "/v1/licence", {"token": "x"}),
 ]
 
 
 async def refuses_every_change(api: Api) -> None:
-    """A runtime key (or a Glyphh sign-in) runs and deploys models; the runtime itself is not its to change."""
+    """A runtime key (or a Glyphh sign-in) runs and deploys programs; the runtime itself is not its to change."""
     creds = api.services.credentials
     before = (creds.runtime_id, creds.token)
     for method, path, sent in CHANGES:

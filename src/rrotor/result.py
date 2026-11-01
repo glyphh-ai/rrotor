@@ -43,5 +43,5 @@ class Result:
         return self.status in WAITING
 
     def to_json(self) -> dict[str, Any]:
-        """The Outcome protocol 1 carries: status, data, step, prompt."""
+        """The Outcome the link's protocol carries: status, data, step, prompt."""
         return {"status": self.status, "data": self.data, "step": self.step, "prompt": self.prompt}

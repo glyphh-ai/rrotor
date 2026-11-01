@@ -58,7 +58,7 @@ drain:
   # In a cluster (RROTOR_DRAIN_AT): head, the followers' signals go by the head, which exports for every node (one
   # egress, from the head); node, each pod exports itself.
   at: head
-  # "on": models' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS), never anywhere else.
+  # "on": programs' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS), never anywhere else.
   payloads: "off"
 
 # "on": the same logs, metrics, traces and audit events also go to Glyphh (RROTOR_SERVER_LOGS), so the platform can
@@ -140,7 +140,7 @@ serviceAccount:
 podDisruptionBudget:
   enabled: false
 
-# The model sandbox (bubblewrap) makes namespaces and mounts /proc. That needs seccomp and AppArmor unconfined and
+# The program sandbox (bubblewrap) makes namespaces and mounts /proc. That needs seccomp and AppArmor unconfined and
 # /proc unmasked, and an unmasked /proc needs the pod in its own user namespace (hostUsers: false). rrotor's own
 # seccomp filter and Landlock hold each run. See docs/self-hosting/helm.md for what the cluster must allow.
 hostUsers: false

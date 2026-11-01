@@ -1,15 +1,15 @@
-from rrotor.errors import ModelError, NotJson, PartMissing, StepUndeclared, Wait
+from rrotor.errors import NotJson, PartMissing, ProgramError, StepUndeclared, Wait
 
 
-def test_model_error_keeps_its_message_and_code():
-    err = ModelError("broke")
-    assert (err.code, err.message, str(err)) == ("E_MODEL", "broke", "broke")
+def test_program_error_keeps_its_message_and_code():
+    err = ProgramError("broke")
+    assert (err.code, err.message, str(err)) == ("E_PROGRAM", "broke", "broke")
 
 
 def test_part_missing_names_what_and_the_mod():
-    err = PartMissing("The Ada kernel", "Ada")
-    assert (err.code, err.what, err.mod) == ("E_PART_MISSING", "The Ada kernel", "Ada")
-    assert "Ada mod's part" in err.message
+    err = PartMissing("The graph database", "Neo4j")
+    assert (err.code, err.what, err.mod) == ("E_PART_MISSING", "The graph database", "Neo4j")
+    assert "Neo4j mod's part" in err.message
 
 
 def test_step_undeclared_names_the_step():
@@ -21,7 +21,7 @@ def test_not_json_has_its_code():
     assert NotJson("x").code == "E_NOT_JSON"
 
 
-def test_wait_is_not_an_exception_a_model_catches():
+def test_wait_is_not_an_exception_a_program_catches():
     wait = Wait("result", {"kind": "input", "key": "k"})
     assert not isinstance(wait, Exception)
     assert (wait.result, wait.pending) == ("result", {"kind": "input", "key": "k"})

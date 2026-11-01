@@ -1,20 +1,32 @@
 # rrotor
 
-The runtime a person's Ada models run in: one locked-down, headless Linux image that deploys a model by commit, runs
+A local runtime for a person's programs: one locked-down, headless Linux image that deploys a program by commit, runs
 each call in a sandbox, and answers over REST and MCP at its own address. Customers run it themselves, at `https://<host>/mcp`
 ([self-hosting](docs/self-hosting/README.md)); Glyphh-run hosting is off. It is added to Claude as a
 connector (Glyphh sign-in or a runtime key) and called by apps with the `glyphh` SDKs (`glyphh-ai/glyphh`). Image:
-`ghcr.io/glyphh-ai/rrotor`.
+`ghcr.io/glyphh-ai/rrotor`. Ada models do not run here: they run in Ada Cloud, on the Glyphh server.
+
+Everything about a program stays on the runtime: its code, its runs, its secrets, kept encrypted with the runtime's
+own key and read by the program as `ctx.secrets["NAME"]` ([architecture, 5.5](docs/architecture.md#55-secrets)), its
+schedules, cron expressions in its manifest that the runtime fires itself
+([5.6](docs/architecture.md#56-schedules)), and its SQLite database, a file in its data folder read as `ctx.db`
+([5.3](docs/architecture.md#53-the-sdk-rrotor)). The Glyphh server only grants the licence.
+
+A program can also be a **CLI** (`"kind": "cli"`, [5.7](docs/architecture.md#57-clis)): a command-line tool (the
+glyphh CLI, `gh`) installed at deploy from a pinned, checksummed release tarball, npm or PyPI package, or a binary in
+the image, and run one command at a time in the same sandbox, behind argument patterns, approvals, the vault and the
+egress proxy (`GET /v1/clis` and `POST /v1/clis/{name}/run`; MCP `clis_list` and `cli_run`). One-shot commands only:
+interactive sessions are not built yet.
 
 | Where | What |
 |---|---|
-| [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, Ada, the licence, parts, CI |
+| [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, the licence, parts, CI |
 | [`docs/self-hosting/`](docs/self-hosting/README.md) | Running your own: Docker Compose, Helm, Terraform; privileges, licensing, backups |
-| `src/rrotord/`, `src/rrotor/` | The daemon; the model SDK every sandbox imports |
-| `examples/` | `ada_incidents`, `ada_tickets` (Ada models) and `daily_sales` (the base alone), each with tests |
-| `parts/ada/`, `scripts/part.py` | The Ada part's recipe; building and signing a part |
+| `src/rrotord/`, `src/rrotor/` | The daemon; the program SDK every sandbox imports |
+| `examples/` | `daily_sales`, a program with its tests; `cli_gh` and `cli_glyphh`, CLIs' manifests (placeholder pins) |
+| `scripts/part.py` | Building and signing a part |
 | `deploy/` | The self-hosting packages |
-| `benchmarks/` | Ada measured against LLMs |
+| `benchmarks/` | Ada (Ada Cloud's) measured against LLMs; kept here because other repos read it by path |
 
 ## Develop
 
@@ -29,6 +41,9 @@ The sandbox's own tests run inside the image (`image/Dockerfile`, target `sandbo
 (`.github/workflows/ci.yml`).
 
 ## Benchmarks
+
+These measure Ada, which runs in Ada Cloud, not in rrotor; they stay in this repo because other repos read them by
+path.
 
 | | Ada alone | Best LLM alone | Ada in front of the LLM |
 |---|---|---|---|

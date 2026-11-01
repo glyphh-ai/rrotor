@@ -310,7 +310,7 @@ class World:
 
     def fetch(self, head: str, by: str, asked: dict[str, Any]) -> dict[str, Any] | None:
         """A snapshot as the follower fetches it when asked: the head's whole store as it is then, from a head
-        still of the term that asked (`GET /cluster/v1/snapshot`); None when it cannot be had."""
+        still of the term that asked (`GET /cluster/v2/snapshot`); None when it cannot be had."""
         node = self.nodes[head]
         core = node.core
         if not node.alive or core is None or core.role != "head" or core.term != asked["term"]:

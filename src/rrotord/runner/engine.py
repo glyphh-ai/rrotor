@@ -1,71 +1,91 @@
 """Runs: a call opens one, each continue resumes it, cancel and expiry end it; `end` always runs. The worker stays
 up while a run waits (up to 15 minutes); if it is gone (rrotor restarted), a continue starts a new one that loads
 again and reads its checkpoints back (docs/architecture.md, 5.4). Every call answers a Result, never an exception:
-the errors raised here are about the call itself (no such model, inputs refused), never about the model.
+the errors raised here are about the call itself (no such program, inputs refused), never about the program.
 
 Every call, continue and cancel is an audit event with its outcome, and every run's end one with its final status
-(rrotord/audit.py); while a run is handled its id, model, version and function are on every log line; with a drain,
+(rrotord/audit.py); while a run is handled its id, program, version and function are on every log line; with a drain,
 its sandbox's start and its function are spans, and its end counted (rrotord/otel.py).
 
-In a cluster (docs/specs/cluster.md, 3) a run's id names the node that holds it (`node`); a follower's runs mount
-the model's folders read-only and open its Ada store read-only (`readonly`); and on the head each run is bracketed
-by `changes`, which installs the change capture in its store before and ships what changed after."""
+In a cluster (docs/specs/cluster.md, 3) a run's id names the node that holds it (`node`), and a follower's runs
+mount the program's folders read-only (`readonly`).
+
+A program that declares secrets gets their values from the vault (rrotord/vault.py) in its worker's start message,
+and nowhere else: a declared one not set stops the run before `load`, `failed {step: secrets, missing: [...]}`, and
+the values are masked in the run's log lines.
+
+A CLI (`"kind": "cli"`, rrotord/clis.py) runs the same way, one command per run (`cli_run`): its arguments checked
+against `allow` first (E_CLI_DENIED, never a run), a run that waits for the person's approval when `approvals` names
+them (resumed by a continue like a program's), then the worker runs the command in the sandbox with the CLI's install,
+a fresh working folder for the call and its private HOME mounted; its Result (exit code, stdout, stderr) has its
+secrets' values masked, and the files the command made or changed added."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime as dt
 import logging
-import sqlite3
+import shutil
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from opentelemetry.trace import Span
 
 from rrotor.ctx import RunState
+from rrotord import clis
 from rrotord import log as logs
-from rrotord import precedents
 from rrotord.audit import Audit
-from rrotord.errors import Conflict, NotFound, RrotorError, Unavailable
-from rrotord.licence import Licence
-from rrotord.licence_key import COMMUNITY
+from rrotord.errors import BadRequest, Conflict, Forbidden, NotFound, RrotorError, Unavailable
 from rrotord.manifest import check_inputs
-from rrotord.models import Models, Version
 from rrotord.otel import Telemetry
 from rrotord.parts import KNOWN, Parts
+from rrotord.programs import Programs, Version
 from rrotord.proxy import EgressProxy
 from rrotord.runner.launch import Launcher, Spec
 from rrotord.runner.record import WAITING, Records, Run, new_id, now
 from rrotord.runner.worker import Worker
 from rrotord.sandbox import bwrap
 from rrotord.sandbox.probe import Layers
+from rrotord.vault import Vault
 
 log = logging.getLogger("rrotor.runner")
 GRACE = 15.0  # past a run's seconds before its worker is killed (the worker stops itself first)
 END_WAIT = 35.0
 WAIT_LIMIT = 15 * 60.0
+MASK = "[secret]"
+MASK_MIN = 4  # a secret's value shorter than this is not masked (it would mask ordinary text)
+CLI = "cli"  # a CLI's run's function, and the step its approval waits at
+WORK = "work"  # a CLI's run's working folder, in its record's folder
+CLI_PATH = "/usr/local/bin:/usr/bin:/bin"
+PROXY = "http://127.0.0.1:3128"
 
 Notify = Callable[[Run], Awaitable[None]]
-
-
-class Changes(Protocol):
-    """What a cluster's head does around the runs that may change what syncs (rrotord/cluster/replication.py)."""
-
-    async def before(self, found: Version) -> None: ...
-
-    async def after(self, model: str) -> None: ...
 
 
 def failed(step: str, code: str, reason: str) -> dict[str, Any]:
     return {"status": "failed", "data": {"reason": reason, "code": code}, "step": step, "prompt": None}
 
 
+def masked(value: Any, hidden: list[str]) -> Any:
+    """`value` with every secret's value in its strings replaced by [secret]."""
+    if isinstance(value, str):
+        for secret in hidden:
+            value = value.replace(secret, MASK)
+        return value
+    if isinstance(value, dict):
+        return {k: masked(v, hidden) for k, v in value.items()}
+    if isinstance(value, list):
+        return [masked(v, hidden) for v in value]
+    return value
+
+
 def about(run: Run) -> dict[str, Any]:
     """A run as its log lines and audit events name it."""
-    return {"run_id": run.id, "model": run.model, "version": run.version, "function": run.function}
+    return {"run_id": run.id, "program": run.program, "version": run.version, "function": run.function}
 
 
 def outcome(run: Run) -> dict[str, Any]:
@@ -79,7 +99,7 @@ class Runner:
     def __init__(
         self,
         *,
-        models: Models,
+        programs: Programs,
         records: Records,
         proxy: EgressProxy,
         launcher: Launcher,
@@ -88,17 +108,17 @@ class Runner:
         notify: Notify | None = None,
         wait_limit: float = WAIT_LIMIT,
         parts: Parts | None = None,
-        licence: Licence | None = None,
         audit: Audit | None = None,
         telemetry: Telemetry | None = None,
         node: Callable[[], str | None] = lambda: None,
         readonly: Callable[[], bool] = lambda: False,
-        changes: Changes | None = None,
+        vault: Vault | None = None,
     ) -> None:
-        self.node, self.readonly, self.changes = node, readonly, changes
-        self.models, self.records, self.proxy, self.launcher = models, records, proxy, launcher
+        self.node, self.readonly, self.vault = node, readonly, vault
+        self.hidden: dict[str, list[str]] = {}  # each run's secret values, masked in its log lines
+        self.programs, self.records, self.proxy, self.launcher = programs, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
-        self.parts, self.licence, self.audit, self.telemetry = parts, licence, audit, telemetry
+        self.parts, self.audit, self.telemetry = parts, audit, telemetry
         self.notify = notify
         self.workers: dict[str, Worker] = {}
         self.stopping: dict[str, dict[str, Any]] = {}  # runs stopped from outside, with the Result they end with
@@ -128,7 +148,7 @@ class Runner:
     async def call(
         self,
         *,
-        model: str,
+        program: str,
         function: str,
         inputs: dict[str, Any],
         version: int | None = None,
@@ -140,9 +160,9 @@ class Runner:
         """A run opened and its first Result; the call is an audit event either way (`refused` with its code when it
         never became a run)."""
         try:
-            run = await self._call(model, function, inputs, version, caller, origin, run_id, clearance)
+            run = await self._call(program, function, inputs, version, caller, origin, run_id, clearance)
         except RrotorError as err:
-            asked = {"model": model, "version": version, "function": function, "run_id": run_id}
+            asked = {"program": program, "version": version, "function": function, "run_id": run_id}
             self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
             raise
         self._audit("run.call", **about(run), outcome=outcome(run), seconds=round(run.seconds, 3))
@@ -150,7 +170,7 @@ class Runner:
 
     async def _call(
         self,
-        model: str,
+        program: str,
         function: str,
         inputs: dict[str, Any],
         version: int | None,
@@ -161,29 +181,163 @@ class Runner:
     ) -> Run:
         if not self.layers.ready:
             raise Unavailable(
-                f"The sandbox is not ready, so no model runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
+                f"The sandbox is not ready, so no program runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
             )
-        found = self.models.get(model, version)
+        found = self.programs.get(program, version)
+        if found.manifest.kind == "cli":
+            raise BadRequest(f"{program} is a CLI, not a program: run it with cli_run.", code="E_NOT_PROGRAM")
         fn = found.manifest.functions.get(function)
         if fn is None:
-            raise NotFound(f"{model} has no function {function}.", code="E_FUNCTION_MISSING")
+            raise NotFound(f"{program} has no function {function}.", code="E_FUNCTION_MISSING")
         check_inputs(fn, inputs)
         run = Run(
-            run_id or new_id(self.node()), model, found.version, found.commit_sha, function, inputs, caller, origin
+            run_id or new_id(self.node()), program, found.version, found.commit_sha, function, inputs, caller, origin
         )
         run.clearance = clearance
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
         with logs.bind(**about(run)):
             async with self._lock(run.id):
-                refused = self._parts_refused(model, found)
+                refused = self._parts_refused(program, found)
                 if refused:
                     await self._finish(run, refused)
                 else:
                     await self._go(run, found, None)
         return run
 
-    def _parts_refused(self, model: str, found: Version) -> dict[str, Any] | None:
+    async def cli_run(
+        self,
+        *,
+        cli: str,
+        args: Any,
+        stdin: Any = None,
+        files: Any = None,
+        caller: str = "claude",
+        origin: str = "local",
+    ) -> Run:
+        """One command of a CLI, a run like a program's call: refused (E_CLI_DENIED, never a run) when `allow` does
+        not take its arguments, waiting for the person when `approvals` names them; an audit event either way, with
+        the command line, secrets masked."""
+        line = None
+        try:
+            found, args = self._cli_found(cli, args)
+            line = masked(clis.command_line(args), self._hidden_now(found))
+            run = await self._cli_call(found, args, line, stdin, files, caller, origin)
+        except RrotorError as err:
+            asked = {"program": cli, "version": None, "function": CLI, "run_id": None, "command": line}
+            self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
+            raise
+        self._audit("run.call", **about(run), command=line, outcome=outcome(run), seconds=round(run.seconds, 3))
+        return run
+
+    def _cli_found(self, cli: str, args: Any) -> tuple[Version, list[str]]:
+        if not self.layers.ready:
+            raise Unavailable(
+                f"The sandbox is not ready, so no CLI runs: {self.layers.why()}", code="E_SANDBOX_UNAVAILABLE"
+            )
+        found = self.programs.get(cli)
+        if found.manifest.kind != "cli" or found.manifest.cli is None:
+            raise BadRequest(f"{cli} is a program, not a CLI: call its functions with program_call.", code="E_NOT_CLI")
+        return found, clis.check_args(args)
+
+    def _hidden_now(self, found: Version) -> list[str]:
+        """The secret values a CLI's command line is masked with in its audit event (none when unreadable)."""
+        try:
+            values, _ = self.vault.values(found.program, found.manifest.secrets) if self.vault else ({}, [])
+        except RrotorError:
+            return []
+        return sorted((v for v in values.values() if len(v) >= MASK_MIN), key=len, reverse=True)
+
+    async def _cli_call(
+        self, found: Version, args: list[str], line: str, stdin: Any, files: Any, caller: str, origin: str
+    ) -> Run:
+        cli = found.manifest.cli
+        assert cli is not None  # noqa: S101  (checked by _cli_found)
+        if not clis.allowed(cli.allow, args):
+            raise Forbidden(
+                f"{found.program} does not allow `{line}`: its allow patterns are {', '.join(cli.allow)}.",
+                code="E_CLI_DENIED",
+            )
+        text, given = clis.check_stdin(stdin), clis.check_files(files)
+        run = Run(new_id(self.node()), found.program, found.version, found.commit_sha, CLI, {}, caller, origin)
+        work = self.records.folder(run.id) / WORK
+        work.mkdir(parents=True)
+        run.inputs = {"args": args, "stdin": text, "files": clis.write_files(work, given)}
+        self.records.save(run)
+        self.records.log(run.id, {"event": "called", "command": line, "caller": caller, "version": found.version})
+        with logs.bind(**about(run)):
+            async with self._lock(run.id):
+                await self._go(run, found, None)
+        return run
+
+    async def _go_cli(self, run: Run, found: Version) -> None:
+        """A CLI's run: its approval first when its arguments need one, then its command in the sandbox."""
+        cli, manifest = found.manifest.cli, found.manifest
+        assert cli is not None  # noqa: S101  (a manifest of kind cli has one)
+        args = list(run.inputs.get("args") or [])
+        pattern = clis.matching(cli.approvals, args)
+        decided = RunState.from_json(run.state).approvals.get(CLI)
+        if pattern is not None and decided is None:
+            line = masked(clis.command_line(args), self._hidden_now(found))
+            prompt = f"Run `{found.program}: {line}`? It matches the approval pattern {pattern!r}."
+            run.status, run.pending, run.waiting_since = "needs_approval", {"kind": "approval", "key": CLI}, now()
+            run.result = {"status": "needs_approval", "data": {"command": line}, "step": CLI, "prompt": prompt}
+            self.records.save(run)
+            self.records.log(run.id, {"event": "waiting", "status": run.status, "step": CLI})
+            await self._tell(run)
+            return
+        if pattern is not None and not decided:
+            await self._finish(run, failed(CLI, "E_CLI_DECLINED", "The person declined the command."))
+            return
+        made = clis.installed(found.root / "cli")
+        if made is None:
+            missing = f"{run.program}'s install is missing: deploy it again."
+            await self._finish(run, failed(CLI, "E_CLI_INSTALL", missing))
+            return
+        values, refused = self._secrets(run, found)
+        if refused is not None:
+            await self._finish(run, refused)
+            return
+        hidden = sorted((v for v in values.values() if len(v) >= MASK_MIN), key=len, reverse=True)
+        if hidden:
+            self.hidden[run.id] = hidden
+        hosts = frozenset(manifest.hosts)
+        socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
+        home = self.programs.folder(run.program) / "home" if cli.home else None
+        if home is not None:
+            home.mkdir(parents=True, exist_ok=True)
+        mounts = dataclasses.replace(
+            self._mounts(run.program, found, socket),
+            cli=found.root / "cli",
+            work=self.records.folder(run.id) / WORK,
+            home=home,
+        )
+        paths = self.launcher.paths(mounts)
+        env = {
+            "PATH": CLI_PATH,
+            "HOME": paths.get("cli_home") or "/tmp",  # noqa: S108  (the sandbox's own tmpfs)
+            "TMPDIR": "/tmp",  # noqa: S108
+            "LANG": "C.UTF-8",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        if socket is not None:
+            env |= {k: PROXY for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")}
+            env["NODE_USE_ENV_PROXY"] = "1"
+        refs = cli.secret_refs()
+        env |= {k: (values[refs[k]] if k in refs else v) for k, v in cli.env.items()}
+        spec = {
+            "run": made.run,
+            "path": made.where(str(paths.get("cli_root"))),
+            "args": args,
+            "env": env,
+            "stdin": run.inputs.get("stdin"),
+            "cwd": paths.get("work"),
+            "cap": clis.OUTPUT_MAX,
+        }
+        await self._start(run, found, mounts, cli=spec, function=CLI, hosts=sorted(hosts), **paths)
+
+    def _parts_refused(self, program: str, found: Version) -> dict[str, Any] | None:
         """Why the run cannot go: a part its manifest asks for is not installed (a licence never refuses a run)."""
         needed = found.manifest.parts()
         if not needed:
@@ -192,7 +346,7 @@ class Runner:
         if missing:
             brings = sorted({KNOWN.get(name, name) for name in missing})
             reason = (
-                f"{model} needs the part{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not installed "
+                f"{program} needs the part{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not installed "
                 f"(from the {', '.join(brings)} mod{'s' if len(brings) > 1 else ''})."
             )
             return failed("parts", "E_PART_MISSING", reason)
@@ -219,7 +373,7 @@ class Runner:
                 run.state, run.status, run.waiting_since = state.to_json(), "running", None
                 self.records.save(run)
                 self.records.log(run.id, {"event": "continued", "pending": run.pending})
-                found = self.models.by_sha(run.model, run.commit_sha)
+                found = self.programs.by_sha(run.program, run.commit_sha)
                 worker = self.workers.get(run.id)
                 if found is None:
                     reason = "This run's version is no longer here."
@@ -263,11 +417,11 @@ class Runner:
     def _left(self, run: Run, found: Version) -> float:
         return max(found.manifest.limits.seconds - run.seconds, 0.0)
 
-    def _mounts(self, model: str, found: Version, socket: Path | None) -> bwrap.Mounts:
+    def _mounts(self, program: str, found: Version, socket: Path | None) -> bwrap.Mounts:
         manifest = found.manifest
-        files = self.models.files(model)
+        files = self.programs.files(program)
         files.mkdir(parents=True, exist_ok=True)
-        data = self.models.data(model) if manifest.data else None
+        data = self.programs.data(program) if manifest.keeps_data else None
         if data:
             data.mkdir(parents=True, exist_ok=True)
         needed = manifest.parts()
@@ -285,69 +439,63 @@ class Runner:
             self.readonly(),
         )
 
-    def _limits(self, found: Version) -> dict[str, Any]:
-        """An Ada version's precedent cap: the licence key's `max_precedents` (Community's without one; null is
-        unlimited), the plan's name for the caller's message, and, with a cap, `precedents_elsewhere`, the other
-        models' total now (the node's cap is on its total)."""
-        if "ada" not in found.manifest.needs:
-            return {}
-        plan = self.licence.limits() if self.licence is not None else COMMUNITY
-        name = self.licence.plan_name if self.licence is not None else "Community"
-        out: dict[str, Any] = {"precedents": plan.max_precedents, "plan": name}
-        if plan.max_precedents is not None:
-            out["precedents_elsewhere"] = self._elsewhere(found.model)
-        return out
-
-    def _elsewhere(self, model: str) -> int:
-        """The precedents the runtime's other Ada models hold now: the plan's cap is on the total, and the model
-        counts its own. A store that does not read counts none (logged)."""
+    def _secrets(self, run: Run, found: Version) -> tuple[dict[str, str], dict[str, Any] | None]:
+        """The values of the secrets the version declares, or why the run cannot go: one not set, or one the
+        rrotor's key does not open."""
+        declared = found.manifest.secrets
+        if not declared:
+            return {}, None
         try:
-            return precedents.total(self.models, skip=model)
-        except sqlite3.Error as err:
-            log.warning("a precedent store did not read", extra={"model": model, "reason": str(err)})
-            return 0
-
-    async def maintain(self, found: Version, op: str) -> dict[str, Any]:
-        """rrotor's own work in a version's sandbox (a re-encode on deploy): one call of `op`, its Result."""
-        refused = self._parts_refused(found.manifest.name, found)
-        if refused:
-            return refused
-        mounts = self._mounts(found.manifest.name, found, None)
-        limits = bwrap.Limits(found.manifest.limits.memory_mb, found.manifest.limits.seconds + 5)
-        await self._before(found)
-        try:
-            worker = await Worker.start(self.launcher, lambda fd: Spec(mounts, limits, fd), lambda m: None)
-        except OSError as err:
-            return failed("sandbox", "E_SANDBOX", f"The sandbox did not start: {err}")
-        try:
-            await worker.send(
-                "start",
-                function=op,
-                inputs={},
-                approvals=[],
-                state={},
-                answer=None,
-                seconds_left=float(found.manifest.limits.seconds),
-                sandbox=self.launcher.sandbox(mounts),
-                hosts=[],
-                caller="rrotor",
-                **self.launcher.paths(mounts),
-            )
-            message = await worker.next(found.manifest.limits.seconds + GRACE)
-        finally:
-            await worker.stop(grace=5.0)
-            await self._after(found.model)
-        if message is None or message.get("op") != "result":
-            return failed(op, "E_WORKER", "The model's process stopped before it answered.")
-        return dict(message["result"])
+            values, missing = self.vault.values(run.program, declared) if self.vault else ({}, list(declared))
+        except RrotorError as err:
+            return {}, failed("secrets", err.code, err.message)
+        if not missing:
+            return values, None
+        many = len(missing) > 1
+        reason = (
+            f"{run.program} needs the secret{'s' if many else ''} {', '.join(missing)}, not set on this rrotor: "
+            f"set {'them' if many else 'it'} with PUT /v1/programs/{run.program}/secrets/<name> or secret_set."
+        )
+        refused = failed("secrets", "E_SECRET_MISSING", reason)
+        refused["data"]["missing"] = missing
+        return {}, refused
 
     async def _go(self, run: Run, found: Version, answer: Any) -> None:
         manifest = found.manifest
+        if manifest.kind == "cli":
+            await self._go_cli(run, found)
+            return
+        values, refused = self._secrets(run, found)
+        if refused is not None:
+            await self._finish(run, refused)
+            return
+        hidden = sorted((v for v in values.values() if len(v) >= MASK_MIN), key=len, reverse=True)
+        if hidden:
+            self.hidden[run.id] = hidden
         hosts = frozenset(manifest.hosts)
         socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
-        mounts = self._mounts(run.model, found, socket)
+        mounts = self._mounts(run.program, found, socket)
+        await self._start(
+            run,
+            found,
+            mounts,
+            function=run.function,
+            inputs=run.inputs,
+            approvals=manifest.functions[run.function].approvals,
+            state=RunState.from_json(run.state).to_json(),
+            answer=answer,
+            hosts=sorted(hosts),
+            clearance=run.clearance,
+            caller=run.caller,
+            secrets={"declared": manifest.secrets, "values": values},
+            sqlite="sqlite" in manifest.databases,
+            **self.launcher.paths(mounts),
+        )
+
+    async def _start(self, run: Run, found: Version, mounts: bwrap.Mounts, **start: Any) -> None:
+        """The run's worker started in its sandbox and sent `start`, then its first Result awaited."""
+        manifest = found.manifest
         limits = bwrap.Limits(manifest.limits.memory_mb, manifest.limits.seconds + 5)
-        await self._before(found)
         try:
             with self._span("rrotor.sandbox.start", run):
                 worker = await Worker.start(
@@ -358,23 +506,12 @@ class Runner:
             await self._finish(run, failed("sandbox", "E_SANDBOX", f"The sandbox did not start: {err}"))
             return
         self.workers[run.id] = worker
-        state = RunState.from_json(run.state).to_json()
-        fn = manifest.functions[run.function]
         await worker.send(
             "start",
-            function=run.function,
-            inputs=run.inputs,
-            approvals=fn.approvals,
-            state=state,
-            answer=answer,
             seconds_left=self._left(run, found),
             sandbox=self.launcher.sandbox(mounts),
-            hosts=sorted(hosts),
-            clearance=run.clearance,
-            caller=run.caller,
-            limits=self._limits(found),
             readonly=mounts.readonly,
-            **self.launcher.paths(mounts),
+            **start,
         )
         await self._await_result(run, worker, found)
 
@@ -393,7 +530,7 @@ class Runner:
             reason = (
                 "The run went past its seconds and was stopped."
                 if alive
-                else f"The model's process stopped (exit {worker.proc.returncode})."
+                else f"The program's process stopped (exit {worker.proc.returncode})."
             )
             stopped = self.stopping.pop(run.id, None)
             await self._end(
@@ -410,7 +547,6 @@ class Runner:
             )
             self.records.save(run)
             self.records.log(run.id, {"event": "waiting", "status": result["status"], "step": result.get("step")})
-            await self._after(run.model)
             await self._tell(run)
             return
         await self._end(run, worker, result)
@@ -425,18 +561,12 @@ class Runner:
             await worker.stop()
         await self._finish(run, result)
 
-    async def _before(self, found: Version) -> None:
-        if self.changes is not None:
-            await self.changes.before(found)
-
-    async def _after(self, model: str) -> None:
-        if self.changes is not None:
-            await self.changes.after(model)
-
     async def _finish(self, run: Run, result: dict[str, Any]) -> None:
         self.workers.pop(run.id, None)
-        await self._after(run.model)
+        hidden = self.hidden.pop(run.id, None)
         await self.proxy.close(run.id)
+        if (self.records.folder(run.id) / WORK).is_dir():  # a CLI's run: only it has a working folder
+            result = self._cli_ended(run, result, hidden or [])
         run.status, run.result, run.pending, run.ended_at, run.waiting_since = (
             result["status"],
             result,
@@ -449,8 +579,22 @@ class Runner:
         payload = {"inputs": run.inputs, "data": result.get("data")}
         self._audit("run.end", **about(run), outcome=outcome(run), seconds=round(run.seconds, 3), payload=payload)
         if self.telemetry is not None:
-            self.telemetry.ended(run.model, run.function, run.status, run.seconds)
+            self.telemetry.ended(run.program, run.function, run.status, run.seconds)
         await self._tell(run)
+
+    def _cli_ended(self, run: Run, result: dict[str, Any], hidden: list[str]) -> dict[str, Any]:
+        """A CLI's run as it ends: the files its command made or changed added to its Result, its working folder and
+        stdin gone, its secrets' values masked in what it answers and keeps."""
+        work = self.records.folder(run.id) / WORK
+        data = result.get("data")
+        if result["status"] == "done" and isinstance(data, dict):
+            made, skipped = clis.collect(work, dict(run.inputs.get("files") or {}))
+            result = {**result, "data": {**data, "files": made, "files_skipped": skipped}}
+        shutil.rmtree(work, ignore_errors=True)
+        stdin = run.inputs.get("stdin")
+        run.inputs = masked({**run.inputs, "stdin": len(stdin.encode()) if isinstance(stdin, str) else None}, hidden)
+        answered: dict[str, Any] = masked(result, hidden)
+        return answered
 
     async def _tell(self, run: Run) -> None:
         if self.notify is not None:
@@ -462,10 +606,14 @@ class Runner:
             state.checkpoints[str(message.get("key"))] = message.get("value")
             run.state = state.to_json()
             self.records.save(run)
-        elif message.get("op") == "log":
-            self.records.log(run.id, {"message": message.get("message", ""), "detail": message.get("detail") or {}})
         else:
-            self.records.log(run.id, {k: v for k, v in message.items() if k != "op"})
+            entry = (
+                {"message": message.get("message", ""), "detail": message.get("detail") or {}}
+                if message.get("op") == "log"
+                else {k: v for k, v in message.items() if k != "op"}
+            )
+            hidden = self.hidden.get(run.id)
+            self.records.log(run.id, masked(entry, hidden) if hidden else entry)
 
     async def expire(self, at: dt.datetime | None = None) -> list[str]:
         """Waiting runs past 15 minutes end, `expired`; `end` runs."""
@@ -498,7 +646,7 @@ class Runner:
         return [
             {
                 "run_id": r.id,
-                "model": r.model,
+                "program": r.program,
                 "function": r.function,
                 "origin": r.origin,
                 "step": (r.result or {}).get("step"),
@@ -518,7 +666,7 @@ class Runner:
             if (
                 run is None
                 or run.status != "running"
-                or not self.models.get(run.model, run.version).manifest.writes(run.function)
+                or not self.programs.get(run.program, run.version).manifest.writes(run.function)
             ):
                 continue
             self.stopping[run_id] = failed(run.function, code, reason)

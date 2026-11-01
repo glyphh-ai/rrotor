@@ -116,7 +116,7 @@ variable "drain_at" {
 }
 
 variable "log_payloads" {
-  description = "Models' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS=on); never anywhere else."
+  description = "Programs' inputs and results in your drain too, 4 KB each (RROTOR_LOG_PAYLOADS=on); never anywhere else."
   type        = bool
   default     = false
 }

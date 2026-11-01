@@ -11,8 +11,8 @@ the plans are in the [README](README.md#the-plans).
 
 ## The licence key
 
-rrotor runs without one, as **Community**: one node, 5,000 precedents across its Ada models, no cluster sync. A
-licence key lifts those limits to the ones it carries.
+rrotor runs without one, as **Community**: one node, no cluster sync. A licence key lifts those limits to the ones
+it carries.
 
 A key is `<payload>.<signature>`, each base64url without padding. The payload is JSON; the signature is Ed25519
 over its exact bytes, made by the Glyphh server. rrotor checks it with Glyphh's public key, which is in rrotor's code
@@ -24,10 +24,10 @@ and setting an environment variable cannot make rrotor trust another signer.
 | `license_id` | This key's id (a UUID) |
 | `tier` | `free`, `pro`, `team` or `enterprise` |
 | `max_nodes` | Nodes one cluster may have (null: unlimited) |
-| `max_precedents` | Precedents one node may hold, across its Ada models (null: unlimited) |
 | `cluster_sync_enabled` | Whether the nodes of a cluster may sync |
 | `issued_at`, `expires_at` | When it was issued (at a payment) and when it stops being current (UTC) |
 | `customer_id` | The paying customer, as the server's id: no name or address |
+| `max_precedents` | Ada Cloud's limit, which the server still writes into the key; rrotor runs no Ada models and does not read it |
 
 Nothing else is in it. You can read any key you hold:
 
@@ -36,9 +36,8 @@ printf %s "$GLYPHH_LICENSE_KEY" | cut -d. -f1 | tr '_-' '/+' | base64 -d 2>/dev/
 ```
 
 `GET /v1/licence` and `GET /v1/health` show the key held, where it came from, its state (`live`, `grace`,
-`expired`, `bad`, or `none`) with the days left, the limits that apply, whether a cluster elects its own head
-(`ha`: Enterprise, [High availability](README.md#high-availability-enterprise)), and the node's precedents against its
-cap (`over: true` after a downgrade: nothing is deleted, growth is refused).
+`expired`, `bad`, or `none`) with the days left, the limits that apply (`max_nodes`, `cluster_sync_enabled`), and
+whether a cluster elects its own head (`ha`: Enterprise, [High availability](README.md#high-availability-enterprise)).
 
 ## Where rrotor reads it
 
@@ -70,8 +69,7 @@ Authorization: Bearer <runtime token>
 Content-Type: application/json
 
 {"machine": "<64 hex characters>", "licence_id": "<uuid or null>", "version": "<rrotor version>", "active_runs": <int>,
- "node_id": "<this node's name>", "cluster_id": "<uuid or null>", "role": "standalone | head | follower",
- "precedents": <int or null>}
+ "node_id": "<this node's name>", "cluster_id": "<uuid or null>", "role": "standalone | head | follower"}
 ```
 
 | Field | What it is | Why |
@@ -82,33 +80,32 @@ Content-Type: application/json
 | `active_runs` | How many runs are in progress, a number | A count only, nothing about the runs |
 | `node_id` | `RROTOR_NODE_ID`, else the container's hostname: your own name for the node | To count your nodes |
 | `cluster_id`, `role` | The cluster's id and this node's role in it (`head` or `follower`); `null` and `standalone` for a node on its own (a node refused or still joining sends the cluster's id it asked to join, as `standalone`) | To count your nodes |
-| `precedents` | How many precedents the node holds across its Ada models, a number | To show use against the key's cap |
 
 The answer is `200 {"license_key": "<key>"}`: the newest key the server holds for your subscription (this release
 also takes the earlier `licence` beside it). If the call fails or is refused, rrotor keeps the key it has and tries
 again.
 
-**Never sent, in the heartbeat or anywhere it is stored:** IP addresses, hostnames, prompts, model inputs or
-outputs, model code, files, secrets, or anything about your users. The server keeps only what the body
+**Never sent, in the heartbeat or anywhere it is stored:** IP addresses, hostnames, prompts, program inputs or
+outputs, program code, files, secrets, or anything about your users. The server keeps only what the body
 carries and when it came. It does not store or log the caller's address
 for this route. As with any HTTPS request, the address is visible on the network path itself (your egress proxy,
 the edge of Glyphh's hosting provider); it is not in the request and the server does not keep it.
 
 ## The link, when it is on
 
-The link is the same as a hosted rrotor's ([architecture, section 6](../architecture.md#6-the-link-protocol-1)):
+The link is the same as a hosted rrotor's ([architecture, section 6](../architecture.md#6-the-link-protocol-2)):
 one WebSocket rrotor opens to the server, authenticated with the runtime token; the server never connects in. What
 goes up it:
 
 | Message | Carries |
 |---|---|
-| `hello` | The protocol, rrotor's version, its mode, the runtime id, the model versions deployed |
-| `deployed` | After each deploy: the model, the version, the commit SHA, the repo it came from (if any) and its `glyphh.json` manifest |
-| `event` | A deploy the server asked for that could not be done: the model, version, commit and why |
-| `usage` | Once a minute at most: for each runtime key used, its SHA-256, a count of calls and when it was last used; and the total number of precedents across the Ada models |
+| `hello` | The protocol, rrotor's version, its mode, the runtime id, the program versions deployed |
+| `deployed` | After each deploy: the program, the version, the commit SHA, the repo it came from (if any) and its `glyphh.json` manifest |
+| `event` | A deploy the server asked for that could not be done: the program, version, commit and why |
+| `usage` | Once a minute at most: for each runtime key used, its SHA-256, a count of calls and when it was last used |
 | `ack`, `pong` | Acknowledgements and keep-alives |
 
-The server calls no model over the link: a run's inputs and results stay on your rrotor. When a caller signs in to Glyphh rather than using a runtime key, rrotor asks the server whether
+The server calls no program over the link: a run's inputs and results stay on your rrotor. When a caller signs in to Glyphh rather than using a runtime key, rrotor asks the server whether
 that sign-in is good for it (`POST /v1/runtime/introspect`, with the token the caller presented) and keeps the
 answer a minute. With `RROTOR_LINK=off` none of this happens, and callers use runtime keys.
 
@@ -119,9 +116,9 @@ heartbeat or the link, so a running subscription never lapses.
 
 - **Past `expires_at`, for 14 days:** everything runs on the key's limits. The health says `grace` and how many
   days are left, and rrotor logs a warning daily.
-- **More than 14 days past:** Community's limits: the precedents past 5,000 stay and are served, and a record
-  that would add one answers `limit_exceeded` (`indexed: false`, a finished call, not a failure). Nothing crashes, nothing is deleted, no model is refused,
-  and a new key from any source lifts the limits at once.
+- **More than 14 days past:** Community's limits: one node serves and a cluster stops syncing
+  ([A cluster](README.md#a-cluster)). Nothing crashes, nothing is deleted, no program is refused, and a new key from
+  any source lifts the limits at once.
 
 ## Air-gapped
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import shutil
 import sys
 import zipfile
@@ -13,14 +14,14 @@ import pytest
 
 from rrotord.deploy import Deployer, Tools, check_sha
 from rrotord.errors import BadRequest, DeployError
-from rrotord.models import Models
+from rrotord.programs import Programs
 from tests.fakes import GitRepo, manifest, token
 
 
 def deployer(tmp_path: Path, **tools: object) -> Deployer:
     kw = {"python": sys.executable, "uv": shutil.which("uv") or "uv", "github": f"file://{tmp_path / 'github'}"}
     kw.update(tools)  # type: ignore[arg-type]
-    return Deployer(Models(tmp_path / "data"), tmp_path / "scratch", Tools(**kw))  # type: ignore[arg-type]
+    return Deployer(Programs(tmp_path / "data"), tmp_path / "scratch", Tools(**kw))  # type: ignore[arg-type]
 
 
 def test_check_sha():
@@ -31,48 +32,48 @@ def test_check_sha():
 
 
 async def test_from_bundle_installs_and_activates(tmp_path, repo: GitRepo):
-    sha = repo.model(manifest("sample"), **{"files/seed.txt": "seed"})
+    sha = repo.program(manifest("sample"), **{"files/seed.txt": "seed"})
     d = deployer(tmp_path)
     v = await d.from_bundle(repo.bundle(tmp_path / "b.bundle"), sha)
-    assert (v.model, v.version, v.commit_sha) == ("sample", 1, sha)
-    assert (v.src / "model.py").is_file() and not (v.src / ".git").exists()
+    assert (v.program, v.version, v.commit_sha) == ("sample", 1, sha)
+    assert (v.src / "program.py").is_file() and not (v.src / ".git").exists()
     assert (v.venv / "bin" / "python").exists()
-    assert d.models.active("sample") == v
-    assert (d.models.files("sample") / "seed.txt").read_text() == "seed"
+    assert d.programs.active("sample") == v
+    assert (d.programs.files("sample") / "seed.txt").read_text() == "seed"
     assert list((tmp_path / "scratch").iterdir()) == []
 
 
 async def test_a_second_version_keeps_the_folder_and_numbers_up(tmp_path, repo: GitRepo):
     d = deployer(tmp_path)
-    first = repo.model(manifest("sample"))
+    first = repo.program(manifest("sample"))
     await d.from_bundle(repo.bundle(tmp_path / "1.bundle"), first)
-    (d.models.files("sample") / "mine.txt").write_text("kept")
-    second = repo.model(manifest("sample"), **{"files/seed.txt": "late"})
+    (d.programs.files("sample") / "mine.txt").write_text("kept")
+    second = repo.program(manifest("sample"), **{"files/seed.txt": "late"})
     v = await d.from_bundle(repo.bundle(tmp_path / "2.bundle"), second)
     assert v.version == 2
-    assert not (d.models.files("sample") / "seed.txt").exists()
+    assert not (d.programs.files("sample") / "seed.txt").exists()
 
 
-async def test_a_model_without_seed_files_gets_an_empty_folder(tmp_path, repo: GitRepo):
-    sha = repo.model(manifest("sample"))
+async def test_a_program_without_seed_files_gets_an_empty_folder(tmp_path, repo: GitRepo):
+    sha = repo.program(manifest("sample"))
     d = deployer(tmp_path)
     await d.from_bundle(repo.bundle(tmp_path / "b.bundle"), sha)
-    assert list(d.models.files("sample").iterdir()) == []
+    assert list(d.programs.files("sample").iterdir()) == []
 
 
 async def test_deploying_a_commit_already_held_reactivates_it(tmp_path, repo: GitRepo):
     d = deployer(tmp_path)
-    first = repo.model(manifest("sample"))
+    first = repo.program(manifest("sample"))
     await d.from_bundle(repo.bundle(tmp_path / "1.bundle"), first)
-    second = repo.model(manifest("sample", description="two"))
+    second = repo.program(manifest("sample", description="two"))
     await d.from_bundle(repo.bundle(tmp_path / "2.bundle"), second)
     again = await d.from_bundle(repo.bundle(tmp_path / "3.bundle"), first, version=5)
     assert (again.commit_sha, again.version) == (first, 5)
-    assert d.models.active("sample") == again
+    assert d.programs.active("sample") == again
 
 
 async def test_from_bundle_a_commit_not_in_it(tmp_path, repo: GitRepo):
-    repo.model()
+    repo.program()
     with pytest.raises(DeployError) as caught:
         await deployer(tmp_path).from_bundle(repo.bundle(tmp_path / "b.bundle"), "f" * 40)
     assert caught.value.code == "E_GIT" and caught.value.message.startswith("git fetch failed")
@@ -84,21 +85,21 @@ async def test_from_bundle_with_a_bad_sha(tmp_path):
 
 
 async def test_from_bundle_with_a_refused_manifest(tmp_path, repo: GitRepo):
-    sha = repo.model({"name": "Bad", "functions": {"start": {}}})
+    sha = repo.program({"name": "Bad", "functions": {"start": {}}})
     with pytest.raises(DeployError) as caught:
         await deployer(tmp_path).from_bundle(repo.bundle(tmp_path / "b.bundle"), sha)
     assert caught.value.code == "E_MANIFEST"
 
 
 async def test_from_repo_fetches_the_commit_with_its_token(tmp_path, repo: GitRepo):
-    sha = repo.model(manifest("sample"))
+    sha = repo.program(manifest("sample"))
     repo.bare(tmp_path / "github", "owner/sample")
     v = await deployer(tmp_path).from_repo("owner/sample", sha, token(), version=3)
-    assert (v.model, v.version) == ("sample", 3)
+    assert (v.program, v.version) == ("sample", 3)
 
 
 async def test_from_repo_without_a_token(tmp_path, repo: GitRepo):
-    sha = repo.model(manifest("sample"))
+    sha = repo.program(manifest("sample"))
     repo.bare(tmp_path / "github", "owner/sample")
     assert (await deployer(tmp_path).from_repo("owner/sample", sha, None)).version == 1
 
@@ -115,7 +116,7 @@ async def test_from_repo_that_is_not_there(tmp_path):
 
 
 async def test_a_fetched_head_that_is_not_the_commit_is_refused(tmp_path, repo: GitRepo, monkeypatch):
-    sha = repo.model()
+    sha = repo.program()
     d = deployer(tmp_path)
     real = d._git
 
@@ -130,16 +131,16 @@ async def test_a_fetched_head_that_is_not_the_commit_is_refused(tmp_path, repo: 
 
 
 async def test_a_venv_that_cannot_be_made_leaves_no_version(tmp_path, repo: GitRepo):
-    sha = repo.model(manifest("sample"))
+    sha = repo.program(manifest("sample"))
     d = deployer(tmp_path, python=str(tmp_path / "no-python"))
     with pytest.raises((DeployError, OSError)):
         await d.from_bundle(repo.bundle(tmp_path / "b.bundle"), sha)
-    assert d.models.versions("sample") == []
-    assert list((tmp_path / "data" / "models" / "sample" / "versions").iterdir()) == []
+    assert d.programs.versions("sample") == []
+    assert list((tmp_path / "data" / "programs" / "sample" / "versions").iterdir()) == []
 
 
 async def test_a_venv_command_that_fails_is_e_venv(tmp_path, repo: GitRepo):
-    sha = repo.model(manifest("sample"))
+    sha = repo.program(manifest("sample"))
     with pytest.raises(DeployError) as caught:
         await deployer(tmp_path, python="false").from_bundle(repo.bundle(tmp_path / "b.bundle"), sha)
     assert caught.value.code == "E_VENV"
@@ -168,14 +169,16 @@ def wheel(folder: Path) -> tuple[Path, str]:
 
 async def test_requirements_lock_is_installed_into_the_venv(tmp_path, repo: GitRepo):
     path, digest = wheel(tmp_path)
-    sha = repo.model(manifest("sample"), **{"requirements.lock": f"tinypkg @ {path.as_uri()} --hash=sha256:{digest}\n"})
+    sha = repo.program(
+        manifest("sample"), **{"requirements.lock": f"tinypkg @ {path.as_uri()} --hash=sha256:{digest}\n"}
+    )
     v = await deployer(tmp_path).from_bundle(repo.bundle(tmp_path / "b.bundle"), sha)
     assert list(v.venv.glob("lib/python*/site-packages/tinypkg/__init__.py"))
 
 
 async def test_a_lock_with_a_wrong_hash_is_e_deps(tmp_path, repo: GitRepo):
     path, _ = wheel(tmp_path)
-    sha = repo.model(
+    sha = repo.program(
         manifest("sample"), **{"requirements.lock": f"tinypkg @ {path.as_uri()} --hash=sha256:{'0' * 64}\n"}
     )
     with pytest.raises(DeployError) as caught:
@@ -187,7 +190,7 @@ async def test_held_activates_and_renumbers(tmp_path):
     from tests.fakes import install
 
     d = deployer(tmp_path)
-    v = install(d.models, manifest("sample"), "", sha="c" * 40)
+    v = install(d.programs, manifest("sample"), "", sha="c" * 40)
     assert (await d.held("sample", "c" * 40)).version == v.version
     assert (await d.held("sample", "c" * 40, version=v.version)).version == v.version
     assert (await d.held("sample", "c" * 40, version=4)).version == 4
@@ -197,6 +200,43 @@ async def test_held_a_commit_not_here(tmp_path):
     with pytest.raises(DeployError) as caught:
         await deployer(tmp_path).held("sample", "c" * 40)
     assert caught.value.code == "E_COMMIT_MISSING"
+
+
+async def test_a_cli_deploys_with_its_install_and_no_program_py(tmp_path, repo: GitRepo):
+    from tests.fakes import ECHO, FakeFetch, cli_manifest, console_wheel, sha, tarball
+
+    archive = tarball({"bin/tool": ECHO})
+    url = "https://example.com/tool.tar.gz"
+    d = deployer(tmp_path)
+    d.installer.fetch = FakeFetch({url: archive})
+    block = {"install": {"url": url, "sha256": sha(archive)}}
+    commit = repo.commit({"glyphh.json": json.dumps(cli_manifest(cli=block))})
+    v = await d.from_bundle(repo.bundle(tmp_path / "b.bundle"), commit)
+    assert v.manifest.kind == "cli" and (v.root / "cli" / "installed.json").is_file()
+    assert (v.venv / "bin" / "python").exists() and not (v.src / "program.py").exists()
+    path, digest = wheel(tmp_path)  # a CLI's lock is its install's: never the venv's
+    wheel_bytes = console_wheel()
+    pypi = {"install": {"pypi": "hello==1.0", "sha256": sha(wheel_bytes)}, "command": "hello"}
+    whl = "https://files.pythonhosted.org/hello-1.0-py3-none-any.whl"
+    listing = {"urls": [{"packagetype": "bdist_wheel", "digests": {"sha256": sha(wheel_bytes)}, "url": whl}]}
+    answers = {"https://pypi.org/pypi/hello/1.0/json": json.dumps(listing).encode(), whl: wheel_bytes}
+    d.installer.fetch = FakeFetch(answers)
+    lock = f"tinypkg @ {path.as_uri()} --hash=sha256:{digest}\n"
+    second = repo.commit({"glyphh.json": json.dumps(cli_manifest(cli=pypi)), "requirements.lock": lock})
+    v2 = await d.from_bundle(repo.bundle(tmp_path / "c.bundle"), second)
+    assert (v2.root / "cli" / "site" / "tinypkg").is_dir()
+    assert not list(v2.venv.glob("lib/python*/site-packages/tinypkg"))
+
+
+async def test_a_cli_whose_install_fails_leaves_nothing(tmp_path, repo: GitRepo):
+    from tests.fakes import FakeFetch, cli_manifest
+
+    d = deployer(tmp_path)
+    d.installer.fetch = FakeFetch()
+    commit = repo.commit({"glyphh.json": json.dumps(cli_manifest())})
+    with pytest.raises(DeployError) as caught:
+        await d.from_bundle(repo.bundle(tmp_path / "b.bundle"), commit)
+    assert caught.value.code == "E_CLI_INSTALL" and d.programs.versions("tool") == []
 
 
 def test_git_env_carries_extra_config_and_the_token_in_the_environment(tmp_path):
