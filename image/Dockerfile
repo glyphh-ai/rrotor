@@ -24,7 +24,9 @@ ARG VERSION=dev
 # The public key rrotor checks a part's signature with: Glyphh's release key, not a secret (it can also be set in the
 # environment). The licence key's public half is in the code (rrotord/licence_key.py), never the environment.
 ARG RELEASE_PUBLIC_KEY=
-LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/rrotor" \
+# The source label names the public repo (glyphh-ai/glyphh: the deploy files, SDKs and plugin), so the published
+# package is listed there; rrotor's own repo stays private.
+LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/glyphh" \
       org.opencontainers.image.description="rrotor: Glyphh's per-person runtime (base)" \
       org.opencontainers.image.version="${VERSION}"
 COPY --from=build /opt/rrotord /opt/rrotord
