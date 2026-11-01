@@ -17,7 +17,8 @@ the values are masked in the run's log lines.
 A CLI (`"kind": "cli"`, rrotord/clis.py) runs the same way, one command per run (`cli_run`): its arguments checked
 against `allow` first (E_CLI_DENIED, never a run), a run that waits for the person's approval when `approvals` names
 them (resumed by a continue like a program's), then the worker runs the command in the sandbox with the CLI's install,
-a fresh working folder for the call and its private HOME mounted; its Result (exit code, stdout, stderr) has its
+a fresh working folder for the call and a private HOME mounted (a signed-in person's own, `homes/<subject>`, so their
+sign-ins and config are theirs alone; else the CLI's own); its Result (exit code, stdout, stderr) has its
 secrets' values masked, and the files the command made or changed added. A CLI's sign-in (`cli_login`, its
 manifest's `login`) is such a run whose command stays up across the person's wait: `needs_input` with the address
 to open, each continue's answer typed into it (never kept), its seconds the sign-in's own."""
@@ -40,7 +41,7 @@ from opentelemetry.trace import Span
 from rrotor.ctx import RunState, cli_step
 from rrotord import clis
 from rrotord import log as logs
-from rrotord.audit import Audit
+from rrotord.audit import Audit, current
 from rrotord.errors import BadRequest, Conflict, Forbidden, NotFound, RrotorError, Unavailable
 from rrotord.manifest import check_inputs
 from rrotord.otel import Telemetry
@@ -197,7 +198,7 @@ class Runner:
         run = Run(
             run_id or new_id(self.node()), program, found.version, found.commit_sha, function, inputs, caller, origin
         )
-        run.clearance = clearance
+        run.clearance, run.subject = clearance, clis.subject_of(current().actor)
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
         with logs.bind(**about(run)):
@@ -227,10 +228,11 @@ class Runner:
             found, args = self._cli_found(cli, args)
             line = masked(clis.command_line(args), self._hidden_now(found))
             sign_in = found.manifest.cli.login if found.manifest.cli else None
+            subject = clis.subject_of(current().actor)
             if sign_in is not None and args and args == sign_in.args[: len(args)]:  # its sign-in, by cli_run
-                run = await self._cli_call(found, sign_in.args, line, None, None, caller, origin, login=True)
+                run = await self._cli_call(found, sign_in.args, line, None, None, caller, origin, subject, login=True)
             else:
-                run = await self._cli_call(found, args, line, stdin, files, caller, origin)
+                run = await self._cli_call(found, args, line, stdin, files, caller, origin, subject)
         except RrotorError as err:
             asked = {"program": cli, "version": None, "function": CLI, "run_id": None, "command": line}
             self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
@@ -242,7 +244,8 @@ class Runner:
         """A CLI's sign-in (its manifest's `login`), a run like any command's: its command started on a
         pseudo-terminal in the sandbox, answering `needs_input` with the address (and device code) it shows, which
         the person opens on their phone; program_continue types the code they paste back into the command, still
-        running, and the run ends `done` once it has signed in, its login kept in the CLI's private HOME."""
+        running, and the run ends `done` once it has signed in, its login kept in the caller's private HOME: a
+        signed-in person's own, so each person on this rrotor signs the CLI in as themselves."""
         line = None
         try:
             found, _ = self._cli_found(cli, [])
@@ -251,7 +254,8 @@ class Runner:
             if sign_in is None:
                 raise BadRequest(f"{cli} does not say how it signs in (no login in its manifest).", code="E_CLI_LOGIN")
             line = clis.command_line(sign_in.args)
-            run = await self._cli_call(found, sign_in.args, line, None, None, caller, origin, login=True)
+            subject = clis.subject_of(current().actor)
+            run = await self._cli_call(found, sign_in.args, line, None, None, caller, origin, subject, login=True)
         except RrotorError as err:
             asked = {"program": cli, "version": None, "function": CLI, "run_id": None, "command": line}
             self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
@@ -286,6 +290,7 @@ class Runner:
         files: Any,
         caller: str,
         origin: str,
+        subject: str | None = None,
         login: bool = False,
         approved: bool = False,
     ) -> Run:
@@ -298,6 +303,7 @@ class Runner:
             )
         text, given = clis.check_stdin(stdin), clis.check_files(files)
         run = Run(new_id(self.node()), found.program, found.version, found.commit_sha, CLI, {}, caller, origin)
+        run.subject = subject
         work = self.records.folder(run.id) / WORK
         work.mkdir(parents=True)
         run.inputs = {"args": args, "stdin": text, "files": clis.write_files(work, given)}
@@ -347,7 +353,7 @@ class Runner:
             self.hidden[run.id] = hidden
         hosts = frozenset(manifest.hosts)
         socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
-        home = self.programs.folder(run.program) / "home" if cli.home else None
+        home = clis.home_path(self.programs.folder(run.program), run.subject) if cli.home else None
         if home is not None:
             home.mkdir(parents=True, exist_ok=True)
         mounts = dataclasses.replace(
@@ -568,10 +574,10 @@ class Runner:
         return {"allow": cli.allow, "approvals": cli.approvals} if cli is not None else None
 
     async def program_cli(self, run: Run, ask: dict[str, Any]) -> dict[str, Any]:
-        """A program's ctx.cli: one command of a CLI its manifest names, run as that CLI's own run (its sandbox, HOME,
-        hosts, secrets, allow patterns, audit), by the program as its caller. A command its approval patterns name
-        runs only when this run's own state holds the person's approval of that command's step (the worker asked for
-        it), so a program cannot skip one. Answers the command's Result."""
+        """A program's ctx.cli: one command of a CLI its manifest names, run as that CLI's own run (its sandbox, the
+        HOME of the person this run is for, hosts, secrets, allow patterns, audit), by the program as its caller. A
+        command its approval patterns name runs only when this run's own state holds the person's approval of that
+        command's step (the worker asked for it), so a program cannot skip one. Answers the command's Result."""
         name, args, stdin = str(ask.get("cli") or ""), ask.get("args"), ask.get("stdin")
         try:
             found = self.programs.get(run.program, run.version).manifest
@@ -588,7 +594,9 @@ class Runner:
                 )
             line = masked(clis.command_line(argv), self._hidden_now(version))
             caller = f"program:{run.program}"
-            done = await self._cli_call(version, argv, line, stdin, None, caller, "program", approved=approved)
+            done = await self._cli_call(
+                version, argv, line, stdin, None, caller, "program", run.subject, approved=approved
+            )
         except RrotorError as err:
             asked = {"program": name, "version": None, "function": CLI, "run_id": None, "by": run.id}
             self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})

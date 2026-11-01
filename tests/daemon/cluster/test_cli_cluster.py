@@ -45,7 +45,8 @@ async def test_a_followers_cli_sign_in_runs_on_the_head(ring: Ring):
     head = await ring.add("n0", ids)
     await until(lambda: head.cluster.role == "head")
     archive = tarball({"bin/tool": SIGN_IN}, {"bin/tool": 0o755})
-    block = {"install": {"url": URL, "sha256": sha(archive)}, "home": True, "login": {"args": ["login"]}}
+    login = {"args": ["login"], "signed_in": "creds"}
+    block = {"install": {"url": URL, "sha256": sha(archive)}, "home": True, "login": login}
     await install_cli(head.runner.programs, cli_manifest(cli=block), FakeFetch({URL: archive}))
     one = await ring.add("n1", ids)
     await until(lambda: one.cluster.ready()[0] and one.runner.programs.active("tool") is not None)
@@ -56,3 +57,7 @@ async def test_a_followers_cli_sign_in_runs_on_the_head(ring: Ring):
     res = await ring.clients["n1"].post(path, json={"answer": "code-9"}, headers=ring.headers())
     assert (await res.json())["status"] == "done"
     assert (head.runner.programs.folder("tool") / "home" / "creds").read_text() == "code-9\n"
+    listed = await (await ring.clients["n0"].get("/v1/clis", headers=ring.headers())).json()
+    assert listed["clis"][0]["signed_in"] is True  # the head holds the homes
+    listed = await (await ring.clients["n1"].get("/v1/clis", headers=ring.headers())).json()
+    assert listed["clis"][0]["signed_in"] is None  # a follower cannot say: its homes are the head's

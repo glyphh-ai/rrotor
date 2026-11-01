@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from rrotord.api import ops
+from rrotord.audit import Who, acting
 from rrotord.errors import BadRequest
 from tests.daemon.api.conftest import Api
 from tests.daemon.api.test_mcp import tool
@@ -75,7 +76,8 @@ SIGN_IN = '#!/bin/sh\necho "visit https://auth.example.com/x"\nread code\necho "
 
 async def deploy_sign_in(api: Api) -> None:
     archive = tarball({"bin/tool": SIGN_IN}, {"bin/tool": 0o755})
-    block = {"install": {"url": URL, "sha256": sha(archive)}, "home": True, "login": {"args": ["login"]}}
+    login = {"args": ["login"], "signed_in": "creds"}
+    block = {"install": {"url": URL, "sha256": sha(archive)}, "home": True, "login": login}
     await install_cli(api.services.programs, cli_manifest(cli=block), FakeFetch({URL: archive}))
 
 
@@ -83,11 +85,28 @@ async def test_a_cli_signs_in_over_rest(api):
     await deploy_sign_in(api)
     status, listed = await send(api, "GET", "/v1/clis")
     assert listed["clis"][0]["login"] == {"args": ["login"]} and listed["clis"][0]["builtin"] is None
+    assert listed["clis"][0]["signed_in"] is False
     status, asked = await send(api, "POST", "/v1/clis/tool/login")
     assert (status, asked["status"], asked["data"]["url"]) == (200, "needs_input", "https://auth.example.com/x")
     status, done = await send(api, "POST", f"/v1/runs/{asked['run_id']}/continue", json={"answer": "code-123"})
     assert (status, done["status"]) == (200, "done")
     assert (api.services.programs.folder("tool") / "home" / "creds").read_text() == "code-123\n"
+    status, listed = await send(api, "GET", "/v1/clis")
+    assert listed["clis"][0]["signed_in"] is True  # for this caller (the local token: the CLI's own HOME)
+    with acting(Who({"type": "sign-in", "sub": "user_9"})):  # another person: their own HOME, not signed in
+        assert (await ops.clis_list(api.services))["clis"][0]["signed_in"] is False
+
+
+async def test_a_signed_in_person_signs_a_cli_in_as_themselves(api):
+    """The HOME a sign-in lands in is the caller's: a Glyphh sign-in's subject gets homes/<subject>."""
+    await deploy_sign_in(api)
+    with acting(Who({"type": "sign-in", "sub": "user_1"})):
+        asked = await ops.cli_login(api.services, {"cli": "tool"})
+        done = await ops.resume(api.services, asked["run_id"], "code-1")
+        assert done["status"] == "done" and (await ops.clis_list(api.services))["clis"][0]["signed_in"] is True
+    assert (api.services.programs.folder("tool") / "homes" / "user_1" / "creds").read_text() == "code-1\n"
+    assert not (api.services.programs.folder("tool") / "home").exists()
+    assert (await ops.clis_list(api.services))["clis"][0]["signed_in"] is False  # the local token's HOME
 
 
 async def test_a_cli_signs_in_over_mcp(api):

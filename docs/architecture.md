@@ -536,8 +536,16 @@ agent CLIs come built in (below), each signed in from the person's phone with `c
   only, never written to disk; its value is masked (`[secret]`) in the run's log, its Result, its record and the
   audit event's command line. `secret?:NAME` takes one only when it is set (an optional API key): a secret only ever
   taken that way never stops a run (`E_SECRET_MISSING`), and its variable is left out while it is not set.
-- **`home`:** `true` gives the CLI a private `HOME`, `/data/programs/<name>/home`, mounted at `/home/cli` and kept
-  across calls (its config, a login it keeps); otherwise `HOME` is the run's own `/tmp`.
+- **`home`:** `true` gives the CLI a private `HOME`, mounted at `/home/cli` and kept across calls (its config, a
+  login it keeps); otherwise `HOME` is the run's own `/tmp`. **Whose HOME is the caller's:** a Glyphh sign-in's
+  subject (the `sub` the server's introspection names, [2.1](#21-adding-the-runtime-to-claude)) gets their own,
+  `/data/programs/<name>/homes/<subject>` (a subject that is not a plain name, `[A-Za-z0-9][A-Za-z0-9_.@:-]*` up to
+  128, is its SHA-256's first 32 hex), so each person on a rrotor signs the CLI in as themselves and runs it with their
+  own account and connections, never another's; a runtime key, the local token, the link and a schedule share the
+  CLI's own, `/data/programs/<name>/home`. A program's `ctx.cli` runs the CLI in the HOME of the person the program's
+  run is for (the run's `subject`, set when it was called), so a program called by a signed-in person acts as them.
+  `clis_list` says whether the CLI is signed in for the caller (`signed_in`: its `login.signed_in` file is in their
+  HOME; `null` when it keeps no such file, or on a follower).
 - **`interactive`:** only `false`; `true` is refused, `E_MANIFEST` (interactive sessions are not built yet).
 - **A run** (`POST /v1/clis/{name}/run`, MCP `cli_run`, `{args, stdin?, files?}`): at most 256 arguments of 8192
   characters, stdin up to 1 MB of text, files up to 64 and 1 MB (by relative path: text, or `{"base64": …}`),
@@ -555,7 +563,8 @@ agent CLIs come built in (below), each signed in from the person's phone with `c
   audit log's `run.call` (with `command`) and `run.end`; its function is `cli`. `program_call` on a CLI is refused
   400 `E_NOT_PROGRAM`, and `cli_run` on a program 400 `E_NOT_CLI`.
 - **In a cluster** a CLI runs on the head: its install is the head's build (versions replicate their code and venv,
-  not `cli/`) and its home and secrets are the head's; a follower sends every command (and a sign-in) there.
+  not `cli/`) and its homes and secrets are the head's; a follower sends every command (and a sign-in) there, with
+  the caller as data, so the head runs it in that caller's HOME.
 
 **Built-in CLIs.** The image carries the vendors' agent CLIs, pinned in `image/clis.json` (a version, and for linux
 amd64 and arm64 the URL and SHA-256 of the vendor's own download) and installed at build by `image/clis.py`: the
@@ -621,8 +630,9 @@ the wait (`rrotor/_worker/login.py`).
   proxy. Without it, a bind is refused as for any command.
 - `cli_run` with the sign-in's arguments (or the first of them, `auth login`) runs the sign-in the same way, and the
   allow patterns are not asked: the sign-in is the manifest's own command.
-- What it signs in to stays in the CLI's private HOME, `/data/programs/<name>/home`, so its later `cli_run` calls are
-  signed in.
+- What it signs in to stays in the caller's private HOME (a signed-in person's own, `/data/programs/<name>/homes/<subject>`;
+  else the CLI's, `/data/programs/<name>/home`), so that caller's later `cli_run` calls are signed in, and nobody
+  else's are.
 - **Not enforced** by rrotor: what the command itself does inside the sandbox with the arguments it was allowed
   (a pattern is only as narrow as it is written), and a CLI process's memory is limited per process, so the worker and
   the command each get `limits.memory_mb`.

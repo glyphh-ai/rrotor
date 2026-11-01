@@ -9,7 +9,9 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rrotord import clis
 from rrotord.api import forward
+from rrotord.audit import current
 from rrotord.cluster.transport import ClusterError
 from rrotord.errors import BadRequest, RrotorError, Unavailable
 from rrotord.programs import Version
@@ -122,8 +124,9 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dic
 
 
 async def clis_list(s: Services) -> dict[str, Any]:
-    """The CLIs here: each one's version, command, install, allowed patterns and approval patterns."""
-    return {"clis": s.programs.clis()}
+    """The CLIs here: each one's version, command, install, allowed patterns and approval patterns, and whether it is
+    signed in for this caller (their own HOME; unknown on a follower, whose homes are the head's)."""
+    return {"clis": s.programs.clis(clis.subject_of(current().actor), homes=not forward.follower(s))}
 
 
 async def cli_run(s: Services, data: dict[str, Any], caller: str = "claude") -> dict[str, Any]:

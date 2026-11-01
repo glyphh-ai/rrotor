@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from rrotord import clis
 from rrotord import manifest as manifests
 from rrotord.errors import NotFound
 from rrotord.store import read_json, write_json
@@ -160,9 +161,11 @@ class Programs:
             if (v := self.active(n)) and v.builtin is None
         ]
 
-    def clis(self) -> list[dict[str, Any]]:
+    def clis(self, subject: str | None = None, homes: bool = True) -> list[dict[str, Any]]:
         """The CLIs here, each by its active version: what it installs and runs, the arguments it allows and those
-        that wait for the person's approval, how it signs in (cli_login), and a built-in one's vendor and version."""
+        that wait for the person's approval, how it signs in (cli_login), whether it is signed in for `subject` (the
+        caller's own HOME holds its `signed_in` file; None when it keeps no such file, or when the homes are not here:
+        `homes` False on a cluster's follower), and a built-in one's vendor and version."""
         out = []
         for name in self.names():
             active = self.active(name)
@@ -182,10 +185,16 @@ class Programs:
                     "home": cli.home,
                     "hosts": active.manifest.hosts,
                     "login": {"args": cli.login.args} if cli.login else None,
+                    "signed_in": self._signed_in(name, cli, subject) if homes else None,
                     "builtin": active.builtin,
                 }
             )
         return out
+
+    def _signed_in(self, name: str, cli: manifests.Cli, subject: str | None) -> bool | None:
+        if not cli.home or cli.login is None or cli.login.signed_in is None:
+            return None
+        return (clis.home_path(self.folder(name), subject) / cli.login.signed_in).is_file()
 
     def describe(self) -> list[dict[str, Any]]:
         out = []

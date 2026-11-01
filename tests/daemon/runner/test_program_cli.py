@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from rrotor.ctx import RunState, cli_step
-from rrotord.audit import Audit
+from rrotord.audit import Audit, Who, acting
 from rrotord.vault import Vault
 from tests.daemon.runner.test_engine import Env
 from tests.fakes import ECHO, FakeFetch, cli_manifest, install, install_cli, manifest, outcome, sha, tarball
@@ -57,6 +57,10 @@ async def test_a_program_runs_a_cli_as_the_clis_own_run(env):
     by = next(e for e in events if e.get("by") == run.id)
     assert (by["program"], by["command"], by["outcome"]["status"]) == ("tool", "pr list", "done")
     assert any(line.get("event") == "cli" for line in env.records.lines(run.id))
+    with acting(Who({"type": "sign-in", "sub": "user_1"})):  # called by a signed-in person: the CLI runs as them
+        theirs = await env.runner.call(program="prog", function="start", inputs={"args": ["pr", "list"]})
+    home = str(env.programs.folder("tool") / "homes" / "user_1")
+    assert theirs.subject == "user_1" and outcome(theirs)["data"]["out"].endswith(f"home: {home}\n")
     step = cli_step("tool", ["pr", "list"], None)
     assert step in RunState.from_json(env.runner.get(run.id).state).checkpoints
 

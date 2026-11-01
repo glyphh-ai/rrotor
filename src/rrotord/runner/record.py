@@ -33,6 +33,7 @@ class Run:
     caller: str
     origin: str  # "link" (the Cloud called it) or "local" (the local API)
     status: str = "running"
+    subject: str | None = None  # the signed-in person it is for (a CLI runs in their own HOME); None: nobody's
     clearance: float = 1.0  # who asks, as a share of what the program may show (ctx.clearance): 1 sees all
     created_at: str = field(default_factory=now)
     updated_at: str = field(default_factory=now)

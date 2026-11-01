@@ -249,8 +249,9 @@ TOOLS: tuple[Tool, ...] = (
     Tool("schedule_resume", "Resume a paused schedule.", SCHEDULE_ARGS, schedule_resume),
     Tool(
         "clis_list",
-        "The command-line tools here: each one's version, command, install, allowed argument patterns and the "
-        "patterns that need the person's approval.",
+        "The command-line tools here: each one's version, command, install, allowed argument patterns, the "
+        "patterns that need the person's approval, and signed_in: whether it is signed in for you (each signed-in "
+        "person has their own HOME on the rrotor; false: call cli_login first).",
         _obj({}),
         clis_list,
         True,
@@ -281,11 +282,12 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "cli_login",
-        "Sign a CLI in from afar (one whose clis_list entry has login), its sign-in kept in its private HOME for "
-        "later cli_run calls: answers needs_input with data.url (and data.code for a device flow) for the person to "
-        "open on their phone; then program_continue with the code the page shows (or, if the page ends on an "
-        "http://localhost… address that does not load, that address; after a device code, any answer once they "
-        "signed in). Answers done with signed_in when it has.",
+        "Sign a CLI in from afar (one whose clis_list entry has login), its sign-in kept in your own private HOME "
+        "on the rrotor (each signed-in person signs in as themselves) for later cli_run calls: answers needs_input "
+        "with data.url (and data.code for a device flow) for the person to open on their phone; then "
+        "program_continue with the code the page shows (or, if the page ends on an http://localhost… address that "
+        "does not load, that address; after a device code, any answer once they signed in). Answers done with "
+        "signed_in when it has.",
         _obj({"cli": {"type": "string"}}, ["cli"]),
         cli_login,
     ),

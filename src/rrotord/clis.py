@@ -73,6 +73,29 @@ def refused(message: str, code: str = "E_CLI_INSTALL") -> DeployError:
     return DeployError(message, code=code)
 
 
+# Whose HOME a CLI's run gets (docs/architecture.md, 5.7, `home`): a Glyphh sign-in's subject has their own,
+# `homes/<subject>`, so each person on a rrotor is signed in as themselves; everything else (a runtime key, the local
+# token, the link, a schedule, rrotor itself) shares the CLI's own, `home`. A subject plain enough to be a folder name
+# is used as is; any other is hashed.
+SUBJECT_PLAIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}")
+
+
+def subject_of(actor: dict[str, Any]) -> str | None:
+    """The signed-in person a run is for, from the caller's actor (rrotord/audit.py): a `sign-in`'s `sub`, else
+    None (the CLI's own HOME)."""
+    sub = actor.get("sub") if actor.get("type") == "sign-in" else None
+    return sub if isinstance(sub, str) and sub else None
+
+
+def home_path(folder: Path, subject: str | None) -> Path:
+    """Where a CLI's HOME is on the volume, under the program's folder: `home`, the CLI's own, or `homes/<subject>`,
+    a signed-in person's own (their sign-in and config, nobody else's)."""
+    if subject is None:
+        return folder / "home"
+    safe = subject if SUBJECT_PLAIN.fullmatch(subject) else hashlib.sha256(subject.encode()).hexdigest()[:32]
+    return folder / "homes" / safe
+
+
 # Fetching
 
 
