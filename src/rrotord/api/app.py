@@ -83,7 +83,7 @@ def make(services: Services) -> web.Application:
             errors,
             refused(services.cluster),
             seqs(services.cluster),
-            gate(services.config, access, services.introspect),
+            gate(services.config, access, services.introspect, services.browser),
         ],
         client_max_size=BODY_MAX,
     )

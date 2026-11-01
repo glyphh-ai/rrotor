@@ -112,6 +112,9 @@ class Handler:
     async def on_access(self, message: p.Keys | p.Pause | p.Resume) -> None:
         self.calls.append((message.type, message))
 
+    async def on_artifact(self, message: p.Artifact) -> None:
+        self.calls.append(("artifact", message))
+
 
 async def fast(delay: float) -> None:
     await asyncio.sleep(min(delay, 0.05))
@@ -235,6 +238,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
             {"type": "keys", "hashes": ["a" * 64]},
             {"type": "pause", "reason": "runtime_hours"},
             {"type": "resume"},
+            {"type": "artifact", "program": "x", "version": 2, "state": "approved", "roles": []},
             {"type": "secret_set"},
             {"type": "pong"},
         ):
@@ -251,7 +255,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
     await link.client.owe(lambda seq: p.event(seq, "x", "k", {}))
     link.start()
     await asyncio.wait_for(acked.wait(), 5)
-    await until(lambda: len(link.handler.calls) == 8)
+    await until(lambda: len(link.handler.calls) == 9)
     assert [c[0] for c in link.handler.calls] == [
         "welcome",
         "call",
@@ -261,6 +265,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
         "keys",
         "pause",
         "resume",
+        "artifact",
     ]
     await until(lambda: not link.client.outbox.pending)
     await until(lambda: "a message from the Cloud failed" in caplog.text)

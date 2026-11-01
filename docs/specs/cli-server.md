@@ -51,7 +51,8 @@ the version's folder, `/data/programs/<name>/versions/<sha>/cli/`.
 - **env**: environment for the process; `secret:NAME` injects a vault secret, never written to disk or logs (run
   logs already mask secret values).
 - **home**: a persistent, private `HOME` for the CLI (its config and any login it keeps, e.g. `gh auth login`),
-  kept across calls on the runtime's volume, never shared with another program.
+  kept across calls on the runtime's volume, never shared with another program; one per signed-in person
+  (`homes/<subject>`), so each signs in as themselves, and the CLI's own (`home`) for keys and the local token.
 - **hosts**: the egress allow-list, exactly as for programs.
 
 ## How Claude uses it

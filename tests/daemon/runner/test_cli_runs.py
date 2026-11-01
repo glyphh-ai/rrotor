@@ -4,6 +4,7 @@ here: allow and approval patterns, env from the vault, masking, the private HOME
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import shutil
 import sys
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 import pytest
 
 from rrotord import clis
-from rrotord.audit import Audit
+from rrotord.audit import Audit, Who, acting
 from rrotord.errors import BadRequest, Forbidden, Unavailable
 from rrotord.sandbox.probe import Layers
 from rrotord.vault import Vault
@@ -115,6 +116,42 @@ async def test_stdin_files_in_and_out_and_the_private_home(env):
     assert (env.programs.folder("tool") / "home" / "count").read_text() == "x\nx\n"
     spec = env.launcher.specs[-1].mounts
     assert spec.home == env.programs.folder("tool") / "home" and spec.cli == env.programs.get("tool").root / "cli"
+
+
+async def test_each_signed_in_person_has_their_own_home(env):
+    """A Glyphh sign-in's subject runs the CLI in homes/<subject>, theirs alone; a runtime key, the local token and
+    rrotor itself share the CLI's own home; a subject that is no folder name is hashed."""
+    script = '#!/bin/sh\necho x >> "$HOME/count"\necho "calls: $(wc -l < "$HOME/count" | tr -d \' \')"\n'
+    await deploy(env, script, cli={"home": True})
+    folder = env.programs.folder("tool")
+    with acting(Who({"type": "sign-in", "sub": "user_1"})):
+        one = await env.runner.cli_run(cli="tool", args=[])
+        again = await env.runner.cli_run(cli="tool", args=[])
+    with acting(Who({"type": "sign-in", "sub": "user_2"})):
+        two = await env.runner.cli_run(cli="tool", args=[])
+    with acting(Who({"type": "key", "key_sha256": "k" * 64})):
+        key = await env.runner.cli_run(cli="tool", args=[])
+    nobody = await env.runner.cli_run(cli="tool", args=[])
+    assert [outcome(r)["data"]["stdout"] for r in (one, again, two, key, nobody)] == [
+        "calls: 1\n",
+        "calls: 2\n",
+        "calls: 1\n",
+        "calls: 1\n",
+        "calls: 2\n",
+    ]
+    assert (one.subject, two.subject, key.subject, nobody.subject) == ("user_1", "user_2", None, None)
+    assert env.records.load(one.id).subject == "user_1"  # kept with the run, for a continue after a restart
+    assert (folder / "homes" / "user_1" / "count").read_text() == "x\nx\n"
+    assert (folder / "homes" / "user_2" / "count").read_text() == "x\n"
+    assert (folder / "home" / "count").read_text() == "x\nx\n"
+    with acting(Who({"type": "sign-in", "sub": "../odd one"})):
+        odd = await env.runner.cli_run(cli="tool", args=[])
+    hashed = hashlib.sha256(b"../odd one").hexdigest()[:32]
+    assert env.launcher.specs[-1].mounts.home == folder / "homes" / hashed and odd.subject == "../odd one"
+    assert not (folder / "odd one").exists()
+    with acting(Who({"type": "sign-in", "sub": ""})):  # a sign-in the Cloud named no subject for
+        assert (await env.runner.cli_run(cli="tool", args=[])).subject is None
+    assert env.programs.clis("user_1")[0]["signed_in"] is None  # no login: nothing says whether it is signed in
 
 
 async def test_output_past_its_cap_is_cut_in_the_result_and_kept_in_the_log(env, monkeypatch):

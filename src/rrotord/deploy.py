@@ -1,8 +1,10 @@
 """Deploying a version: exactly one commit, from a git bundle sent to the API, from a GitHub repo (with a token for
-a private one; the Cloud mints a short-lived one per deploy), or one this rrotor already holds. The commit's SHA is
-checked, the manifest read, a venv made and `requirements.lock` installed (binary wheels only, with hashes: no program
-code runs outside the sandbox, not even a package's setup), and the version becomes active (docs/architecture.md,
-2.2 and 5). A CLI's version also gets its install, pinned and checked, under `cli/` (rrotord/clis.py)."""
+a private one; the Cloud mints a short-lived one per deploy), from files written here (an app published from Claude,
+committed in a scratch repo), or one this rrotor already holds. The commit's SHA is checked, the manifest read, a
+venv made and `requirements.lock` installed (binary wheels only, with hashes: no program code runs outside the
+sandbox, not even a package's setup), and the version becomes active (docs/architecture.md, 2.2 and 5), unless an
+app's approved version is to keep serving (5.8). A CLI's version also gets its install, pinned and checked, under
+`cli/` (rrotord/clis.py)."""
 
 from __future__ import annotations
 
@@ -80,6 +82,41 @@ class Deployer:
             await self._git(env, "init", "-q", str(src))
             await self._git(env, "fetch", "-q", str(bundle), commit, cwd=src)
             return await self._install(env, src, commit, version)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    async def from_files(
+        self, files: Mapping[str, bytes], version: int | None = None, activate: bool = True
+    ) -> tuple[Version, bool]:
+        """A version from files written here (an app published from Claude, docs/architecture.md, 5.8): committed
+        in a scratch repo (the commit is the version's SHA) and installed as any commit; `activate` False leaves the
+        version deployed but not active (an approved version of the app keeps serving). Answers the version and
+        whether it was made now (False: this rrotor already held the same files, their commit the same)."""
+        work = Path(tempfile.mkdtemp(dir=self._scratch()))
+        try:
+            env = self._git_env(work) | {
+                "GIT_AUTHOR_NAME": "rrotor",
+                "GIT_AUTHOR_EMAIL": "rrotor@glyphh.ai",
+                "GIT_COMMITTER_NAME": "rrotor",
+                "GIT_COMMITTER_EMAIL": "rrotor@glyphh.ai",
+                "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+            }
+            src = work / "src"
+            src.mkdir()
+            for name, data in files.items():
+                target = src / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            await self._git(env, "init", "-q", str(src))
+            await self._git(env, "add", "-A", cwd=src)
+            await self._git(env, "commit", "-q", "-m", "published", cwd=src)
+            commit = await self._git(env, "rev-parse", "HEAD", cwd=src)
+            found = manifests.read(src)
+            existing = self.programs.by_sha(found.name, commit)
+            if existing is not None:
+                return existing, False
+            return await self._place(src, commit, found, version, activate), True
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -170,18 +207,25 @@ class Deployer:
         if head != commit:
             raise DeployError(f"The commit fetched is {head[:12]}, not {commit[:12]}.", code="E_SHA")
         found = manifests.read(src)
-        self._check_clis(found)
-        shutil.rmtree(src / ".git")
         existing = self.programs.by_sha(found.name, commit)
         if existing is not None:
             return await self.held(found.name, commit, version)
+        return await self._place(src, commit, found, version)
+
+    async def _place(
+        self, src: Path, commit: str, found: manifests.Manifest, version: int | None, activate: bool = True
+    ) -> Version:
+        """A checked-out commit, its manifest read, placed under the program's versions with its venv (and a CLI's
+        install), recorded and, unless told otherwise, activated."""
+        self._check_clis(found)
+        shutil.rmtree(src / ".git")
         root = self.programs.version_root(found.name, commit)
         staging = root.with_name(f".{commit}.staging")
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
         try:
             shutil.move(src, staging / "src")
-            await self._venv(staging, lock=found.kind == "program")
+            await self._venv(staging, lock=found.kind != "cli")
             if found.kind == "cli":  # its install, pinned and checked, beside the venv its worker runs in
                 await self.installer.install(found, staging / "cli", staging / "src")
             shutil.rmtree(root, ignore_errors=True)
@@ -191,7 +235,8 @@ class Deployer:
             raise
         self._seed(found.name, root / "src" / "files")
         made = self.programs.record(found.name, version or self.programs.next_number(found.name), commit, found)
-        self.programs.activate(made)
+        if activate:
+            self.programs.activate(made)
         return made
 
     async def _venv(self, root: Path, lock: bool = True) -> None:

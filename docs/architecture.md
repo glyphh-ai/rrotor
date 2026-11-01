@@ -273,6 +273,8 @@ A git repo; a version is a commit.
 | `requirements.lock` | Optional: its Python dependencies, pinned with hashes, installed at deploy, never at run |
 | `files/` | Optional: seed files, copied into its folder on the first deploy |
 
+An **app** is a kind of program too (`"kind": "app"`, [5.8](#58-apps)): a page Claude wrote, published from Claude with
+its files, reviewed in the Glyphh catalogue and served to the org's people at `/apps/<name>/`.
 A **CLI** is a kind of program (`"kind": "cli"`, [5.7](#57-clis)): the same repo, manifest, deploy, sandbox, vault,
 egress proxy, approvals, limits and audit, with no `program.py`: its manifest names a command-line tool to install
 and the arguments it may be run with.
@@ -297,7 +299,8 @@ and the arguments it may be run with.
 | Key | What |
 |---|---|
 | `name` | `^[a-z][a-z0-9_]{0,62}$`; a deploy names the program by it |
-| `kind` | `program` (the default) or `cli`: a CLI has a `cli` block and no functions, schedules, data, databases or parts ([5.7](#57-clis)) |
+| `kind` | `program` (the default), `cli` (a CLI has a `cli` block and no functions, schedules, data, databases or parts, [5.7](#57-clis)) or `app` (a page Claude wrote, served to the org's people: an `app` block, and functions only when the page calls them, [5.8](#58-apps)) |
+| `app` | An app's: `entry` (its page in `src/`, `.html`, `.htm` or `.md`; default `index.html`), `title`, `roles` (the roles that may open it, lower-cased; none: everyone in the org) and `functions` (those of its own the page may call) ([5.8](#58-apps)) |
 | `version` | Optional, 1 or more |
 | `description`, `python` | Free text; `python` must be `3.13` |
 | `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it runs on a cluster's head: `true` runs it there, `false` on whichever node the call reaches, read-only there; default whether the program keeps data (`data` or a SQLite database); every call of a program that keeps data runs on the head whatever it says) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
@@ -536,8 +539,16 @@ agent CLIs come built in (below), each signed in from the person's phone with `c
   only, never written to disk; its value is masked (`[secret]`) in the run's log, its Result, its record and the
   audit event's command line. `secret?:NAME` takes one only when it is set (an optional API key): a secret only ever
   taken that way never stops a run (`E_SECRET_MISSING`), and its variable is left out while it is not set.
-- **`home`:** `true` gives the CLI a private `HOME`, `/data/programs/<name>/home`, mounted at `/home/cli` and kept
-  across calls (its config, a login it keeps); otherwise `HOME` is the run's own `/tmp`.
+- **`home`:** `true` gives the CLI a private `HOME`, mounted at `/home/cli` and kept across calls (its config, a
+  login it keeps); otherwise `HOME` is the run's own `/tmp`. **Whose HOME is the caller's:** a Glyphh sign-in's
+  subject (the `sub` the server's introspection names, [2.1](#21-adding-the-runtime-to-claude)) gets their own,
+  `/data/programs/<name>/homes/<subject>` (a subject that is not a plain name, `[A-Za-z0-9][A-Za-z0-9_.@:-]*` up to
+  128, is its SHA-256's first 32 hex), so each person on a rrotor signs the CLI in as themselves and runs it with their
+  own account and connections, never another's; a runtime key, the local token, the link and a schedule share the
+  CLI's own, `/data/programs/<name>/home`. A program's `ctx.cli` runs the CLI in the HOME of the person the program's
+  run is for (the run's `subject`, set when it was called), so a program called by a signed-in person acts as them.
+  `clis_list` says whether the CLI is signed in for the caller (`signed_in`: its `login.signed_in` file is in their
+  HOME; `null` when it keeps no such file, or on a follower).
 - **`interactive`:** only `false`; `true` is refused, `E_MANIFEST` (interactive sessions are not built yet).
 - **A run** (`POST /v1/clis/{name}/run`, MCP `cli_run`, `{args, stdin?, files?}`): at most 256 arguments of 8192
   characters, stdin up to 1 MB of text, files up to 64 and 1 MB (by relative path: text, or `{"base64": …}`),
@@ -555,7 +566,8 @@ agent CLIs come built in (below), each signed in from the person's phone with `c
   audit log's `run.call` (with `command`) and `run.end`; its function is `cli`. `program_call` on a CLI is refused
   400 `E_NOT_PROGRAM`, and `cli_run` on a program 400 `E_NOT_CLI`.
 - **In a cluster** a CLI runs on the head: its install is the head's build (versions replicate their code and venv,
-  not `cli/`) and its home and secrets are the head's; a follower sends every command (and a sign-in) there.
+  not `cli/`) and its homes and secrets are the head's; a follower sends every command (and a sign-in) there, with
+  the caller as data, so the head runs it in that caller's HOME.
 
 **Built-in CLIs.** The image carries the vendors' agent CLIs, pinned in `image/clis.json` (a version, and for linux
 amd64 and arm64 the URL and SHA-256 of the vendor's own download) and installed at build by `image/clis.py`: the
@@ -621,11 +633,75 @@ the wait (`rrotor/_worker/login.py`).
   proxy. Without it, a bind is refused as for any command.
 - `cli_run` with the sign-in's arguments (or the first of them, `auth login`) runs the sign-in the same way, and the
   allow patterns are not asked: the sign-in is the manifest's own command.
-- What it signs in to stays in the CLI's private HOME, `/data/programs/<name>/home`, so its later `cli_run` calls are
-  signed in.
+- What it signs in to stays in the caller's private HOME (a signed-in person's own, `/data/programs/<name>/homes/<subject>`;
+  else the CLI's, `/data/programs/<name>/home`), so that caller's later `cli_run` calls are signed in, and nobody
+  else's are.
 - **Not enforced** by rrotor: what the command itself does inside the sandbox with the arguments it was allowed
   (a pattern is only as narrow as it is written), and a CLI process's memory is limited per process, so the worker and
   the command each get `limits.memory_mb`.
+
+### 5.8 Apps
+
+An app is a page Claude wrote (a Claude Code artifact: one `.html` or `.md` file and any files beside it) published
+to this rrotor for the org's people, reviewed in the Glyphh catalogue and served to a browser signed in to Glyphh for
+this rrotor (`rrotord/apps.py`, `rrotord/browser.py`, `rrotord/artifacts.py`; the spec is the server's
+`docs/specs/artifacts.md`, pointed at by [`specs/apps.md`](specs/apps.md)). It is a program of `"kind": "app"`
+([5.2](#52-the-manifest-glyphhjson)): the same deploy, versions, sandbox, vault, hosts, CLIs and audit; its page's
+calls run its functions as the viewer.
+
+- **Publishing** (`POST /v1/apps`, MCP `app_publish`): `{name, title, description?, roles?, files, entry?, functions?,
+  program?, hosts?, secrets?, clis?, limits?}`; `files` the page's files by relative path (text, or `{base64: …}`;
+  64 files and 16 MiB in all at most; never `glyphh.json`, `program.py`, `requirements.lock` or `files/`, which are
+  rrotor's own), `functions` as a manifest's (`{name: {description, inputs}}`) with `program` the text of
+  `program.py` when any are named. rrotor writes the manifest beside the files, commits them in a scratch repo (the
+  commit is the version's SHA; the same files again are the same commit, held already) and deploys the version as
+  any (`Deployer.from_files`): activated, unless an **approved** version of the app is active, which keeps serving
+  until the catalogue approves the new one (the `approved` message activates the version it names). The answer is
+  `{program, version, commit_sha, deployed_at, active, state, url}`, `url` where a browser opens it
+  (`https://<host>/apps/<name>/`; a local rrotor's `http://127.0.0.1:7777/apps/<name>/`). `deployed` goes up the
+  link with the manifest and `by`, the Glyphh subject who published (null for the local token). On a hosted or
+  self-hosted rrotor publishing is a person's act: a runtime key is refused 403 `E_FORBIDDEN`; a local rrotor's
+  token publishes. A follower sends it to its head.
+- **The catalogue's word** (`/data/artifacts.json`): the server tells this rrotor each app's reviewed version, its
+  state (`draft`, `approved`, `rejected`, `retired`) and roles, and the reviewer groups, down the link (`artifact`
+  messages, and the welcome's `artifacts` and `reviewers`, [6](#6-the-link-protocol-2)), kept across restarts. An
+  app is served only while its active version is the approved one; a newer version here is a `draft`, an older one
+  `retired`, one the catalogue has not spoken of `unknown`. With the link off (air-gapped) there is no catalogue:
+  the deploy is the approval and the manifest's `roles` decide. `GET /v1/apps` (MCP `apps_list`) lists each app:
+  `{name, title, description, version, active, roles, functions, state, url}`.
+- **Serving** (`GET /apps/{name}/`, `GET /apps/{name}/{path}`): the active version's `src/` (`/` the entry; a
+  Markdown entry inside rrotor's own document shell, rendered by `marked` from cdnjs), with `Content-Type` by
+  extension, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and a Content-Security-Policy that lets
+  the page load scripts and styles only from itself (inline too: an artifact is one file) and the five CDN hosts
+  Claude Code's artifacts use (cdnjs, jsDelivr, the Tailwind and jQuery CDNs, unpkg), fonts from Google Fonts, and
+  `fetch` only its own origin. A refusal is a page too, since a browser is reading, its code in `X-Error`: 404
+  `E_APP_MISSING` (no such app, a program that is not one, a file not there or rrotor's own), 409 `E_APP_UNREVIEWED`
+  (nothing approved yet, or rejected), 403 `E_APP_FORBIDDEN` (the viewer's roles do not open it; the page has a
+  sign-out form). A **reviewer** (the org's admin, or a member of a reviewer group) opens any app, any version
+  (`?version=N`, to review a draft), whatever its roles.
+- **The viewer's sign-in** (`rrotord/browser.py`, a hosted or self-hosted rrotor with the link on): a page asked
+  for with no session is sent (302) to `/auth/start?next=…`, which sends the browser to the Glyphh server's
+  `/oauth/authorize` with PKCE (rrotor registered itself once as a public client at `POST /oauth/register`, its id
+  in `/data/oauth-client.json`; the sign-in in flight in the `rrotor_signin` cookie, signed with a secret in
+  `/data/browser-secret`, ten minutes) and `resource` this rrotor's own `/mcp`; `/auth/callback` exchanges the code
+  at `/oauth/token` and keeps the tokens in a **session** (`/data/sessions/<id>.json`, private: the access and
+  refresh tokens, the subject, when the access token expires), named by the `rrotor_session` cookie (HttpOnly,
+  SameSite Lax, Secure, 30 days), then goes on to `next` (a path on this host only). The gate takes the session on
+  `/apps/*`, `/auth/*` and `/v1/apps` only (never on `/v1/*` or `/mcp`, which take bearers as before), introspects
+  its access token exactly as a bearer (`POST /v1/runtime/introspect`, a minute kept; the answer's `sub`, `role`
+  and `groups` are the viewer, [7](#7-the-api)), refreshes an access token about to expire with the refresh token,
+  and drops a session that cannot be refreshed or that the Cloud no longer vouches for (the browser signs in again).
+  An `Origin` other than this host's is refused `E_ORIGIN`; a page's calls are same-site by the cookie's `Lax`.
+  `POST /auth/logout` ends the session. A **local** rrotor has no sign-in to make: its `/apps/*` is served to the
+  browser on its own machine with no session, roles ignored (the person's own machine).
+- **Roles:** a viewer's `role` (`admin` or `member`) and `groups` (the identity provider's, as the Cloud names them)
+  are matched, lower-cased, against the app's `roles`; empty roles open to everyone in the org. The per-person HOME
+  a CLI runs in ([5.7](#57-clis)) is the session's subject, as for a bearer sign-in.
+- **Calls** (`POST /apps/{name}/call/{function}`, the JSON body the inputs): a run of the app's function as the
+  viewer (caller `app`, origin `app`, the run's subject the viewer's), answered as `POST /v1/runs` answers; a
+  `needs_input` or `needs_approval` is answered with `POST /apps/{name}/runs/{run_id}/continue` `{answer}`. A
+  function `app.functions` does not name is 403 `E_APP_FUNCTION`; a run of another program 404 `E_RUN_MISSING`.
+  Every call is a run: `run_status`, `run_log` and the audit log's `run.call` as any.
 
 ## 6. The link: protocol 2
 
@@ -635,14 +711,15 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 | Direction | `type` | Carries |
 |---|---|---|
 | up | `hello` | protocol 2 (protocol 1 named a program `model`: the server closes a link of the other protocol with 4426), rrotor's version, mode, runtime id, the versions deployed |
-| down | `welcome` | accepted; for a hosted or self-hosted runtime, the licence key (`license_key`, [9](#9-the-licence)), in release N also the legacy licence (`licence: {payload, signature}`; the key is preferred), and the runtime keys' SHA-256s (`keys`, the whole list) |
+| down | `welcome` | accepted; for a hosted or self-hosted runtime, the licence key (`license_key`, [9](#9-the-licence)), in release N also the legacy licence (`licence: {payload, signature}`; the key is preferred), and the runtime keys' SHA-256s (`keys`, the whole list); the catalogue's whole word on this rrotor's apps (`artifacts: [{program, version, state, roles}]`) and the org's `reviewers` (groups), [5.8](#58-apps) |
 | down | `keys` | `hashes`: the whole list again, whenever a key is made, revoked or expires |
+| down | `artifact` | program, version, state (`draft`, `approved`, `rejected`, `retired`), roles: an app's review changed; `approved` activates the version named when this rrotor holds it ([5.8](#58-apps)) |
 | down | `deploy`, `activate`, `remove` | program, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
 | down | `continue` | `run_id`, `answer` |
 | down | `call`, `cancel` | `run_id`, program, version, function, inputs, caller, clearance; `cancel` the `run_id`. Handled; the server sends neither |
 | down | `pause`, `resume` | Handled (a paused hosted runtime answers 402 `E_LIMIT` to all but `/healthz`); the server sends neither |
 | up | `result` | `seq`, `run_id`, the `Result`, seconds: only for a run a `call` opened |
-| up | `deployed` | program, version, commit SHA, `repo` (null unless from a repo), `manifest`; after **every** deploy, by any route; not numbered, kept until acknowledged |
+| up | `deployed` | program, version, commit SHA, `repo` (null unless from a repo), `manifest`, `by` (the Glyphh subject who published an app; null otherwise); after **every** deploy, by any route; not numbered, kept until acknowledged |
 | up | `event` | `seq`, program, kind, data: `deploy_failed` `{version, commit_sha, code, message}` when a `deploy` or `activate` cannot be done |
 | up | `usage` | `seq`, `keys` (each runtime key that let a request in: `{key_sha256, calls, last_used_at}`) |
 | both | `ping`, `pong` | every 20 s |
@@ -692,7 +769,12 @@ is who the audit log names for what the request does, and every 401 and 403 is a
   with `WWW-Authenticate: Bearer resource_metadata="https://<address>/.well-known/oauth-protected-resource/mcp",
   scope="account"` (and `error="invalid_token"` when a token was sent), which is how Claude finds where to sign in.
 - **Local:** `Host` must be `127.0.0.1:<port>` or `localhost:<port>`, an `Origin` other than those is refused (no
-  web page may call it), and the bearer is the local token, compared by its SHA-256 in constant time.
+  web page may call it), and the bearer is the local token, compared by its SHA-256 in constant time; `/apps/*` is
+  served to the machine's own browser with no token ([5.8](#58-apps)).
+- **A browser's session**, hosted and self-hosted with the link on: on `/apps/*`, `/auth/*` and `/v1/apps` only, the
+  `rrotor_session` cookie names a session whose access token is introspected like a bearer, the answer's `sub`,
+  `role` and `groups` the viewer; a page asked for with no session is sent to `/auth/start` ([5.8](#58-apps)).
+  `/auth/*` is open (the sign-in itself).
 
 **REST:**
 
@@ -709,6 +791,11 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `GET /v1/schedules` | `{schedules: [{id, program, name, version, function, cron, tz, input, paused, next_at, last, skipped}]}` ([5.6](#56-schedules)) |
 | `POST /v1/schedules/{program}/{name}/pause`, `…/resume` | The schedule paused or resumed, kept across restarts: the schedule as listed |
 | `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
+| `GET /v1/apps` | `{apps: [{name, title, description, version, active, roles, functions, state, url}]}`: the apps here and the catalogue's word on each ([5.8](#58-apps)) |
+| `POST /v1/apps` | `{name, title, description?, roles?, files, entry?, functions?, program?, hosts?, secrets?, clis?, limits?}`: a page published as an app, a new version: `201 {program, version, commit_sha, deployed_at, active, state, url}`; a person's act on a public rrotor (a key is 403 `E_FORBIDDEN`) ([5.8](#58-apps)) |
+| `GET /apps/{name}/`, `GET /apps/{name}/{path}` | The app's page, or a file beside it, to a browser signed in (`?version=N`: a draft, for a reviewer); a refusal is a page, its code in `X-Error` (404 `E_APP_MISSING`, 409 `E_APP_UNREVIEWED`, 403 `E_APP_FORBIDDEN`) ([5.8](#58-apps)) |
+| `POST /apps/{name}/call/{function}`, `POST /apps/{name}/runs/{id}/continue` | The page's call into one of the app's functions as the viewer (the body the inputs): the run's first `Result`, as `POST /v1/runs`; and its answer to a waiting run (`{answer}`); 403 `E_APP_FUNCTION` for a function the page may not call |
+| `GET /auth/start?next=`, `GET /auth/callback`, `POST /auth/logout` | The browser's Glyphh sign-in for this rrotor's apps, and its end ([5.8](#58-apps)); hosted and self-hosted with the link on |
 | `GET /v1/clis` | `{clis: [{name, description, version, command, install: {source, pinned}, allow, approvals, needs_approval, home, hosts, login, builtin}]}`: `login` `{args}` when it signs in with `…/login`, `builtin` `{vendor, title, version}` for one the image carries ([5.7](#57-clis)) |
 | `POST /v1/clis/{name}/run` | `{args, stdin?, files?}`: one command of the CLI, a run: `{run_id, …, status, data: {exit_code, stdout, stderr, stdout_bytes, stderr_bytes, truncated, files, files_skipped}}`, or `needs_approval`; 403 `E_CLI_DENIED` when `allow` does not take the arguments; the arguments of its sign-in (or the first of them) run its sign-in |
 | `POST /v1/clis/{name}/login` | The CLI's sign-in, a run: `needs_input` with `data: {url, urls, code, output}` to open on the person's phone, then `…/continue` with the code the page shows (a device code: any answer once signed in): `done` with `{exit_code, signed_in, output}`; 400 `E_CLI_LOGIN` when its manifest has no `login` ([5.7](#57-clis), signing in) |
@@ -739,6 +826,8 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `cluster_status` | `GET /v1/cluster` |
 | `secrets_list` `{program}`, `secret_set` `{program, name, value}`, `secret_delete` `{program, name}` | A program's secrets ([5.5](#55-secrets)): names only back, never a value |
 | `schedules_list`, `schedule_pause` `{program, name}`, `schedule_resume` `{program, name}` | `GET /v1/schedules`; pause and resume ([5.6](#56-schedules)) |
+| `apps_list` | `GET /v1/apps` ([5.8](#58-apps)) |
+| `app_publish` `{name, title, description?, roles?, files, entry?, functions?, program?, …}` | `POST /v1/apps`: a page Claude wrote published as an app for the org's people, awaiting the catalogue's review |
 | `clis_list` | `GET /v1/clis` ([5.7](#57-clis)) |
 | `cli_run` `{cli, args, stdin?, files?}` | `POST /v1/clis/{name}/run`; a command that needs approval is answered with `program_continue` like a program's run |
 | `cli_login` `{cli}` | `POST /v1/clis/{name}/login`; answered with `program_continue` (the code the page shows) |

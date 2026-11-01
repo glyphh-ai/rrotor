@@ -44,6 +44,8 @@ async def test_initialize_discover_ping_and_the_tools_listed(api):
     assert (await rpc(api, "ping"))[1]["result"] == {}
     tools = (await rpc(api, "tools/list"))[1]["result"]["tools"]
     assert [t["name"] for t in tools] == [
+        "apps_list",
+        "app_publish",
         "programs_list",
         "program_call",
         "program_continue",
@@ -64,7 +66,8 @@ async def test_initialize_discover_ping_and_the_tools_listed(api):
         "cli_run",
         "cli_login",
     ]
-    assert tools[0]["annotations"]["readOnlyHint"] is True and tools[1]["inputSchema"]["required"] == ["program"]
+    assert tools[2]["annotations"]["readOnlyHint"] is True and tools[3]["inputSchema"]["required"] == ["program"]
+    assert tools[1]["inputSchema"]["required"] == ["name", "title", "files"]
 
 
 async def test_the_tools_run_programs_and_read_runs(api):

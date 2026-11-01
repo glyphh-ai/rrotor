@@ -36,6 +36,7 @@ class Handler(Protocol):
     async def on_cancel(self, message: p.Cancel) -> None: ...
     async def on_deploy(self, message: p.Deploy) -> None: ...
     async def on_access(self, message: p.Keys | p.Pause | p.Resume) -> None: ...
+    async def on_artifact(self, message: p.Artifact) -> None: ...
 
 
 Connect = Callable[[str, dict[str, str]], Awaitable[aiohttp.ClientWebSocketResponse]]
@@ -270,6 +271,8 @@ class LinkClient:
             self._spawn(self.handler.on_deploy(message))
         elif isinstance(message, p.Keys | p.Pause | p.Resume):
             self._spawn(self.handler.on_access(message))
+        elif isinstance(message, p.Artifact):
+            self._spawn(self.handler.on_artifact(message))
 
     def _spawn(self, work: Awaitable[None]) -> None:
         async def guarded() -> None:

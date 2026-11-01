@@ -18,18 +18,20 @@ from typing import Any, Protocol
 
 from aiohttp import web
 
-from rrotord import VERSION
+from rrotord import VERSION, apps
 from rrotord import drain as drains
 from rrotord.access import Access
 from rrotord.aggregate import ClusterAudit
 from rrotord.api import mcp, ops
-from rrotord.api.gate import METADATA, SCOPE, public_url
-from rrotord.audit import Audit
+from rrotord.api.gate import METADATA, SCOPE, public_url, viewer_roles
+from rrotord.artifacts import Artifacts
+from rrotord.audit import Audit, current
+from rrotord.browser import Browser
 from rrotord.cluster.node import Cluster
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.drain import Drain
-from rrotord.errors import BadRequest, Forbidden, RrotorError
+from rrotord.errors import BadRequest, Forbidden, NotFound, RrotorError, Unavailable
 from rrotord.introspect import Introspector
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
@@ -49,7 +51,10 @@ class Fetch(Protocol):
     async def __call__(self, url: str) -> bytes: ...
 
 
-Report = Callable[[Version, str | None], Awaitable[None]]  # `deployed` up the link: the version and its repo, if any
+class Report(Protocol):
+    """`deployed` up the link: the version, its repo (if any) and, for an app published, who published it."""
+
+    async def __call__(self, version: Version, repo: str | None, by: str | None = None) -> None: ...
 
 
 class LinkView(Protocol):
@@ -81,6 +86,8 @@ class Services:
     cluster: Cluster | None = None  # this node's place in its cluster; none: standalone
     gathered: ClusterAudit | None = None  # the cluster's audit store, read on its head
     scheduler: Scheduler | None = None  # the programs' schedules: fired by the daemon, listed and paused here
+    artifacts: Artifacts | None = None  # the catalogue's word on the apps here (docs/architecture.md, 5.8)
+    browser: Browser | None = None  # public, the link on: a browser's Glyphh sign-in, to open the apps
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -277,6 +284,69 @@ def setup(app: web.Application, s: Services) -> None:
         kept = s.licence.take(sent)
         return web.json_response({"licence": licence(), "kept": kept})
 
+    async def apps_list(_: web.Request) -> web.Response:
+        return web.json_response(await ops.apps_list(s))
+
+    async def app_publish(request: web.Request) -> web.Response:
+        return web.json_response(await ops.app_publish(s, await body(request)), status=201)
+
+    def served() -> apps.Apps:
+        if s.artifacts is None:
+            raise Unavailable("This rrotor keeps no apps.", code="E_APPS")
+        return apps.Apps(s.programs, s.artifacts, s.config.address)
+
+    async def app_page(request: web.Request) -> web.Response:
+        """The app's page or one of its files, to a browser the gate let in (docs/architecture.md, 5.8); a
+        refusal is a page too, since a browser is reading."""
+        name, path = request.match_info["name"], request.match_info.get("path", "")
+        asked = request.query.get("version")
+        roles = viewer_roles(current().actor)
+        try:
+            if asked is not None and not asked.isdigit():
+                raise BadRequest("version is a number.", code="E_INPUTS")
+            version = served().serving(name, roles, int(asked) if asked else None)
+            data, kind = apps.Apps.file(version, path)
+        except apps.AppError as err:
+            page = apps.refused_page(err, signed_in=roles is not None)
+            return web.Response(text=page, status=err.status, content_type="text/html", headers={"X-Error": err.code})
+        headers = {
+            "Content-Security-Policy": apps.CSP,
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        }
+        return web.Response(body=data, content_type=kind, headers=headers)
+
+    async def app_call(request: web.Request) -> web.Response:
+        """The page's call into one of the app's functions, as the viewer: the run's first Result."""
+        name, function = request.match_info["name"], request.match_info["function"]
+        version = served().serving(name, viewer_roles(current().actor))
+        apps.Apps.check_call(version, function)
+        inputs = apps.Apps.inputs_of(await request.read())
+        data = {"program": name, "function": function, "inputs": inputs, "version": version.version}
+        return web.json_response(await ops.call(s, data, caller="app", origin="app"))
+
+    async def app_continue(request: web.Request) -> web.Response:
+        """The page's answer to a run of the app waiting for input or an approval."""
+        name, run_id = request.match_info["name"], request.match_info["run_id"]
+        served().serving(name, viewer_roles(current().actor))
+        run = s.runner.get(run_id)
+        if run.program != name:
+            raise NotFound(f"{name} has no run {run_id}.", code="E_RUN_MISSING")
+        data = await body(request)
+        return web.json_response(await ops.resume(s, run_id, data.get("answer")))
+
+    async def auth_start(request: web.Request) -> web.Response:
+        assert s.browser is not None  # noqa: S101  (registered only with one)
+        return await s.browser.start(request)
+
+    async def auth_callback(request: web.Request) -> web.Response:
+        assert s.browser is not None  # noqa: S101
+        return await s.browser.callback(request)
+
+    async def auth_logout(request: web.Request) -> web.Response:
+        assert s.browser is not None  # noqa: S101
+        return await s.browser.logout(request)
+
     async def resource_metadata(request: web.Request) -> web.Response:
         """RFC 9728: this runtime as an OAuth protected resource, and Glyphh as the server that signs a client in."""
         return web.json_response(
@@ -304,6 +374,16 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/v1/schedules", schedules)
     app.router.add_post("/v1/schedules/{program}/{name}/pause", pausing(True))
     app.router.add_post("/v1/schedules/{program}/{name}/resume", pausing(False))
+    app.router.add_get("/v1/apps", apps_list)
+    app.router.add_post("/v1/apps", app_publish)
+    app.router.add_post("/apps/{name}/call/{function}", app_call)
+    app.router.add_post("/apps/{name}/runs/{run_id}/continue", app_continue)
+    app.router.add_get("/apps/{name}/", app_page)
+    app.router.add_get("/apps/{name}/{path:.+}", app_page)
+    if s.browser is not None:
+        app.router.add_get("/auth/start", auth_start)
+        app.router.add_get("/auth/callback", auth_callback)
+        app.router.add_post("/auth/logout", auth_logout)
     app.router.add_get("/v1/clis", clis_list)
     app.router.add_post("/v1/clis/{name}/run", cli_run)
     app.router.add_post("/v1/clis/{name}/login", cli_login)

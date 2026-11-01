@@ -1,5 +1,6 @@
 """glyphh.json, the program's manifest (docs/architecture.md, 5.2): read, checked, and its functions found in
-program.py without running it (its syntax tree), since no program code runs outside the sandbox."""
+program.py without running it (its syntax tree), since no program code runs outside the sandbox. A CLI (5.7) has
+no program.py; an app (5.8) has one only when its page calls functions."""
 
 from __future__ import annotations
 
@@ -259,15 +260,48 @@ class Cli(BaseModel):
         return {m["name"] for m in refs} - {m["name"] for m in refs if not m["optional"]}
 
 
+ENTRY = re.compile(r"^[A-Za-z0-9._-]{1,128}(/[A-Za-z0-9._-]{1,128}){0,7}\.(html|htm|md)$")
+ROLE = r"^[A-Za-z0-9][A-Za-z0-9_.@:/ -]{0,119}$"
+
+
+class App(BaseModel):
+    """A page Claude wrote, served to the org's people (`"kind": "app"`, docs/architecture.md, 5.8): its entry
+    file in src/, its title, the roles that may open it (none: everyone in the org) and the functions the page may
+    call."""
+
+    model_config = ConfigDict(extra="forbid")
+    entry: str = "index.html"  # the page, a .html, .htm or .md file in src/
+    title: Annotated[str, Field(min_length=1, max_length=120)]
+    roles: list[Annotated[str, Field(pattern=ROLE)]] = Field([], max_length=50)
+    functions: list[Annotated[str, Field(pattern=FUNCTION)]] = Field([], max_length=100)
+
+    @field_validator("entry")
+    @classmethod
+    def _entry(cls, value: str) -> str:
+        if not ENTRY.match(value) or {".", ".."} & set(value.split("/")):
+            raise ValueError("app.entry is a .html, .htm or .md file inside src/, by its relative path")
+        return value
+
+    @field_validator("roles")
+    @classmethod
+    def _roles(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(r.strip().lower() for r in value))
+
+    def allows(self, roles: set[str]) -> bool:
+        """Whether a viewer with these roles (their role and groups, lower-cased) may open the page."""
+        return not self.roles or bool(set(self.roles) & {r.lower() for r in roles})
+
+
 class Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: Annotated[str, Field(pattern=NAME)]
-    kind: Literal["program", "cli"] = "program"  # what runs: program.py's functions, or a CLI's command
+    kind: Literal["program", "cli", "app"] = "program"  # what runs: program.py's functions, a CLI's command, a page
     version: int | None = Field(None, ge=1)
     description: str = ""
     python: str = PYTHON
     functions: dict[Annotated[str, Field(pattern=FUNCTION)], Function] = {}  # a program's: at least one
     cli: Cli | None = None  # a CLI's: what it installs and runs
+    app: App | None = None  # an app's: its page, title, roles and the functions the page calls
     hosts: list[str] = []
     secrets: list[Annotated[str, Field(pattern=CAPS)]] = []  # what it reads from the vault (rrotord/vault.py)
     # sqlite: a database file in its data folder, opened as ctx.db (rrotor's own); the others are parts, not built yet
@@ -300,7 +334,11 @@ class Manifest(BaseModel):
             return self._a_cli()
         if self.cli is not None:
             raise ValueError('cli is for a manifest of "kind": "cli"')
-        if not self.functions:
+        if self.kind == "app":
+            self._an_app()
+        elif self.app is not None:
+            raise ValueError('app is for a manifest of "kind": "app"')
+        elif not self.functions:
             raise ValueError("functions names at least one function")
         reserved = RESERVED & set(self.functions)
         if reserved:
@@ -309,6 +347,18 @@ class Manifest(BaseModel):
             if function.writes is None:
                 function.writes = self.keeps_data  # safe: a program with data writes unless it says one does not
         return self
+
+    def _an_app(self) -> None:
+        if self.app is None:
+            raise ValueError('a manifest of "kind": "app" has an app block: entry, title, roles, functions')
+        unknown = sorted(set(self.app.functions) - set(self.functions))
+        if unknown:
+            raise ValueError(f"app.functions names {', '.join(unknown)}, not among its functions")
+
+    @property
+    def static(self) -> bool:
+        """An app with no functions: its page alone, no program.py."""
+        return self.kind == "app" and not self.functions
 
     def _a_cli(self) -> Manifest:
         if self.cli is None:
@@ -388,9 +438,9 @@ def read(src: Path) -> Manifest:
         raise DeployError("The commit has no glyphh.json.", code="E_MANIFEST")
     try:
         raw = json.loads(path.read_text())
-        cli = isinstance(raw, dict) and raw.get("kind") == "cli"  # a CLI needs no program.py
-        if not cli and not program.is_file():
-            raise DeployError("The commit has no program.py.", code="E_MANIFEST")
+        kind = raw.get("kind") if isinstance(raw, dict) else None
+        if kind != "cli" and not (kind == "app" and not raw.get("functions")) and not program.is_file():
+            raise DeployError("The commit has no program.py.", code="E_MANIFEST")  # a CLI or a static app needs none
         manifest = Manifest.model_validate(raw)
     except (ValueError, ValidationError) as err:
         errors = err.errors(include_url=False, include_input=False) if isinstance(err, ValidationError) else None
@@ -401,6 +451,10 @@ def read(src: Path) -> Manifest:
         )
         raise DeployError(f"glyphh.json is refused: {why}", code="E_MANIFEST") from None
     if manifest.kind == "cli":
+        return manifest
+    if manifest.app is not None and not (src / manifest.app.entry).is_file():
+        raise DeployError(f"The commit has no {manifest.app.entry}, the app's page.", code="E_MANIFEST")
+    if manifest.static:
         return manifest
     missing = sorted(set(manifest.functions) - _defined(program))
     if missing:

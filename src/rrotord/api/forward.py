@@ -132,6 +132,8 @@ async def _serve(s: Services, op: Any, args: dict[str, Any]) -> dict[str, Any]:
             return await ops.cli_login(s, dict(args.get("data") or {}), str(args.get("caller") or "claude"))
         case "deploy":
             return await ops.deploy(s, dict(args.get("data") or {}))
+        case "app_publish":
+            return await ops.app_publish(s, dict(args.get("data") or {}))
         case "resume":
             return await ops.resume(s, run_id, args.get("answer"))
         case "cancel":

@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rrotord import apps, clis
 from rrotord.api import forward
+from rrotord.audit import current
 from rrotord.cluster.transport import ClusterError
-from rrotord.errors import BadRequest, RrotorError, Unavailable
+from rrotord.errors import BadRequest, Forbidden, RrotorError, Unavailable
 from rrotord.programs import Version
 from rrotord.runner.record import Run
 from rrotord.scheduler import Scheduler
@@ -92,7 +95,65 @@ async def deploy(s: Services, data: dict[str, Any]) -> dict[str, Any]:
     return version.to_json()
 
 
-async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dict[str, Any]:
+async def app_publish(s: Services, data: dict[str, Any]) -> dict[str, Any]:
+    """An app published from Claude (docs/architecture.md, 5.8): its files and manifest made a version of
+    `"kind": "app"`, not activated while an approved version is active (the catalogue activates the one it approves);
+    `deployed` goes up the link with `by`, the Glyphh subject publishing. A person's act: on a public rrotor a
+    runtime key is refused. A follower sends it to its head."""
+    if forward.follower(s):
+        return await forward.relayed(s, "app_publish", {"data": data})
+    actor = current().actor
+    if s.config.public and actor.get("type") != "sign-in":
+        raise Forbidden("Publishing an app is a person's act: sign in to Glyphh for this runtime.", code="E_FORBIDDEN")
+    name = apps.check_name(data.get("name"))
+    files = apps.read_files(data.get("files"))
+    manifest = apps.manifest_of(data, name)
+    files["glyphh.json"] = json.dumps(manifest, indent=2).encode()
+    program = data.get("program")
+    if program is not None:
+        if not isinstance(program, str):
+            raise BadRequest("program is the text of program.py.", code="E_INPUTS")
+        files["program.py"] = program.encode()
+    if s.artifacts is None:
+        raise Unavailable("This rrotor keeps no apps.", code="E_APPS")
+    active = s.programs.active(name) if name in s.programs.names() else None
+    keep = active is not None and active.manifest.app is not None and s.artifacts.approved(name, active.version)
+    term = forward.leading(s)
+    try:
+        version, made = await s.deployer.from_files(files, activate=not keep)
+    except RrotorError as err:
+        if s.audit is not None:
+            s.audit.emit("program.deploy_failed", program=name, outcome={"status": "failed", "code": err.code})
+        raise
+    if s.audit is not None:
+        s.audit.emit(
+            "program.deploy",
+            program=version.program,
+            version=version.version,
+            commit_sha=version.commit_sha,
+            repo=None,
+            outcome={"status": "done", "code": None},
+        )
+    await forward.committed(s, term)
+    if s.report is not None and made:
+        await s.report(version, None, clis.subject_of(actor))
+    now_active = s.programs.active(name)
+    return {
+        **version.to_json(),
+        "active": now_active is not None and now_active.commit_sha == version.commit_sha,
+        "state": s.artifacts.state(name, version.version),
+        "url": f"{s.config.address}/apps/{name}/",
+    }
+
+
+async def apps_list(s: Services) -> dict[str, Any]:
+    """The apps here: each one's title, version, roles, the catalogue's state and where a browser opens it."""
+    if s.artifacts is None:
+        raise Unavailable("This rrotor keeps no apps.", code="E_APPS")
+    return {"apps": apps.Apps(s.programs, s.artifacts, s.config.address).listed()}
+
+
+async def call(s: Services, data: dict[str, Any], caller: str = "claude", origin: str = "local") -> dict[str, Any]:
     """Open a run of a program's function; the first Result, with its data."""
     program, function = data.get("program"), data.get("function", "start")
     inputs, version, clearance = data.get("inputs") or {}, data.get("version"), data.get("clearance", 1.0)
@@ -115,15 +176,22 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude") -> dic
         return await forward.relayed(s, "call", {"data": data, "caller": caller})
     term = forward.leading(s) if forward.writes(s, program, function, version) else None
     run = await s.runner.call(
-        program=program, function=function, inputs=inputs, version=version, caller=caller, clearance=float(clearance)
+        program=program,
+        function=function,
+        inputs=inputs,
+        version=version,
+        caller=caller,
+        origin=origin,
+        clearance=float(clearance),
     )
     await forward.committed(s, term)
     return answer(run)
 
 
 async def clis_list(s: Services) -> dict[str, Any]:
-    """The CLIs here: each one's version, command, install, allowed patterns and approval patterns."""
-    return {"clis": s.programs.clis()}
+    """The CLIs here: each one's version, command, install, allowed patterns and approval patterns, and whether it is
+    signed in for this caller (their own HOME; unknown on a follower, whose homes are the head's)."""
+    return {"clis": s.programs.clis(clis.subject_of(current().actor), homes=not forward.follower(s))}
 
 
 async def cli_run(s: Services, data: dict[str, Any], caller: str = "claude") -> dict[str, Any]:

@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from rrotord.access import Access, digest
 from rrotord.api.app import make
+from rrotord.introspect import NOBODY, Identity
 from tests.daemon.api.conftest import Api, services
 from tests.fakes import token
 
@@ -85,15 +86,20 @@ async def test_in_development_one_exact_host_stands_in_for_the_machines_address(
 
 
 class Vouches:
-    """A fake of the Cloud's introspection: which tokens are signed in."""
+    """A fake of the Cloud's introspection: which tokens are signed in, as whom (one subject, role and groups)."""
 
-    def __init__(self, *good: str) -> None:
+    def __init__(self, *good: str, sub: str = "user_1", role: str | None = None, groups: tuple[str, ...] = ()) -> None:
         self.good = set(good)
+        self.sub, self.role, self.groups = sub, role, groups
         self.asked: list[str] = []
 
-    async def check(self, token: str) -> tuple[bool, str | None]:
+    async def who(self, token: str) -> Identity:
         self.asked.append(token)
-        return (True, "user_1") if token in self.good else (False, None)
+        return Identity(True, self.sub, self.role, self.groups) if token in self.good else NOBODY
+
+    async def check(self, token: str) -> tuple[bool, str | None]:
+        found = await self.who(token)
+        return found.active, found.sub
 
 
 async def test_a_glyphh_sign_in_the_cloud_vouches_for_lets_a_call_in_and_a_refusal_says_where_to_sign_in(hosted):

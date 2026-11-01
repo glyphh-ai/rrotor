@@ -24,15 +24,18 @@ import hashlib
 import hmac
 import re
 from collections.abc import Awaitable, Callable
+from typing import Any
+from urllib.parse import urlencode
 
 from aiohttp import web
 from aiohttp.typedefs import Middleware
 
 from rrotord.access import Access
 from rrotord.audit import WHO, Who, client_of
+from rrotord.browser import Browser
 from rrotord.config import Config
 from rrotord.errors import Forbidden, RrotorError, Unauthorized
-from rrotord.introspect import Introspector
+from rrotord.introspect import NOBODY, Introspector
 
 OPEN = frozenset({"/healthz", "/readyz"})
 METADATA = "/.well-known/oauth-protected-resource"
@@ -44,7 +47,7 @@ REPLAY = "fly-replay"
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
-def admit(request: web.Request, actor: dict[str, str | None]) -> None:
+def admit(request: web.Request, actor: dict[str, Any]) -> None:
     """Who the request is for, from here on (the app's outer middleware forgets it after the request)."""
     WHO.set(Who(actor, client_of(request), "mcp" if request.path == "/mcp" else "rest"))
 
@@ -113,9 +116,27 @@ def route_by_host(request: web.Request, domain: str, own: str | None, exact: str
     return replay(machine)
 
 
-def gate(config: Config, access: Access, introspect: Introspector | None = None) -> Middleware:
+def viewer_roles(actor: dict[str, Any]) -> set[str] | None:
+    """What an app's `roles` is matched against for this caller: a sign-in's role and groups; None for the local
+    token (the person's own machine: every app opens, roles ignored)."""
+    if actor.get("type") == "local":
+        return None
+    roles = {str(actor.get("role") or "")} | {str(g) for g in actor.get("groups") or []}
+    return {r.lower() for r in roles if r}
+
+
+def browsing(path: str) -> bool:
+    """A path a browser reaches with its session cookie: the apps, the sign-in, and the apps' own API."""
+    return path.startswith(("/apps/", "/auth/")) or path == "/v1/apps" or path.startswith("/v1/apps/")
+
+
+def gate(
+    config: Config, access: Access, introspect: Introspector | None = None, browser: Browser | None = None
+) -> Middleware:
     """The local gate (the local token on loopback) or the hosted one (a runtime key, or a sign-in the Cloud vouches
-    for, at this machine's address), which a self-hosted rrotor uses too."""
+    for, at this machine's address), which a self-hosted rrotor uses too. A browser's session (rrotord/browser.py)
+    is taken on the apps' paths only, its access token introspected like a bearer; a page asked for with no
+    session is sent to sign in (docs/architecture.md, 5.8)."""
     hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost") for port in (config.host_port, config.local_port)}
     origins = {f"http://{h}" for h in hosts}
 
@@ -128,12 +149,35 @@ def gate(config: Config, access: Access, introspect: Introspector | None = None)
         origin = request.headers.get("Origin")
         if origin is not None and origin not in origins:
             raise Forbidden("No web page may call this API.", code="E_ORIGIN")
+        if request.path.startswith("/apps/"):  # the person's own machine: its browser opens every app
+            admit(request, {"type": "local"})
+            return await handler(request)
         token = presented(request)
         digest = config.local_token_sha256
         if digest is None or not token or not same(token, digest):
             raise Unauthorized("Send the local token: Authorization: Bearer <local token>.")
         admit(request, {"type": "local"})
         return await handler(request)
+
+    async def session_actor(request: web.Request) -> dict[str, Any] | None:
+        """The browser's session, introspected: the sign-in's actor, or None (no session, or not live)."""
+        if browser is None or introspect is None:
+            return None
+        session = await browser.session(request)
+        if session is None:
+            return None
+        who = await introspect.who(session.access_token)
+        if not who.active:
+            browser.drop(session.id)
+            return None
+        browser.remember(session, who.sub)
+        return who.actor()
+
+    def own_origin(request: web.Request) -> None:
+        """A browser's request carries its page's Origin on a cross-site or non-GET request: only this host's."""
+        origin = request.headers.get("Origin")
+        if origin is not None and origin != public_url(request, config.public_host):
+            raise Forbidden("Only this runtime's own pages call it.", code="E_ORIGIN")
 
     @web.middleware
     async def hosted(request: web.Request, handler: Handler) -> web.StreamResponse:
@@ -142,16 +186,25 @@ def gate(config: Config, access: Access, introspect: Introspector | None = None)
         elsewhere = route_by_host(request, config.public_domain, config.machine_id, config.public_host)
         if elsewhere is not None:
             return elsewhere
-        if request.path in SIGN_IN:
+        if request.path in SIGN_IN or request.path.startswith("/auth/"):
             return await handler(request)
         token = presented(request)
+        if not token and browsing(request.path):
+            own_origin(request)
+            actor = await session_actor(request)
+            if actor is not None:
+                admit(request, actor)
+                return await handler(request)
+            if request.method == "GET" and request.path.startswith("/apps/") and browser is not None:
+                raise web.HTTPFound(f"/auth/start?{urlencode({'next': request.path_qs}, safe='/')}")
+            raise challenge(request, False, config.public_host)
         if not token:
             raise challenge(request, False, config.public_host)
         key = access.match(token)
-        signed, sub = (False, None) if key is not None or introspect is None else await introspect.check(token)
-        if key is None and not signed:
+        who = NOBODY if key is not None or introspect is None else await introspect.who(token)
+        if key is None and not who.active:
             raise challenge(request, True, config.public_host)
-        admit(request, {"type": "key", "key_sha256": key} if key is not None else {"type": "sign-in", "sub": sub})
+        admit(request, {"type": "key", "key_sha256": key} if key is not None else who.actor())
         if access.paused is not None and config.mode == "hosted":
             raise RrotorError(
                 "This runtime is paused: its plan's hosted hours for the month are spent.",
