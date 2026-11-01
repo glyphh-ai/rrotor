@@ -1,0 +1,216 @@
+{
+  "_": "The vendors' agent CLIs the image carries (docs/architecture.md, 5.7, built-in CLIs): each pinned to a version and the SHA-256 of its download for linux amd64 and arm64, unpacked by image/clis.py under /usr/local/lib/rrotor-clis/<name>/ with `command` linked into /usr/local/bin, and its manifest (`manifest`, install from the image) written beside it, which rrotord deploys at boot as a built-in CLI. Raise a pin here: version, url and sha256 of both builds.",
+  "clis": {
+    "claude": {
+      "vendor": "Anthropic",
+      "title": "Claude Code",
+      "version": "2.1.316",
+      "command": "claude",
+      "builds": {
+        "amd64": {
+          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.316.tgz",
+          "sha256": "745e1b196eb475161a185a00f5e1144d7324ec6094e21149eae719fa42481000",
+          "entry": "package/claude"
+        },
+        "arm64": {
+          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.316.tgz",
+          "sha256": "3a948e45a0c79d1b41e5e40bb4163b5f9e4a193c16ed72c949d8e5f55e9d875d",
+          "entry": "package/claude"
+        }
+      },
+      "manifest": {
+        "description": "Claude Code, Anthropic's coding agent. Sign in once with cli_login (a claude.ai account, so its connectors come too), then run `-p <prompt>`.",
+        "cli": {
+          "allow": ["-p *", "--print *", "* -p *", "* --print *", "auth status*", "auth logout", "mcp list", "mcp get *", "--version", "--help"],
+          "approvals": ["auth logout"],
+          "env": { "DISABLE_AUTOUPDATER": "1", "ANTHROPIC_API_KEY": "secret?:ANTHROPIC_API_KEY" },
+          "home": true,
+          "login": { "args": ["auth", "login", "--claudeai"], "listen": true, "signed_in": ".claude/.credentials.json" }
+        },
+        "hosts": ["*.anthropic.com", "claude.ai", "*.claude.ai", "claude.com", "*.claude.com"],
+        "secrets": ["ANTHROPIC_API_KEY"],
+        "limits": { "seconds": 900, "memory_mb": 4096 }
+      }
+    },
+    "codex": {
+      "vendor": "OpenAI",
+      "title": "Codex CLI",
+      "version": "0.166.0",
+      "command": "codex",
+      "builds": {
+        "amd64": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978",
+          "entry": "codex-x86_64-unknown-linux-musl"
+        },
+        "arm64": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-aarch64-unknown-linux-musl.tar.gz",
+          "sha256": "94eb707605ec2646b2e05b7edf7c4e7b3ccf02b16237c34ae9beb8cfb7f810a9",
+          "entry": "codex-aarch64-unknown-linux-musl"
+        }
+      },
+      "manifest": {
+        "description": "OpenAI's Codex CLI. Sign in once with cli_login (a ChatGPT account, by a device code), then run `exec <prompt>` (rrotor is its sandbox: add `--sandbox danger-full-access`).",
+        "cli": {
+          "allow": ["exec *", "e *", "login status", "logout", "mcp list*", "--version", "--help"],
+          "approvals": ["logout"],
+          "env": { "CODEX_API_KEY": "secret?:CODEX_API_KEY" },
+          "home": true,
+          "login": { "args": ["login", "--device-auth"], "paste": false, "signed_in": ".codex/auth.json" }
+        },
+        "hosts": ["*.openai.com", "chatgpt.com", "*.chatgpt.com"],
+        "secrets": ["CODEX_API_KEY"],
+        "limits": { "seconds": 900, "memory_mb": 4096 }
+      }
+    },
+    "gemini": {
+      "vendor": "Google",
+      "title": "Gemini CLI",
+      "version": "0.66.0",
+      "command": "gemini",
+      "builds": {
+        "amd64": {
+          "url": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.66.0.tgz",
+          "sha256": "269734d35287fbd8ed2982534258ecf4a95f184b6e06e6732e0d6850c28701d9",
+          "entry": "package/bundle/gemini.js"
+        },
+        "arm64": {
+          "url": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.66.0.tgz",
+          "sha256": "269734d35287fbd8ed2982534258ecf4a95f184b6e06e6732e0d6850c28701d9",
+          "entry": "package/bundle/gemini.js"
+        }
+      },
+      "manifest": {
+        "description": "Google's Gemini CLI. Sign in once with cli_login (a Google account), then run `-p <prompt>`.",
+        "cli": {
+          "allow": ["-p *", "--prompt *", "* -p *", "* --prompt *", "mcp list", "--list-sessions", "--version", "--help"],
+          "env": { "NO_BROWSER": "true", "NODE_NO_WARNINGS": "1", "GEMINI_API_KEY": "secret?:GEMINI_API_KEY" },
+          "home": true,
+          "login": {
+            "args": [],
+            "signed_in": ".gemini/oauth_creds.json",
+            "home_files": {
+              ".gemini/settings.json": "{\"security\": {\"auth\": {\"selectedType\": \"oauth-personal\"}}, \"general\": {\"disableAutoUpdate\": true}}\n"
+            }
+          }
+        },
+        "hosts": ["accounts.google.com", "*.googleapis.com", "codeassist.google.com", "*.google.com"],
+        "secrets": ["GEMINI_API_KEY"],
+        "limits": { "seconds": 900, "memory_mb": 4096 }
+      }
+    },
+    "cursor": {
+      "vendor": "Cursor",
+      "title": "Cursor CLI",
+      "version": "2026.10.22-27dcf5f",
+      "command": "cursor-agent",
+      "builds": {
+        "amd64": {
+          "url": "https://downloads.cursor.com/lab/2026.10.22-27dcf5f/linux/x64/agent-cli-package.tar.gz",
+          "sha256": "85296944e4600a83c4b764f578d1502bf9c416db200d33a593e8f3ecabfdc294",
+          "entry": "dist-package/cursor-agent"
+        },
+        "arm64": {
+          "url": "https://downloads.cursor.com/lab/2026.10.22-27dcf5f/linux/arm64/agent-cli-package.tar.gz",
+          "sha256": "22a36df9720830668ccd4d707e5190204ab9c8a0efb2f068cc914895f804d3ec",
+          "entry": "dist-package/cursor-agent"
+        }
+      },
+      "manifest": {
+        "description": "Cursor's agent CLI. Sign in once with cli_login (a Cursor account), then run `-p <prompt>`.",
+        "cli": {
+          "allow": ["-p *", "--print *", "* -p *", "* --print *", "status", "whoami", "models", "logout", "about*", "--version", "--help"],
+          "approvals": ["logout"],
+          "env": { "NO_OPEN_BROWSER": "1", "CURSOR_API_KEY": "secret?:CURSOR_API_KEY" },
+          "home": true,
+          "login": { "args": ["login"], "paste": false }
+        },
+        "hosts": ["cursor.com", "*.cursor.com", "*.cursor.sh", "*.cursorapi.com"],
+        "secrets": ["CURSOR_API_KEY"],
+        "limits": { "seconds": 900, "memory_mb": 4096 }
+      }
+    },
+    "grok": {
+      "vendor": "xAI",
+      "title": "Grok Build CLI",
+      "version": "1.0.70",
+      "command": "grok",
+      "builds": {
+        "amd64": {
+          "url": "https://registry.npmjs.org/@xai-official/grok-linux-x64/-/grok-linux-x64-1.0.70.tgz",
+          "sha256": "2190ea4a29e0c931b34a3f8f1e2a71cb6ce1137181790e1ba9569f2dbcf3022f",
+          "entry": "package/bin/grok",
+          "brotli": "package/bin/grok.br"
+        },
+        "arm64": {
+          "url": "https://registry.npmjs.org/@xai-official/grok-linux-arm64/-/grok-linux-arm64-1.0.70.tgz",
+          "sha256": "558a723fb426ea6be9782be344bd3d945253241bb242fb1cf64d3e275c0b5fe9",
+          "entry": "package/bin/grok",
+          "brotli": "package/bin/grok.br"
+        }
+      },
+      "manifest": {
+        "description": "xAI's Grok Build CLI. Sign in once with cli_login (an xAI account, by a device code), then run `-p <prompt>`.",
+        "cli": {
+          "allow": ["-p *", "--single *", "* -p *", "* --single *", "models", "logout", "version", "--version", "--help"],
+          "approvals": ["logout"],
+          "env": { "XAI_API_KEY": "secret?:XAI_API_KEY" },
+          "home": true,
+          "login": { "args": ["login", "--device-auth"], "paste": false }
+        },
+        "hosts": ["x.ai", "*.x.ai", "grok.com", "*.grok.com"],
+        "secrets": ["XAI_API_KEY"],
+        "limits": { "seconds": 900, "memory_mb": 4096 }
+      }
+    },
+    "glyphh": {
+      "vendor": "Glyphh",
+      "title": "Glyphh CLI",
+      "version": "3.6.0",
+      "command": "glyphh",
+      "sdk": { "entry": "glyphh.cli:main" },
+      "manifest": {
+        "description": "The glyphh command: Ada Cloud from a terminal (the Glyphh SDK, image/sdk.lock). Sign in once with cli_login (paste an API key from platform.glyphh.ai), or set GLYPHH_API_KEY.",
+        "cli": {
+          "approvals": ["delete *", "forget *", "logout"],
+          "env": { "GLYPHH_API_KEY": "secret?:GLYPHH_API_KEY" },
+          "home": true,
+          "login": { "args": ["login"], "signed_in": ".glyphh/credentials.json" }
+        },
+        "hosts": ["ada.glyphh.ai", "platform.glyphh.ai"],
+        "secrets": ["GLYPHH_API_KEY"],
+        "limits": { "seconds": 300, "memory_mb": 512 }
+      }
+    },
+    "copilot": {
+      "vendor": "GitHub",
+      "title": "GitHub Copilot CLI",
+      "version": "1.0.105",
+      "command": "copilot",
+      "builds": {
+        "amd64": {
+          "url": "https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.105.tgz",
+          "sha256": "aa65846d4c0c6b83e8eb0726fef3de5f38a13b3f17bffeb7674882e79f4ec2d3",
+          "entry": "package/copilot"
+        },
+        "arm64": {
+          "url": "https://registry.npmjs.org/@github/copilot-linux-arm64/-/copilot-linux-arm64-1.0.105.tgz",
+          "sha256": "fb9efcf18a43633f24ba44fe7415c9d5fcb41957a9e9e8c0abd35c107eeac057",
+          "entry": "package/copilot"
+        }
+      },
+      "manifest": {
+        "description": "GitHub's Copilot CLI. Sign in once with cli_login (a GitHub account, by a device code), then run `-p <prompt> --allow-all-tools`.",
+        "cli": {
+          "allow": ["-p *", "--prompt *", "* -p *", "* --prompt *", "version", "--version", "--help"],
+          "env": { "COPILOT_AUTO_UPDATE": "false", "COPILOT_GITHUB_TOKEN": "secret?:COPILOT_GITHUB_TOKEN" },
+          "home": true,
+          "login": { "args": ["login", "--device-code"], "paste": false }
+        },
+        "hosts": ["github.com", "api.github.com", "*.githubcopilot.com", "*.githubusercontent.com"],
+        "secrets": ["COPILOT_GITHUB_TOKEN"],
+        "limits": { "seconds": 900, "memory_mb": 4096 }
+      }
+    }
+  }
+}

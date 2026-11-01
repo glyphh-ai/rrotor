@@ -1,0 +1,4 @@
+# The Python SDKs the image carries for every program (importable in the sandbox without a requirements.lock, as rrotor
+# is: rrotor/_worker/loop.py puts /usr/local/lib/rrotor-sdk on sys.path, after the program's own venv) and for the
+# built-in glyphh CLI (image/clis.json). Installed at build with uv: hashed, binary wheels only, no dependencies.
+glyphh==3.6.0 --hash=sha256:ef9401dee2c95b604d71d9e4aad46073f165cb8b64b07b5a89273224f88c7b89

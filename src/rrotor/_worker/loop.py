@@ -5,11 +5,15 @@ The runner sends `start`, then `continue` or `end`, and `cancel` while a functio
 or cancelled stops where it is (a signal in the main thread) and `end` still runs.
 
 A CLI's run (`cli` in `start`) imports no program: once locked down, the worker runs its one command
-(rrotor/_worker/command.py), timed and cancellable the same way, answers its `result` and, at `end`, `ended`."""
+(rrotor/_worker/command.py), timed and cancellable the same way, answers its `result` and, at `end`, `ended`. A CLI's
+sign-in (`login` in its `cli`) keeps its command running on a pseudo-terminal across the person's wait
+(rrotor/_worker/login.py): `needs_input` with the address it shows, each `continue` typed into it."""
 
 from __future__ import annotations
 
+import functools
 import importlib.util
+import os
 import queue
 import signal
 import sys
@@ -19,7 +23,7 @@ from pathlib import Path
 from types import FrameType, ModuleType
 from typing import Any
 
-from rrotor._worker import command
+from rrotor._worker import command, login
 from rrotor._worker.channel import Channel
 from rrotor._worker.forward import Forwarder
 from rrotor._worker.landlock import Landlock, Rules
@@ -30,6 +34,7 @@ from rrotor.result import Result
 
 PROXY_URL = "http://127.0.0.1:3128"
 DATABASE = "db.sqlite3"  # ctx.db, in the program's data folder
+SDKS = ("/usr/local/lib/rrotor-sdk",)  # image/sdk.lock: importable by every program, as rrotor is
 _DONE = Result.done()
 
 
@@ -63,6 +68,8 @@ class Worker:
         self.channel = channel
         self.landlock = landlock
         self.inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self.replies: queue.Queue[dict[str, Any] | None] = queue.Queue()  # what rrotor answered ctx.cli
+        self.asked = 0
         self.running = threading.Event()
         self._main = threading.get_ident()  # a cancel is a signal to this thread: it interrupts a blocking call too
 
@@ -72,8 +79,22 @@ class Worker:
                 if self.running.is_set():
                     signal.pthread_kill(self._main, signal.SIGUSR1)
                 continue
+            if message.get("op") == "cli_result":
+                self.replies.put(message)
+                continue
             self.inbox.put(message)
+        self.replies.put(None)
         self.inbox.put(None)
+
+    def _cli(self, ask: dict[str, Any]) -> dict[str, Any]:
+        """A CLI's command a program asked for (ctx.cli), run by rrotor in that CLI's sandbox: its Result."""
+        self.asked += 1
+        self.channel.send("cli", id=self.asked, **ask)
+        while (reply := self.replies.get()) is not None:
+            if reply.get("id") == self.asked:
+                result: dict[str, Any] = reply.get("result") or {}
+                return result
+        return {"status": "failed", "data": {"code": "E_CLI", "reason": "rrotor went away during the command."}}
 
     def _sink(self, op: str, data: dict[str, Any]) -> None:
         self.channel.send(op, **data)
@@ -89,6 +110,7 @@ class Worker:
                     tuple(rules["write"]),
                     tuple(rules.get("tcp_ports", ())),
                     bool(rules.get("exec_writes", True)),
+                    bool(rules.get("net", True)),
                 )
             )
         if box.get("proxy_socket"):
@@ -119,6 +141,8 @@ class Worker:
             self.channel.send("result", result=failure("sandbox", "E_SANDBOX", str(err)).to_json(), pending=None)
             return self._finish(None, None)
         threading.Thread(target=self._read, daemon=True).start()
+        if start.get("cli") and start["cli"].get("login") is not None:  # a CLI's sign-in: kept running across waits
+            return self._sign_in(dict(start["cli"]), float(start.get("seconds_left", 300)))
         if start.get("cli"):  # a CLI's run: its one command, no program
             spec = dict(start["cli"])
             outcome = self._timed(float(start.get("seconds_left", 300)), lambda: Outcome(command.run(spec)), "cli")
@@ -144,7 +168,12 @@ class Worker:
             readonly=bool(start.get("readonly")),
             secrets=Secrets(secrets.get("declared") or (), secrets.get("values") or {}),
             database=Path(start["data"]) / DATABASE if start.get("sqlite") and start.get("data") else None,
+            clis=start.get("clis"),
+            request=self._cli,
         )
+        for sdk in SDKS:  # the SDKs the image carries (glyphh), after the program's own venv
+            if os.path.isdir(sdk) and sdk not in sys.path:
+                sys.path.append(sdk)
         try:
             program = import_program(str(start.get("program", "/program")))
         except BaseException as err:  # noqa: BLE001  (a program that cannot import is a failed run)
@@ -163,6 +192,30 @@ class Worker:
             ctx.answer = message.get("answer")
             left = float(message.get("seconds_left", seconds))
             outcome = self._timed(left, lambda: self._call(program, function, ctx), function)
+
+    def _sign_in(self, spec: dict[str, Any], seconds: float) -> int:
+        """A CLI's sign-in (rrotor/_worker/login.py): its command started on a terminal, a `needs_input` with the
+        address it shows, each `continue` typed into it, until it ends; stopped at `end`, a cancel or its seconds."""
+        session = login.Session(spec)
+        try:
+            refused = session.start()
+            asked = lambda: Outcome(session.until_asked())  # noqa: E731
+            outcome = Outcome(refused) if refused else self._timed(seconds, asked, "cli")
+            while True:
+                waiting = outcome.result.waiting
+                self.channel.send("result", result=outcome.result.to_json(), pending=login.PENDING if waiting else None)
+                message = self.inbox.get()
+                if not waiting or message is None or message.get("op") != "continue":
+                    break
+                left = float(message.get("seconds_left", seconds))
+                outcome = self._timed(left, functools.partial(self._answered, session, message.get("answer")), "cli")
+        finally:
+            session.stop()
+        return self._finish(None, None)
+
+    @staticmethod
+    def _answered(session: login.Session, answer: Any) -> Outcome:
+        return Outcome(session.answer(answer))
 
     @staticmethod
     def _load(program: ModuleType, ctx: Ctx) -> Outcome:

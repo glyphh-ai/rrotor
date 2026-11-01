@@ -253,7 +253,10 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 **The image** (`image/Dockerfile`): Debian 13 (trixie) slim, amd64 and arm64; `tini`, Python 3.13 (Debian's),
 Node 22, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates, tzdata (a schedule's time zone); in
 rrotord's venv, the OpenTelemetry
-SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests). No browser, no database. It runs as
+SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests); the vendors' agent CLIs (Claude
+Code, Codex, Gemini, Cursor, Grok, Copilot: about 1.7 GB unpacked, pinned in `image/clis.json`,
+[5.7](#57-clis)); the Glyphh SDK for every program and the `glyphh` CLI (`image/sdk.lock`, [5.3](#53-the-sdk-rrotor)).
+No browser, no database. It runs as
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
 is the `hosted` target: the base, with no part built in ([11](#11-the-image-and-ci)).
 
@@ -305,6 +308,7 @@ and the arguments it may be run with.
 | `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
 | `secrets` | The secrets it reads by name, `^[A-Z][A-Z0-9_]{0,63}$` ([5.5](#55-secrets)) |
 | `schedules` | Functions the runtime calls by itself: each `{function, cron, tz?, input?, name?}` ([5.6](#56-schedules)) |
+| `clis` | The CLIs on this rrotor its functions run with `ctx.cli` (built in or deployed, [5.7](#57-clis)): a deploy naming one this rrotor does not hold is refused (`E_MANIFEST`); every call runs on a cluster's head, where CLIs run |
 | `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `program.py` does not
@@ -337,9 +341,14 @@ ctx.clearance                 # who asks, 0 to 1; 1 unless the call says (the pr
 ctx.caller                    # who called: "claude", or "schedule" for a run its schedule started (5.6)
 ctx.readonly                  # a cluster follower's run: its folders are read-only
 ctx.secrets["NAME"], ctx.secrets.get("NAME")   # a secret the manifest declares (5.5)
+ctx.cli(name, args, stdin=None) -> CliResult   # a command of a CLI the manifest names: exit_code, stdout, stderr
 ctx.log(message, **detail)
 ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 ```
+
+The image also carries the Glyphh SDK (`glyphh`, pinned with its hash in `image/sdk.lock`) at
+`/usr/local/lib/rrotor-sdk`, which the worker puts on `sys.path` after the program's own venv: `import glyphh` works
+without a `requirements.lock`, and a program that pins its own version gets its own.
 
 - **Approvals and inputs are re-entrant.** A `continue` calls the same function again with the same inputs: steps
   done are skipped by `ctx.checkpoint`, and `ctx.ask_approval(step, …)` then answers the decision for that step
@@ -348,9 +357,22 @@ ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
   inside the sandbox on first use and closed when the run ends: `with ctx.db:` commits, and what is not committed is
   rolled back. On a cluster's follower it opens read-only (`mode=ro`), though a program with a database runs on the
   head. A program that does not declare it gets `E_DATABASE_UNDECLARED`.
+- **`ctx.cli`** runs one command of a CLI on this rrotor that the manifest's `clis` names (else `E_CLI_UNDECLARED`;
+  one no longer here, `E_CLI_MISSING`), as that CLI's own run: rrotor runs it in the CLI's sandbox, with its private
+  HOME (so a CLI signed in with `cli_login` is signed in here too), its hosts, its env and secrets, by the program
+  as its caller (`program:<name>`), an audit `run.call` with `by` (the program's run). The worker asks the runner
+  over its channel (`cli`, answered `cli_result`) and waits; the time counts against the program's `seconds`. The
+  arguments are checked against the CLI's `allow` first (`E_CLI_DENIED`, never run). One its `approvals` names is a
+  step of the program's own run, `cli:<name>:<digest of the command>`: the run answers `needs_approval` with the
+  command line, a continue's `{"approved": true}` runs it (`false`: `E_CLI_DECLINED`), and the runner checks that
+  approval in the run's own state before it runs the command, so a program cannot skip it. What the command
+  answered is a checkpoint of the same key: a resumed run reads it back, never running it twice. A command that
+  could not run raises `CliError` with its code (`E_SECRET_MISSING`, `E_LIMIT_SECONDS`, …); a nonzero exit is
+  still an answer (`CliResult.ok` is false). A program stopped mid-command leaves the command to end as its own run.
 - **`rrotor.testing`** gives a program's own tests a `Ctx` with no sandbox (`Harness`): inputs, answers, a folder,
   an `http` that answers what the test says, `secrets={...}` (with `declared=[...]`, the names the manifest
-  declares) and `database=<a file>` for `ctx.db`.
+  declares), `database=<a file>` for `ctx.db`, and `clis={"claude": FakeCli("answer", allow=…, approvals=…)}` for
+  `ctx.cli` (stdout, a `CliResult`, or a function of the arguments and stdin; `h.cli_calls` lists what ran).
 
 ### 5.4 A run
 
@@ -455,7 +477,8 @@ A program says when the runtime should call it, in its manifest; the daemon fire
 A CLI is a command-line tool (the glyphh CLI, `gh`, `stripe`, a team's own) that rrotor installs at deploy and runs
 one command at a time in the same sandbox as programs, so Claude can use the tool without it touching the person's
 machine, their files or the open network (`rrotord/clis.py`, the build spec
-[`specs/cli-server.md`](specs/cli-server.md)). Examples: `examples/cli_gh/`, `examples/cli_glyphh/`.
+[`specs/cli-server.md`](specs/cli-server.md)). Examples: `examples/cli_gh/`, `examples/cli_glyphh/`. The vendors'
+agent CLIs come built in (below), each signed in from the person's phone with `cli_login`.
 
 ```json
 {
@@ -511,7 +534,8 @@ machine, their files or the open network (`rrotord/clis.py`, the build spec
   `HTTPS_PROXY`/`HTTP_PROXY` and `NODE_USE_ENV_PROXY`, which a manifest may not set, nor any `LD_*`). `secret:NAME`
   takes a secret the manifest declares from the vault ([5.5](#55-secrets)), passed in the worker's start message
   only, never written to disk; its value is masked (`[secret]`) in the run's log, its Result, its record and the
-  audit event's command line.
+  audit event's command line. `secret?:NAME` takes one only when it is set (an optional API key): a secret only ever
+  taken that way never stops a run (`E_SECRET_MISSING`), and its variable is left out while it is not set.
 - **`home`:** `true` gives the CLI a private `HOME`, `/data/programs/<name>/home`, mounted at `/home/cli` and kept
   across calls (its config, a login it keeps); otherwise `HOME` is the run's own `/tmp`.
 - **`interactive`:** only `false`; `true` is refused, `E_MANIFEST` (interactive sessions are not built yet).
@@ -531,7 +555,74 @@ machine, their files or the open network (`rrotord/clis.py`, the build spec
   audit log's `run.call` (with `command`) and `run.end`; its function is `cli`. `program_call` on a CLI is refused
   400 `E_NOT_PROGRAM`, and `cli_run` on a program 400 `E_NOT_CLI`.
 - **In a cluster** a CLI runs on the head: its install is the head's build (versions replicate their code and venv,
-  not `cli/`) and its home and secrets are the head's; a follower sends every command there.
+  not `cli/`) and its home and secrets are the head's; a follower sends every command (and a sign-in) there.
+
+**Built-in CLIs.** The image carries the vendors' agent CLIs, pinned in `image/clis.json` (a version, and for linux
+amd64 and arm64 the URL and SHA-256 of the vendor's own download) and installed at build by `image/clis.py`: the
+download's checksum checked before anything is unpacked, unpacked under `/usr/local/lib/rrotor-clis/<name>/` (Grok's
+brotli-packed binary unpacked with node), its command linked into `/usr/local/bin`, and its manifest written beside
+it (`glyphh.json`, installing from the image, and `vendor.json`: vendor, title, version). Nothing downloaded runs at
+build. At boot rrotord deploys each (`Deployer.builtin`, `RROTOR_BUILTIN_CLIS` names the folder): when this rrotor has
+no program of its name, or as a new version when the image's pins changed and the active one is built-in too; a CLI
+of that name the person deployed is theirs and is never replaced. Its commit is the SHA-1 of its manifest and vendor
+file (every node of a cluster makes the same), its `src/builtin.json` marks it, `clis_list` shows `builtin`, and the
+link's `hello` leaves it out (it is the image's, not the Cloud's).
+
+| Name | CLI | Pinned | Signs in (`login`) |
+|---|---|---|---|
+| `claude` | Anthropic's Claude Code (`claude`, native build from npm) | 2.1.316 | `auth login --claudeai`: the claude.ai account's address and a pasted code; it listens on loopback (`listen`) |
+| `codex` | OpenAI's Codex CLI (`codex`, GitHub release, musl) | 0.166.0 | `login --device-auth`: a ChatGPT device code |
+| `gemini` | Google's Gemini CLI (`gemini`, npm bundle run with the image's node) | 0.66.0 | the bare command with `NO_BROWSER` and Google sign-in seeded in `~/.gemini/settings.json`: an address and a pasted code; stopped once `~/.gemini/oauth_creds.json` is written |
+| `cursor` | Cursor's agent CLI (`cursor-agent`, Cursor's download, its own node) | 2026.10.22-27dcf5f | `login` with `NO_OPEN_BROWSER`: an address it polls (`paste: false`) |
+| `grok` | xAI's Grok Build CLI (`grok`, npm, brotli-packed native binary) | 1.0.70 | `login --device-auth`: an xAI device code |
+| `copilot` | GitHub's Copilot CLI (`copilot`, native build from npm) | 1.0.105 | `login --device-code`: a GitHub device code |
+| `glyphh` | Glyphh's own CLI (`glyphh`, the Glyphh SDK's console script: `image/sdk.lock`, run with the image's Python) | 3.6.0 | `login`: an API key from platform.glyphh.ai, pasted; or the secret `GLYPHH_API_KEY` |
+
+Each vendor's agent keeps its private HOME (`home: true`), allows its one-shot forms only (`-p <prompt>` and the
+like, its status, `--version`; a bare command would open its interface and wait), waits for the person's approval to
+sign out, reaches its vendor's hosts, runs up to 900 seconds with 4 GB (glyphh: any arguments, approval to delete,
+forget or sign out, 300 seconds), and takes the vendor's API key as an optional secret
+(`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`, `CURSOR_API_KEY`, `XAI_API_KEY`, `COPILOT_GITHUB_TOKEN`):
+signing in is the way in (Claude's claude.ai sign-in brings the account's connectors; an API key set would take its
+place). Self-updates are off where the CLI has a switch; the image is read-only to it anyway. Codex and Copilot ship
+their own sandboxes, which cannot nest inside rrotor's: run them with theirs off (`--sandbox danger-full-access`,
+`--allow-all-tools`), rrotor's sandbox being theirs.
+
+**Signing in** (`login` in the `cli` block, `POST /v1/clis/{name}/login`, MCP `cli_login`): the person drives rrotor
+from their phone, never at the machine, so a sign-in is a run that waits for them, its command kept running across
+the wait (`rrotor/_worker/login.py`).
+
+```json
+"login": { "args": ["auth", "login"], "listen": true, "paste": true, "signed_in": ".claude/.credentials.json",
+           "home_files": {}, "env": {}, "code": null, "seconds": 600 }
+```
+
+- The worker starts `args` on a pseudo-terminal (1000 columns, so an address is never wrapped; `TERM` set), in the
+  same sandbox as any command of the CLI, with `env` beside the CLI's own and `home_files` written into its HOME
+  first where they are not there yet (`login` needs `home: true`). It reads all the command prints, all along (a
+  spinner never blocks it), cleaned of terminal codes (a hyperlink's text kept), into the run's log and a tail.
+- Once the command shows an `https://` address (not its own loopback one) and settles (a second's quiet, five at
+  most), the run answers `needs_input` at step `login`: `data: {url, urls, code, output}` (`code`: a device code shown
+  from the address's line on, by `code`'s regex or `XXXX-XXXX`), the prompt saying what to do. The run waits up to
+  15 minutes like any other; its command is still running.
+- `program_continue` answers it: the text (or `{code}`) is typed into the command, then Enter, unless the sign-in
+  is a device or polled one (a code was shown, or `paste: false`), where nothing is typed and the command finds out
+  itself. A pasted `http://localhost…` (or `127.0.0.1`, `[::1]`) address, where the phone's browser ended on the
+  CLI's own redirect and could not load it, is requested from the CLI's listener inside the sandbox instead, as the
+  browser would have. The answer is never kept: not in the run's state (its pending kind is `login`), its log or its
+  record, and masked (`[answer]`) where the terminal echoes it.
+- The run ends `done` (`{exit_code, signed_in, output}`) when the command exits, or when its `signed_in` file (in
+  HOME) is written, the command then stopped (a CLI that stays up once signed in); it asks again (`needs_input`) when
+  the command shows a new address, or goes 30 seconds quiet while still running. Its seconds are `login.seconds`
+  (its time running, not the wait); a cancel, its expiry or its seconds stop the command and all it started.
+- `listen: true` (a CLI that cannot start its sign-in without its loopback listener, as Claude Code) leaves TCP to
+  the sandbox: Landlock does not hold its binds and connections to the proxy's port. The sandbox's network
+  namespace has only its own loopback, so nothing outside reaches the listener and nothing is reached past the
+  proxy. Without it, a bind is refused as for any command.
+- `cli_run` with the sign-in's arguments (or the first of them, `auth login`) runs the sign-in the same way, and the
+  allow patterns are not asked: the sign-in is the manifest's own command.
+- What it signs in to stays in the CLI's private HOME, `/data/programs/<name>/home`, so its later `cli_run` calls are
+  signed in.
 - **Not enforced** by rrotor: what the command itself does inside the sandbox with the arguments it was allowed
   (a pattern is only as narrow as it is written), and a CLI process's memory is limited per process, so the worker and
   the command each get `limits.memory_mb`.
@@ -618,8 +709,9 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `GET /v1/schedules` | `{schedules: [{id, program, name, version, function, cron, tz, input, paused, next_at, last, skipped}]}` ([5.6](#56-schedules)) |
 | `POST /v1/schedules/{program}/{name}/pause`, `…/resume` | The schedule paused or resumed, kept across restarts: the schedule as listed |
 | `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
-| `GET /v1/clis` | `{clis: [{name, description, version, command, install: {source, pinned}, allow, approvals, needs_approval, home, hosts}]}` ([5.7](#57-clis)) |
-| `POST /v1/clis/{name}/run` | `{args, stdin?, files?}`: one command of the CLI, a run: `{run_id, …, status, data: {exit_code, stdout, stderr, stdout_bytes, stderr_bytes, truncated, files, files_skipped}}`, or `needs_approval`; 403 `E_CLI_DENIED` when `allow` does not take the arguments |
+| `GET /v1/clis` | `{clis: [{name, description, version, command, install: {source, pinned}, allow, approvals, needs_approval, home, hosts, login, builtin}]}`: `login` `{args}` when it signs in with `…/login`, `builtin` `{vendor, title, version}` for one the image carries ([5.7](#57-clis)) |
+| `POST /v1/clis/{name}/run` | `{args, stdin?, files?}`: one command of the CLI, a run: `{run_id, …, status, data: {exit_code, stdout, stderr, stdout_bytes, stderr_bytes, truncated, files, files_skipped}}`, or `needs_approval`; 403 `E_CLI_DENIED` when `allow` does not take the arguments; the arguments of its sign-in (or the first of them) run its sign-in |
+| `POST /v1/clis/{name}/login` | The CLI's sign-in, a run: `needs_input` with `data: {url, urls, code, output}` to open on the person's phone, then `…/continue` with the code the page shows (a device code: any answer once signed in): `done` with `{exit_code, signed_in, output}`; 400 `E_CLI_LOGIN` when its manifest has no `login` ([5.7](#57-clis), signing in) |
 | `POST /v1/runs/{id}/continue` | `{answer}`: the next `Result` |
 | `POST /v1/runs/{id}/cancel` | Stops it; `end` runs; `cancelled` |
 | `GET /v1/runs/{id}` | Status, function, times, seconds, the last `Result` |
@@ -649,6 +741,7 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `schedules_list`, `schedule_pause` `{program, name}`, `schedule_resume` `{program, name}` | `GET /v1/schedules`; pause and resume ([5.6](#56-schedules)) |
 | `clis_list` | `GET /v1/clis` ([5.7](#57-clis)) |
 | `cli_run` `{cli, args, stdin?, files?}` | `POST /v1/clis/{name}/run`; a command that needs approval is answered with `program_continue` like a program's run |
+| `cli_login` `{cli}` | `POST /v1/clis/{name}/login`; answered with `program_continue` (the code the page shows) |
 
 A refusal is a tool error carrying the API's `{error}`.
 
@@ -737,7 +830,7 @@ carries none.
 |---|---|
 | `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the sample program's tests |
 | `deploy` | Compose (the air-gapped overlay, the cluster file and the per-node file, which refuses to render without its node's settings) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file (one replica, and two clusters of three), `terraform fmt -check` and `validate` for both modules and their examples (one node and a cluster). Nothing is started |
-| `image` | Builds the base and runs the sandbox tests inside it; starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off`; with the secret `CI_CLUSTER_LICENSE_KEY` (a key with cluster sync), brings up the three-node Compose cluster and checks every node ready, `rrotor-0` the head of three |
+| `image` | Builds the base (with the vendors' CLIs, their downloads checked against `image/clis.json`) and runs the sandbox tests inside it (each vendor CLI deployed as at boot and run in the sandbox; their sign-ins reach the vendors only with `RROTOR_VENDOR_SIGN_IN=1`); starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off`; with the secret `CI_CLUSTER_LICENSE_KEY` (a key with cluster sync), brings up the three-node Compose cluster and checks every node ready, `rrotor-0` the head of three |
 | `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with the release public key baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |
 
 The version is `pyproject.toml`'s; a new version is a new image tag.
@@ -1041,7 +1134,8 @@ write to the head.
   that declares one fails `E_PART_MISSING`; `ctx.db` is SQLite, built).
 - **SSO and SAML, roles (RBAC).**
 - **Interactive CLI sessions:** `cli_start`, `cli_send`, `cli_read`, `cli_stop` on a pseudo-terminal, for tools that
-  prompt (`"interactive": true`, refused today) ([`specs/cli-server.md`](specs/cli-server.md), build step 3).
+  prompt (`"interactive": true`, refused today) ([`specs/cli-server.md`](specs/cli-server.md), build step 3). A CLI's
+  sign-in runs on one already (`login`, [5.7](#57-clis)).
 - **Programs:** coding-agent CLIs run on the runtime, scheduled from the cluster's head
   ([`specs/cluster.md`](specs/cluster.md#8-programs-and-the-gateway-later)).
 - **The gateway:** programs behind OpenAI- and Anthropic-compatible endpoints, configured at the head

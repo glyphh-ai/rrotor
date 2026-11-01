@@ -16,7 +16,12 @@ A program can also be a **CLI** (`"kind": "cli"`, [5.7](docs/architecture.md#57-
 glyphh CLI, `gh`) installed at deploy from a pinned, checksummed release tarball, npm or PyPI package, or a binary in
 the image, and run one command at a time in the same sandbox, behind argument patterns, approvals, the vault and the
 egress proxy (`GET /v1/clis` and `POST /v1/clis/{name}/run`; MCP `clis_list` and `cli_run`). One-shot commands only:
-interactive sessions are not built yet.
+interactive sessions are not built yet. The image carries the vendors' agent CLIs (Claude Code, Codex, Gemini,
+Cursor, Grok, Copilot; pinned in `image/clis.json`), listed without a deploy, each signed in from the person's phone
+with `cli_login` (`POST /v1/clis/{name}/login`): it answers `needs_input` with the address to open, and
+`program_continue` types back the code the page shows; and the `glyphh` CLI with the Glyphh SDK, which every program
+imports without a `requirements.lock`. A program runs a CLI with `ctx.cli(name, args)` (its manifest's `clis`), in
+that CLI's own sandbox and signed-in HOME.
 
 | Where | What |
 |---|---|

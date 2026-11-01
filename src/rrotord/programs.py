@@ -15,6 +15,8 @@ from rrotord import manifest as manifests
 from rrotord.errors import NotFound
 from rrotord.store import read_json, write_json
 
+BUILTIN = "builtin.json"  # in a built-in CLI's src/: its vendor, title and version
+
 
 @dataclass(frozen=True, slots=True)
 class Version:
@@ -32,6 +34,13 @@ class Version:
     @property
     def venv(self) -> Path:
         return self.root / "venv"
+
+    @property
+    def builtin(self) -> dict[str, Any] | None:
+        """A built-in CLI's vendor, title and pinned version (the image carries it, rrotord deployed it at boot);
+        None for what was deployed."""
+        found = read_json(self.src / BUILTIN)
+        return found if isinstance(found, dict) else None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -144,16 +153,16 @@ class Programs:
             self.on_change("remove", found)
 
     def deployed(self) -> list[dict[str, Any]]:
-        """The active version of each program, for the link's hello."""
+        """The active version of each program, for the link's hello (not the built-in CLIs: the image's own)."""
         return [
             {"program": v.program, "version": v.version, "commit_sha": v.commit_sha}
             for n in self.names()
-            if (v := self.active(n))
+            if (v := self.active(n)) and v.builtin is None
         ]
 
     def clis(self) -> list[dict[str, Any]]:
         """The CLIs here, each by its active version: what it installs and runs, the arguments it allows and those
-        that wait for the person's approval."""
+        that wait for the person's approval, how it signs in (cli_login), and a built-in one's vendor and version."""
         out = []
         for name in self.names():
             active = self.active(name)
@@ -172,6 +181,8 @@ class Programs:
                     "needs_approval": bool(cli.approvals),
                     "home": cli.home,
                     "hosts": active.manifest.hosts,
+                    "login": {"args": cli.login.args} if cli.login else None,
+                    "builtin": active.builtin,
                 }
             )
         return out

@@ -104,3 +104,12 @@ def test_a_clis_run_executes_nothing_it_may_write(tmp_path):
         allowed.append(add[3]._obj.allowed)  # type: ignore[attr-defined]
     assert allowed[0] & ll.EXECUTE and not allowed[1] & ll.EXECUTE
     assert allowed[0] & ~ll.EXECUTE == allowed[1]
+
+
+def test_a_sign_in_that_listens_leaves_tcp_to_the_sandboxs_own_network():
+    """A CLI's sign-in that listens on loopback: TCP is not handled, so no port rule is added (or could be)."""
+    kernel = Kernel(6)
+    Landlock(kernel, ok_prctl).restrict(Rules((), (), (3128,), False, net=False))
+    create = [c for c in kernel.calls if c[0] == ll.SYS_CREATE_RULESET][1]
+    assert create[1]._obj.net == 0  # type: ignore[attr-defined]
+    assert not [c for c in kernel.calls if c[0] == ll.SYS_ADD_RULE]

@@ -209,6 +209,9 @@ def setup(app: web.Application, s: Services) -> None:
         data = await body(request)
         return web.json_response(await ops.cli_run(s, {**data, "cli": request.match_info["name"]}))
 
+    async def cli_login(request: web.Request) -> web.Response:
+        return web.json_response(await ops.cli_login(s, {"cli": request.match_info["name"]}))
+
     async def resume(request: web.Request) -> web.Response:
         data = await body(request)
         return web.json_response(await ops.resume(s, request.match_info["run_id"], data.get("answer")))
@@ -303,6 +306,7 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_post("/v1/schedules/{program}/{name}/resume", pausing(False))
     app.router.add_get("/v1/clis", clis_list)
     app.router.add_post("/v1/clis/{name}/run", cli_run)
+    app.router.add_post("/v1/clis/{name}/login", cli_login)
     app.router.add_post("/v1/runs", call)
     app.router.add_post("/v1/runs/{run_id}/continue", resume)
     app.router.add_post("/v1/runs/{run_id}/cancel", cancel)

@@ -266,6 +266,87 @@ def test_a_clis_run_runs_its_command_locked_without_exec_of_what_it_writes(tmp_p
     assert (result["status"], result["data"]["stdout"], result["data"]["exit_code"]) == ("done", "hi there\n", 0)
 
 
+CALLS_A_CLI = """
+from rrotor import Result
+
+def start(ctx, inputs):
+    import glyphh_like
+    got = ctx.cli("claude", ["-p", "hi"])
+    return Result.done({"out": got.stdout, "sdk": glyphh_like.NAME})
+"""
+
+
+def test_a_programs_ctx_cli_is_asked_of_the_runner_and_answered(tmp_path, monkeypatch):
+    sdk = tmp_path / "sdk"
+    (sdk / "glyphh_like").mkdir(parents=True)
+    (sdk / "glyphh_like" / "__init__.py").write_text("NAME = 'from the image'\n")
+    monkeypatch.setattr("rrotor._worker.loop.SDKS", (str(sdk), str(tmp_path / "absent")))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    folder = write(tmp_path / "p", CALLS_A_CLI)
+
+    def react(message: dict[str, Any], runner: Runner) -> None:
+        if message["op"] == "cli":
+            runner.send("cli_result", id=0, result={})  # another command's answer: not this one
+            data = {"exit_code": 0, "stdout": f"ran {message['args']}", "stderr": ""}
+            runner.send("cli_result", id=message["id"], result={"status": "done", "data": data})
+        elif message["op"] == "result":
+            runner.send("end")
+
+    runner = run(start_for(folder, clis={"claude": {"allow": [], "approvals": []}}), react)
+    assert runner.results()[0]["data"] == {"out": "ran ['-p', 'hi']", "sdk": "from the image"}
+    asked = next(m for m in runner.got if m["op"] == "cli")
+    assert (asked["id"], asked["cli"], asked["args"], asked["stdin"]) == (1, "claude", ["-p", "hi"], None)
+    assert str(sdk) in sys.path and sys.path.index(str(sdk)) > 0
+
+
+def test_a_ctx_cli_whose_runner_goes_away_fails(tmp_path):
+    folder = write(tmp_path / "p", CALLS_A_CLI.replace("import glyphh_like", "pass").replace("glyphh_like.NAME", "1"))
+
+    def react(message: dict[str, Any], runner: Runner) -> None:
+        if message["op"] == "cli":
+            runner.mine.shutdown(socket.SHUT_WR)  # the runner gone: the worker reads the end of its channel
+
+    runner = run(start_for(folder, clis={"claude": {}}), react)
+    assert runner.results()[0]["data"]["code"] == "E_CLI" and "went away" in runner.results()[0]["data"]["reason"]
+
+
+def sign_in_spec(tmp_path: Path, body: str) -> dict[str, Any]:
+    tool = tmp_path / "tool"
+    tool.write_text("#!/bin/sh\n" + body)
+    tool.chmod(0o755)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    return {"run": "exec", "path": str(tool), "args": [], "env": env, "cwd": str(tmp_path), "login": {}}
+
+
+def test_a_clis_sign_in_waits_for_its_answer_with_the_command_kept_running(tmp_path):
+    spec = sign_in_spec(tmp_path, 'echo "https://s.example.com/x"\nread code\necho "got $code"\n')
+
+    def react(message: dict[str, Any], runner: Runner) -> None:
+        if message["op"] == "result" and message["result"]["status"] == "needs_input":
+            runner.send("continue", answer="the-code", seconds_left=10)
+        elif message["op"] == "result":
+            runner.send("end")
+
+    lock = Lock()
+    box = {"landlock": {"read": ["/usr"], "write": ["/work"], "exec_writes": False, "net": False}}
+    runner = run({"function": "cli", "cli": spec, "sandbox": box, "seconds_left": 10}, react, landlock=lock)
+    assert lock.rules.net is False
+    assert runner.ops() == ["result", "result", "ended"]
+    asked, done = runner.results()
+    assert (asked["status"], asked["data"]["url"]) == ("needs_input", "https://s.example.com/x")
+    assert runner.got[0]["pending"] == {"kind": "login", "key": "cli"} and runner.got[1]["pending"] is None
+    assert done["status"] == "done" and "got [answer]" in done["data"]["output"]
+
+
+def test_a_clis_sign_in_ends_at_end_or_when_it_cannot_start(tmp_path):
+    spec = sign_in_spec(tmp_path, 'echo "https://s.example.com/x"\nsleep 30\n')
+    runner = run({"function": "cli", "cli": spec, "seconds_left": 10})  # `end` while it waits
+    assert runner.ops() == ["result", "ended"] and runner.results()[0]["status"] == "needs_input"
+    spec["path"] = str(tmp_path / "missing")
+    runner = run({"function": "cli", "cli": spec, "seconds_left": 10})
+    assert runner.results()[0]["data"]["code"] == "E_CLI_EXEC" and runner.ops() == ["result", "ended"]
+
+
 def test_a_sandbox_that_cannot_lock_fails_the_run(tmp_path):
     folder = write(tmp_path / "p", PROGRAM)
     box: dict[str, Any] = {"landlock": {"read": [], "write": []}}

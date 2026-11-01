@@ -63,6 +63,7 @@ class Rules:
     write: tuple[str, ...]
     tcp_ports: tuple[int, ...] = ()
     exec_writes: bool = True  # whether what may be written may also be executed (not in a CLI's run)
+    net: bool = True  # whether TCP is held to tcp_ports (not for a CLI's sign-in that listens on loopback)
 
 
 class Landlock:
@@ -90,7 +91,7 @@ class Landlock:
         if abi < 1:
             raise LandlockError(0, "This kernel has no Landlock.")
         fs = fs_rights(abi)
-        net = (NET_BIND_TCP | NET_CONNECT_TCP) if abi >= 4 else 0
+        net = (NET_BIND_TCP | NET_CONNECT_TCP) if abi >= 4 and rules.net else 0
         scoped = (SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL) if abi >= 6 else 0
         attr = RulesetAttr(fs, net, scoped)
         size = ctypes.sizeof(RulesetAttr) if abi >= 6 else (16 if abi >= 4 else 8)

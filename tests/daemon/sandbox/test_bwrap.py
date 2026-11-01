@@ -88,6 +88,11 @@ def test_a_clis_run_mounts_its_install_working_folder_and_home():
     assert ["/i", "/cli"] in after(argv, "--ro-bind") and ["/w", "/work"] in after(argv, "--bind")
     home = bwrap.command(mounts_home, Limits(256, 10), 7, 9, exists=lambda p: False)
     assert ["/h", "/home/cli"] in after(home, "--bind")
+
+
+def test_a_sign_in_that_listens_is_not_held_to_the_proxys_port():
+    mounts = Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, Path("/p"), cli=Path("/i"), listen=True)
+    assert bwrap.landlock_rules(mounts)["net"] is False and bwrap.landlock_rules(MOUNTS)["net"] is True
     follower = Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, None, home=Path("/h"), readonly=True)
     on_follower = bwrap.command(follower, Limits(256, 10), 7, 9, exists=lambda p: False)
     assert ["/h", "/home/cli"] in after(on_follower, "--ro-bind")

@@ -29,6 +29,7 @@ class Mounts:
     cli: Path | None = None  # a CLI's run: its version's install, read-only at /cli
     work: Path | None = None  # its per-call working folder, at /work
     home: Path | None = None  # its private persistent HOME ("home": true), at /home/cli
+    listen: bool = False  # a CLI's sign-in that listens on loopback: TCP left to the sandbox's own network
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +42,9 @@ class Limits:
 
 def landlock_rules(mounts: Mounts) -> dict[str, object]:
     """What the worker locks itself to, as paths inside the sandbox. A CLI's run (and every process it starts)
-    executes nothing it may write: only the system, its install and the version's venv."""
+    executes nothing it may write: only the system, its install and the version's venv. A CLI's sign-in that listens
+    for the browser's redirect (`listen`) may bind and connect any TCP port: the sandbox's network namespace has only
+    its own loopback (and the proxy's forwarder on it), so nothing outside can reach the listener or be reached."""
     mine = [FILES] + ([DATA] if mounts.data else []) + ([CLI_HOME] if mounts.home else [])
     write = [FILES, "/tmp", "/dev", *mine[1:]] if not mounts.readonly else ["/tmp", "/dev"]
     read = [*SYSTEM_RO, PROGRAM, VENV, SDK, "/proc", *(f"{PARTS}/{name}" for name, _ in mounts.parts)]
@@ -50,6 +53,7 @@ def landlock_rules(mounts: Mounts) -> dict[str, object]:
         "write": write + ([WORK] if mounts.work else []),
         "tcp_ports": [3128] if mounts.proxy else [],
         "exec_writes": mounts.cli is None,
+        "net": not mounts.listen,
     }
 
 
