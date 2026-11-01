@@ -754,8 +754,11 @@ writing call (`"writes": true`, or any call of a program with data), any command
 another node holds (run ids are `<node id>~<uuid>`) to its head, which does it as the same caller; `GET
 /v1/approvals` gathers every node's. A member's answers carry `Rrotor-Cluster-Seq` (the head's last seq, a
 follower's applied one); a follower that forwarded a write answers once it has applied it (up to 2 s), and a request
-with `Rrotor-Min-Seq: <seq>` is answered from a node at least that far, or by the head. No head (or a head that
-was deposed): 503 `E_NO_HEAD` with `Retry-After: 2` for writes, reads go on; with HA, a write the head cannot get
+with `Rrotor-Min-Seq: <seq>` is answered from a node at least that far, or by the head. No head, or a head that
+refused the request before running anything: 503 `E_NO_HEAD` with `Retry-After: 2` for writes (safe to send again;
+the SDKs retry it), reads go on; a head lost with the write in hand (deposed during the call, its connection closed
+with the forward in flight, or a writing run in flight when it stepped down): 503 `E_HEAD_LOST`, no `Retry-After`
+(the write may have been applied: the SDKs never retry it); with HA, a write the head cannot get
 onto a majority of voters within 5 s: 503 `E_NOT_COMMITTED` (it is kept, and committed when they return); a run on a
 node no longer in the cluster: 410 `E_RUN_LOST`.
 
@@ -1026,7 +1029,7 @@ write to the head.
   answering its own, and takes a higher one at once. A head that sees a higher term (in an answer, a vote, a forward
   or a join, or in a member's hello when it has lost its followers and looks every 5 s) steps down there and then
   (`cluster.head`, `deposed`): its shippers stop, its followers' connections close and they find the new head, its
-  writing runs in flight fail `E_NO_HEAD`, and it marks itself `stale`, so it takes the new head's snapshot before it
+  writing runs in flight fail `E_HEAD_LOST`, and it marks itself `stale`, so it takes the new head's snapshot before it
   follows: what it wrote that nobody else holds, logged or not, is discarded. A head takes over with a `head` entry
   in its term, and applies all its log holds before it writes.
 - **Elected heads, Enterprise (HA)** (`ha` in the licence: Enterprise with sync; `GET /v1/cluster` shows it): the
@@ -1117,7 +1120,7 @@ write to the head.
   `/readyz`, no Caddy). `replicas` and `node_count` of 1 are the single box as before.
 - **The seams left for what comes next:** the snapshot is a plain GET on the listener rather than binary frames on
   the WebSocket; a deposed head takes a whole snapshot rather than only the programs it touched; the clients' retry
-  of `E_NO_HEAD` is the SDKs' (in `glyphh-ai/glyphh`), not this repo's.
+  of `E_NO_HEAD` (and never of `E_HEAD_LOST`) is the SDKs' (in `glyphh-ai/glyphh`), not this repo's.
 - **Proven by simulation** (`tests/daemon/cluster/sim.py`): the nodes' Raft over a seeded network in one thread, no
   clock but the scheduler's: messages delayed, reordered, lost and doubled, partitions, crashes and restarts (log,
   term, vote and store kept), writes, members joining and leaving, compaction, and an operator's promotions, forced

@@ -294,3 +294,52 @@ async def test_a_head_restarted_leads_again_in_its_term_and_a_follower_that_cann
 
     await one.cluster._answer_head(Channel(), {"type": "append", "id": "1"})  # type: ignore[arg-type]
     assert sent[0]["error"]["code"] == "E_CLUSTER_APPLY" and "No space left" in sent[0]["error"]["message"]
+
+
+async def test_a_forward_the_head_refused_is_retried_and_one_it_had_in_hand_is_not(nodes: Nodes):
+    """E_NO_HEAD (Retry-After): refused before anything ran, the SDKs send it again. E_HEAD_LOST: the head went with
+    the request in hand, so it may have been applied, and is never sent again blindly."""
+    a, b = nodes.make("a", ["a", "b"]), nodes.make("b", ["a", "b"])
+    await a.start()
+    await b.start()
+    await until(lambda: b.role == "follower" and b.head_channel is not None)
+
+    class Gone:
+        def __init__(self, code: str) -> None:
+            self.code = code
+
+        async def request(self, kind: str, /, **_: Any) -> dict[str, Any]:
+            raise ClusterError("gone", code=self.code)
+
+    real = b.head_channel
+    try:
+        for code, expected, headers in (
+            ("E_NO_HEAD", "E_NO_HEAD", {"Retry-After": "2"}),
+            ("E_CLUSTER_CLOSED", "E_HEAD_LOST", {}),
+        ):
+            b.head_channel = Gone(code)  # type: ignore[assignment]
+            with pytest.raises(RrotorError) as caught:
+                await b.forward("approvals", {})
+            assert (caught.value.code, caught.value.status, caught.value.headers) == (expected, 503, headers)
+        b.head_channel = Gone("E_RUN_LOST")  # type: ignore[assignment]
+        with pytest.raises(ClusterError) as other:
+            await b.forward("approvals", {})
+        assert other.value.code == "E_RUN_LOST"  # anything else as the head said it
+    finally:
+        b.head_channel = real
+
+
+async def test_a_deposed_heads_writing_runs_fail_head_lost(ring: Ring, monkeypatch: pytest.MonkeyPatch):
+    await three(ring)
+    zero = ring.daemons["n0"]
+    stopped: list[tuple[str, str]] = []
+
+    async def stop_writing(code: str, reason: str) -> list[str]:
+        stopped.append((code, reason))
+        return []
+
+    monkeypatch.setattr(zero.runner, "stop_writing", stop_writing)
+    code, done = await promote(ring, "n1")
+    assert code == 0 and done["head"] == "n1"
+    await until(lambda: bool(stopped))
+    assert stopped[0][0] == "E_HEAD_LOST"  # what they wrote may be applied: never retried blindly

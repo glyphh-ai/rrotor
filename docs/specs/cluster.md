@@ -156,6 +156,9 @@ A run lives on the node that runs it. In a cluster its id carries that node: `<n
 | A run on the lost head | `E_RUN_LOST` | `E_RUN_LOST` |
 
 The SDKs retry `E_NO_HEAD` with backoff for up to 10 s. MCP returns it as a tool error, which Claude retries.
+`E_NO_HEAD` means nothing ran (no head, or the head refused the request first). A write the head had in hand when it
+was lost (deposed during the call, the connection closed with the forward in flight, a writing run stopped as it
+stepped down) is 503 `E_HEAD_LOST`, with no `Retry-After`: it may have been applied, so the SDKs never retry it.
 
 ## 4. Membership and the head
 
@@ -199,7 +202,7 @@ single-node membership changes. **Voters** are the first five members (by join);
 so a large Enterprise cluster's commits wait on five, not on all.
 
 **Fencing.** Every entry, forward and apply carries the term. A node refuses anything from a lower term; a head
-that sees a higher term steps down at once, fails its in-flight writing runs (`E_NO_HEAD`) and, on rejoining,
+that sees a higher term steps down at once, fails its in-flight writing runs (`E_HEAD_LOST`) and, on rejoining,
 discards any entries past the new head's log for the programs they touched by taking those programs' snapshot.
 
 **Split brain.** Enterprise: a head that has not heard from a majority of voters within the election timeout
@@ -396,7 +399,7 @@ local or head-only per route.
 
 | Case | What happens |
 |---|---|
-| The head dies mid-write | The run is lost with it; the caller gets a dropped connection or `E_NO_HEAD`. Enterprise: an uncommitted entry is gone from the cluster; the old head discards it on rejoin (snapshot of the programs it touched). Pro and Team: entries the followers did not get are lost if another node is promoted; kept if the head restarts |
+| The head dies mid-write | The run is lost with it; the caller gets a dropped connection or `E_HEAD_LOST` (never retried: it may have been applied). Enterprise: an uncommitted entry is gone from the cluster; the old head discards it on rejoin (snapshot of the programs it touched). Pro and Team: entries the followers did not get are lost if another node is promoted; kept if the head restarts |
 | The head dies between runs | Enterprise: a new head in 1.5 to 3 s. Pro and Team: writes 503 until it restarts or is promoted |
 | A network partition | Enterprise: the majority side elects (or keeps) a head and takes writes; the minority side serves reads at its last applied seq and refuses writes; on healing the minority catches up. Pro and Team: the side without the head serves reads only |
 | A follower falls behind or restarts | Catches up from the log, or from a snapshot past `RROTOR_CLUSTER_LOG_KEEP`; not ready until within a second of the head |

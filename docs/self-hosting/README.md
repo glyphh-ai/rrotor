@@ -149,7 +149,9 @@ An Enterprise key (`ha: true` in `GET /v1/licence`) makes the cluster elect its 
 wait on five, not on all); when a voter leaves, the first learner takes its place.
 
 - **The head lost:** after 1.5 to 3 seconds without hearing from it, a voter stands and a majority of voters elects
-  it. Reads go on throughout; writes answer 503 `E_NO_HEAD` with `Retry-After: 2` until the new head is found.
+  it. Reads go on throughout; writes answer 503 `E_NO_HEAD` with `Retry-After: 2` until the new head is found
+  (the SDKs retry it). A write the old head had in hand answers `E_HEAD_LOST`: it may have been applied, so it is
+  not retried.
 - **A write is answered once most voters hold it**, so no acknowledged write is lost when a head dies. If they do not
   within 5 seconds the write answers 503 `E_NOT_COMMITTED`: it is kept, and committed when they return.
 - **A partition:** the side with a majority of voters keeps (or elects) a head; the other side's head steps down
@@ -185,7 +187,8 @@ fence the old head: when it restarts or reconnects, the first member it reaches 
 down there and then, and takes the new head's copy of everything, dropping whatever it wrote that nobody else
 has. A head that answers is
 told to step down as the votes are asked, so `promote` is also how you move the head on purpose (to drain its
-machine, say). Writes that reach a head as it steps down fail `E_NO_HEAD`; retry them. If the votes do not come
+machine, say). Writes the head had in hand as it stepped down fail `E_HEAD_LOST`: they may have been applied, so
+check before sending them again (the SDKs retry `E_NO_HEAD`, never `E_HEAD_LOST`). If the votes do not come
 (`E_CLUSTER_VOTES`: another promotion at the same time, say) the term has moved and a head that answered may have
 stepped down: run it again.
 
