@@ -90,7 +90,7 @@ async def test_the_sign_in_goes_to_glyphh_with_pkce_and_comes_back_to_a_session(
     made, glyphh = fresh(tmp_path, now)
     with pytest.raises(web.HTTPFound) as away:
         await made.start(request("/auth/start?next=/apps/board/"))
-    location = urlsplit(away.value.location)
+    location = urlsplit(str(away.value.location))
     q = parse_qs(location.query)
     assert f"{location.scheme}://{location.netloc}{location.path}" == f"{SERVER}/oauth/authorize"
     assert (q["client_id"], q["redirect_uri"], q["resource"], q["code_challenge_method"], q["scope"]) == (
@@ -166,7 +166,7 @@ async def test_a_callback_that_did_not_start_here_or_was_refused_is_refused(tmp_
     with pytest.raises(web.HTTPFound) as away:
         await made.start(request("/auth/start?next=//evil.example.com"))
     signin = cookies_of(away.value)[b.SIGNIN_COOKIE]
-    state = parse_qs(urlsplit(away.value.location).query)["state"][0]
+    state = parse_qs(urlsplit(str(away.value.location)).query)["state"][0]
     with pytest.raises(BadRequest, match="did not start here"):
         await made.callback(request("/auth/callback?code=c&state=other", {b.SIGNIN_COOKIE: signin}))
     with pytest.raises(BadRequest, match="expired or did not start here"):

@@ -54,6 +54,12 @@ async def send(api: Api, method: str, path: str, **kw: Any) -> tuple[int, Any]:
     return res.status, await res.json()
 
 
+def catalogue(api: Api) -> Artifacts:
+    """The rrotor's word from the catalogue, which every rrotor here holds."""
+    assert api.services.artifacts is not None
+    return api.services.artifacts
+
+
 @pytest.fixture
 async def local(api: Api) -> Api:
     api.services.artifacts = Artifacts(api.services.config.data)
@@ -118,7 +124,7 @@ async def test_a_publish_is_an_audit_event_done_or_failed_and_a_forwarded_one_is
         local.services, {"op": "app_publish", "args": {"data": publish_body(hosts=["a.example"])}}
     )
     assert done["version"] == 1
-    found = local.services.programs.active("board").manifest
+    found = local.services.programs.get("board").manifest
     assert found.hosts == ["a.example"] and found.limits.seconds == 300
     kinds = [(e["kind"], e["outcome"]["status"]) for e in local.services.audit.read(None, 10)[0]]
     assert kinds == [("program.deploy_failed", "failed"), ("program.deploy", "done")]  # oldest first
@@ -138,7 +144,7 @@ async def test_a_markdown_page_is_served_in_the_document_shell(local: Api):
 async def test_a_new_version_of_an_approved_app_waits_for_its_review(local: Api):
     status, one = await send(local, "POST", "/v1/apps", json=publish_body())
     assert status == 201, one
-    local.services.artifacts.set_one("board", 1, "approved", [])
+    catalogue(local).set_one("board", 1, "approved", [])
     status, two = await send(local, "POST", "/v1/apps", json=publish_body(files={"index.html": "<p>two</p>"}))
     assert (status, two["version"], two["active"], two["state"]) == (201, 2, False, "draft")
     assert await (await local.client.get("/apps/board/")).text() == PAGE  # the approved version keeps serving
@@ -299,7 +305,7 @@ async def publish_as_person(h: Hosted, **over: Any) -> dict[str, Any]:
     res = await h.api.client.post(
         "/v1/apps", json=publish_body(**over), headers={"Authorization": f"Bearer {h.signed_in}"}
     )
-    body = await res.json()
+    body: dict[str, Any] = await res.json()
     assert res.status == 201, body
     return body
 
@@ -331,7 +337,7 @@ async def test_a_browser_signs_in_to_glyphh_and_opens_what_its_roles_and_the_rev
     cookie = {"Cookie": f"{SESSION_COOKIE}={res.cookies[SESSION_COOKIE].value}"}
     res = await client.get("/apps/board/", headers=cookie)  # signed in, but nothing approved yet
     assert res.status == 409 and res.headers["X-Error"] == "E_APP_UNREVIEWED" and "Sign out" in await res.text()
-    s.artifacts.set_one("board", 1, "approved", [])
+    catalogue(hosted.api).set_one("board", 1, "approved", [])
     res = await client.get("/apps/board/", headers=cookie)
     assert res.status == 200 and await res.text() == PAGE
     assert hosted.vouches.asked == [hosted.signed_in] * 2 or hosted.signed_in in hosted.vouches.asked
@@ -341,8 +347,8 @@ async def test_a_browser_signs_in_to_glyphh_and_opens_what_its_roles_and_the_rev
     assert res.status == 403 and (await res.json())["error"]["code"] == "E_ORIGIN"
     res = await client.get("/apps/board/", headers={**cookie, "Origin": f"https://{SELF_HOST}"})
     assert res.status == 200
-    s.artifacts.set_one("board", 1, "approved", ["ops"])  # the catalogue's roles are not the manifest's
-    s.artifacts.set_one("board", 1, "rejected", [])
+    catalogue(hosted.api).set_one("board", 1, "approved", ["ops"])  # the catalogue's roles are not the manifest's
+    catalogue(hosted.api).set_one("board", 1, "rejected", [])
     res = await client.get("/apps/board/", headers=cookie)
     assert res.status == 409
     res = await client.post("/auth/logout", headers=cookie)
@@ -357,9 +363,9 @@ async def test_a_browser_signs_in_to_glyphh_and_opens_what_its_roles_and_the_rev
 
 async def test_roles_a_reviewer_and_a_draft(hosted: Hosted):
     await publish_as_person(hosted, roles=["Ops"])
-    client, s = hosted.api.client, hosted.api.services
+    client, word = hosted.api.client, catalogue(hosted.api)
     cookie = hosted.session()
-    s.artifacts.set_one("board", 1, "approved", ["ops"])
+    word.set_one("board", 1, "approved", ["ops"])
     res = await client.get("/apps/board/", headers=cookie)  # sre is not ops
     assert res.status == 403 and res.headers["X-Error"] == "E_APP_FORBIDDEN" and "Sign out" in await res.text()
     hosted.vouches.groups = ("ops", "SRE")  # the Cloud's word is asked for each request here: no minute kept
@@ -373,17 +379,17 @@ async def test_roles_a_reviewer_and_a_draft(hosted: Hosted):
     assert (await client.get("/apps/board/", headers=cookie)).status == 200  # and the approved one
     res = await client.get("/apps/board/?version=9", headers=cookie)
     assert res.status == 404
-    s.artifacts.set_one("board", 2, "draft", ["ops"])  # nothing approved any more: a reviewer still opens it
+    word.set_one("board", 2, "draft", ["ops"])  # nothing approved any more: a reviewer still opens it
     res = await client.get("/apps/board/", headers=cookie)
     assert res.status == 200
     hosted.vouches.role, hosted.vouches.groups = "member", ("Platform-Admins",)
-    s.artifacts.reviewers = ["platform-admins"]
+    word.reviewers = ["platform-admins"]
     assert (await client.get("/apps/board/?version=2", headers=cookie)).status == 200
 
 
 async def test_a_session_the_cloud_no_longer_vouches_for_is_dropped(hosted: Hosted):
     await publish_as_person(hosted)
-    hosted.api.services.artifacts.set_one("board", 1, "approved", [])
+    catalogue(hosted.api).set_one("board", 1, "approved", [])
     cookie = hosted.session("stale-" + "x" * 20)
     res = await hosted.api.client.get("/apps/board/", headers=cookie, allow_redirects=False)
     assert res.status == 302
@@ -393,7 +399,7 @@ async def test_a_session_the_cloud_no_longer_vouches_for_is_dropped(hosted: Host
 async def test_a_pages_call_runs_as_the_viewer(hosted: Hosted):
     await publish_as_person(hosted, functions={"rows": {}}, program=ROWS)
     s = hosted.api.services
-    s.artifacts.set_one("board", 1, "approved", [])
+    catalogue(hosted.api).set_one("board", 1, "approved", [])
     res = await hosted.api.client.post("/apps/board/call/rows", headers=hosted.session(), data=b'{"n": 1}')
     answer = await res.json()
     assert res.status == 200 and answer["data"]["rows"] == [2], answer
@@ -433,7 +439,7 @@ async def test_a_follower_sends_a_publish_to_its_head(local: Api, monkeypatch):
         seen.append((op, args))
         return {"relayed": True}
 
-    monkeypatch.setattr(ops.forward, "follower", lambda s: True)
-    monkeypatch.setattr(ops.forward, "relayed", relayed)
+    monkeypatch.setattr(forward, "follower", lambda s: True)
+    monkeypatch.setattr(forward, "relayed", relayed)
     assert await ops.app_publish(local.services, publish_body()) == {"relayed": True}
     assert seen[0][0] == "app_publish"

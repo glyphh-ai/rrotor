@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,7 @@ from rrotord.errors import DeployError
 PAGE = "<!doctype html><title>Board</title><p>hi</p>"
 
 
-def write(tmp_path: Path, data: dict, program: str | None = None, page: str | None = PAGE) -> Path:
+def write(tmp_path: Path, data: dict[str, Any], program: str | None = None, page: str | None = PAGE) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "glyphh.json").write_text(json.dumps(data))
     if program is not None:
@@ -25,7 +26,7 @@ def write(tmp_path: Path, data: dict, program: str | None = None, page: str | No
     return tmp_path
 
 
-def app(**extra: object) -> dict:
+def app(**extra: object) -> dict[str, Any]:
     return {"name": "board", "kind": "app", "app": {"title": "The board", **extra}}
 
 

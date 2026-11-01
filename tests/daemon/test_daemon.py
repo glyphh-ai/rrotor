@@ -354,8 +354,9 @@ def self_daemon(tmp_path: Path, short_dir: Path, link: bool = True) -> Daemon:
 async def test_a_self_hosted_daemon_links_and_introspects_unless_its_link_is_off(tmp_path, short_dir):
     on = self_daemon(tmp_path / "on", short_dir)
     assert on.link.configured and on.link.state == "no_token" and on.services().introspect is not None
-    browser = on.services().browser
-    assert browser is not None and browser.address == "https://rrotor.acme.com" and on.services().artifacts.linked
+    browser, catalogue = on.services().browser, on.services().artifacts
+    assert browser is not None and browser.address == "https://rrotor.acme.com"
+    assert catalogue is not None and catalogue.linked
     assert browser.redirect_uri == "https://rrotor.acme.com/auth/callback" and on.handler.artifacts is on.artifacts
     assert self_daemon(tmp_path / "off2", short_dir, link=False).services().browser is None
     assert Daemon(config(tmp_path, short_dir), ready()).services().browser is None  # local: no sign-in to make
