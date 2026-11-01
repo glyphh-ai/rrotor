@@ -1,0 +1,110 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#000; --surface:#0d0d0d; --border:#5a5a5a; --text:#fff; --muted:#b0b0b0; --dim:#9a9a9a; --accent:#b066ff; --accent-light:#c68cff; --rose:#ec4899; }
+  html,body { margin:0; background:var(--bg); }
+  body { width:1600px; height:900px; font-family:'Geist', -apple-system, system-ui, sans-serif; color:var(--text); }
+  .mono { font-family:'JetBrains Mono', 'SF Mono', monospace; }
+  svg { display:block; }
+  text { fill:var(--text); font-family:'Geist', system-ui, sans-serif; }
+  .k { font-family:'JetBrains Mono', monospace; font-size:12px; letter-spacing:.12em; fill:var(--dim); text-transform:uppercase; }
+  .h { font-size:22px; font-weight:600; }
+  .b { font-size:15px; fill:var(--muted); }
+  .s { font-size:13px; fill:var(--muted); }
+  .box { fill:var(--surface); stroke:var(--border); stroke-width:1; rx:12; }
+  .inner { fill:#000; stroke:var(--border); stroke-width:1; rx:8; }
+  .flow { stroke:var(--accent); stroke-width:2; fill:none; marker-end:url(#arrow); }
+  .back { stroke:var(--dim); stroke-width:1.5; fill:none; stroke-dasharray:6 6; marker-end:url(#arrowg); }
+  .pill { font-family:'JetBrains Mono', monospace; font-size:12px; }
+</style></head>
+<body>
+<svg width="1600" height="900" viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#b066ff"/></marker>
+    <marker id="arrowg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#9a9a9a"/></marker>
+    <linearGradient id="grad" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#9333ea"/><stop offset="1" stop-color="#ec4899"/></linearGradient>
+  </defs>
+
+  <!-- title -->
+  <text class="k" x="72" y="66">THE ADA GATE · GLYPHH.AI EDGE · SHADOW MODE · 2026-10-25</text>
+  <text class="h" x="72" y="104" style="font-size:30px">Every session is asked of Ada at its 5th, 20th and 60th request</text>
+  <text class="b" x="72" y="134">Nothing waits on the answer. The verdict applies from the session's next request. Today it is logged, not enforced.</text>
+
+  <!-- 1 visitors -->
+  <rect class="box" x="72" y="200" width="250" height="300"/>
+  <text class="k" x="96" y="236">1 · VISITORS</text>
+  <rect class="inner" x="96" y="258" width="202" height="56"/><text class="b" x="116" y="282" style="fill:#fff">A person</text><text class="s" x="116" y="302">browser, reads, pauses</text>
+  <rect class="inner" x="96" y="326" width="202" height="56"/><text class="b" x="116" y="350" style="fill:#fff">A scraper</text><text class="s" x="116" y="370">fetches pages, no cookie</text>
+  <rect class="inner" x="96" y="394" width="202" height="56"/><text class="b" x="116" y="418" style="fill:#fff">An LLM agent</text><text class="s" x="116" y="438">headless browser, 1–2 s a page</text>
+  <text class="s" x="96" y="482">Alike at the first request.</text>
+
+  <!-- 2 cloudflare -->
+  <rect class="box" x="372" y="200" width="220" height="300"/>
+  <text class="k" x="396" y="236">2 · CLOUDFLARE</text>
+  <text class="b" x="396" y="272" style="fill:#fff">Serves the assets</text>
+  <text class="s" x="396" y="296">images, styles, scripts</text>
+  <text class="s" x="396" y="316">answered from its cache</text>
+  <line x1="396" y1="340" x2="568" y2="340" stroke="#5a5a5a"/>
+  <text class="s" x="396" y="368">So the origin sees pages,</text>
+  <text class="s" x="396" y="388">not a browser's bursts:</text>
+  <text class="s" x="396" y="408">the facts are pace and walk,</text>
+  <text class="s" x="396" y="428">not content.</text>
+
+  <!-- 3 origin / proxy -->
+  <rect class="box" x="642" y="200" width="420" height="300"/>
+  <text class="k" x="666" y="236">3 · GLYPHH.AI ORIGIN ON FLY · middleware.js</text>
+  <rect class="inner" x="666" y="258" width="372" height="64"/>
+  <text class="b" x="686" y="282" style="fill:#fff">Session store</text>
+  <text class="s" x="686" y="304">glyphh_sid cookie, or address + user agent · 30 min idle</text>
+  <rect class="inner" x="666" y="334" width="372" height="64"/>
+  <text class="b" x="686" y="358" style="fill:#fff">Every request kept: time, method, path</text>
+  <text class="s" x="686" y="380">at the 5th, 20th and 60th → 16 facts of how it behaves</text>
+  <rect class="inner" x="666" y="410" width="372" height="64"/>
+  <text class="b" x="686" y="434" style="fill:#fff">waitUntil: ask Ada after the response</text>
+  <text class="s" x="686" y="456">no visitor waits · 120 decisions a day on the Free plan</text>
+
+  <!-- 4 ada cloud -->
+  <rect class="box" x="1112" y="200" width="416" height="300" stroke="url(#grad)" stroke-width="1.5"/>
+  <text class="k" x="1136" y="236" style="fill:#c68cff">4 · ADA CLOUD · ada.glyphh.ai</text>
+  <text class="b" x="1136" y="272" style="fill:#fff; font-size:20px; font-weight:600">bots-edge</text>
+  <text class="s" x="1136" y="296">a precedent store: 650 sessions seeded, glyphh.ai's own next</text>
+  <text class="s" x="1136" y="316">learned weights · calibrated · costs in the spec</text>
+  <text class="pill" x="1136" y="352" fill="#b0b0b0">block a person 5 · let a robot in 1 · challenge ½</text>
+  <text class="b" x="1136" y="392" style="fill:#fff">POST /v1/decide → least expected cost</text>
+  <g transform="translate(1136,412)">
+    <rect width="104" height="30" rx="15" fill="#000" stroke="#5a5a5a"/><text class="pill" x="52" y="20" text-anchor="middle" fill="#fff">allow</text>
+    <rect x="116" width="124" height="30" rx="15" fill="#000" stroke="#5a5a5a"/><text class="pill" x="178" y="20" text-anchor="middle" fill="#fff">challenge</text>
+    <rect x="252" width="104" height="30" rx="15" fill="#000" stroke="#b066ff"/><text class="pill" x="304" y="20" text-anchor="middle" fill="#c68cff">block</text>
+  </g>
+  <text class="s" x="1136" y="476">with probabilities and the receipts it stands on · ~450 ms</text>
+
+  <!-- forward flows -->
+  <path class="flow" d="M322 350 L368 350"/>
+  <path class="flow" d="M592 350 L638 350"/>
+  <path class="flow" d="M1062 442 L1108 442"/>
+
+  <!-- 5 the verdict -->
+  <rect class="box" x="642" y="560" width="886" height="110"/>
+  <text class="k" x="666" y="596">5 · THE VERDICT, ON THE SESSION'S NEXT REQUEST</text>
+  <text class="b" x="666" y="628" style="fill:#fff">Shadow (today):</text><text class="s" x="800" y="628">x-ada-gate: shadow:allow · one JSON log line per decision with the session's facts</text>
+  <text class="b" x="666" y="652" style="fill:#fff">Enforce (next):</text><text class="s" x="800" y="652">block → 403 · challenge → a proof of browser · allow → nothing changes</text>
+  <path class="flow" d="M1320 500 L1320 556"/>
+  <path class="back" d="M900 560 L900 504"/>
+
+  <!-- 6 the loop -->
+  <rect class="box" x="72" y="560" width="520" height="110"/>
+  <text class="k" x="96" y="596">6 · THE LOOP THAT MAKES IT GLYPHH.AI'S</text>
+  <text class="s" x="96" y="628">Fly logs → label the sessions (known crawlers, our probes, people who signed in)</text>
+  <text class="s" x="96" y="652">→ record into bots-edge → learn → backtest → the same probe again.</text>
+  <path class="back" d="M642 615 L596 615"/>
+
+  <!-- footer -->
+  <line x1="72" y1="740" x2="1528" y2="740" stroke="#5a5a5a"/>
+  <text class="k" x="72" y="776">WHAT THE FIRST PROBE SAID</text>
+  <text class="s" x="72" y="806">Asked from outside with its own 14 fast requests, the scraper was allowed (P robot 0.05). Seen at the edge, five requests in under a second and no cookie,</text>
+  <text class="s" x="72" y="828">it was challenged (P robot 0.70). Both browsers were allowed. The library seed knows robots by a page's burst of assets; this origin never sees one.</text>
+  <text class="k" x="1528" y="806" text-anchor="end" style="fill:#c68cff">glyphh</text>
+</svg>
+</body></html>

@@ -1,0 +1,113 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#000; --surface:#0d0d0d; --border:#5a5a5a; --grid:#2a2a2a; --text:#fff; --muted:#b0b0b0; --dim:#9a9a9a; --accent:#b066ff; --accent-light:#c68cff; }
+  html,body { margin:0; background:var(--bg); }
+  body { width:1600px; height:900px; font-family:'Geist', -apple-system, system-ui, sans-serif; color:var(--text); }
+  text { fill:var(--text); font-family:'Geist', system-ui, sans-serif; }
+  .k { font-family:'JetBrains Mono', monospace; font-size:12px; letter-spacing:.12em; fill:var(--dim); }
+  .h { font-size:30px; font-weight:600; }
+  .b { font-size:15px; fill:var(--muted); }
+  .s { font-size:13px; fill:var(--muted); }
+  .lab { font-size:15px; fill:#fff; }
+  .val { font-family:'JetBrains Mono', monospace; font-size:14px; fill:#fff; font-variant-numeric: tabular-nums; }
+  .tick { font-family:'JetBrains Mono', monospace; font-size:12px; fill:var(--dim); }
+  .panel { fill:var(--surface); stroke:var(--border); stroke-width:1; rx:12; }
+  .grid { stroke:var(--grid); stroke-width:1; }
+  .axis { stroke:var(--border); stroke-width:1; }
+</style></head>
+<body>
+<svg id="svg" width="1600" height="900" viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+  <text class="k" x="72" y="66">BOTS AT THE DOOR · 2,000 REAL SESSIONS HELD OUT · 10,000 LEARNED · 20% ROBOTS</text>
+  <text class="h" x="72" y="104">The gate's cost: blocking a person costs 5, a robot let in costs 1</text>
+  <text class="b" x="72" y="134">Lower is better. Ada decides under those costs and challenges where either answer is dear; the baselines decide blind.</text>
+
+  <!-- left panel: cost bars -->
+  <rect class="panel" x="72" y="180" width="870" height="470"/>
+  <text class="k" x="96" y="216">COST ON THE 2,000 (PEOPLE BLOCKED · ROBOTS LET IN)</text>
+  <g id="bars" transform="translate(96,240)"></g>
+
+  <!-- right panel: growing store -->
+  <rect class="panel" x="972" y="180" width="556" height="470"/>
+  <text class="k" x="996" y="216">THE GROWING STORE · EDGE FEATURES · COST AS THE GATE FILLS</text>
+  <g id="line" transform="translate(996,268)"></g>
+
+  <!-- stat row -->
+  <g id="stats" transform="translate(72,690)"></g>
+  <text class="k" x="1528" y="870" text-anchor="end" style="fill:#c68cff">glyphh</text>
+  <text class="s" x="72" y="870">Ada: learned weights, calibrated, decide. The 5+ rows are the 1,322 sessions a gate meets while they run. Source: rrotor benchmarks/bots, 2026-10-25.</text>
+</svg>
+<script>
+const NS = 'http://www.w3.org/2000/svg';
+const el = (t, a, txt) => { const e = document.createElementNS(NS, t); for (const [k, v] of Object.entries(a)) e.setAttribute(k, v); if (txt != null) e.textContent = txt; return e; };
+
+// ── bars: emphasis form, Ada in the accent, baselines in the de-emphasis gray ──
+const rows = [
+  { name: 'One-request rule', cost: 1139, note: '200 · 139', ada: false },
+  { name: 'Let everyone in', cost: 382, note: '0 · 382', ada: false },
+  { name: 'Ada, edge features', cost: 289, note: '18 · 111', ada: true },
+  { name: 'Ada, every feature', cost: 145.5, note: '12 · 43', ada: true },
+  { name: 'Ada, edge, sessions of 5+', cost: 45.5, note: '6 · 6', ada: true },
+  { name: 'Ada, every feature, sessions of 5+', cost: 20.5, note: '3 · 2', ada: true },
+];
+const g = document.getElementById('bars');
+const W = 822, labelW = 300, plotW = W - labelW - 170, maxCost = 1200, rowH = 56, barH = 22;
+const x = (c) => labelW + (c / maxCost) * plotW;
+for (const t of [0, 300, 600, 900, 1200]) {
+  g.appendChild(el('line', { class: 'grid', x1: x(t), x2: x(t), y1: 0, y2: rows.length * rowH }));
+  g.appendChild(el('text', { class: 'tick', x: x(t), y: rows.length * rowH + 22, 'text-anchor': 'middle' }, t === 0 ? '0' : t.toLocaleString()));
+}
+g.appendChild(el('line', { class: 'axis', x1: x(0), x2: x(0), y1: 0, y2: rows.length * rowH }));
+rows.forEach((r, i) => {
+  const y = i * rowH + (rowH - barH) / 2;
+  const w = Math.max(x(r.cost) - x(0), 4);
+  const fill = r.ada ? '#b066ff' : '#9a9a9a';
+  // bar: square at the baseline, 4px rounded data end
+  const d = `M${x(0)} ${y} H${x(0) + w - 4} a4 4 0 0 1 4 4 V${y + barH - 4} a4 4 0 0 1 -4 4 H${x(0)} Z`;
+  g.appendChild(el('path', { d, fill }));
+  g.appendChild(el('text', { class: 'lab', x: labelW - 16, y: y + 16, 'text-anchor': 'end', style: r.ada ? '' : 'fill:#b0b0b0' }, r.name));
+  g.appendChild(el('text', { class: 'val', x: x(0) + w + 12, y: y + 16 }, `${r.cost.toLocaleString()}  ·  ${r.note}`));
+});
+g.appendChild(el('text', { class: 's', x: labelW, y: rows.length * rowH + 50 }, 'value · people blocked · robots let in'));
+
+// ── line: cost against precedents, log scale ──
+const L = document.getElementById('line');
+const curve = [[30, 382], [100, 336], [300, 343.5], [1000, 281], [3000, 280], [10000, 289]];
+const LW = 508, LH = 280, left = 56, bottom = 280;
+const lx = (p) => left + (Math.log10(p) - Math.log10(30)) / (Math.log10(10000) - Math.log10(30)) * (LW - left - 70);
+const ly = (c) => bottom - ((c - 250) / (400 - 250)) * LH;
+for (const t of [250, 300, 350, 400]) {
+  L.appendChild(el('line', { class: 'grid', x1: left, x2: LW, y1: ly(t), y2: ly(t) }));
+  L.appendChild(el('text', { class: 'tick', x: left - 10, y: ly(t) + 4, 'text-anchor': 'end' }, String(t)));
+}
+L.appendChild(el('line', { class: 'axis', x1: left, x2: LW, y1: bottom, y2: bottom }));
+for (const p of [30, 100, 300, 1000, 3000, 10000]) L.appendChild(el('text', { class: 'tick', x: lx(p), y: bottom + 22, 'text-anchor': 'middle' }, p >= 1000 ? `${p / 1000}K` : String(p)));
+L.appendChild(el('text', { class: 's', x: LW, y: bottom + 50, 'text-anchor': 'end' }, 'precedents recorded, log scale'));
+L.appendChild(el('path', { d: curve.map(([p, c], i) => `${i ? 'L' : 'M'}${lx(p)} ${ly(c)}`).join(' '), fill: 'none', stroke: '#b066ff', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+for (const [p, c] of curve) {
+  L.appendChild(el('circle', { cx: lx(p), cy: ly(c), r: 6, fill: '#b066ff', stroke: '#0d0d0d', 'stroke-width': 2 }));
+}
+L.appendChild(el('text', { class: 'val', x: lx(30) - 8, y: ly(382) - 14 }, '382'));
+L.appendChild(el('text', { class: 'val', x: lx(1000), y: ly(281) + 26, 'text-anchor': 'middle' }, '281 at 1,000'));
+L.appendChild(el('text', { class: 'val', x: lx(10000) + 12, y: ly(289) + 5 }, '289'));
+L.appendChild(el('text', { class: 's', x: left, y: -22 }, 'At 1,000 precedents (the Free plan) the gate has most of what 10,000 give it.'));
+
+// ── stat tiles ──
+const S = document.getElementById('stats');
+const tiles = [
+  ['Right on sessions of 5+ requests', '99.6%', 'Ada, every feature, 1,322 sessions'],
+  ['People blocked there', '3 of 1,322', 'the dear mistake, priced at 5'],
+  ['Fable on the 200 sample', 'cost 31', '96.5% right, 6 people blocked; Ada cost 7'],
+  ['A decision at the edge', '~450 ms', 'after the response, no visitor waits'],
+];
+tiles.forEach((t, i) => {
+  const tx = i * 364;
+  S.appendChild(el('rect', { class: 'panel', x: tx, y: 0, width: 340, height: 120 }));
+  S.appendChild(el('text', { class: 's', x: tx + 20, y: 30 }, t[0]));
+  S.appendChild(el('text', { x: tx + 20, y: 76, style: 'font-size:34px; font-weight:600; fill:#fff' }, t[1]));
+  S.appendChild(el('text', { class: 's', x: tx + 20, y: 102 }, t[2]));
+});
+</script>
+</body></html>
