@@ -142,6 +142,20 @@ async def cli_run(s: Services, data: dict[str, Any], caller: str = "claude") -> 
     return answer(run)
 
 
+async def cli_login(s: Services, data: dict[str, Any], caller: str = "claude") -> dict[str, Any]:
+    """A CLI's sign-in: `needs_input` with the address (and device code) to open on the person's phone, answered
+    by program_continue with the code the page shows; on the cluster's head, as every CLI run is."""
+    cli = data.get("cli")
+    if not isinstance(cli, str) or not cli:
+        raise BadRequest("Send {cli}.")
+    if forward.follower(s):
+        return await forward.relayed(s, "cli_login", {"data": data, "caller": caller})
+    term = forward.leading(s)
+    run = await s.runner.cli_login(cli=cli, caller=caller)
+    await forward.committed(s, term)
+    return answer(run)
+
+
 async def resume(s: Services, run_id: str, value: Any) -> dict[str, Any]:
     far, node = forward.elsewhere(s, run_id)
     if far:

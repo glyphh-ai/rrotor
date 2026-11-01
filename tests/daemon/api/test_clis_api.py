@@ -66,3 +66,35 @@ async def test_clis_over_mcp_and_each_kind_refuses_the_others_tool(api):
 async def test_a_cli_run_without_a_cli_is_refused(api):
     with pytest.raises(BadRequest, match=r"Send \{cli, args"):
         await ops.cli_run(api.services, {"args": []})
+    with pytest.raises(BadRequest, match=r"Send \{cli\}"):
+        await ops.cli_login(api.services, {})
+
+
+SIGN_IN = '#!/bin/sh\necho "visit https://auth.example.com/x"\nread code\necho "$code" > "$HOME/creds"\n'
+
+
+async def deploy_sign_in(api: Api) -> None:
+    archive = tarball({"bin/tool": SIGN_IN}, {"bin/tool": 0o755})
+    block = {"install": {"url": URL, "sha256": sha(archive)}, "home": True, "login": {"args": ["login"]}}
+    await install_cli(api.services.programs, cli_manifest(cli=block), FakeFetch({URL: archive}))
+
+
+async def test_a_cli_signs_in_over_rest(api):
+    await deploy_sign_in(api)
+    status, listed = await send(api, "GET", "/v1/clis")
+    assert listed["clis"][0]["login"] == {"args": ["login"]} and listed["clis"][0]["builtin"] is None
+    status, asked = await send(api, "POST", "/v1/clis/tool/login")
+    assert (status, asked["status"], asked["data"]["url"]) == (200, "needs_input", "https://auth.example.com/x")
+    status, done = await send(api, "POST", f"/v1/runs/{asked['run_id']}/continue", json={"answer": "code-123"})
+    assert (status, done["status"]) == (200, "done")
+    assert (api.services.programs.folder("tool") / "home" / "creds").read_text() == "code-123\n"
+
+
+async def test_a_cli_signs_in_over_mcp(api):
+    await deploy_sign_in(api)
+    asked = await tool(api, "cli_login", cli="tool")
+    assert asked["isError"] is False and asked["structuredContent"]["status"] == "needs_input"
+    done = await tool(api, "program_continue", run_id=asked["structuredContent"]["run_id"], answer="c-1")
+    assert done["structuredContent"]["status"] == "done"
+    missing = await tool(api, "cli_login", cli="nothing")
+    assert missing["isError"] and missing["structuredContent"]["error"]["code"] == "E_PROGRAM_MISSING"

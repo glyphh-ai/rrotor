@@ -31,7 +31,9 @@ PYPI = re.compile(r"^(?P<name>[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)==(?P<ver
 IMAGE = re.compile(r"^(/usr/[A-Za-z0-9._+/-]+|[A-Za-z0-9._+-]{1,64})$")
 COMMAND = re.compile(r"^[A-Za-z0-9._+-]{1,128}(/[A-Za-z0-9._+-]{1,128}){0,15}$")
 ENV_NAME = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
-SECRET_REF = re.compile(r"^secret:(?P<name>[A-Z][A-Z0-9_]{0,63})$")
+# secret:NAME takes a secret the run needs; secret?:NAME one it passes only when it is set (an optional API key)
+SECRET_REF = re.compile(r"^secret(?P<optional>\?)?:(?P<name>[A-Z][A-Z0-9_]{0,63})$")
+HOME_FILE = re.compile(r"^[A-Za-z0-9._-]{1,128}(/[A-Za-z0-9._-]{1,128}){0,7}$")
 # What rrotor sets in a CLI's environment itself: its PATH, HOME and temporary folder, and the egress proxy
 ENV_RESERVED = frozenset({"PATH", "HOME", "TMPDIR", "NODE_USE_ENV_PROXY"})
 PROXY_ENV = re.compile(r"^(http|https|all|no)_proxy$", re.IGNORECASE)
@@ -150,6 +152,59 @@ class Install(BaseModel):
 
 
 Pattern = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[^\x00\n\r]+$")]
+Env = dict[Annotated[str, Field(pattern=ENV_NAME)], Annotated[str, Field(max_length=4096)]]
+
+
+def _check_env(value: dict[str, str]) -> dict[str, str]:
+    for name, text in value.items():
+        if name in ENV_RESERVED or name.startswith("LD_") or PROXY_ENV.match(name):
+            raise ValueError(f"{name} is set by rrotor (PATH, HOME, TMPDIR, the proxy, LD_*): leave it out")
+        if text.startswith(("secret:", "secret?:")) and not SECRET_REF.match(text):
+            raise ValueError(f"{name}: secret:NAME (or secret?:NAME) names a secret, ^[A-Z][A-Z0-9_]{{0,63}}$")
+    return value
+
+
+def _refs(env: dict[str, str]) -> dict[str, re.Match[str]]:
+    return {k: m for k, v in env.items() if (m := SECRET_REF.match(v))}
+
+
+class Login(BaseModel):
+    """How a CLI signs in from afar (docs/architecture.md, 5.7, signing in): the command that starts its sign-in, run
+    on a pseudo-terminal and kept running while the person opens its address on their phone; the code they paste (or
+    the address the browser ended on) is typed into it by program_continue."""
+
+    model_config = ConfigDict(extra="forbid")
+    args: list[Annotated[str, Field(max_length=8192)]] = Field(max_length=16)  # its arguments ([]: the bare command)
+    env: Env = {}  # beside the CLI's own env, for the sign-in only
+    listen: bool = False  # it listens on loopback for the browser's redirect: TCP inside the sandbox left open
+    paste: bool = True  # it waits for a code pasted back; false: it finds out itself (a device code, polling)
+    code: Annotated[str, Field(max_length=200)] | None = None  # a regex for its device code; a generic one otherwise
+    signed_in: Annotated[str, Field(pattern=HOME_FILE.pattern)] | None = None  # a file in HOME that means it is done
+    home_files: dict[Annotated[str, Field(pattern=HOME_FILE.pattern)], Annotated[str, Field(max_length=65536)]] = {}
+    seconds: int = Field(600, ge=30, le=1800)  # its time running (not the time it waits for the person)
+
+    @field_validator("env")
+    @classmethod
+    def _env(cls, value: dict[str, str]) -> dict[str, str]:
+        return _check_env(value)
+
+    @field_validator("code")
+    @classmethod
+    def _code(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as err:
+                raise ValueError(f"login.code is not a regular expression: {err}") from None
+        return value
+
+    @field_validator("signed_in", "home_files")
+    @classmethod
+    def _inside(cls, value: Any) -> Any:
+        for path in [value] if isinstance(value, str) else (value or {}):
+            if {".", ".."} & set(path.split("/")):
+                raise ValueError(f"{path} is a path inside HOME, without . or ..")
+        return value
 
 
 class Cli(BaseModel):
@@ -160,9 +215,10 @@ class Cli(BaseModel):
     command: str  # what runs: a path in the install (or a name found in it), npm's bin, PyPI's console script
     allow: list[Pattern] = []  # globs over the arguments, joined as a shell would quote them; none: any
     approvals: list[Pattern] = []  # the arguments that wait for the person's approval first
-    env: dict[Annotated[str, Field(pattern=ENV_NAME)], Annotated[str, Field(max_length=4096)]] = {}
+    env: Env = {}
     home: bool = False  # a private HOME kept across calls
     interactive: bool = False
+    login: Login | None = None  # how it signs in from afar (cli_login); needs its private HOME to keep the sign-in
 
     @field_validator("command")
     @classmethod
@@ -174,12 +230,7 @@ class Cli(BaseModel):
     @field_validator("env")
     @classmethod
     def _env(cls, value: dict[str, str]) -> dict[str, str]:
-        for name, text in value.items():
-            if name in ENV_RESERVED or name.startswith("LD_") or PROXY_ENV.match(name):
-                raise ValueError(f"{name} is set by rrotor (PATH, HOME, TMPDIR, the proxy, LD_*): leave it out")
-            if text.startswith("secret:") and not SECRET_REF.match(text):
-                raise ValueError(f"{name}: secret:NAME names a secret, ^[A-Z][A-Z0-9_]{{0,63}}$")
-        return value
+        return _check_env(value)
 
     @field_validator("interactive")
     @classmethod
@@ -193,11 +244,19 @@ class Cli(BaseModel):
         image = self.install.image
         if image is not None and self.command != image.rsplit("/", 1)[-1]:
             raise ValueError(f"command is the image binary's name, {image.rsplit('/', 1)[-1]}")
+        if self.login is not None and not self.home:
+            raise ValueError("login keeps its sign-in in the CLI's private HOME: set home to true")
         return self
 
-    def secret_refs(self) -> dict[str, str]:
-        """Each variable that takes a secret, and the secret's name."""
-        return {k: m["name"] for k, v in self.env.items() if (m := SECRET_REF.match(v))}
+    def secret_refs(self, login: bool = False) -> dict[str, str]:
+        """Each variable that takes a secret, and the secret's name (a sign-in's own env beside, with `login`)."""
+        env = self.env | (self.login.env if login and self.login else {})
+        return {k: m["name"] for k, m in _refs(env).items()}
+
+    def optional_secrets(self) -> set[str]:
+        """The secrets only ever taken as secret?:NAME: a run goes without them when they are not set."""
+        refs = list(_refs(self.env).values()) + (list(_refs(self.login.env).values()) if self.login else [])
+        return {m["name"] for m in refs} - {m["name"] for m in refs if not m["optional"]}
 
 
 class Manifest(BaseModel):
@@ -266,7 +325,7 @@ class Manifest(BaseModel):
         ]
         if given:
             raise ValueError(f"a cli runs its command, so it has no {', '.join(given)}")
-        unset = sorted(set(self.cli.secret_refs().values()) - set(self.secrets))
+        unset = sorted(set(self.cli.secret_refs(login=True).values()) - set(self.secrets))
         if unset:
             raise ValueError(f"cli.env takes the secret {', '.join(unset)}, not in secrets: declare it there")
         return self

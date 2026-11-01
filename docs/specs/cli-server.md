@@ -1,6 +1,6 @@
 # The CLI server: sandboxed command-line tools Claude drives through rrotor
 
-**Status: approved (2026-10-31); steps 1, 2 and 4 built, step 3 (interactive sessions) not built.** The founder's
+**Status: approved (2026-10-31); steps 1, 2, 4 and 5 built, step 3 (interactive sessions) not built.** The founder's
 rulings: a CLI is a kind of program; one-shot commands first (interactive sessions later); program databases start
 with SQLite (built: `ctx.db`). How it is built: [`architecture.md`, 5.7](../architecture.md#57-clis).
 
@@ -81,6 +81,11 @@ Files go in and out through a per-call working folder, not the person's filesyst
 3. **Not built.** Interactive sessions on a pseudo-terminal (`"interactive": true` is refused, `E_MANIFEST`).
 4. **Built.** The glyphh CLI as the first packaged CLI (`examples/cli_glyphh/`), with an example manifest for `gh`
    (`examples/cli_gh/`); their version and checksum pins are placeholders.
+5. **Built (2026-11-01).** The vendors' agent CLIs in the image, pinned (Claude Code, Codex, Gemini, Cursor, Grok,
+   Copilot), deployed at boot as built-in CLIs; and signing in from afar (`login`, `cli_login`): the sign-in command
+   kept running on a pseudo-terminal across the person's wait, its address (and device code) answered as
+   `needs_input`, the code they paste typed back into it by `program_continue`
+   ([`architecture.md`, 5.7](../architecture.md#57-clis)).
 
 ## The founder's answers (2026-10-31)
 

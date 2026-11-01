@@ -7,6 +7,7 @@ code runs outside the sandbox, not even a package's setup), and the version beco
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
 import shutil
@@ -19,7 +20,7 @@ from rrotord import clis
 from rrotord import manifest as manifests
 from rrotord.errors import BadRequest, DeployError
 from rrotord.proc import run
-from rrotord.programs import Programs, Version
+from rrotord.programs import BUILTIN, Programs, Version
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 REPO = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
@@ -108,6 +109,41 @@ class Deployer:
             found = self.programs.renumber(found, version)
         self.programs.activate(found)
         return found
+
+    async def builtin(self, folder: Path) -> Version | None:
+        """A built-in CLI the image carries (its folder: glyphh.json, installing from the image, and vendor.json), at
+        boot: deployed when this rrotor has no program of its name, or a new version of it when the image's pins
+        changed and the active one is built-in too. A CLI of that name the person deployed is theirs: left as it is.
+        Its commit is the SHA-1 of its manifest and vendor file, so every node of a cluster makes the same one."""
+        found = manifests.read(folder)
+        vendor = (folder / "vendor.json").read_bytes()
+        named = (b"rrotor-builtin\0", (folder / "glyphh.json").read_bytes(), vendor)
+        commit = hashlib.sha1(b"".join(named), usedforsecurity=False).hexdigest()
+        known = found.name in self.programs.names()
+        active = self.programs.active(found.name) if known else None
+        if known and (active is None or active.builtin is None):
+            return None
+        if active is not None and active.commit_sha == commit:
+            return None
+        if self.programs.by_sha(found.name, commit) is not None:
+            return await self.held(found.name, commit)
+        root = self.programs.version_root(found.name, commit)
+        staging = root.with_name(f".{commit}.staging")
+        shutil.rmtree(staging, ignore_errors=True)
+        (staging / "src").mkdir(parents=True)
+        try:
+            shutil.copyfile(folder / "glyphh.json", staging / "src" / "glyphh.json")
+            (staging / "src" / BUILTIN).write_bytes(vendor)
+            await self._venv(staging, lock=False)
+            await self.installer.install(found, staging / "cli", staging / "src")
+            staging.rename(root)
+        except BaseException:
+            shutil.rmtree(staging if known else self.programs.folder(found.name), ignore_errors=True)
+            raise
+        self._seed(found.name, root / "src" / "files")
+        made = self.programs.record(found.name, self.programs.next_number(found.name), commit, found)
+        self.programs.activate(made)
+        return made
 
     def _scratch(self) -> Path:
         self.scratch.mkdir(parents=True, exist_ok=True)

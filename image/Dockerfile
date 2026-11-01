@@ -9,6 +9,14 @@ RUN apt-get update \
 COPY --from=node:22-trixie-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /usr/local/bin/uv
 
+# The vendors' agent CLIs (Claude Code, Codex, Gemini, Cursor, Grok, Copilot), pinned in image/clis.json by version
+# and the SHA-256 of each architecture's download, checked before anything is unpacked; each with its built-in
+# manifest beside it, which rrotord deploys at boot (docs/architecture.md, 5.7).
+FROM os AS clis
+ARG TARGETARCH
+COPY image/clis.json image/clis.py /tmp/
+RUN python3 /tmp/clis.py /tmp/clis.json /clis "${TARGETARCH}"
+
 FROM os AS build
 WORKDIR /src
 COPY pyproject.toml uv.lock ./
@@ -30,6 +38,7 @@ LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/glyphh" \
       org.opencontainers.image.description="rrotor: Glyphh's per-person runtime (base)" \
       org.opencontainers.image.version="${VERSION}"
 COPY --from=build /opt/rrotord /opt/rrotord
+COPY --from=clis /clis/ /
 RUN useradd --uid 10001 --user-group --create-home --home-dir /home/rrotor --shell /usr/sbin/nologin rrotor \
  && mkdir -p /data && chown rrotor:rrotor /data
 ENV PATH=/opt/rrotord/bin:/usr/local/bin:/usr/bin:/bin \

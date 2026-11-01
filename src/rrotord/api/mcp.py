@@ -32,7 +32,9 @@ INSTRUCTIONS = (
     "program's secrets (values are never shown back); schedules_list, schedule_pause and schedule_resume show and "
     "pause the schedules this runtime fires itself. clis_list shows the command-line tools installed here, and "
     "cli_run runs one command of one in the sandbox (args checked against its allow patterns; one that needs approval "
-    "answers needs_approval, then program_continue runs it once the person approves)."
+    "answers needs_approval, then program_continue runs it once the person approves). The vendors' agent CLIs (claude, "
+    "codex, gemini, cursor, grok, copilot) come built in; cli_login signs one in from the person's phone: it answers "
+    "needs_input with an address (and a device code) to open, and program_continue brings back the code the page shows."
 )
 
 
@@ -117,6 +119,10 @@ async def clis_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
 
 async def cli_run(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.cli_run(s, args)
+
+
+async def cli_login(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.cli_login(s, {"cli": ops.text_of(args, "cli")})
 
 
 async def schedules_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
@@ -271,6 +277,16 @@ TOOLS: tuple[Tool, ...] = (
             ["cli", "args"],
         ),
         cli_run,
+    ),
+    Tool(
+        "cli_login",
+        "Sign a CLI in from afar (one whose clis_list entry has login), its sign-in kept in its private HOME for "
+        "later cli_run calls: answers needs_input with data.url (and data.code for a device flow) for the person to "
+        "open on their phone; then program_continue with the code the page shows (or, if the page ends on an "
+        "http://localhost… address that does not load, that address; after a device code, any answer once they "
+        "signed in). Answers done with signed_in when it has.",
+        _obj({"cli": {"type": "string"}}, ["cli"]),
+        cli_login,
     ),
 )
 BY_NAME = {t.name: t for t in TOOLS}

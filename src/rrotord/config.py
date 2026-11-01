@@ -67,6 +67,7 @@ class Config:
     runtime_id: str | None = None  # hosted: the runtime this machine is, from its secrets
     runtime_token: str | None = None  # hosted: its token for the link, from its secrets
     builtin_parts: Path = Path("/opt/parts-builtin")  # parts the image carries, installed at boot
+    builtin_clis: Path = Path("/usr/local/lib/rrotor-clis")  # the vendors' CLIs the image carries, deployed at boot
     public_domain: str = "glyphh.app"  # hosted and doorman: the runtimes' addresses are <machine>.<domain>
     machine_id: str | None = None  # hosted: this machine's id (Fly's FLY_MACHINE_ID), its own address
     keys_sha256: tuple[str, ...] = ()  # hosted: the runtime keys' SHA-256s at first; the Cloud's list after
@@ -346,6 +347,7 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         runtime_id=runtime_id,
         runtime_token=runtime_token,
         builtin_parts=Path(env.get("RROTOR_BUILTIN_PARTS", "/opt/parts-builtin")),
+        builtin_clis=Path(env.get("RROTOR_BUILTIN_CLIS", "/usr/local/lib/rrotor-clis")),
         public_domain=env.get("RROTOR_PUBLIC_DOMAIN", "glyphh.app").strip().lower().rstrip("."),
         machine_id=machine_id.lower() if machine_id else None,
         keys_sha256=keys,

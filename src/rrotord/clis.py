@@ -384,7 +384,8 @@ class Installer:
             raise refused(f"The image has no {image}.")
         if not path.startswith(IMAGE_ROOTS):
             raise refused(f"{image} is at {path}, outside /usr: the sandbox does not have it.")
-        verify(Path(path).read_bytes(), sha256, path)
+        if sha256 is not None:  # read only to check it (a vendor's binary is hundreds of MB)
+            verify(Path(path).read_bytes(), sha256, path)
         return Installed("exec", path, absolute=True)
 
 

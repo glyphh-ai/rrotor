@@ -78,8 +78,18 @@ def test_each_install_source_and_the_hosts_it_implies(install, source, hosts):
         ({"cli_env": {"PATH": "/x"}}, "PATH is set by rrotor"),
         ({"cli_env": {"https_proxy": "x"}}, "set by rrotor"),
         ({"cli_env": {"LD_PRELOAD": "x"}}, "set by rrotor"),
-        ({"cli_env": {"T": "secret:lower"}}, "secret:NAME names a secret"),
+        ({"cli_env": {"T": "secret:lower"}}, "secret:NAME (or secret?:NAME) names a secret"),
+        ({"cli_env": {"T": "secret?:"}}, "names a secret"),
         ({"cli_env": {"T": "secret:TOKEN"}}, "takes the secret TOKEN, not in secrets"),
+        ({"cli_login": {"args": ["login"]}}, "set home to true"),
+        ({"cli_home": True, "cli_login": {"args": ["login"], "env": {"T": "secret:K"}}}, "the secret K, not in"),
+        ({"cli_home": True, "cli_login": {"args": [], "env": {"HOME": "/x"}}}, "HOME is set by rrotor"),
+        ({"cli_home": True, "cli_login": {"args": [], "code": "("}}, "not a regular expression"),
+        ({"cli_home": True, "cli_login": {"args": [], "signed_in": "../x"}}, "inside HOME"),
+        ({"cli_home": True, "cli_login": {"args": [], "signed_in": "/etc/x"}}, "String should match pattern"),
+        ({"cli_home": True, "cli_login": {"args": [], "home_files": {"a/../b": ""}}}, "inside HOME"),
+        ({"cli_home": True, "cli_login": {"args": [], "seconds": 5}}, "greater than or equal to 30"),
+        ({"cli_home": True, "cli_login": {}}, "args"),
         ({"cli_allow": [""]}, "at least 1 character"),
         ({"kind": "program", "functions": {"start": {}}}, 'cli is for a manifest of "kind": "cli"'),
     ],
@@ -107,6 +117,33 @@ def test_env_names_the_secrets_it_takes():
         cli_manifest(cli={"env": {"TOKEN": "secret:TOKEN", "PLAIN": "1"}}, secrets=["TOKEN"])
     )
     assert found.cli is not None and found.cli.secret_refs() == {"TOKEN": "TOKEN"}
+
+
+def test_a_secret_taken_only_as_secret_question_is_optional():
+    login = {"args": ["login"], "env": {"KEY": "secret?:KEY", "BOTH": "secret:BOTH"}}
+    env = {"KEY": "secret?:KEY", "TOKEN": "secret:TOKEN", "BOTH": "secret?:BOTH"}
+    found = m.Manifest.model_validate(
+        cli_manifest(cli={"env": env, "home": True, "login": login}, secrets=["KEY", "TOKEN", "BOTH"])
+    )
+    assert found.cli is not None and found.cli.optional_secrets() == {"KEY"}
+    assert found.cli.secret_refs() == {"KEY": "KEY", "TOKEN": "TOKEN", "BOTH": "BOTH"}
+    assert found.cli.secret_refs(login=True)["BOTH"] == "BOTH"
+    bare = m.Manifest.model_validate(cli_manifest(cli={"env": {"KEY": "secret?:KEY"}}, secrets=["KEY"]))
+    assert bare.cli is not None and bare.cli.optional_secrets() == {"KEY"} and bare.cli.login is None
+
+
+def test_a_login_block_and_its_defaults():
+    found = m.Manifest.model_validate(cli_manifest(cli={"home": True, "login": {"args": ["auth", "login"]}}))
+    assert found.cli is not None and found.cli.login is not None
+    login = found.cli.login
+    assert (login.args, login.listen, login.paste, login.code, login.signed_in, login.seconds) == (
+        ["auth", "login"],
+        False,
+        True,
+        None,
+        None,
+        600,
+    )
 
 
 @pytest.mark.parametrize("example", ["cli_gh", "cli_glyphh"])

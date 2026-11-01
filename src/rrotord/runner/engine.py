@@ -18,7 +18,9 @@ A CLI (`"kind": "cli"`, rrotord/clis.py) runs the same way, one command per run 
 against `allow` first (E_CLI_DENIED, never a run), a run that waits for the person's approval when `approvals` names
 them (resumed by a continue like a program's), then the worker runs the command in the sandbox with the CLI's install,
 a fresh working folder for the call and its private HOME mounted; its Result (exit code, stdout, stderr) has its
-secrets' values masked, and the files the command made or changed added."""
+secrets' values masked, and the files the command made or changed added. A CLI's sign-in (`cli_login`, its
+manifest's `login`) is such a run whose command stays up across the person's wait: `needs_input` with the address
+to open, each continue's answer typed into it (never kept), its seconds the sign-in's own."""
 
 from __future__ import annotations
 
@@ -62,6 +64,7 @@ CLI = "cli"  # a CLI's run's function, and the step its approval waits at
 WORK = "work"  # a CLI's run's working folder, in its record's folder
 CLI_PATH = "/usr/local/bin:/usr/bin:/bin"
 PROXY = "http://127.0.0.1:3128"
+LOOPBACK = "localhost,127.0.0.1,::1"  # never through the proxy: a CLI's own listener, for its sign-in
 
 Notify = Callable[[Run], Awaitable[None]]
 
@@ -222,7 +225,32 @@ class Runner:
         try:
             found, args = self._cli_found(cli, args)
             line = masked(clis.command_line(args), self._hidden_now(found))
-            run = await self._cli_call(found, args, line, stdin, files, caller, origin)
+            sign_in = found.manifest.cli.login if found.manifest.cli else None
+            if sign_in is not None and args and args == sign_in.args[: len(args)]:  # its sign-in, by cli_run
+                run = await self._cli_call(found, sign_in.args, line, None, None, caller, origin, login=True)
+            else:
+                run = await self._cli_call(found, args, line, stdin, files, caller, origin)
+        except RrotorError as err:
+            asked = {"program": cli, "version": None, "function": CLI, "run_id": None, "command": line}
+            self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
+            raise
+        self._audit("run.call", **about(run), command=line, outcome=outcome(run), seconds=round(run.seconds, 3))
+        return run
+
+    async def cli_login(self, *, cli: str, caller: str = "claude", origin: str = "local") -> Run:
+        """A CLI's sign-in (its manifest's `login`), a run like any command's: its command started on a
+        pseudo-terminal in the sandbox, answering `needs_input` with the address (and device code) it shows, which
+        the person opens on their phone; program_continue types the code they paste back into the command, still
+        running, and the run ends `done` once it has signed in, its login kept in the CLI's private HOME."""
+        line = None
+        try:
+            found, _ = self._cli_found(cli, [])
+            assert found.manifest.cli is not None  # noqa: S101  (checked by _cli_found)
+            sign_in = found.manifest.cli.login
+            if sign_in is None:
+                raise BadRequest(f"{cli} does not say how it signs in (no login in its manifest).", code="E_CLI_LOGIN")
+            line = clis.command_line(sign_in.args)
+            run = await self._cli_call(found, sign_in.args, line, None, None, caller, origin, login=True)
         except RrotorError as err:
             asked = {"program": cli, "version": None, "function": CLI, "run_id": None, "command": line}
             self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
@@ -249,11 +277,19 @@ class Runner:
         return sorted((v for v in values.values() if len(v) >= MASK_MIN), key=len, reverse=True)
 
     async def _cli_call(
-        self, found: Version, args: list[str], line: str, stdin: Any, files: Any, caller: str, origin: str
+        self,
+        found: Version,
+        args: list[str],
+        line: str,
+        stdin: Any,
+        files: Any,
+        caller: str,
+        origin: str,
+        login: bool = False,
     ) -> Run:
         cli = found.manifest.cli
         assert cli is not None  # noqa: S101  (checked by _cli_found)
-        if not clis.allowed(cli.allow, args):
+        if not login and not clis.allowed(cli.allow, args):
             raise Forbidden(
                 f"{found.program} does not allow `{line}`: its allow patterns are {', '.join(cli.allow)}.",
                 code="E_CLI_DENIED",
@@ -263,8 +299,11 @@ class Runner:
         work = self.records.folder(run.id) / WORK
         work.mkdir(parents=True)
         run.inputs = {"args": args, "stdin": text, "files": clis.write_files(work, given)}
+        if login:
+            run.inputs["login"] = True
         self.records.save(run)
-        self.records.log(run.id, {"event": "called", "command": line, "caller": caller, "version": found.version})
+        called = {"event": "called", "command": line, "caller": caller, "version": found.version}
+        self.records.log(run.id, called | ({"login": True} if login else {}))
         with logs.bind(**about(run)):
             async with self._lock(run.id):
                 await self._go(run, found, None)
@@ -275,7 +314,8 @@ class Runner:
         cli, manifest = found.manifest.cli, found.manifest
         assert cli is not None  # noqa: S101  (a manifest of kind cli has one)
         args = list(run.inputs.get("args") or [])
-        pattern = clis.matching(cli.approvals, args)
+        sign_in = cli.login if run.inputs.get("login") else None
+        pattern = None if sign_in is not None else clis.matching(cli.approvals, args)
         decided = RunState.from_json(run.state).approvals.get(CLI)
         if pattern is not None and decided is None:
             line = masked(clis.command_line(args), self._hidden_now(found))
@@ -311,6 +351,7 @@ class Runner:
             cli=found.root / "cli",
             work=self.records.folder(run.id) / WORK,
             home=home,
+            listen=sign_in is not None and sign_in.listen,
         )
         paths = self.launcher.paths(mounts)
         env = {
@@ -323,10 +364,12 @@ class Runner:
         }
         if socket is not None:
             env |= {k: PROXY for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")}
-            env["NODE_USE_ENV_PROXY"] = "1"
-        refs = cli.secret_refs()
-        env |= {k: (values[refs[k]] if k in refs else v) for k, v in cli.env.items()}
-        spec = {
+            env |= {"NODE_USE_ENV_PROXY": "1", "NO_PROXY": LOOPBACK, "no_proxy": LOOPBACK}
+        refs = cli.secret_refs(login=sign_in is not None)
+        given = cli.env | (sign_in.env if sign_in is not None else {})
+        env |= {k: values.get(refs[k], "") if k in refs else v for k, v in given.items()}
+        env = {k: v for k, v in env.items() if k not in refs or v}  # an optional secret not set: left out
+        spec: dict[str, Any] = {
             "run": made.run,
             "path": made.where(str(paths.get("cli_root"))),
             "args": args,
@@ -335,6 +378,14 @@ class Runner:
             "cwd": paths.get("work"),
             "cap": clis.OUTPUT_MAX,
         }
+        if sign_in is not None:
+            spec["login"] = {
+                "paste": sign_in.paste,
+                "code": sign_in.code,
+                "signed_in": sign_in.signed_in,
+                "home_files": sign_in.home_files,
+                "listen": sign_in.listen,
+            }
         await self._start(run, found, mounts, cli=spec, function=CLI, hosts=sorted(hosts), **paths)
 
     def _parts_refused(self, program: str, found: Version) -> dict[str, Any] | None:
@@ -414,8 +465,16 @@ class Runner:
     def _stopped(status: str, step: str, reason: str) -> dict[str, Any]:
         return {"status": status, "data": {"reason": reason}, "step": step, "prompt": None}
 
+    @staticmethod
+    def _seconds(run: Run, found: Version) -> int:
+        """A run's seconds: its manifest's, or a CLI's sign-in's own (the time it runs, not the time it waits)."""
+        cli = found.manifest.cli
+        if run.inputs.get("login") and cli is not None and cli.login is not None:
+            return cli.login.seconds
+        return found.manifest.limits.seconds
+
     def _left(self, run: Run, found: Version) -> float:
-        return max(found.manifest.limits.seconds - run.seconds, 0.0)
+        return max(self._seconds(run, found) - run.seconds, 0.0)
 
     def _mounts(self, program: str, found: Version, socket: Path | None) -> bwrap.Mounts:
         manifest = found.manifest
@@ -449,6 +508,8 @@ class Runner:
             values, missing = self.vault.values(run.program, declared) if self.vault else ({}, list(declared))
         except RrotorError as err:
             return {}, failed("secrets", err.code, err.message)
+        optional = found.manifest.cli.optional_secrets() if found.manifest.cli else set()
+        missing = [name for name in missing if name not in optional]
         if not missing:
             return values, None
         many = len(missing) > 1
@@ -495,7 +556,7 @@ class Runner:
     async def _start(self, run: Run, found: Version, mounts: bwrap.Mounts, **start: Any) -> None:
         """The run's worker started in its sandbox and sent `start`, then its first Result awaited."""
         manifest = found.manifest
-        limits = bwrap.Limits(manifest.limits.memory_mb, manifest.limits.seconds + 5)
+        limits = bwrap.Limits(manifest.limits.memory_mb, self._seconds(run, found) + 5)
         try:
             with self._span("rrotor.sandbox.start", run):
                 worker = await Worker.start(

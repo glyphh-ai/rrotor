@@ -266,6 +266,43 @@ def test_a_clis_run_runs_its_command_locked_without_exec_of_what_it_writes(tmp_p
     assert (result["status"], result["data"]["stdout"], result["data"]["exit_code"]) == ("done", "hi there\n", 0)
 
 
+def sign_in_spec(tmp_path: Path, body: str) -> dict[str, Any]:
+    tool = tmp_path / "tool"
+    tool.write_text("#!/bin/sh\n" + body)
+    tool.chmod(0o755)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    return {"run": "exec", "path": str(tool), "args": [], "env": env, "cwd": str(tmp_path), "login": {}}
+
+
+def test_a_clis_sign_in_waits_for_its_answer_with_the_command_kept_running(tmp_path):
+    spec = sign_in_spec(tmp_path, 'echo "https://s.example.com/x"\nread code\necho "got $code"\n')
+
+    def react(message: dict[str, Any], runner: Runner) -> None:
+        if message["op"] == "result" and message["result"]["status"] == "needs_input":
+            runner.send("continue", answer="the-code", seconds_left=10)
+        elif message["op"] == "result":
+            runner.send("end")
+
+    lock = Lock()
+    box = {"landlock": {"read": ["/usr"], "write": ["/work"], "exec_writes": False, "net": False}}
+    runner = run({"function": "cli", "cli": spec, "sandbox": box, "seconds_left": 10}, react, landlock=lock)
+    assert lock.rules.net is False
+    assert runner.ops() == ["result", "result", "ended"]
+    asked, done = runner.results()
+    assert (asked["status"], asked["data"]["url"]) == ("needs_input", "https://s.example.com/x")
+    assert runner.got[0]["pending"] == {"kind": "login", "key": "cli"} and runner.got[1]["pending"] is None
+    assert done["status"] == "done" and "got [answer]" in done["data"]["output"]
+
+
+def test_a_clis_sign_in_ends_at_end_or_when_it_cannot_start(tmp_path):
+    spec = sign_in_spec(tmp_path, 'echo "https://s.example.com/x"\nsleep 30\n')
+    runner = run({"function": "cli", "cli": spec, "seconds_left": 10})  # `end` while it waits
+    assert runner.ops() == ["result", "ended"] and runner.results()[0]["status"] == "needs_input"
+    spec["path"] = str(tmp_path / "missing")
+    runner = run({"function": "cli", "cli": spec, "seconds_left": 10})
+    assert runner.results()[0]["data"]["code"] == "E_CLI_EXEC" and runner.ops() == ["result", "ended"]
+
+
 def test_a_sandbox_that_cannot_lock_fails_the_run(tmp_path):
     folder = write(tmp_path / "p", PROGRAM)
     box: dict[str, Any] = {"landlock": {"read": [], "write": []}}

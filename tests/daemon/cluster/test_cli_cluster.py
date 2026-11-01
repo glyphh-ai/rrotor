@@ -35,3 +35,24 @@ async def test_a_followers_cli_command_runs_on_the_head(ring: Ring):
     assert res.status == 200, body
     assert (body["status"], body["data"]["exit_code"]) == ("done", 3) and body["run_id"].startswith("n0~")
     assert body["data"]["stdout"].startswith("args: hi\n")
+
+
+SIGN_IN = '#!/bin/sh\necho "visit https://auth.example.com/x"\nread code\necho "$code" > "$HOME/creds"\n'
+
+
+async def test_a_followers_cli_sign_in_runs_on_the_head(ring: Ring):
+    ids = ["n0", "n1"]
+    head = await ring.add("n0", ids)
+    await until(lambda: head.cluster.role == "head")
+    archive = tarball({"bin/tool": SIGN_IN}, {"bin/tool": 0o755})
+    block = {"install": {"url": URL, "sha256": sha(archive)}, "home": True, "login": {"args": ["login"]}}
+    await install_cli(head.runner.programs, cli_manifest(cli=block), FakeFetch({URL: archive}))
+    one = await ring.add("n1", ids)
+    await until(lambda: one.cluster.ready()[0] and one.runner.programs.active("tool") is not None)
+    res = await ring.clients["n1"].post("/v1/clis/tool/login", headers=ring.headers())
+    body = await res.json()
+    assert res.status == 200 and body["status"] == "needs_input" and body["run_id"].startswith("n0~"), body
+    path = f"/v1/runs/{body['run_id']}/continue"
+    res = await ring.clients["n1"].post(path, json={"answer": "code-9"}, headers=ring.headers())
+    assert (await res.json())["status"] == "done"
+    assert (head.runner.programs.folder("tool") / "home" / "creds").read_text() == "code-9\n"
