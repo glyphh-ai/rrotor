@@ -5,8 +5,9 @@
 A program is a module with `load(ctx)`, its functions `fn(ctx, inputs) -> Result` and `end(ctx)`; rrotor runs it in
 its sandbox (docs/architecture.md, section 5)."""
 
-from rrotor.ctx import Ctx, Secrets
+from rrotor.ctx import CliResult, Ctx, Secrets
 from rrotor.errors import (
+    CliError,
     DatabaseUndeclared,
     PartMissing,
     ProgramError,
@@ -19,6 +20,8 @@ from rrotor.result import STATUSES, Result
 
 __all__ = [
     "STATUSES",
+    "CliError",
+    "CliResult",
     "Ctx",
     "DatabaseUndeclared",
     "Http",

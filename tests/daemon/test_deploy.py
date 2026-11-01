@@ -43,6 +43,23 @@ async def test_from_bundle_installs_and_activates(tmp_path, repo: GitRepo):
     assert list((tmp_path / "scratch").iterdir()) == []
 
 
+async def test_a_program_naming_a_cli_not_here_is_refused(tmp_path, repo: GitRepo):
+    from tests.fakes import cli_manifest, install
+
+    d = deployer(tmp_path)
+    install(d.programs, manifest("plain"), "def start(ctx, inputs):\n    pass\n", sha="e" * 40)
+    install(d.programs, cli_manifest("idle"), "", sha="d" * 40)
+    (d.programs.folder("idle") / "active.json").unlink()
+    sha = repo.program(manifest("sample", clis=["claude", "plain", "idle"]))
+    with pytest.raises(DeployError, match="names the CLIs claude, plain, idle, not on this rrotor") as caught:
+        await d.from_bundle(repo.bundle(tmp_path / "b.bundle"), sha)
+    assert caught.value.code == "E_MANIFEST"
+    install(d.programs, cli_manifest("claude"), "", sha="f" * 40)
+    sha = repo.program(manifest("sample", clis=["claude"]))
+    v = await d.from_bundle(repo.bundle(tmp_path / "c.bundle"), sha)
+    assert v.manifest.clis == ["claude"]
+
+
 async def test_a_second_version_keeps_the_folder_and_numbers_up(tmp_path, repo: GitRepo):
     d = deployer(tmp_path)
     first = repo.program(manifest("sample"))

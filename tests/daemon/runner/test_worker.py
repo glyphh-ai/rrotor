@@ -1,4 +1,5 @@
 import asyncio
+import json
 import socket
 import sys
 from typing import Any
@@ -77,6 +78,39 @@ async def test_send_reaches_the_worker():
     assert await w.send("start", a=1)
     message = await w.next(5)
     assert message is not None and message["got"] == '{"op":"start","a":1}\n'
+    await w.stop()
+
+
+CLI_ASK = (
+    "import json\n"
+    "for n in (1, 2):\n"
+    "    os.write(fd, json.dumps({'op': 'cli', 'id': n, 'cli': 'c'}).encode() + b'\\n')\n"
+    "got = b''\n"
+    "while got.count(b'\\n') < 2:\n"
+    "    got += os.read(fd, 4096)\n"
+    "os.write(fd, json.dumps({'op': 'result', 'got': got.decode()}).encode() + b'\\n')"
+)
+
+
+async def test_a_programs_ctx_cli_is_served_and_answered_by_its_id():
+    async def serve(ask: dict[str, Any]) -> dict[str, Any]:
+        if ask["id"] == 2:
+            raise RuntimeError("broke")
+        return {"status": "done", "data": {"cli": ask["cli"]}}
+
+    w = await Worker.start(Script(CLI_ASK), lambda fd: Spec(None, None, fd), lambda m: None, serve)  # type: ignore[arg-type]
+    message = await w.next(5)
+    assert message is not None
+    answers = sorted((json.loads(line) for line in message["got"].splitlines()), key=lambda a: a["id"])
+    assert answers[0] == {"op": "cli_result", "id": 1, "result": {"status": "done", "data": {"cli": "c"}}}
+    assert answers[1]["result"]["data"] == {"code": "E_CLI", "reason": "broke"}
+    await w.stop()
+
+
+async def test_a_worker_with_nothing_to_serve_refuses_a_cli():
+    w = await Worker.start(Script(CLI_ASK), lambda fd: Spec(None, None, fd), lambda m: None)  # type: ignore[arg-type]
+    message = await w.next(5)
+    assert message is not None and "E_CLI_MISSING" in message["got"]
     await w.stop()
 
 

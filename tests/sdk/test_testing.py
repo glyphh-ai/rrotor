@@ -98,3 +98,33 @@ def test_harness_keeps_checkpoints_across_resumes(tmp_path):
     assert h.call("start").status == "needs_input"
     assert h.resume(10) == Result.done(11)
     assert calls == [1] and h.logs == []
+
+
+def test_harness_answers_ctx_cli_with_fake_clis(tmp_path):
+    from rrotor import CliError, CliResult
+    from rrotor.testing import FakeCli
+
+    def start(ctx, inputs):
+        sent = ctx.cli("claude", ["-p", "email it"])
+        merged = ctx.cli("gh", ["pr", "merge", "1"], stdin="why")
+        failed = ctx.cli("tool", ["x"])
+        try:
+            ctx.cli("gone", [])
+        except CliError as err:
+            missing = err.code
+        return Result.done([sent.stdout, merged.stdout, failed.exit_code, missing])
+
+    clis = {
+        "claude": FakeCli("Sent the email.", allow=["-p *"]),
+        "gh": FakeCli(lambda args, stdin: f"{' '.join(args)} ({stdin})", approvals=["pr merge *"]),
+        "tool": FakeCli(CliResult(3, "", "bad")),
+        "gone": None,
+    }
+    h = Harness(module(start=start), tmp_path, clis=clis)
+    assert h.call("start").status == "needs_approval"  # gh's approval pattern: a step of the run
+    assert h.resume({"approved": True}) == Result.done(["Sent the email.", "pr merge 1 (why)", 3, "E_CLI_MISSING"])
+    assert h.cli_calls == [
+        ("claude", ["-p", "email it"], None),
+        ("gh", ["pr", "merge", "1"], "why"),
+        ("tool", ["x"], None),
+    ]  # claude ran once: the resumed run read its checkpoint

@@ -141,6 +141,29 @@ async def test_a_sign_in_that_listens_takes_the_pasted_redirect_inside_the_sandb
     assert refused.status == "done" and data["exit_code"] != 0 and "PermissionError" in data["output"], data
 
 
+USES_A_CLI = """
+from rrotor import Result
+
+def start(ctx, inputs):
+    import glyphh
+    got = ctx.cli("shell", ["-c", "echo from $HOME; touch /work/x && echo wrote"])
+    return Result.done({"out": got.stdout, "exit": got.exit_code, "glyphh": glyphh.__version__})
+"""
+
+
+async def test_a_program_runs_a_cli_in_the_clis_own_sandbox(runner):
+    _, made = runner
+    deployer = Deployer(made.programs, Path(tempfile.mkdtemp(prefix="rr-deploy-")))
+    data = manifest("uses", clis=["shell"])
+    await deploy(deployer, "uses", {"glyphh.json": json.dumps(data), "program.py": USES_A_CLI})
+    run = await made.call(program="uses", function="start", inputs={})
+    assert run.status == "done", run.result
+    result = run.result["data"]
+    assert (result["out"], result["exit"]) == ("from /home/cli\nwrote\n", 0)  # the CLI's HOME and folder
+    pinned = json.loads(Path("/usr/local/lib/rrotor-clis/glyphh/vendor.json").read_text())["version"]
+    assert result["glyphh"] == pinned  # the image's Glyphh SDK, with no requirements.lock
+
+
 async def test_ctx_db_opens_in_the_programs_data_folder(runner):
     root, made = runner
     first = await made.call(program="counts", function="start", inputs={})

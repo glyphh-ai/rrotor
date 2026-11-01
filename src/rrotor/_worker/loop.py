@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import importlib.util
+import os
 import queue
 import signal
 import sys
@@ -33,6 +34,7 @@ from rrotor.result import Result
 
 PROXY_URL = "http://127.0.0.1:3128"
 DATABASE = "db.sqlite3"  # ctx.db, in the program's data folder
+SDKS = ("/usr/local/lib/rrotor-sdk",)  # image/sdk.lock: importable by every program, as rrotor is
 _DONE = Result.done()
 
 
@@ -66,6 +68,8 @@ class Worker:
         self.channel = channel
         self.landlock = landlock
         self.inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self.replies: queue.Queue[dict[str, Any] | None] = queue.Queue()  # what rrotor answered ctx.cli
+        self.asked = 0
         self.running = threading.Event()
         self._main = threading.get_ident()  # a cancel is a signal to this thread: it interrupts a blocking call too
 
@@ -75,8 +79,22 @@ class Worker:
                 if self.running.is_set():
                     signal.pthread_kill(self._main, signal.SIGUSR1)
                 continue
+            if message.get("op") == "cli_result":
+                self.replies.put(message)
+                continue
             self.inbox.put(message)
+        self.replies.put(None)
         self.inbox.put(None)
+
+    def _cli(self, ask: dict[str, Any]) -> dict[str, Any]:
+        """A CLI's command a program asked for (ctx.cli), run by rrotor in that CLI's sandbox: its Result."""
+        self.asked += 1
+        self.channel.send("cli", id=self.asked, **ask)
+        while (reply := self.replies.get()) is not None:
+            if reply.get("id") == self.asked:
+                result: dict[str, Any] = reply.get("result") or {}
+                return result
+        return {"status": "failed", "data": {"code": "E_CLI", "reason": "rrotor went away during the command."}}
 
     def _sink(self, op: str, data: dict[str, Any]) -> None:
         self.channel.send(op, **data)
@@ -150,7 +168,12 @@ class Worker:
             readonly=bool(start.get("readonly")),
             secrets=Secrets(secrets.get("declared") or (), secrets.get("values") or {}),
             database=Path(start["data"]) / DATABASE if start.get("sqlite") and start.get("data") else None,
+            clis=start.get("clis"),
+            request=self._cli,
         )
+        for sdk in SDKS:  # the SDKs the image carries (glyphh), after the program's own venv
+            if os.path.isdir(sdk) and sdk not in sys.path:
+                sys.path.append(sdk)
         try:
             program = import_program(str(start.get("program", "/program")))
         except BaseException as err:  # noqa: BLE001  (a program that cannot import is a failed run)

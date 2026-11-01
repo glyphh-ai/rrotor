@@ -63,6 +63,26 @@ class SecretMissing(ProgramError):
         self.name = name
 
 
+class CliError(ProgramError):
+    """`ctx.cli` refused or failed: a CLI the manifest does not name, not on this rrotor, arguments it does not
+    allow, a command the person declined, or one that did not run."""
+
+    def __init__(self, message: str, code: str = "E_CLI") -> None:
+        super().__init__(message)
+        self.code = code
+
+    @classmethod
+    def undeclared(cls, name: str) -> CliError:
+        return cls(
+            f'The CLI {name!r} is not in this program\'s clis in glyphh.json (add "clis": ["{name}"]).',
+            "E_CLI_UNDECLARED",
+        )
+
+    @classmethod
+    def missing(cls, name: str) -> CliError:
+        return cls(f"The CLI {name!r} is not on this rrotor.", "E_CLI_MISSING")
+
+
 class NotJson(ProgramError):
     """A checkpoint's value or a Result's data that JSON cannot carry."""
 

@@ -277,6 +277,7 @@ class Manifest(BaseModel):
     connectors: list[str] = []
     data: bool = False
     schedules: list[Schedule] = []  # functions the daemon calls on a cron schedule (rrotord/scheduler.py)
+    clis: list[Annotated[str, Field(pattern=NAME)]] = []  # the CLIs on this rrotor its functions run (ctx.cli)
 
     @field_validator("hosts")
     @classmethod
@@ -320,6 +321,7 @@ class Manifest(BaseModel):
                 ("data", self.data),
                 ("databases", self.databases),
                 ("needs", self.needs),
+                ("clis", self.clis),
             )
             if value
         ]
@@ -356,8 +358,8 @@ class Manifest(BaseModel):
     def head_only(self) -> bool:
         """A program that keeps state in its data folder (its SQLite database too), which never replicates, or reads
         secrets, which only the head's vault holds, or a CLI (its install, the head's build, and its home never
-        replicate): every call to it runs on the head."""
-        return self.keeps_data or bool(self.secrets) or self.kind == "cli"
+        replicate), or a program that runs CLIs (which run on the head): every call to it runs on the head."""
+        return self.keeps_data or bool(self.secrets) or self.kind == "cli" or bool(self.clis)
 
     def writes(self, function: str) -> bool:
         """Whether a call of `function` runs on the cluster's head: it writes, or its program is the head's alone. A

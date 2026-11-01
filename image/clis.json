@@ -163,6 +163,25 @@
         "limits": { "seconds": 900, "memory_mb": 4096 }
       }
     },
+    "glyphh": {
+      "vendor": "Glyphh",
+      "title": "Glyphh CLI",
+      "version": "3.6.0",
+      "command": "glyphh",
+      "sdk": { "entry": "glyphh.cli:main" },
+      "manifest": {
+        "description": "The glyphh command: Ada Cloud from a terminal (the Glyphh SDK, image/sdk.lock). Sign in once with cli_login (paste an API key from platform.glyphh.ai), or set GLYPHH_API_KEY.",
+        "cli": {
+          "approvals": ["delete *", "forget *", "logout"],
+          "env": { "GLYPHH_API_KEY": "secret?:GLYPHH_API_KEY" },
+          "home": true,
+          "login": { "args": ["login"], "signed_in": ".glyphh/credentials.json" }
+        },
+        "hosts": ["ada.glyphh.ai", "platform.glyphh.ai"],
+        "secrets": ["GLYPHH_API_KEY"],
+        "limits": { "seconds": 300, "memory_mb": 512 }
+      }
+    },
     "copilot": {
       "vendor": "GitHub",
       "title": "GitHub Copilot CLI",

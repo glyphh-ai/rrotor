@@ -145,6 +145,21 @@ class Deployer:
         self.programs.activate(made)
         return made
 
+    def _check_clis(self, found: manifests.Manifest) -> None:
+        """A program's `clis` are each a CLI this rrotor holds (built in or deployed): refused E_MANIFEST otherwise."""
+        held = set(self.programs.names())
+        missing = [
+            name
+            for name in found.clis
+            if name not in held or (v := self.programs.active(name)) is None or v.manifest.kind != "cli"
+        ]
+        if missing:
+            raise DeployError(
+                f"glyphh.json names the CLI{'s' if len(missing) > 1 else ''} {', '.join(missing)}, not on this rrotor: "
+                "deploy it first (clis_list shows the CLIs here).",
+                code="E_MANIFEST",
+            )
+
     def _scratch(self) -> Path:
         self.scratch.mkdir(parents=True, exist_ok=True)
         return self.scratch
@@ -155,6 +170,7 @@ class Deployer:
         if head != commit:
             raise DeployError(f"The commit fetched is {head[:12]}, not {commit[:12]}.", code="E_SHA")
         found = manifests.read(src)
+        self._check_clis(found)
         shutil.rmtree(src / ".git")
         existing = self.programs.by_sha(found.name, commit)
         if existing is not None:

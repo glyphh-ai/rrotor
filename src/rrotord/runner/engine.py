@@ -37,7 +37,7 @@ from typing import Any
 
 from opentelemetry.trace import Span
 
-from rrotor.ctx import RunState
+from rrotor.ctx import RunState, cli_step
 from rrotord import clis
 from rrotord import log as logs
 from rrotord.audit import Audit
@@ -124,6 +124,7 @@ class Runner:
         self.parts, self.audit, self.telemetry = parts, audit, telemetry
         self.notify = notify
         self.workers: dict[str, Worker] = {}
+        self.current: dict[str, Run] = {}  # each run with a worker, as the runner holds it now (a continue reloads it)
         self.stopping: dict[str, dict[str, Any]] = {}  # runs stopped from outside, with the Result they end with
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -286,6 +287,7 @@ class Runner:
         caller: str,
         origin: str,
         login: bool = False,
+        approved: bool = False,
     ) -> Run:
         cli = found.manifest.cli
         assert cli is not None  # noqa: S101  (checked by _cli_found)
@@ -301,6 +303,8 @@ class Runner:
         run.inputs = {"args": args, "stdin": text, "files": clis.write_files(work, given)}
         if login:
             run.inputs["login"] = True
+        if approved:  # a program's command its run's person approved already (program_cli)
+            run.state = RunState(approvals={CLI: True}).to_json()
         self.records.save(run)
         called = {"event": "called", "command": line, "caller": caller, "version": found.version}
         self.records.log(run.id, called | ({"login": True} if login else {}))
@@ -419,6 +423,7 @@ class Runner:
             if run.status not in WAITING:
                 raise Conflict("This run is not waiting for an answer.", code="E_RUN_STATE", run_status=run.status)
             with logs.bind(**about(run)):
+                self.current[run.id] = run  # what its worker's checkpoints and commands go to from here
                 state = RunState.from_json(run.state)
                 state.record(run.pending or {}, answer)
                 run.state, run.status, run.waiting_since = state.to_json(), "running", None
@@ -550,8 +555,47 @@ class Runner:
             caller=run.caller,
             secrets={"declared": manifest.secrets, "values": values},
             sqlite="sqlite" in manifest.databases,
+            clis={name: self._cli_patterns(name) for name in manifest.clis},
             **self.launcher.paths(mounts),
         )
+
+    def _cli_patterns(self, name: str) -> dict[str, list[str]] | None:
+        """What a program's ctx.cli checks first of a CLI it names: its allow and approval patterns (None: not here)."""
+        try:
+            cli = self.programs.get(name).manifest.cli
+        except RrotorError:
+            return None
+        return {"allow": cli.allow, "approvals": cli.approvals} if cli is not None else None
+
+    async def program_cli(self, run: Run, ask: dict[str, Any]) -> dict[str, Any]:
+        """A program's ctx.cli: one command of a CLI its manifest names, run as that CLI's own run (its sandbox, HOME,
+        hosts, secrets, allow patterns, audit), by the program as its caller. A command its approval patterns name
+        runs only when this run's own state holds the person's approval of that command's step (the worker asked for
+        it), so a program cannot skip one. Answers the command's Result."""
+        name, args, stdin = str(ask.get("cli") or ""), ask.get("args"), ask.get("stdin")
+        try:
+            found = self.programs.get(run.program, run.version).manifest
+            if name not in found.clis:
+                raise Forbidden(f"{run.program} does not name the CLI {name} in its clis.", code="E_CLI_UNDECLARED")
+            version, argv = self._cli_found(name, args)
+            cli = version.manifest.cli
+            assert cli is not None  # noqa: S101  (checked by _cli_found)
+            state = self.current.get(run.id, run).state  # as a continue since the worker started holds it
+            approved = RunState.from_json(state).approvals.get(cli_step(name, argv, stdin)) is True
+            if clis.matching(cli.approvals, argv) is not None and not approved:
+                raise Forbidden(
+                    f"`{name} {clis.command_line(argv)}` needs the person's approval.", code="E_CLI_DECLINED"
+                )
+            line = masked(clis.command_line(argv), self._hidden_now(version))
+            caller = f"program:{run.program}"
+            done = await self._cli_call(version, argv, line, stdin, None, caller, "program", approved=approved)
+        except RrotorError as err:
+            asked = {"program": name, "version": None, "function": CLI, "run_id": None, "by": run.id}
+            self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
+            return failed(CLI, err.code, err.message)
+        self._audit("run.call", **about(done), command=line, by=run.id, outcome=outcome(done))
+        self.records.log(run.id, {"event": "cli", "cli": name, "run_id": done.id, "status": done.status})
+        return dict(done.result or {})
 
     async def _start(self, run: Run, found: Version, mounts: bwrap.Mounts, **start: Any) -> None:
         """The run's worker started in its sandbox and sent `start`, then its first Result awaited."""
@@ -560,13 +604,17 @@ class Runner:
         try:
             with self._span("rrotor.sandbox.start", run):
                 worker = await Worker.start(
-                    self.launcher, lambda fd: Spec(mounts, limits, fd), lambda m: self._note(run, m)
+                    self.launcher,
+                    lambda fd: Spec(mounts, limits, fd),
+                    lambda m: self._note(run, m),
+                    lambda ask: self.program_cli(run, ask),
                 )
         except OSError as err:
             await self.proxy.close(run.id)
             await self._finish(run, failed("sandbox", "E_SANDBOX", f"The sandbox did not start: {err}"))
             return
         self.workers[run.id] = worker
+        self.current[run.id] = run
         await worker.send(
             "start",
             seconds_left=self._left(run, found),
@@ -624,6 +672,7 @@ class Runner:
 
     async def _finish(self, run: Run, result: dict[str, Any]) -> None:
         self.workers.pop(run.id, None)
+        self.current.pop(run.id, None)
         hidden = self.hidden.pop(run.id, None)
         await self.proxy.close(run.id)
         if (self.records.folder(run.id) / WORK).is_dir():  # a CLI's run: only it has a working folder
@@ -663,6 +712,7 @@ class Runner:
 
     def _note(self, run: Run, message: dict[str, Any]) -> None:
         if message.get("op") == "checkpoint":
+            run = self.current.get(run.id, run)  # the run as a continue since the worker started holds it
             state = RunState.from_json(run.state)
             state.checkpoints[str(message.get("key"))] = message.get("value")
             run.state = state.to_json()

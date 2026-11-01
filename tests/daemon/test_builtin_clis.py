@@ -42,20 +42,23 @@ script = _script()
 @pytest.mark.parametrize("name", sorted(PINS))
 def test_each_pinned_cli_has_both_builds_and_a_manifest_rrotor_takes(name):
     entry = PINS[name]
-    assert set(entry["builds"]) == {"amd64", "arm64"}
-    for build in entry["builds"].values():
+    if "sdk" in entry:  # a console script of an SDK image/sdk.lock pins at the same version
+        assert f"{name}=={entry['version']} --hash=sha256:" in (IMAGE / "sdk.lock").read_text()
+    else:
+        assert set(entry["builds"]) == {"amd64", "arm64"}
+    for build in entry.get("builds", {}).values():
         assert build["url"].startswith("https://") and HEX64.match(build["sha256"]) and build["entry"]
         assert entry["version"] in build["url"]
     found = m.Manifest.model_validate(script.manifest(name, entry))
     assert found.kind == "cli" and found.cli is not None and found.cli.home and found.cli.login is not None
     assert found.cli.install.image == f"/usr/local/bin/{entry['command']}" and found.cli.command == entry["command"]
-    assert found.hosts and found.cli.allow
+    assert found.hosts and (found.cli.allow or "sdk" in entry)
     assert found.cli.optional_secrets() == set(found.secrets)  # an API key is optional: the sign-in is the way in
     assert script.about(entry) == {"vendor": entry["vendor"], "title": entry["title"], "version": entry["version"]}
 
 
 def test_the_vendors_the_image_carries():
-    assert sorted(PINS) == ["claude", "codex", "copilot", "cursor", "gemini", "grok"]
+    assert sorted(PINS) == ["claude", "codex", "copilot", "cursor", "gemini", "glyphh", "grok"]
     assert PINS["claude"]["manifest"]["cli"]["login"]["args"] == ["auth", "login", "--claudeai"]  # claude.ai
 
 
@@ -89,6 +92,18 @@ def test_the_build_script_refuses_a_wrong_checksum_or_a_missing_entry(tmp_path):
         script.main(["clis.py", str(IMAGE / "clis.json"), str(tmp_path), "riscv"])
     with pytest.raises(SystemExit, match="is not https"):
         script.download("http://example.com/x")
+
+
+def test_the_build_script_writes_an_sdk_clis_console_script(tmp_path):
+    with pytest.raises(SystemExit, match=r"install image/sdk\.lock first"):
+        script.install("glyphh", PINS["glyphh"], tmp_path, "arm64")
+    (tmp_path / "usr/local/lib/rrotor-sdk/glyphh").mkdir(parents=True)
+    link = script.install("glyphh", PINS["glyphh"], tmp_path, "arm64")
+    assert link.readlink() == Path("/usr/local/lib/rrotor-clis/glyphh/glyphh")
+    wrapper = (tmp_path / "usr/local/lib/rrotor-clis/glyphh/glyphh").read_text()
+    assert wrapper.startswith("#!/usr/bin/python3\n") and "from glyphh.cli import main" in wrapper
+    assert '"/usr/local/lib/rrotor-sdk"' in wrapper
+    assert json.loads((tmp_path / "usr/local/lib/rrotor-clis/glyphh/vendor.json").read_text())["version"] == "3.6.0"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node unpacks a brotli-packed binary")

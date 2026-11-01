@@ -64,8 +64,39 @@ def unbrotli(packed: Path, out: Path) -> None:
     packed.unlink()
 
 
+SDK = "usr/local/lib/rrotor-sdk"  # the SDKs image/sdk.lock installs (uv, hashed), before this script runs
+WRAPPER = """#!/usr/bin/python3
+import sys
+
+sys.path.insert(0, "/{sdk}")
+from {module} import {function}
+
+sys.exit({function}())
+"""
+
+
+def install_sdk_cli(name: str, entry: dict[str, Any], root: Path) -> Path:
+    """A CLI that is a console script of an SDK the image carries: a script running it with the image's Python."""
+    module, _, function = entry["sdk"]["entry"].partition(":")
+    if not (root / SDK / module.split(".")[0]).is_dir():
+        raise SystemExit(f"{name}: {module} is not in /{SDK}: install image/sdk.lock first")
+    folder = root / LIB / name
+    folder.mkdir(parents=True)
+    script = folder / entry["command"]
+    script.write_text(WRAPPER.format(sdk=SDK, module=module, function=function))
+    script.chmod(0o755)
+    link = root / BIN / entry["command"]
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(Path("/") / LIB / name / entry["command"])
+    (folder / "glyphh.json").write_text(json.dumps(manifest(name, entry), indent=2) + "\n")
+    (folder / "vendor.json").write_text(json.dumps(about(entry)) + "\n")
+    return link
+
+
 def install(name: str, entry: dict[str, Any], root: Path, arch: str, fetch: Any = download) -> Path:
     """One CLI into root: answers its linked command."""
+    if "sdk" in entry:
+        return install_sdk_cli(name, entry, root)
     build = entry["builds"][arch]
     data = fetch(build["url"])
     check(data, build["sha256"], build["url"])

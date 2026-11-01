@@ -33,8 +33,9 @@ INSTRUCTIONS = (
     "pause the schedules this runtime fires itself. clis_list shows the command-line tools installed here, and "
     "cli_run runs one command of one in the sandbox (args checked against its allow patterns; one that needs approval "
     "answers needs_approval, then program_continue runs it once the person approves). The vendors' agent CLIs (claude, "
-    "codex, gemini, cursor, grok, copilot) come built in; cli_login signs one in from the person's phone: it answers "
-    "needs_input with an address (and a device code) to open, and program_continue brings back the code the page shows."
+    "codex, gemini, cursor, grok, copilot) and glyphh come built in; cli_login signs one in from the person's phone: "
+    "it answers needs_input with an address (and a device code) to open, and program_continue brings back the code "
+    "the page shows. A program runs a CLI it names in its clis with ctx.cli."
 )
 
 

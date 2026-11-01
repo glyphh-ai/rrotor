@@ -5,6 +5,8 @@ h = Harness(program, tmp_path, approvals={"start": {"write"}}, http=FakeHttp({"h
 # a program with data: data=<its data folder>, home=<its folder>, clearance=<who asks, 0 to 1>
 # secrets: secrets={"API_KEY": "test"} (declared: the names glyphh.json declares, those by default)
 # a SQLite database (ctx.db): database=tmp_path / "db.sqlite3"
+# CLIs (ctx.cli): clis={"claude": FakeCli("sent")} (stdout, a CliResult, or a function of (args, stdin));
+#   FakeCli(..., allow=[...], approvals=[...]) as the CLI's manifest has them; h.cli_calls lists what ran
 r = h.call("start", {"day": "2026-10-14"})   # Result needs_approval
 r = h.resume({"approved": True})               # Result done
 """
@@ -17,7 +19,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from rrotor.ctx import Ctx, RunState, Secrets
+from rrotor.ctx import CliResult, Ctx, RunState, Secrets
 from rrotor.http import Http, Response
 from rrotor.invoke import Outcome, invoke, lifecycle
 from rrotor.result import Result
@@ -72,6 +74,21 @@ class FakeHttp(Http):
         return Response(200, json.dumps(value).encode(), {"Content-Type": "application/json"})
 
 
+CliAnswer = CliResult | str | Callable[[list[str], str | None], "CliResult | str"]
+
+
+class FakeCli:
+    """A CLI as a program's ctx.cli meets it in tests: its answer (stdout of a command that exits 0, a CliResult, or a
+    function of the arguments and stdin), and the allow and approval patterns its manifest would have."""
+
+    def __init__(self, answer: CliAnswer = "", *, allow: Iterable[str] = (), approvals: Iterable[str] = ()) -> None:
+        self.answer, self.allow, self.approvals = answer, list(allow), list(approvals)
+
+    def run(self, args: list[str], stdin: str | None) -> CliResult:
+        got = self.answer(args, stdin) if callable(self.answer) else self.answer
+        return got if isinstance(got, CliResult) else CliResult(0, str(got), "")
+
+
 class Harness:
     """One run of a program module: `call`, then `resume` with each answer, as rrotor would."""
 
@@ -90,8 +107,11 @@ class Harness:
         secrets: Mapping[str, str] | None = None,
         declared: Iterable[str] | None = None,
         database: Path | None = None,
+        clis: Mapping[str, FakeCli | None] | None = None,
     ) -> None:
         self.program, self.files, self.database = program, files, database
+        self.clis = dict(clis or {})  # the CLIs the manifest names: None for one not on the rrotor
+        self.cli_calls: list[tuple[str, list[str], str | None]] = []
         self.secrets = Secrets(declared if declared is not None else (secrets or {}), secrets)
         self.data, self.clearance, self.caller = data, clearance, caller
         self.home = home if home is not None else Path(str(getattr(program, "__file__", "."))).parent
@@ -125,7 +145,16 @@ class Harness:
             caller=self.caller,
             secrets=self.secrets,
             database=self.database,
+            clis={k: {"allow": c.allow, "approvals": c.approvals} if c else None for k, c in self.clis.items()},
+            request=self._cli,
         )
+
+    def _cli(self, ask: dict[str, Any]) -> dict[str, Any]:
+        name, args, stdin = ask["cli"], list(ask["args"]), ask.get("stdin")
+        fake = self.clis[name]
+        assert fake is not None  # noqa: S101  (ctx.cli refuses a CLI that is not here first)
+        self.cli_calls.append((name, args, stdin))
+        return {"status": "done", "data": fake.run(args, stdin).to_json()}
 
     def _run(self, answer: Any) -> Result:
         ctx = self._ctx(answer)

@@ -85,7 +85,9 @@ Files go in and out through a per-call working folder, not the person's filesyst
    Copilot), deployed at boot as built-in CLIs; and signing in from afar (`login`, `cli_login`): the sign-in command
    kept running on a pseudo-terminal across the person's wait, its address (and device code) answered as
    `needs_input`, the code they paste typed back into it by `program_continue`
-   ([`architecture.md`, 5.7](../architecture.md#57-clis)).
+   ([`architecture.md`, 5.7](../architecture.md#57-clis)). The glyphh CLI and the Glyphh SDK in the image; a
+   program runs a CLI with `ctx.cli` (its manifest's `clis`), in the CLI's own sandbox, its approval patterns steps
+   of the program's run ([`architecture.md`, 5.3](../architecture.md#53-the-sdk-rrotor)).
 
 ## The founder's answers (2026-10-31)
 

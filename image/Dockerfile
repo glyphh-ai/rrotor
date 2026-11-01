@@ -11,11 +11,15 @@ COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /usr/local/bin/uv
 
 # The vendors' agent CLIs (Claude Code, Codex, Gemini, Cursor, Grok, Copilot), pinned in image/clis.json by version
 # and the SHA-256 of each architecture's download, checked before anything is unpacked; each with its built-in
-# manifest beside it, which rrotord deploys at boot (docs/architecture.md, 5.7).
+# manifest beside it, which rrotord deploys at boot (docs/architecture.md, 5.7). The Glyphh SDK (image/sdk.lock, hashed)
+# under /usr/local/lib/rrotor-sdk, for every program and the built-in glyphh CLI.
 FROM os AS clis
 ARG TARGETARCH
-COPY image/clis.json image/clis.py /tmp/
-RUN python3 /tmp/clis.py /tmp/clis.json /clis "${TARGETARCH}"
+COPY image/clis.json image/clis.py image/sdk.lock /tmp/
+RUN uv pip install -q --no-cache --target /clis/usr/local/lib/rrotor-sdk --python /usr/bin/python3 \
+      --require-hashes --only-binary :all: --no-deps -r /tmp/sdk.lock \
+ && rm -rf /clis/usr/local/lib/rrotor-sdk/bin \
+ && python3 /tmp/clis.py /tmp/clis.json /clis "${TARGETARCH}"
 
 FROM os AS build
 WORKDIR /src

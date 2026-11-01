@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import datetime as dt
+import fnmatch
+import hashlib
 import json
+import shlex
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, overload
 
-from rrotor.errors import DatabaseUndeclared, NotJson, SecretMissing, SecretUndeclared, StepUndeclared, Wait
+from rrotor.errors import (
+    CliError,
+    DatabaseUndeclared,
+    NotJson,
+    SecretMissing,
+    SecretUndeclared,
+    StepUndeclared,
+    Wait,
+)
 from rrotor.http import Http
 from rrotor.result import Result
 
@@ -49,6 +60,39 @@ def _json_value(value: Any, what: str) -> Any:
 
 
 Sink = Callable[[str, dict[str, Any]], None]
+Request = Callable[[dict[str, Any]], dict[str, Any]]  # a CLI's command, run by rrotor: its Result as JSON
+
+
+def cli_step(name: str, args: list[str], stdin: str | None) -> str:
+    """The approval step (and the checkpoint) of one command of a CLI a program runs: the CLI's name and a digest of
+    the command, so each command is approved for itself."""
+    digest = hashlib.sha256(json.dumps([name, args, stdin]).encode()).hexdigest()[:16]
+    return f"cli:{name}:{digest}"
+
+
+@dataclass(frozen=True, slots=True)
+class CliResult:
+    """What a CLI's command answered `ctx.cli`: its exit code, and the head of its stdout and stderr (64 KB each)."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+    truncated: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0
+
+    def to_json(self) -> dict[str, Any]:
+        return {"exit_code": self.exit_code, "stdout": self.stdout, "stderr": self.stderr, "truncated": self.truncated}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> CliResult:
+        return cls(int(data["exit_code"]), str(data["stdout"]), str(data["stderr"]), bool(data.get("truncated")))
+
+
+def _no_cli(_: dict[str, Any]) -> dict[str, Any]:
+    return {"status": "failed", "data": {"code": "E_CLI_MISSING", "reason": "No CLI runs here."}}
 
 
 class Secrets:
@@ -107,8 +151,12 @@ class Ctx:
         readonly: bool = False,
         secrets: Secrets | None = None,
         database: Path | None = None,
+        clis: Mapping[str, Mapping[str, Any] | None] | None = None,
+        request: Request | None = None,
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
+        self._clis = dict(clis or {})  # each CLI the manifest names: its allow and approval patterns (None: not here)
+        self._request = request or _no_cli
         self._database = database  # the SQLite file, when the manifest asks for one
         self._db: sqlite3.Connection | None = None  # opened on first use
         self._secrets = secrets or Secrets()
@@ -151,6 +199,41 @@ class Ctx:
         self._state.checkpoints[key] = value
         self._sink("checkpoint", {"key": key, "value": value})
         return value
+
+    def cli(self, name: str, args: Iterable[str], stdin: str | None = None) -> CliResult:
+        """One command of a CLI on this rrotor (built in or deployed, named in the manifest's `clis`), run by rrotor in
+        that CLI's own sandbox, with its private HOME (its sign-in), its hosts and its secrets: its exit code, stdout
+        and stderr. Once per run: a resumed run reads what the command answered. Its arguments must be ones the CLI
+        allows (E_CLI_DENIED); one its approval patterns name waits for the person's approval first, as a step of this
+        run (declined: E_CLI_DECLINED). A command that cannot run fails with its code (E_CLI_…, E_SECRET_MISSING, …)."""
+        argv = [str(a) for a in args]
+        if name not in self._clis:
+            raise CliError.undeclared(name)
+        patterns = self._clis[name]
+        if patterns is None:
+            raise CliError.missing(name)
+        line = shlex.join(argv)
+        allow = list(patterns.get("allow") or [])
+        if allow and not any(fnmatch.fnmatchcase(line, p) for p in allow):
+            raise CliError(
+                f"{name} does not allow `{line}`: its allow patterns are {', '.join(allow)}.", "E_CLI_DENIED"
+            )
+        step = cli_step(name, argv, stdin)
+        if step in self._state.checkpoints:
+            return CliResult.from_json(self._state.checkpoints[step])
+        approval = next((p for p in patterns.get("approvals") or [] if fnmatch.fnmatchcase(line, p)), None)
+        if approval is not None:
+            if step not in self._state.approvals:
+                prompt = f"Run `{name} {line}`? It matches {name}'s approval pattern {approval!r}."
+                raise Wait(Result.needs_approval(step, prompt), {"kind": "approval", "key": step})
+            if not self._state.approvals[step]:
+                raise CliError(f"The person declined `{name} {line}`.", "E_CLI_DECLINED")
+        answer = self._request({"cli": name, "args": argv, "stdin": stdin, "step": step})
+        data: dict[str, Any] = answer["data"] if isinstance(answer.get("data"), dict) else {}
+        if answer.get("status") != "done":
+            code = str(data.get("code") or "E_CLI")
+            raise CliError(f"{name} {line}: {data.get('reason') or answer.get('status')}", code)
+        return CliResult.from_json(self.checkpoint(step, lambda: CliResult.from_json(data).to_json()))
 
     def log(self, message: str, **detail: Any) -> None:
         self._sink("log", {"message": str(message), "detail": _json_value(detail, "A log line's detail")})

@@ -255,7 +255,8 @@ Node 22, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates, t
 rrotord's venv, the OpenTelemetry
 SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests); the vendors' agent CLIs (Claude
 Code, Codex, Gemini, Cursor, Grok, Copilot: about 1.7 GB unpacked, pinned in `image/clis.json`,
-[5.7](#57-clis)). No browser, no database. It runs as
+[5.7](#57-clis)); the Glyphh SDK for every program and the `glyphh` CLI (`image/sdk.lock`, [5.3](#53-the-sdk-rrotor)).
+No browser, no database. It runs as
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
 is the `hosted` target: the base, with no part built in ([11](#11-the-image-and-ci)).
 
@@ -307,6 +308,7 @@ and the arguments it may be run with.
 | `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
 | `secrets` | The secrets it reads by name, `^[A-Z][A-Z0-9_]{0,63}$` ([5.5](#55-secrets)) |
 | `schedules` | Functions the runtime calls by itself: each `{function, cron, tz?, input?, name?}` ([5.6](#56-schedules)) |
+| `clis` | The CLIs on this rrotor its functions run with `ctx.cli` (built in or deployed, [5.7](#57-clis)): a deploy naming one this rrotor does not hold is refused (`E_MANIFEST`); every call runs on a cluster's head, where CLIs run |
 | `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `program.py` does not
@@ -339,9 +341,14 @@ ctx.clearance                 # who asks, 0 to 1; 1 unless the call says (the pr
 ctx.caller                    # who called: "claude", or "schedule" for a run its schedule started (5.6)
 ctx.readonly                  # a cluster follower's run: its folders are read-only
 ctx.secrets["NAME"], ctx.secrets.get("NAME")   # a secret the manifest declares (5.5)
+ctx.cli(name, args, stdin=None) -> CliResult   # a command of a CLI the manifest names: exit_code, stdout, stderr
 ctx.log(message, **detail)
 ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 ```
+
+The image also carries the Glyphh SDK (`glyphh`, pinned with its hash in `image/sdk.lock`) at
+`/usr/local/lib/rrotor-sdk`, which the worker puts on `sys.path` after the program's own venv: `import glyphh` works
+without a `requirements.lock`, and a program that pins its own version gets its own.
 
 - **Approvals and inputs are re-entrant.** A `continue` calls the same function again with the same inputs: steps
   done are skipped by `ctx.checkpoint`, and `ctx.ask_approval(step, …)` then answers the decision for that step
@@ -350,9 +357,22 @@ ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
   inside the sandbox on first use and closed when the run ends: `with ctx.db:` commits, and what is not committed is
   rolled back. On a cluster's follower it opens read-only (`mode=ro`), though a program with a database runs on the
   head. A program that does not declare it gets `E_DATABASE_UNDECLARED`.
+- **`ctx.cli`** runs one command of a CLI on this rrotor that the manifest's `clis` names (else `E_CLI_UNDECLARED`;
+  one no longer here, `E_CLI_MISSING`), as that CLI's own run: rrotor runs it in the CLI's sandbox, with its private
+  HOME (so a CLI signed in with `cli_login` is signed in here too), its hosts, its env and secrets, by the program
+  as its caller (`program:<name>`), an audit `run.call` with `by` (the program's run). The worker asks the runner
+  over its channel (`cli`, answered `cli_result`) and waits; the time counts against the program's `seconds`. The
+  arguments are checked against the CLI's `allow` first (`E_CLI_DENIED`, never run). One its `approvals` names is a
+  step of the program's own run, `cli:<name>:<digest of the command>`: the run answers `needs_approval` with the
+  command line, a continue's `{"approved": true}` runs it (`false`: `E_CLI_DECLINED`), and the runner checks that
+  approval in the run's own state before it runs the command, so a program cannot skip it. What the command
+  answered is a checkpoint of the same key: a resumed run reads it back, never running it twice. A command that
+  could not run raises `CliError` with its code (`E_SECRET_MISSING`, `E_LIMIT_SECONDS`, …); a nonzero exit is
+  still an answer (`CliResult.ok` is false). A program stopped mid-command leaves the command to end as its own run.
 - **`rrotor.testing`** gives a program's own tests a `Ctx` with no sandbox (`Harness`): inputs, answers, a folder,
   an `http` that answers what the test says, `secrets={...}` (with `declared=[...]`, the names the manifest
-  declares) and `database=<a file>` for `ctx.db`.
+  declares), `database=<a file>` for `ctx.db`, and `clis={"claude": FakeCli("answer", allow=…, approvals=…)}` for
+  `ctx.cli` (stdout, a `CliResult`, or a function of the arguments and stdin; `h.cli_calls` lists what ran).
 
 ### 5.4 A run
 
@@ -556,10 +576,12 @@ link's `hello` leaves it out (it is the image's, not the Cloud's).
 | `cursor` | Cursor's agent CLI (`cursor-agent`, Cursor's download, its own node) | 2026.10.22-27dcf5f | `login` with `NO_OPEN_BROWSER`: an address it polls (`paste: false`) |
 | `grok` | xAI's Grok Build CLI (`grok`, npm, brotli-packed native binary) | 1.0.70 | `login --device-auth`: an xAI device code |
 | `copilot` | GitHub's Copilot CLI (`copilot`, native build from npm) | 1.0.105 | `login --device-code`: a GitHub device code |
+| `glyphh` | Glyphh's own CLI (`glyphh`, the Glyphh SDK's console script: `image/sdk.lock`, run with the image's Python) | 3.6.0 | `login`: an API key from platform.glyphh.ai, pasted; or the secret `GLYPHH_API_KEY` |
 
-Each keeps its private HOME (`home: true`), allows its one-shot forms only (`-p <prompt>` and the like, its status,
-`--version`; a bare command would open its interface and wait), waits for the person's approval to sign out, reaches
-its vendor's hosts, runs up to 900 seconds with 4 GB, and takes the vendor's API key as an optional secret
+Each vendor's agent keeps its private HOME (`home: true`), allows its one-shot forms only (`-p <prompt>` and the
+like, its status, `--version`; a bare command would open its interface and wait), waits for the person's approval to
+sign out, reaches its vendor's hosts, runs up to 900 seconds with 4 GB (glyphh: any arguments, approval to delete,
+forget or sign out, 300 seconds), and takes the vendor's API key as an optional secret
 (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`, `CURSOR_API_KEY`, `XAI_API_KEY`, `COPILOT_GITHUB_TOKEN`):
 signing in is the way in (Claude's claude.ai sign-in brings the account's connectors; an API key set would take its
 place). Self-updates are off where the CLI has a switch; the image is read-only to it anyway. Codex and Copilot ship

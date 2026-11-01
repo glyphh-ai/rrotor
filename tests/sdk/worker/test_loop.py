@@ -266,6 +266,50 @@ def test_a_clis_run_runs_its_command_locked_without_exec_of_what_it_writes(tmp_p
     assert (result["status"], result["data"]["stdout"], result["data"]["exit_code"]) == ("done", "hi there\n", 0)
 
 
+CALLS_A_CLI = """
+from rrotor import Result
+
+def start(ctx, inputs):
+    import glyphh_like
+    got = ctx.cli("claude", ["-p", "hi"])
+    return Result.done({"out": got.stdout, "sdk": glyphh_like.NAME})
+"""
+
+
+def test_a_programs_ctx_cli_is_asked_of_the_runner_and_answered(tmp_path, monkeypatch):
+    sdk = tmp_path / "sdk"
+    (sdk / "glyphh_like").mkdir(parents=True)
+    (sdk / "glyphh_like" / "__init__.py").write_text("NAME = 'from the image'\n")
+    monkeypatch.setattr("rrotor._worker.loop.SDKS", (str(sdk), str(tmp_path / "absent")))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    folder = write(tmp_path / "p", CALLS_A_CLI)
+
+    def react(message: dict[str, Any], runner: Runner) -> None:
+        if message["op"] == "cli":
+            runner.send("cli_result", id=0, result={})  # another command's answer: not this one
+            data = {"exit_code": 0, "stdout": f"ran {message['args']}", "stderr": ""}
+            runner.send("cli_result", id=message["id"], result={"status": "done", "data": data})
+        elif message["op"] == "result":
+            runner.send("end")
+
+    runner = run(start_for(folder, clis={"claude": {"allow": [], "approvals": []}}), react)
+    assert runner.results()[0]["data"] == {"out": "ran ['-p', 'hi']", "sdk": "from the image"}
+    asked = next(m for m in runner.got if m["op"] == "cli")
+    assert (asked["id"], asked["cli"], asked["args"], asked["stdin"]) == (1, "claude", ["-p", "hi"], None)
+    assert str(sdk) in sys.path and sys.path.index(str(sdk)) > 0
+
+
+def test_a_ctx_cli_whose_runner_goes_away_fails(tmp_path):
+    folder = write(tmp_path / "p", CALLS_A_CLI.replace("import glyphh_like", "pass").replace("glyphh_like.NAME", "1"))
+
+    def react(message: dict[str, Any], runner: Runner) -> None:
+        if message["op"] == "cli":
+            runner.mine.shutdown(socket.SHUT_WR)  # the runner gone: the worker reads the end of its channel
+
+    runner = run(start_for(folder, clis={"claude": {}}), react)
+    assert runner.results()[0]["data"]["code"] == "E_CLI" and "went away" in runner.results()[0]["data"]["reason"]
+
+
 def sign_in_spec(tmp_path: Path, body: str) -> dict[str, Any]:
     tool = tmp_path / "tool"
     tool.write_text("#!/bin/sh\n" + body)

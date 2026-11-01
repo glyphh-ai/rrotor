@@ -91,6 +91,7 @@ def test_each_install_source_and_the_hosts_it_implies(install, source, hosts):
         ({"cli_home": True, "cli_login": {"args": [], "seconds": 5}}, "greater than or equal to 30"),
         ({"cli_home": True, "cli_login": {}}, "args"),
         ({"cli_allow": [""]}, "at least 1 character"),
+        ({"clis": ["claude"]}, "it has no clis"),
         ({"kind": "program", "functions": {"start": {}}}, 'cli is for a manifest of "kind": "cli"'),
     ],
 )
@@ -130,6 +131,13 @@ def test_a_secret_taken_only_as_secret_question_is_optional():
     assert found.cli.secret_refs(login=True)["BOTH"] == "BOTH"
     bare = m.Manifest.model_validate(cli_manifest(cli={"env": {"KEY": "secret?:KEY"}}, secrets=["KEY"]))
     assert bare.cli is not None and bare.cli.optional_secrets() == {"KEY"} and bare.cli.login is None
+
+
+def test_a_program_that_runs_clis_runs_on_the_head():
+    found = m.Manifest.model_validate({"name": "p", "functions": {"start": {"writes": False}}, "clis": ["claude"]})
+    assert found.clis == ["claude"] and found.head_only and found.writes("start")
+    with pytest.raises(ValueError, match="String should match pattern"):
+        m.Manifest.model_validate({"name": "p", "functions": {"start": {}}, "clis": ["Bad Name"]})
 
 
 def test_a_login_block_and_its_defaults():

@@ -34,6 +34,7 @@ SIGN_IN = {  # what each one's sign-in shows: the address to open, and whether a
     "cursor": ("https://cursor.com/loginDeepControl?", False),
     "grok": ("https://accounts.x.ai/", True),
     "copilot": ("https://github.com/login/device", True),
+    "glyphh": ("https://platform.glyphh.ai", False),
 }
 
 
