@@ -97,9 +97,16 @@ async def test_a_follower_promoted_while_the_head_is_down_takes_the_writes_and_t
     promoted = [e for e in events if e["kind"] == "cluster.head"]
     assert promoted[-1]["reason"] == "promoted" and promoted[-1]["actor"] == {"type": "local"}
     await until(lambda: two.cluster.role == "follower" and two.cluster.state.get("head") == "n1" and ready(ring, "n2"))
-    # writes resume on the promoted node, forwarded from the other follower too
+    # writes resume on the promoted node, forwarded from the other follower too (a follower still learning the new
+    # head answers E_NO_HEAD or E_HEAD_LOST for a moment: asked again until the head takes it)
     status, body, _ = await ring.write("n2")
-    assert (status, body["status"]) == (200, "done") and body["run_id"].startswith("n1~"), body
+    for _ in range(100):
+        if status == 200:
+            break
+        assert body["error"]["code"] in ("E_NO_HEAD", "E_HEAD_LOST"), body
+        await asyncio.sleep(0.05)
+        status, body, _ = await ring.write("n2")
+    assert (status, body.get("status")) == (200, "done") and body["run_id"].startswith("n1~"), body
     await until(lambda: held(two) == 2 == held(one))
     # the old head comes back: a member it reaches knows term 2, so it follows instead of leading again
     zero = await ring.add("n0", ids)
@@ -180,7 +187,10 @@ async def test_a_head_that_hears_of_a_higher_term_steps_down(ring: Ring, monkeyp
     one.cluster.raft.term = 5
     with pytest.raises(RrotorError) as caught:
         await one.cluster.forward("approvals", {})
-    assert caught.value.code == "E_NO_HEAD" and zero.cluster.role == "follower" and zero.cluster.raft.term == 5
+    # Refused before anything ran: E_NO_HEAD; the head deposed while the forward was in its hands: E_HEAD_LOST.
+    # Which one is the race between the forward and the step-down; either says the head is gone.
+    assert caught.value.code in ("E_NO_HEAD", "E_HEAD_LOST")
+    await until(lambda: zero.cluster.role == "follower" and zero.cluster.raft.term == 5)
     # a head with a member it is not connected to asks who it is: a higher term deposes it
     ring2 = ring.daemons["n2"]
     ring2.cluster.raft.observe(5)
