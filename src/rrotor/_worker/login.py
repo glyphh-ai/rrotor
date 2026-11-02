@@ -287,6 +287,7 @@ class Session:
             "url": url,
             "urls": fresh,
             "code": code,
+            "typed": not self.device,  # whether a continue's answer is typed into the command (a pasted code)
             "output": self._masked(shown)[-TAIL:],
             "schema": {"type": "string"},
             "options": None,

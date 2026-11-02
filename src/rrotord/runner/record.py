@@ -57,6 +57,7 @@ class Run:
             "function": self.function,
             "caller": self.caller,
             "origin": self.origin,
+            "subject": self.subject,
             "status": self.status,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

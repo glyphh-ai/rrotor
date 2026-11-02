@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apps</title>
+<style>
+  body{max-width:72rem;margin:2rem auto;padding:0 1rem;font-family:system-ui,sans-serif;line-height:1.5;color:#1a1a1a;background:#fff}
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem}
+  h1{font-size:1.5rem;font-weight:600;margin:0}
+  header form{margin:0}
+  button{font:inherit;font-size:.9rem;padding:.3rem .7rem;border:1px solid #bbb;border-radius:6px;background:#f6f6f6;cursor:pointer}
+  button:hover{background:#eee}
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(18rem,1fr));gap:1rem;list-style:none;padding:0;margin:0}
+  .card{border:1px solid #d0d0d0;border-radius:10px;padding:1rem 1.1rem;display:flex;flex-direction:column;gap:.4rem;background:#fff}
+  .card h2{font-size:1.05rem;font-weight:600;margin:0}
+  .meta{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;font-size:.85rem;color:#555}
+  .chip{border:1px solid #d0d0d0;border-radius:999px;padding:0 .55rem;font-size:.78rem;color:#333;background:#f6f6f6}
+  .state-approved{color:#1a7f37}.state-draft{color:#9a6700}.state-rejected{color:#b42318}.state-retired{color:#777}
+  .description{margin:0;color:#333;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .actions{margin-top:auto;padding-top:.5rem;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
+  a.open{display:inline-block;padding:.3rem .8rem;border-radius:6px;background:#1a1a1a;color:#fff;text-decoration:none;font-size:.9rem}
+  a.review{color:#0a58ca;font-size:.9rem}
+  .note{font-size:.9rem;color:#555}
+  .empty{color:#555;border:1px dashed #d0d0d0;border-radius:10px;padding:2rem;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>Apps</h1>
+  <form method="post" action="/auth/logout" id="sign-out" hidden><button type="submit">Sign out</button></form>
+</header>
+<main>
+  <ul class="cards" id="cards"></ul>
+  <p class="empty" id="empty" hidden>Nothing published yet. Ask Claude to publish what it made to your org.</p>
+</main>
+<script id="index" type="application/json">/*__RROTOR_INDEX__*/</script>
+<script>
+(function () {
+  "use strict";
+  var given = JSON.parse(document.getElementById("index").textContent);
+  var TYPES = { page: "Page", dashboard: "Dashboard", doc: "Doc", diagram: "Diagram", deck: "Deck", design: "Design" };
+  var STATES = { approved: "Published", draft: "Awaiting review", rejected: "Rejected", retired: "Retired", unknown: "Published" };
+  var list = document.getElementById("cards");
+  if (given.signed_in) document.getElementById("sign-out").hidden = false;
+  if (!given.apps.length) document.getElementById("empty").hidden = false;
+
+  function el(tag, attrs, text) {
+    var node = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  given.apps.forEach(function (app) {
+    var card = el("li", { class: "card" });
+    card.appendChild(el("h2", {}, app.title));
+    var meta = el("div", { class: "meta" });
+    meta.appendChild(el("span", { class: "chip" }, TYPES[app.type] || app.type));
+    meta.appendChild(el("span", {}, "v" + app.version));
+    meta.appendChild(el("span", { class: "state-" + app.state }, STATES[app.state] || app.state));
+    card.appendChild(meta);
+    if (app.description) card.appendChild(el("p", { class: "description" }, app.description));
+    var actions = el("div", { class: "actions" });
+    if (app.open) actions.appendChild(el("a", { class: "open", href: app.url }, "Open"));
+    if (given.reviewer && (app.state === "draft" || app.state === "rejected")) {
+      if (given.platform) {
+        var review = el("a", { class: "review", href: given.platform + "/apps?state=draft", target: "_blank", rel: "noopener" }, "Review on Glyphh");
+        actions.appendChild(review);
+      } else {
+        actions.appendChild(el("span", { class: "note" }, "Review it on the Glyphh platform"));
+      }
+    }
+    card.appendChild(actions);
+    list.appendChild(card);
+  });
+})();
+</script>
+</body>
+</html>

@@ -21,7 +21,9 @@ a fresh working folder for the call and a private HOME mounted (a signed-in pers
 sign-ins and config are theirs alone; else the CLI's own); its Result (exit code, stdout, stderr) has its
 secrets' values masked, and the files the command made or changed added. A CLI's sign-in (`cli_login`, its
 manifest's `login`) is such a run whose command stays up across the person's wait: `needs_input` with the address
-to open, each continue's answer typed into it (never kept), its seconds the sign-in's own."""
+to open, each continue's answer typed into it (never kept), its seconds the sign-in's own; `shared` signs the CLI's
+own HOME in rather than the caller's. A program's `ctx.cli(..., env=)` hands the command variables beside the CLI's
+own, for that command (kept in memory, the names alone in the record), each value masked as a secret's is."""
 
 from __future__ import annotations
 
@@ -120,6 +122,7 @@ class Runner:
     ) -> None:
         self.node, self.readonly, self.vault = node, readonly, vault
         self.hidden: dict[str, list[str]] = {}  # each run's secret values, masked in its log lines
+        self.envs: dict[str, dict[str, str]] = {}  # a CLI run's environment from the program that asked (ctx.cli env)
         self.programs, self.records, self.proxy, self.launcher = programs, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
         self.parts, self.audit, self.telemetry = parts, audit, telemetry
@@ -161,11 +164,13 @@ class Runner:
         origin: str = "local",
         run_id: str | None = None,
         clearance: float = 1.0,
+        shared: bool = False,
     ) -> Run:
         """A run opened and its first Result; the call is an audit event either way (`refused` with its code when it
-        never became a run)."""
+        never became a run). `shared`: the run is nobody's (subject none: the CLIs' shared HOME), whoever called, as
+        an app of `run_as: app` runs its page's calls."""
         try:
-            run = await self._call(program, function, inputs, version, caller, origin, run_id, clearance)
+            run = await self._call(program, function, inputs, version, caller, origin, run_id, clearance, shared)
         except RrotorError as err:
             asked = {"program": program, "version": version, "function": function, "run_id": run_id}
             self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
@@ -183,6 +188,7 @@ class Runner:
         origin: str,
         run_id: str | None,
         clearance: float,
+        shared: bool = False,
     ) -> Run:
         if not self.layers.ready:
             raise Unavailable(
@@ -198,7 +204,7 @@ class Runner:
         run = Run(
             run_id or new_id(self.node()), program, found.version, found.commit_sha, function, inputs, caller, origin
         )
-        run.clearance, run.subject = clearance, clis.subject_of(current().actor)
+        run.clearance, run.subject = clearance, (None if shared else clis.subject_of(current().actor))
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
         with logs.bind(**about(run)):
@@ -240,12 +246,14 @@ class Runner:
         self._audit("run.call", **about(run), command=line, outcome=outcome(run), seconds=round(run.seconds, 3))
         return run
 
-    async def cli_login(self, *, cli: str, caller: str = "claude", origin: str = "local") -> Run:
+    async def cli_login(self, *, cli: str, caller: str = "claude", origin: str = "local", shared: bool = False) -> Run:
         """A CLI's sign-in (its manifest's `login`), a run like any command's: its command started on a
         pseudo-terminal in the sandbox, answering `needs_input` with the address (and device code) it shows, which
         the person opens on their phone; program_continue types the code they paste back into the command, still
         running, and the run ends `done` once it has signed in, its login kept in the caller's private HOME: a
-        signed-in person's own, so each person on this rrotor signs the CLI in as themselves."""
+        signed-in person's own, so each person on this rrotor signs the CLI in as themselves. `shared`: the CLI's
+        own HOME instead (subject none), the sign-in every run with no person uses: an app of `run_as: app`, a
+        schedule, a runtime key's call."""
         line = None
         try:
             found, _ = self._cli_found(cli, [])
@@ -254,7 +262,7 @@ class Runner:
             if sign_in is None:
                 raise BadRequest(f"{cli} does not say how it signs in (no login in its manifest).", code="E_CLI_LOGIN")
             line = clis.command_line(sign_in.args)
-            subject = clis.subject_of(current().actor)
+            subject = None if shared else clis.subject_of(current().actor)
             run = await self._cli_call(found, sign_in.args, line, None, None, caller, origin, subject, login=True)
         except RrotorError as err:
             asked = {"program": cli, "version": None, "function": CLI, "run_id": None, "command": line}
@@ -293,6 +301,7 @@ class Runner:
         subject: str | None = None,
         login: bool = False,
         approved: bool = False,
+        env: dict[str, str] | None = None,
     ) -> Run:
         cli = found.manifest.cli
         assert cli is not None  # noqa: S101  (checked by _cli_found)
@@ -311,6 +320,9 @@ class Runner:
             run.inputs["login"] = True
         if approved:  # a program's command its run's person approved already (program_cli)
             run.state = RunState(approvals={CLI: True}).to_json()
+        if env:  # a program's env for this one command: its names in the record, its values in memory alone
+            run.inputs["env"] = sorted(env)
+            self.envs[run.id] = dict(env)
         self.records.save(run)
         called = {"event": "called", "command": line, "caller": caller, "version": found.version}
         self.records.log(run.id, called | ({"login": True} if login else {}))
@@ -348,7 +360,9 @@ class Runner:
         if refused is not None:
             await self._finish(run, refused)
             return
-        hidden = sorted((v for v in values.values() if len(v) >= MASK_MIN), key=len, reverse=True)
+        extra = self.envs.get(run.id) or {}  # a program's env for this command (ctx.cli): masked as a secret is
+        private = [*values.values(), *extra.values()]
+        hidden = sorted((v for v in private if len(v) >= MASK_MIN), key=len, reverse=True)
         if hidden:
             self.hidden[run.id] = hidden
         hosts = frozenset(manifest.hosts)
@@ -379,6 +393,7 @@ class Runner:
         given = cli.env | (sign_in.env if sign_in is not None else {})
         env |= {k: values.get(refs[k], "") if k in refs else v for k, v in given.items()}
         env = {k: v for k, v in env.items() if k not in refs or v}  # an optional secret not set: left out
+        env |= extra  # the program's, after the CLI's own (never rrotor's: clis.check_env refused those)
         spec: dict[str, Any] = {
             "run": made.run,
             "path": made.where(str(paths.get("cli_root"))),
@@ -584,6 +599,7 @@ class Runner:
             if name not in found.clis:
                 raise Forbidden(f"{run.program} does not name the CLI {name} in its clis.", code="E_CLI_UNDECLARED")
             version, argv = self._cli_found(name, args)
+            env = clis.check_env(ask.get("env"))
             cli = version.manifest.cli
             assert cli is not None  # noqa: S101  (checked by _cli_found)
             state = self.current.get(run.id, run).state  # as a continue since the worker started holds it
@@ -595,7 +611,7 @@ class Runner:
             line = masked(clis.command_line(argv), self._hidden_now(version))
             caller = f"program:{run.program}"
             done = await self._cli_call(
-                version, argv, line, stdin, None, caller, "program", run.subject, approved=approved
+                version, argv, line, stdin, None, caller, "program", run.subject, approved=approved, env=env
             )
         except RrotorError as err:
             asked = {"program": name, "version": None, "function": CLI, "run_id": None, "by": run.id}
@@ -681,6 +697,7 @@ class Runner:
     async def _finish(self, run: Run, result: dict[str, Any]) -> None:
         self.workers.pop(run.id, None)
         self.current.pop(run.id, None)
+        self.envs.pop(run.id, None)
         hidden = self.hidden.pop(run.id, None)
         await self.proxy.close(run.id)
         if (self.records.folder(run.id) / WORK).is_dir():  # a CLI's run: only it has a working folder

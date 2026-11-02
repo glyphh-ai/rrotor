@@ -31,7 +31,7 @@ from rrotord.cluster.node import Cluster
 from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.drain import Drain
-from rrotord.errors import BadRequest, Forbidden, NotFound, RrotorError, Unavailable
+from rrotord.errors import BadRequest, Forbidden, RrotorError, Unavailable
 from rrotord.introspect import Introspector
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
@@ -55,6 +55,12 @@ class Report(Protocol):
     """`deployed` up the link: the version, its repo (if any) and, for an app published, who published it."""
 
     async def __call__(self, version: Version, repo: str | None, by: str | None = None) -> None: ...
+
+
+class Secrets(Protocol):
+    """`secrets` up the link after a secret of an app changed: which declared ones are missing now."""
+
+    async def __call__(self, program: str) -> None: ...
 
 
 class LinkView(Protocol):
@@ -88,6 +94,7 @@ class Services:
     scheduler: Scheduler | None = None  # the programs' schedules: fired by the daemon, listed and paused here
     catalogue: Catalogue | None = None  # the catalogue's word on the apps here (docs/architecture.md, 5.8)
     browser: Browser | None = None  # public, the link on: a browser's Glyphh sign-in, to open the apps
+    secrets: Secrets | None = None  # after a secret of an app changed, `secrets` up the link; none without a link
 
 
 async def body(request: web.Request) -> dict[str, Any]:
@@ -319,23 +326,47 @@ def setup(app: web.Application, s: Services) -> None:
         return web.Response(body=data, content_type=kind, headers=headers)
 
     async def app_call(request: web.Request) -> web.Response:
-        """The page's call into one of the app's functions, as the viewer: the run's first Result."""
+        """The page's call into one of the app's functions, as the viewer (or, for an app of `run_as: app`, as the
+        app itself: nobody's run, the shared HOME and the vault): the run's first Result."""
         name, function = request.match_info["name"], request.match_info["function"]
         version = served().serving(name, viewer_roles(current().actor))
         apps.Apps.check_call(version, function)
         inputs = apps.Apps.inputs_of(await request.read())
         data = {"program": name, "function": function, "inputs": inputs, "version": version.version}
-        return web.json_response(await ops.call(s, data, caller="app", origin="app"))
+        app = version.manifest.app
+        assert app is not None  # noqa: S101  (serving answers an app)
+        return web.json_response(await ops.call(s, data, caller="app", origin="app", shared=app.shared))
 
     async def app_continue(request: web.Request) -> web.Response:
-        """The page's answer to a run of the app waiting for input or an approval."""
+        """The page's answer to one of the viewer's own runs of the app, waiting for input or an approval."""
         name, run_id = request.match_info["name"], request.match_info["run_id"]
-        served().serving(name, viewer_roles(current().actor))
-        run = s.runner.get(run_id)
-        if run.program != name:
-            raise NotFound(f"{name} has no run {run_id}.", code="E_RUN_MISSING")
         data = await body(request)
-        return web.json_response(await ops.resume(s, run_id, data.get("answer")))
+        return web.json_response(await ops.app_continue(s, name, run_id, data.get("answer")))
+
+    async def app_run(request: web.Request) -> web.Response:
+        """One of the viewer's own runs of the app, as `GET /v1/runs/{id}` shows it (a page polls a sign-in)."""
+        m = request.match_info
+        return web.json_response(await ops.app_run(s, m["name"], m["run_id"]))
+
+    async def app_clis(request: web.Request) -> web.Response:
+        return web.json_response(await ops.app_clis(s, request.match_info["name"]))
+
+    async def app_cli_login(request: web.Request) -> web.Response:
+        m = request.match_info
+        return web.json_response(await ops.app_cli_login(s, m["name"], m["cli"]))
+
+    async def app_me(request: web.Request) -> web.Response:
+        return web.json_response(await ops.app_me(s, request.match_info["name"]))
+
+    async def app_client(_: web.Request) -> web.Response:
+        """rrotor.js, the page's client: same origin, within the apps' CSP, never cached."""
+        headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+        return web.Response(body=apps.client_js(), content_type="text/javascript", headers=headers)
+
+    async def app_index(_: web.Request) -> web.Response:
+        """The index: this rrotor's apps as cards, for the viewer the gate let in (docs/architecture.md, 5.8)."""
+        headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+        return web.Response(text=await ops.app_index(s), content_type="text/html", headers=headers)
 
     async def auth_start(request: web.Request) -> web.Response:
         assert s.browser is not None  # noqa: S101  (registered only with one)
@@ -378,8 +409,14 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_post("/v1/schedules/{program}/{name}/resume", pausing(False))
     app.router.add_get("/v1/apps", apps_list)
     app.router.add_post("/v1/apps", app_publish)
+    app.router.add_get("/apps/", app_index)
+    app.router.add_get(f"/apps/_/{apps.CLIENT}", app_client)  # before the pages: `_` is no app's name
     app.router.add_post("/apps/{name}/call/{function}", app_call)
     app.router.add_post("/apps/{name}/runs/{run_id}/continue", app_continue)
+    app.router.add_get("/apps/{name}/runs/{run_id}", app_run)
+    app.router.add_get("/apps/{name}/clis", app_clis)
+    app.router.add_post("/apps/{name}/clis/{cli}/login", app_cli_login)
+    app.router.add_get("/apps/{name}/me", app_me)
     app.router.add_get("/apps/{name}/", app_page)
     app.router.add_get("/apps/{name}/{path:.+}", app_page)
     if s.browser is not None:

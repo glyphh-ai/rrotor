@@ -31,15 +31,22 @@ class Catalogue:
         kept = kept or {}
         self.entries: dict[str, dict[str, Any]] = dict(kept.get("apps") or {})
         self.reviewers: list[str] = list(kept.get("reviewers") or [])
+        found = kept.get("platform")
+        self.platform: str | None = found if isinstance(found, str) and found else None  # where a review is done
 
     def _save(self) -> None:
-        write_json(self.path, {"apps": self.entries, "reviewers": self.reviewers})
+        write_json(self.path, {"apps": self.entries, "reviewers": self.reviewers, "platform": self.platform})
 
-    def set_all(self, entries: list[dict[str, Any]], reviewers: list[str] | None = None) -> None:
-        """The welcome's whole list: what the catalogue holds for this rrotor now, nothing else."""
+    def set_all(
+        self, entries: list[dict[str, Any]], reviewers: list[str] | None = None, platform: str | None = None
+    ) -> None:
+        """The welcome's whole list: what the catalogue holds for this rrotor now, nothing else; the reviewer groups
+        and the platform's address when the welcome names them."""
         self.entries = {str(e["program"]): self._entry(e) for e in entries}
         if reviewers is not None:
             self.reviewers = [r.lower() for r in reviewers]
+        if platform is not None:
+            self.platform = platform.rstrip("/") or None
         self._save()
 
     def set_one(self, program: str, version: int, state: str, roles: list[str]) -> None:

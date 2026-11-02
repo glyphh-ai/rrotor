@@ -165,7 +165,8 @@ class Programs:
         """The CLIs here, each by its active version: what it installs and runs, the arguments it allows and those
         that wait for the person's approval, how it signs in (cli_login), whether it is signed in for `subject` (the
         caller's own HOME holds its `signed_in` file; None when it keeps no such file, or when the homes are not here:
-        `homes` False on a cluster's follower), and a built-in one's vendor and version."""
+        `homes` False on a cluster's follower) and for the shared HOME (`shared_signed_in`: the CLI's own, which an
+        app of `run_as: app`, a schedule or a key's call runs in), and a built-in one's vendor and version."""
         out = []
         for name in self.names():
             active = self.active(name)
@@ -186,6 +187,7 @@ class Programs:
                     "hosts": active.manifest.hosts,
                     "login": {"args": cli.login.args} if cli.login else None,
                     "signed_in": self._signed_in(name, cli, subject) if homes else None,
+                    "shared_signed_in": self._signed_in(name, cli, None) if homes else None,
                     "builtin": active.builtin,
                 }
             )

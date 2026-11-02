@@ -21,6 +21,7 @@ from rrotord.programs import Programs
 from rrotord.proxy import EgressProxy
 from rrotord.runner.engine import Runner
 from rrotord.runner.record import Records
+from rrotord.vault import Vault
 from tests.fakes import DONE_PROGRAM, FakeLink, GitRepo, LocalLauncher, install, keys, manifest, ready, token
 
 WAITS = "from rrotor import Result\n\ndef start(ctx, inputs):\n    return Result.needs_input('day?')\n"
@@ -153,6 +154,7 @@ async def test_deploy_from_the_repo_answers_deployed(env, tmp_path):
             "repo": "owner/sample",
             "manifest": env.programs.active("sample").manifest.model_dump(mode="json"),
             "by": None,
+            "secrets_missing": [],
         }
     ]
     assert env.link.sent[0]["manifest"]["name"] == "sample"
@@ -267,6 +269,38 @@ async def test_report_carries_who_published(env):
     install(env.programs, APP, "", sha="1" * 40)
     await env.handler.report(env.programs.active("board"), None, "user_1")
     assert env.link.sent[0]["by"] == "user_1" and env.link.sent[0]["manifest"]["kind"] == "app"
+
+
+async def test_deployed_names_the_secrets_not_set_and_a_change_of_them_is_told(env, tmp_path):
+    """`deployed` carries the declared secrets the vault does not hold; a secret of an app set or deleted sends
+    `secrets` with what is missing now; a program that is not an app, or no link, sends nothing."""
+    install(env.programs, {**APP, "secrets": ["GH_TOKEN", "SLACK"]}, "", sha="1" * 40)
+    version = env.programs.active("board")
+    await env.handler.report(version, None, "user_1")  # no vault: every declared secret is missing
+    assert env.link.sent[-1]["secrets_missing"] == ["GH_TOKEN", "SLACK"]
+    env.runner.vault = Vault(tmp_path / "data")
+    env.runner.vault.set("board", "GH_TOKEN", "ghp_1234567")
+    await env.handler.report(version, None, "user_1")
+    assert env.link.sent[-1]["secrets_missing"] == ["SLACK"]
+    await env.handler.secrets("board")
+    told = env.link.sent[-1]
+    assert (told["type"], told["program"], told["missing"]) == ("secrets", "board", ["SLACK"]) and len(told["id"]) == 32
+    assert "ghp_1234567" not in str(env.link.sent)
+    sent = len(env.link.sent)
+    install(env.programs, manifest("sample", secrets=["KEY"]), DONE_PROGRAM)
+    await env.handler.secrets("sample")  # a program, not an app: the catalogue has no row for it
+    await env.handler.secrets("nothing")  # not here at all
+    env.link.configured = False
+    await env.handler.secrets("board")
+    assert len(env.link.sent) == sent
+
+
+async def test_a_welcome_names_the_platform(env, tmp_path):
+    env.handler.catalogue = Catalogue(tmp_path / "data")
+    await env.handler.on_welcome(p.Welcome(type="welcome", apps=[], platform="https://platform.glyphh.ai"))
+    assert env.handler.catalogue.platform == "https://platform.glyphh.ai"
+    await env.handler.on_welcome(p.Welcome(type="welcome", apps=[]))  # one that says nothing of it: kept
+    assert env.handler.catalogue.platform == "https://platform.glyphh.ai"
 
 
 async def test_a_welcomes_licence_key_is_offered_preferred_to_its_legacy_licence_and_a_bad_one_logged(

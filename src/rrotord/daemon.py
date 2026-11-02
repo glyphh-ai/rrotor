@@ -304,6 +304,7 @@ class Daemon:
             self.scheduler,
             self.catalogue,
             self.browser,
+            self.handler.secrets,
         )
 
     def install_builtin(self) -> list[str]:

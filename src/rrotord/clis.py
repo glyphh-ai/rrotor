@@ -41,7 +41,7 @@ from aiohttp.abc import AbstractResolver, ResolveResult
 
 from rrotor.http import host_allowed
 from rrotord.errors import BadRequest, DeployError
-from rrotord.manifest import NPM, NPM_REGISTRY, PYPI, Manifest
+from rrotord.manifest import ENV_RESERVED, NPM, NPM_REGISTRY, PROXY_ENV, PYPI, Manifest
 from rrotord.proc import run
 from rrotord.proxy import public
 
@@ -436,6 +436,28 @@ def check_args(args: Any) -> list[str]:
     if len(args) > ARGS_MAX or any(len(a) > ARG_MAX or "\x00" in a for a in args):
         raise BadRequest(f"At most {ARGS_MAX} args, each up to {ARG_MAX} characters, no NUL.", code="E_CLI_INPUTS")
     return list(args)
+
+
+ENV_MAX = 32
+ENV_KEY = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def check_env(env: Any) -> dict[str, str]:
+    """The environment a program hands one command of a CLI (`ctx.cli(..., env=)`, docs/architecture.md, 5.7): up
+    to 32 names, `[A-Z_][A-Z0-9_]*`, string values, none of what rrotor sets itself (PATH, HOME, TMPDIR, the proxy,
+    LD_*)."""
+    if env is None:
+        return {}
+    if not isinstance(env, dict) or len(env) > ENV_MAX:
+        raise BadRequest(f"env is an object of up to {ENV_MAX} variables.", code="E_CLI_INPUTS")
+    for name, value in env.items():
+        if not isinstance(name, str) or not ENV_KEY.match(name) or not isinstance(value, str):
+            raise BadRequest("env names are [A-Z_][A-Z0-9_]*, each a string value.", code="E_CLI_INPUTS")
+        if name in ENV_RESERVED or name.startswith("LD_") or PROXY_ENV.match(name):
+            raise BadRequest(f"env: {name} is rrotor's own (PATH, HOME, TMPDIR, the proxy, LD_*).", code="E_CLI_INPUTS")
+        if len(value) > 4096 or "\x00" in value:
+            raise BadRequest(f"env: {name} is over 4096 characters, or has a NUL.", code="E_CLI_INPUTS")
+    return dict(env)
 
 
 def check_stdin(stdin: Any) -> str | None:

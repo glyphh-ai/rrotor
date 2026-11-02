@@ -43,7 +43,7 @@ def test_a_command_runs_once_per_run(tmp_path):
     got = ctx.cli("claude", ["-p", "email it"])
     assert got == CliResult(0, "sent\n", "") and got.ok
     step = cli_step("claude", ["-p", "email it"], None)
-    assert asked == [{"cli": "claude", "args": ["-p", "email it"], "stdin": None, "step": step}]
+    assert asked == [{"cli": "claude", "args": ["-p", "email it"], "stdin": None, "step": step, "env": {}}]
     assert ctx.cli("claude", ["-p", "email it"]) == got and len(asked) == 1  # a resumed run reads it back
     assert step.startswith("cli:claude:") and step != cli_step("claude", ["-p", "other"], None)
 
@@ -95,6 +95,16 @@ def test_without_rrotor_no_cli_runs(tmp_path):
     with pytest.raises(CliError) as caught:
         ctx.cli("claude", ["-p", "x"])
     assert caught.value.code == "E_CLI_MISSING"
+
+
+def test_env_goes_with_the_command_once_checked(tmp_path):
+    ctx, asked = make(tmp_path, {"gh": {"allow": []}})
+    assert ctx.cli("gh", ["pr", "list"], env={"GH_TOKEN": "ghp_123", "GH_HOST": "github.com"}).ok
+    assert asked[0]["env"] == {"GH_TOKEN": "ghp_123", "GH_HOST": "github.com"}
+    for bad in ({"gh_token": "x"}, {"GH TOKEN": "x"}, {"GH_TOKEN": 1}, {f"K{i}": "v" for i in range(33)}, "x=1"):
+        with pytest.raises(CliError) as caught:
+            ctx.cli("gh", ["pr", "view"], env=bad)  # type: ignore[arg-type]
+        assert caught.value.code == "E_CLI_ENV" and len(asked) == 1, bad
 
 
 def test_a_cli_result_round_trips():

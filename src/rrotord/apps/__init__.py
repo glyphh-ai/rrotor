@@ -2,7 +2,9 @@
 server's docs/specs/apps.md, 4). Publishing takes the app's files and makes a version of `"kind": "app"`
 (rrotord/deploy.py, `from_files`); serving answers the active version's `src/` to a browser whose sign-in the
 gate admitted (rrotord/browser.py), when the catalogue says the version is approved (rrotord/catalogue.py) and the
-viewer's role or groups the app's `roles` allow; the page's calls run the app's functions as the viewer.
+viewer's role or groups the app's `roles` allow; the page's calls run the app's functions as the viewer, or as the
+app itself (`app.run_as`). Beside this module: `rrotor.js`, the page's client (served at /apps/_/rrotor.js: calls,
+the app's CLIs, the sign-in card), and `index.html`, the index page's template (GET /apps/).
 
 The entry (the file opened at `/apps/<name>/`) is served as it is when it is a page (`.html`, `.htm`), an SVG or a
 PDF, and inside one of rrotor's shells otherwise: the document shell renders Markdown with `marked`, the diagram
@@ -38,7 +40,7 @@ from urllib.parse import quote
 
 from rrotord import manifest as manifests
 from rrotord.catalogue import Catalogue
-from rrotord.errors import BadRequest, RrotorError
+from rrotord.errors import BadRequest, Conflict, NotFound, RrotorError
 from rrotord.programs import Programs, Version
 
 FILES_MAX, BYTES_MAX = 64, 16 * 1024 * 1024
@@ -211,6 +213,23 @@ REFUSED = (
     "color:#1a1a1a}}</style></head><body><h1>{title}</h1><p>{message}</p>{action}</body></html>"
 )
 SIGN_OUT = '<form method="post" action="/auth/logout"><button type="submit">Sign out</button></form>'
+# rrotor's own files beside this module, packaged with the daemon: the page's client (served at /apps/_/rrotor.js;
+# `_` is no app's name, the manifest's NAME refuses it) and the index page's template (the list inlined as JSON).
+STATIC = Path(__file__).parent
+CLIENT = "rrotor.js"
+INDEX = "index.html"
+INDEX_MARK = "/*__RROTOR_INDEX__*/"
+
+
+def client_js() -> bytes:
+    return (STATIC / CLIENT).read_bytes()
+
+
+def index_page(cards: list[dict[str, Any]], reviewer: bool, platform: str | None, signed_in: bool) -> str:
+    """The index page (`GET /apps/`): the template with the cards, whether the viewer reviews, where a review is done
+    and whether there is a session to end, inlined as JSON where the template's mark is."""
+    data = {"apps": cards, "reviewer": reviewer, "platform": platform, "signed_in": signed_in}
+    return (STATIC / INDEX).read_text().replace(INDEX_MARK, script_text(json.dumps(data)))
 
 
 class AppError(RrotorError):
@@ -255,8 +274,8 @@ def read_files(given: Any) -> dict[str, bytes]:
 
 
 def manifest_of(data: dict[str, Any], name: str, files: dict[str, bytes]) -> dict[str, Any]:
-    """The app's glyphh.json from what app_publish was sent: name, title, description, roles, entry (default
-    index.html, or the one file sent), type (default the entry's), functions."""
+    """The app's glyphh.json from what app_publish was sent: name, title, description, roles, run_as (default
+    viewer), entry (default index.html, or the one file sent), type (default the entry's), functions."""
     title, description = data.get("title"), data.get("description", "")
     if not isinstance(title, str) or not title.strip():
         raise BadRequest("Send title: what the app is called.", code="E_INPUTS")
@@ -265,6 +284,9 @@ def manifest_of(data: dict[str, Any], name: str, files: dict[str, bytes]) -> dic
     roles = data.get("roles") or []
     if not isinstance(roles, list) or not all(isinstance(r, str) for r in roles) or len(roles) > ROLES_MAX:
         raise BadRequest("roles is a list of role names (groups, admin, member); empty: everyone.", code="E_INPUTS")
+    run_as = data.get("run_as") or "viewer"
+    if run_as not in ("viewer", "app"):
+        raise BadRequest("run_as is viewer (the page's calls run as the person viewing) or app.", code="E_INPUTS")
     functions = data.get("functions") or {}
     if not isinstance(functions, dict) or not all(isinstance(v, dict) for v in functions.values()):
         raise BadRequest("functions is an object: each function's name to {description, inputs}.", code="E_INPUTS")
@@ -284,6 +306,7 @@ def manifest_of(data: dict[str, Any], name: str, files: dict[str, bytes]) -> dic
             "title": title.strip(),
             "roles": roles,
             "functions": list(functions),
+            "run_as": run_as,
         },
         "functions": functions,
     }
@@ -391,11 +414,88 @@ class Apps:
                     "active": True,
                     "roles": app.roles,
                     "functions": app.functions,
+                    "run_as": app.run_as,
                     "state": self.state(name, active.version),
                     "url": self.url(name),
                 }
             )
         return out
+
+    def index(self, roles: set[str] | None) -> tuple[list[dict[str, Any]], bool]:
+        """The index page's cards for a viewer with these roles (None: a local rrotor's own browser, which sees
+        everything): the approved apps their roles allow, with Open; for a reviewer, every app, each with its state.
+        Answers the cards and whether the viewer is a reviewer."""
+        reviewer = roles is None or self.catalogue.is_reviewer(roles)
+        cards = []
+        for item in self.listed():
+            name, version = str(item["name"]), int(item["version"])
+            allowed = not item["roles"] or bool(set(item["roles"]) & (roles or set()))
+            opens = roles is None or (self.catalogue.approved(name, version) and (allowed or reviewer))
+            if not opens and not reviewer:
+                continue
+            cards.append({k: item[k] for k in ("name", "title", "description", "type", "version", "state", "url")})
+            cards[-1]["open"] = opens
+        return cards, reviewer
+
+    def clis_of(self, version: Version, subject: str | None, homes: bool = True) -> list[dict[str, Any]]:
+        """The CLIs the app's manifest names, as this viewer stands: whether each is signed in for `subject` (the
+        shared HOME for an app of `run_as: app`, whose CLIs a viewer does not sign in: `login` false) and whether it
+        has a sign-in to run; one not deployed here: `signed_in` null, no sign-in."""
+        app = version.manifest.app
+        assert app is not None  # noqa: S101
+        here = {c["name"]: c for c in self.programs.clis(None if app.shared else subject, homes=homes)}
+        out = []
+        for name in version.manifest.clis:
+            cli = here.get(name)
+            builtin = (cli or {}).get("builtin") or {}
+            out.append(
+                {
+                    "name": name,
+                    "title": str(builtin.get("title") or name),
+                    "signed_in": cli.get("signed_in") if cli is not None else None,
+                    "login": cli is not None and cli.get("login") is not None and not app.shared,
+                }
+            )
+        return out
+
+    def me(self, version: Version, actor: dict[str, Any]) -> dict[str, Any]:
+        """What the gate knows of the viewer, for the page (`rrotor.app`): null on a local rrotor."""
+        app = version.manifest.app
+        assert app is not None  # noqa: S101
+        viewer = (
+            {"sub": actor.get("sub"), "role": actor.get("role"), "groups": list(actor.get("groups") or [])}
+            if actor.get("type") == "sign-in"
+            else None
+        )
+        return {"name": version.program, "title": app.title, "type": app.type, "run_as": app.run_as, "viewer": viewer}
+
+    @staticmethod
+    def own_run(view: dict[str, Any], name: str, version: Version, subject: str | None) -> dict[str, Any]:
+        """A run (as `run_status` shows it) of this app that is the viewer's: a run of the app's functions, or a
+        sign-in of one of its CLIs started from a page (origin `app`), and for the viewer's subject (none for an app
+        of `run_as: app`, whose runs are the app's, and on a local rrotor); any other is E_RUN_MISSING, as if it
+        were not there. Answers the view."""
+        app = version.manifest.app
+        assert app is not None  # noqa: S101
+        whose = None if app.shared else subject
+        program = view.get("program")
+        of_app = program == name or (view.get("origin") == "app" and program in version.manifest.clis)
+        if not of_app or view.get("subject") != whose:
+            raise NotFound(f"{name} has no run {view.get('run_id')} of yours.", code="E_RUN_MISSING")
+        return view
+
+    def check_cli(self, version: Version, cli: str) -> None:
+        """A sign-in from the page is of a CLI the app names, and only for an app that runs as the viewer."""
+        app = version.manifest.app
+        assert app is not None  # noqa: S101
+        if cli not in version.manifest.clis:
+            raise NotFound(f"{version.program} does not name the CLI {cli} in its clis.", code="E_APP_CLI")
+        if app.shared:
+            raise Conflict(
+                f"{app.title} runs as the app, not as its viewer: an admin signs {cli} in once (cli_login with "
+                "shared: true).",
+                code="E_APP_RUN_AS",
+            )
 
     def serving(self, name: str, roles: set[str] | None, asked: int | None = None) -> Version:
         """The version of the app a viewer with these roles may open (None: a local rrotor's own browser, which

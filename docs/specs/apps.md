@@ -1,6 +1,7 @@
 # Apps: what Claude made, published to this rrotor, served to the org's people
 
-**Status: built, rrotor 0.3.0 (branch `apps-types`, 2026-11-02): [`architecture.md`, 5.8](../architecture.md#58-apps).**
+**Status: built, rrotor 0.4.0 (branch `app-signins`, 2026-11-02; 0.3.0 was branch `apps-types`): [`architecture.md`,
+5.8](../architecture.md#58-apps).**
 The spec is the server's [`docs/specs/apps.md`](https://github.com/glyphh-ai/server/blob/main/docs/specs/apps.md)
 (section 4 is rrotor's part); this file is its pointer so the rrotor repo carries the contract too. One word
 everywhere: app. "Artifact" is Claude's word for the file in the session, and names nothing a person reads or
@@ -18,6 +19,11 @@ down the link as `app` messages and the welcome's `apps`, protocol 3, kept in `/
 Glyphh server, a session cookie, the sign-in introspected like a bearer) whose role or groups the app's `roles`
 allow: a page as it is, a `.md` in the document shell, a `.jsx` or `.tsx` in the React shell (an import map, Babel
 in the browser, nothing built), a `.mmd` in the diagram shell, an image in the image shell, a PDF or an SVG as it
-is. The page's calls (`POST /apps/<name>/call/<function>`) run as the viewer: their HOME, their CLIs. A local rrotor
-serves its apps to the browser on its own machine without a sign-in; one with the link off treats every deploy as
-approved.
+is. The page's calls (`POST /apps/<name>/call/<function>`) run as the viewer: their HOME, their CLIs; or, with
+`app.run_as: app`, as the app itself (the CLIs' shared HOME, the vault). A viewer signs an app's CLI in from the
+page (`GET /apps/<name>/clis`, `POST /apps/<name>/clis/<cli>/login`, polled at `GET /apps/<name>/runs/<id>`), with
+rrotor's sign-in card from `/apps/_/rrotor.js`; an admin signs a CLI's shared HOME in once (`cli_login` with
+`shared: true`); a program hands a CLI a key from the vault with `ctx.cli(..., env=)`; `deployed` and the `secrets`
+message tell the catalogue which declared secrets are not set; `GET /apps/` is the index of the apps here. A local
+rrotor serves its apps to the browser on its own machine without a sign-in; one with the link off treats every
+deploy as approved.

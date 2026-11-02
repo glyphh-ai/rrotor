@@ -126,7 +126,7 @@ async def cli_run(s: Services, args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def cli_login(s: Services, args: dict[str, Any]) -> dict[str, Any]:
-    return await ops.cli_login(s, {"cli": ops.text_of(args, "cli")})
+    return await ops.cli_login(s, {"cli": ops.text_of(args, "cli"), "shared": args.get("shared")})
 
 
 async def apps_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
@@ -174,7 +174,8 @@ TOOLS: tuple[Tool, ...] = (
         "diagram, an image a design; say dashboard or deck yourself), roles (groups, admin, member; empty: everyone in "
         "the org), files (path to text or {base64} for a PDF or an image; 64 and 16 MiB at most), entry (default "
         "index.html, or the one file sent), and, when the page calls functions, functions ({name: {description, "
-        "inputs}}) with program (the text of program.py; a function runs as the viewer, with their CLIs). The app "
+        "inputs}}) with program (the text of program.py; a function runs as the viewer, with their CLIs, or, with "
+        "run_as app, as the app itself: the CLIs' shared HOME and the vault, the same for every viewer). The app "
         "awaits the org's review in Glyphh (an admin or a reviewer approves it), then is served at the url answered. "
         "A new version of an approved app keeps the approved one serving until it is approved.",
         _obj(
@@ -184,6 +185,7 @@ TOOLS: tuple[Tool, ...] = (
                 "description": {"type": "string"},
                 "type": {"type": "string", "enum": ["page", "dashboard", "doc", "diagram", "deck", "design"]},
                 "roles": {"type": "array", "items": {"type": "string"}, "maxItems": 50},
+                "run_as": {"type": "string", "enum": ["viewer", "app"]},
                 "files": FILES,
                 "entry": {"type": "string"},
                 "functions": {"type": "object", "additionalProperties": {"type": "object"}},
@@ -306,8 +308,9 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "clis_list",
         "The command-line tools here: each one's version, command, install, allowed argument patterns, the "
-        "patterns that need the person's approval, and signed_in: whether it is signed in for you (each signed-in "
-        "person has their own HOME on the rrotor; false: call cli_login first).",
+        "patterns that need the person's approval, signed_in: whether it is signed in for you (each signed-in "
+        "person has their own HOME on the rrotor; false: call cli_login first), and shared_signed_in: whether its "
+        "shared HOME is (what an app of run_as app, a schedule or a key's call runs in).",
         _obj({}),
         clis_list,
         True,
@@ -343,8 +346,9 @@ TOOLS: tuple[Tool, ...] = (
         "with data.url (and data.code for a device flow) for the person to open on their phone; then "
         "program_continue with the code the page shows (or, if the page ends on an http://localhost… address that "
         "does not load, that address; after a device code, any answer once they signed in). Answers done with "
-        "signed_in when it has.",
-        _obj({"cli": {"type": "string"}}, ["cli"]),
+        "signed_in when it has. shared: true signs the CLI's shared HOME in instead (what an app of run_as app, a "
+        "schedule or a key's call runs in): an admin's act, or the local token's.",
+        _obj({"cli": {"type": "string"}, "shared": {"type": "boolean"}}, ["cli"]),
         cli_login,
     ),
 )

@@ -8,7 +8,7 @@ import pytest
 
 from rrotord.api import ops
 from rrotord.audit import Who, acting
-from rrotord.errors import BadRequest
+from rrotord.errors import BadRequest, Forbidden
 from tests.daemon.api.conftest import Api
 from tests.daemon.api.test_mcp import tool
 from tests.fakes import ECHO, FakeFetch, cli_manifest, install, install_cli, manifest, sha, tarball
@@ -67,8 +67,10 @@ async def test_clis_over_mcp_and_each_kind_refuses_the_others_tool(api):
 async def test_a_cli_run_without_a_cli_is_refused(api):
     with pytest.raises(BadRequest, match=r"Send \{cli, args"):
         await ops.cli_run(api.services, {"args": []})
-    with pytest.raises(BadRequest, match=r"Send \{cli\}"):
+    with pytest.raises(BadRequest, match=r"Send \{cli, shared\?\}"):
         await ops.cli_login(api.services, {})
+    with pytest.raises(BadRequest, match=r"Send \{cli, shared\?\}"):
+        await ops.cli_login(api.services, {"cli": "tool", "shared": "yes"})
 
 
 SIGN_IN = '#!/bin/sh\necho "visit https://auth.example.com/x"\nread code\necho "$code" > "$HOME/creds"\n'
@@ -107,6 +109,39 @@ async def test_a_signed_in_person_signs_a_cli_in_as_themselves(api):
     assert (api.services.programs.folder("tool") / "homes" / "user_1" / "creds").read_text() == "code-1\n"
     assert not (api.services.programs.folder("tool") / "home").exists()
     assert (await ops.clis_list(api.services))["clis"][0]["signed_in"] is False  # the local token's HOME
+
+
+async def test_the_shared_sign_in_is_an_admins_act_or_the_local_tokens(api):
+    """`shared: true` signs the CLI's own HOME in (what an app of run_as app, a schedule or a key's call uses): the
+    local token may, an admin may, a member or a key is refused; clis_list says shared_signed_in."""
+    await deploy_sign_in(api)
+    status, listed = await send(api, "GET", "/v1/clis")
+    assert (listed["clis"][0]["signed_in"], listed["clis"][0]["shared_signed_in"]) == (False, False)
+    for who in (
+        Who({"type": "sign-in", "sub": "user_2", "role": "member"}),
+        Who({"type": "sign-in", "sub": "user_3"}),
+        Who({"type": "key", "key_sha256": "a" * 64}),
+    ):
+        with acting(who), pytest.raises(Forbidden) as refused:
+            await ops.cli_login(api.services, {"cli": "tool", "shared": True})
+        assert refused.value.code == "E_FORBIDDEN"
+    assert not (api.services.programs.folder("tool") / "home").exists()
+    with acting(Who({"type": "sign-in", "sub": "user_1", "role": "admin"})):  # an admin: the shared HOME
+        asked = await ops.cli_login(api.services, {"cli": "tool", "shared": True})
+        done = await ops.resume(api.services, asked["run_id"], "code-shared")
+        assert done["status"] == "done"
+        mine = (await ops.clis_list(api.services))["clis"][0]
+        assert (mine["signed_in"], mine["shared_signed_in"]) == (False, True)  # theirs is not, the shared one is
+    assert (api.services.programs.folder("tool") / "home" / "creds").read_text() == "code-shared\n"
+    run = api.services.runner.get(asked["run_id"])
+    assert run.subject is None
+    status, asked = await send(api, "POST", "/v1/clis/tool/login", json={"shared": True})  # the local token may
+    assert (status, asked["status"]) == (200, "needs_input")
+    await send(api, "POST", f"/v1/runs/{asked['run_id']}/continue", json={"answer": "code-local"})
+    assert (api.services.programs.folder("tool") / "home" / "creds").read_text() == "code-local\n"
+    shared = await tool(api, "cli_login", cli="tool", shared=True)
+    assert shared["isError"] is False and shared["structuredContent"]["status"] == "needs_input"
+    await tool(api, "program_cancel", run_id=shared["structuredContent"]["run_id"])
 
 
 async def test_a_cli_signs_in_over_mcp(api):

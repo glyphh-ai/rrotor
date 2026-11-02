@@ -125,11 +125,19 @@ async def _serve(s: Services, op: Any, args: dict[str, Any]) -> dict[str, Any]:
     run_id = str(args.get("run_id") or "")
     match op:
         case "call":
-            return await ops.call(s, dict(args.get("data") or {}), str(args.get("caller") or "claude"))
+            return await ops.call(
+                s,
+                dict(args.get("data") or {}),
+                str(args.get("caller") or "claude"),
+                str(args.get("origin") or "local"),
+                bool(args.get("shared")),
+            )
         case "cli":
             return await ops.cli_run(s, dict(args.get("data") or {}), str(args.get("caller") or "claude"))
         case "cli_login":
-            return await ops.cli_login(s, dict(args.get("data") or {}), str(args.get("caller") or "claude"))
+            return await ops.cli_login(
+                s, dict(args.get("data") or {}), str(args.get("caller") or "claude"), str(args.get("origin") or "local")
+            )
         case "deploy":
             return await ops.deploy(s, dict(args.get("data") or {}))
         case "app_publish":

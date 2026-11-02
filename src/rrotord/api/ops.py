@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from rrotord import apps, clis
 from rrotord.api import forward
+from rrotord.api.gate import viewer_roles
 from rrotord.audit import current
 from rrotord.cluster.transport import ClusterError
 from rrotord.errors import BadRequest, Forbidden, RrotorError, Unavailable
@@ -154,8 +155,11 @@ async def apps_list(s: Services) -> dict[str, Any]:
     return {"apps": apps.Apps(s.programs, s.catalogue, s.config.address).listed()}
 
 
-async def call(s: Services, data: dict[str, Any], caller: str = "claude", origin: str = "local") -> dict[str, Any]:
-    """Open a run of a program's function; the first Result, with its data."""
+async def call(
+    s: Services, data: dict[str, Any], caller: str = "claude", origin: str = "local", shared: bool = False
+) -> dict[str, Any]:
+    """Open a run of a program's function; the first Result, with its data. `shared`: the run is nobody's (an app
+    of `run_as: app`: the CLIs' shared HOME), whoever called."""
     program, function = data.get("program"), data.get("function", "start")
     inputs, version, clearance = data.get("inputs") or {}, data.get("version"), data.get("clearance", 1.0)
     if (
@@ -174,7 +178,8 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude", origin
         and c.role == "follower"
         and (forward.writes(s, program, function, version) or not await c.caught_up(forward.MIN_SEQ.get()))
     ):
-        return await forward.relayed(s, "call", {"data": data, "caller": caller})
+        sent = {"data": data, "caller": caller, "origin": origin, "shared": shared}
+        return await forward.relayed(s, "call", sent)
     term = forward.leading(s) if forward.writes(s, program, function, version) else None
     run = await s.runner.call(
         program=program,
@@ -184,6 +189,7 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude", origin
         caller=caller,
         origin=origin,
         clearance=float(clearance),
+        shared=shared,
     )
     await forward.committed(s, term)
     return answer(run)
@@ -191,7 +197,8 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude", origin
 
 async def clis_list(s: Services) -> dict[str, Any]:
     """The CLIs here: each one's version, command, install, allowed patterns and approval patterns, and whether it is
-    signed in for this caller (their own HOME; unknown on a follower, whose homes are the head's)."""
+    signed in for this caller (their own HOME) and for the shared HOME (unknown on a follower, whose homes are the
+    head's)."""
     return {"clis": s.programs.clis(clis.subject_of(current().actor), homes=not forward.follower(s))}
 
 
@@ -211,16 +218,25 @@ async def cli_run(s: Services, data: dict[str, Any], caller: str = "claude") -> 
     return answer(run)
 
 
-async def cli_login(s: Services, data: dict[str, Any], caller: str = "claude") -> dict[str, Any]:
+async def cli_login(s: Services, data: dict[str, Any], caller: str = "claude", origin: str = "local") -> dict[str, Any]:
     """A CLI's sign-in: `needs_input` with the address (and device code) to open on the person's phone, answered
-    by program_continue with the code the page shows; on the cluster's head, as every CLI run is."""
-    cli = data.get("cli")
-    if not isinstance(cli, str) or not cli:
-        raise BadRequest("Send {cli}.")
+    by program_continue with the code the page shows; on the cluster's head, as every CLI run is. `shared: true`
+    signs the CLI's shared HOME in (what an app of `run_as: app`, a schedule or a key's call runs in): an admin's
+    act, or the local token's; anyone else is refused E_FORBIDDEN."""
+    cli, shared = data.get("cli"), data.get("shared") or False
+    if not isinstance(cli, str) or not cli or not isinstance(shared, bool):
+        raise BadRequest("Send {cli, shared?}.")
+    if shared:
+        actor = current().actor
+        if actor.get("type") != "local" and not (actor.get("type") == "sign-in" and actor.get("role") == "admin"):
+            raise Forbidden(
+                "Signing a CLI's shared HOME in is an admin's act: it is what every run with no person uses.",
+                code="E_FORBIDDEN",
+            )
     if forward.follower(s):
-        return await forward.relayed(s, "cli_login", {"data": data, "caller": caller})
+        return await forward.relayed(s, "cli_login", {"data": data, "caller": caller, "origin": origin})
     term = forward.leading(s)
-    run = await s.runner.cli_login(cli=cli, caller=caller)
+    run = await s.runner.cli_login(cli=cli, caller=caller, origin=origin, shared=shared)
     await forward.committed(s, term)
     return answer(run)
 
@@ -316,6 +332,7 @@ async def secret_set(s: Services, program: str, name: str, value: Any) -> dict[s
     vault(s).set(program, name, value)
     if s.audit is not None:
         s.audit.emit("secret.set", program=program, secret=name, outcome={"status": "done", "code": None})
+    await secrets_told(s, program)
     return {"program": program, "name": name, "set": True}
 
 
@@ -325,7 +342,70 @@ async def secret_delete(s: Services, program: str, name: str) -> dict[str, Any]:
     vault(s).delete(program, name)
     if s.audit is not None:
         s.audit.emit("secret.delete", program=program, secret=name, outcome={"status": "done", "code": None})
+    await secrets_told(s, program)
     return {"program": program, "name": name, "set": False}
+
+
+async def secrets_told(s: Services, program: str) -> None:
+    """After a secret of a program changed: the catalogue told which of an app's declared secrets are missing now
+    (`secrets` up the link; the handler sends nothing for a program that is not an app)."""
+    if s.secrets is not None:
+        await s.secrets(program)
+
+
+def app_served(s: Services) -> apps.Apps:
+    if s.catalogue is None:
+        raise Unavailable("This rrotor keeps no apps.", code="E_APPS")
+    return apps.Apps(s.programs, s.catalogue, s.config.address)
+
+
+def viewer(s: Services, name: str) -> tuple[apps.Apps, Version, dict[str, Any]]:
+    """The app's version a page's request is about, for the viewer the gate let in (their roles gate it as the page
+    itself is gated), and the viewer's actor."""
+    actor = current().actor
+    served = app_served(s)
+    return served, served.serving(name, viewer_roles(actor)), actor
+
+
+async def app_clis(s: Services, name: str) -> dict[str, Any]:
+    """`GET /apps/{name}/clis`: the app's CLIs as this viewer stands (docs/architecture.md, 5.8)."""
+    served, version, actor = viewer(s, name)
+    return {"clis": served.clis_of(version, clis.subject_of(actor), homes=not forward.follower(s))}
+
+
+async def app_cli_login(s: Services, name: str, cli: str) -> dict[str, Any]:
+    """`POST /apps/{name}/clis/{cli}/login`: the CLI's sign-in as the viewer, from the page; audited as a page's
+    call (`run.call`, caller `app`, origin `app`)."""
+    served, version, _ = viewer(s, name)
+    served.check_cli(version, cli)
+    return await cli_login(s, {"cli": cli}, caller="app", origin="app")
+
+
+async def app_run(s: Services, name: str, run_id: str) -> dict[str, Any]:
+    """`GET /apps/{name}/runs/{run_id}`: one of the viewer's own runs of this app, as `run_status` shows it."""
+    served, version, actor = viewer(s, name)
+    return served.own_run(await run_status(s, run_id), name, version, clis.subject_of(actor))
+
+
+async def app_continue(s: Services, name: str, run_id: str, value: Any) -> dict[str, Any]:
+    """`POST /apps/{name}/runs/{run_id}/continue`: the page's answer to one of the viewer's own waiting runs."""
+    served, version, actor = viewer(s, name)
+    served.own_run(await run_status(s, run_id), name, version, clis.subject_of(actor))
+    return await resume(s, run_id, value)
+
+
+async def app_me(s: Services, name: str) -> dict[str, Any]:
+    """`GET /apps/{name}/me`: the app, and what the gate knows of the viewer (null on a local rrotor)."""
+    served, version, actor = viewer(s, name)
+    return served.me(version, actor)
+
+
+async def app_index(s: Services) -> str:
+    """`GET /apps/`: the index page for the viewer the gate let in."""
+    actor = current().actor
+    served = app_served(s)
+    cards, reviewer = served.index(viewer_roles(actor))
+    return apps.index_page(cards, reviewer, served.catalogue.platform, signed_in=actor.get("type") == "sign-in")
 
 
 def scheduler(s: Services) -> Scheduler:

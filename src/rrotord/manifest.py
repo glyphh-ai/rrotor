@@ -300,6 +300,14 @@ class App(BaseModel):
     title: Annotated[str, Field(min_length=1, max_length=120)]
     roles: list[Annotated[str, Field(pattern=ROLE)]] = Field([], max_length=50)
     functions: list[Annotated[str, Field(pattern=FUNCTION)]] = Field([], max_length=100)
+    # Whose standing a page's call runs with: the viewer's (their HOME, their sign-ins) or the app's own (subject
+    # none: the CLI's shared HOME and the program's vault, as a schedule runs)
+    run_as: Literal["viewer", "app"] = "viewer"
+
+    @property
+    def shared(self) -> bool:
+        """Whether the page's calls run as the app itself rather than as the person viewing it."""
+        return self.run_as == "app"
 
     @field_validator("entry")
     @classmethod

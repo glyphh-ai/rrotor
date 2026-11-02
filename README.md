@@ -26,7 +26,10 @@ that CLI's own sandbox and signed-in HOME.
 A program can also be an **app** (`"kind": "app"`, [5.8](docs/architecture.md#58-apps)): what Claude made (a page,
 a dashboard, a Markdown document, a React page, a diagram, a deck or a design as a PDF or an image), published from
 Claude with `app_publish` (`POST /v1/apps`), reviewed in the Glyphh catalogue, and served at `/apps/<name>/` to the
-org's people signed in to Glyphh, whose roles the app allows; a page's calls run the app's functions as the viewer.
+org's people signed in to Glyphh, whose roles the app allows; a page's calls run the app's functions as the viewer
+(or, with `run_as: app`, as the app itself). A viewer signs an app's CLI in from the page itself (rrotor's sign-in
+card, `/apps/_/rrotor.js`), an admin signs a CLI's shared HOME in once (`cli_login` with `shared: true`), and a
+program hands a CLI a key from the vault with `ctx.cli(..., env=)`.
 
 | Where | What |
 |---|---|

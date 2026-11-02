@@ -111,6 +111,7 @@ def test_a_paste_flow_asks_then_types_the_answer_and_masks_it(tmp_path):
     asked = s.until_asked()
     assert asked.status == "needs_input" and asked.data["url"] == "https://auth.example.com/o?s=1"
     assert asked.data["code"] is None and "the code the page shows" in str(asked.prompt)
+    assert asked.data["typed"] is True  # a pasted code: the answer is typed into the command
     done = s.answer({"code": "secret-code-9"})
     assert done.status == "done" and done.data["signed_in"] is True, done.data
     assert "secret-code-9" not in done.data["output"]
@@ -124,7 +125,7 @@ def test_a_device_flow_does_not_type_the_answer(tmp_path):
     s = session(tmp_path, body, quiet=0.6)
     s.start()
     asked = s.until_asked()
-    assert (asked.data["code"], s.device) == ("ABCD-EFGH", True)
+    assert (asked.data["code"], asked.data["typed"], s.device) == ("ABCD-EFGH", False, True)
     again = s.answer("done")  # nothing typed: the CLI waits on, quiet, and is asked about again
     assert again.status == "needs_input" and again.data["url"] is None and s.device
     assert "still running and waiting" in str(again.prompt)
@@ -138,7 +139,7 @@ def test_a_polled_flow_that_takes_no_code(tmp_path):
     s = session(tmp_path, 'echo "open https://p.example.com/l"\nsleep 5\n', paste=False)
     s.start()
     asked = s.until_asked()
-    assert asked.data["code"] is None and "any answer" in str(asked.prompt)
+    assert asked.data["code"] is None and asked.data["typed"] is False and "any answer" in str(asked.prompt)
     s.stop()
 
 

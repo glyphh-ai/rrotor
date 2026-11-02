@@ -6,6 +6,7 @@ import datetime as dt
 import fnmatch
 import hashlib
 import json
+import re
 import shlex
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
@@ -93,6 +94,22 @@ class CliResult:
 
 def _no_cli(_: dict[str, Any]) -> dict[str, Any]:
     return {"status": "failed", "data": {"code": "E_CLI_MISSING", "reason": "No CLI runs here."}}
+
+
+ENV_MAX = 32
+ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def check_env(env: Mapping[str, str] | None) -> dict[str, str]:
+    """`ctx.cli`'s env as rrotor takes it: up to 32 names, `[A-Z_][A-Z0-9_]*`, string values (E_CLI_ENV)."""
+    if env is None:
+        return {}
+    if not isinstance(env, Mapping) or len(env) > ENV_MAX:
+        raise CliError(f"env is a mapping of up to {ENV_MAX} variables.", "E_CLI_ENV")
+    for name, value in env.items():
+        if not isinstance(name, str) or not ENV_NAME.match(name) or not isinstance(value, str):
+            raise CliError(f"env: {name!r} is not a name [A-Z_][A-Z0-9_]* with a string value.", "E_CLI_ENV")
+    return dict(env)
 
 
 class Secrets:
@@ -200,13 +217,21 @@ class Ctx:
         self._sink("checkpoint", {"key": key, "value": value})
         return value
 
-    def cli(self, name: str, args: Iterable[str], stdin: str | None = None) -> CliResult:
+    def cli(
+        self, name: str, args: Iterable[str], stdin: str | None = None, env: Mapping[str, str] | None = None
+    ) -> CliResult:
         """One command of a CLI on this rrotor (built in or deployed, named in the manifest's `clis`), run by rrotor in
         that CLI's own sandbox, with its private HOME (its sign-in), its hosts and its secrets: its exit code, stdout
         and stderr. Once per run: a resumed run reads what the command answered. Its arguments must be ones the CLI
         allows (E_CLI_DENIED); one its approval patterns name waits for the person's approval first, as a step of this
-        run (declined: E_CLI_DECLINED). A command that cannot run fails with its code (E_CLI_…, E_SECRET_MISSING, …)."""
+        run (declined: E_CLI_DECLINED). A command that cannot run fails with its code (E_CLI_…, E_SECRET_MISSING, …).
+
+        `env` is set in the command's environment beside the CLI's own, for this one command: names `[A-Z_][A-Z0-9_]*`,
+        at most 32, string values (E_CLI_ENV otherwise); the usual way to hand a CLI a key from the vault is
+        `env={"GH_TOKEN": ctx.secrets["GH_TOKEN"]}`. A value of 4 characters or more is masked in the run's log as a
+        secret is."""
         argv = [str(a) for a in args]
+        given = check_env(env)
         if name not in self._clis:
             raise CliError.undeclared(name)
         patterns = self._clis[name]
@@ -228,7 +253,7 @@ class Ctx:
                 raise Wait(Result.needs_approval(step, prompt), {"kind": "approval", "key": step})
             if not self._state.approvals[step]:
                 raise CliError(f"The person declined `{name} {line}`.", "E_CLI_DECLINED")
-        answer = self._request({"cli": name, "args": argv, "stdin": stdin, "step": step})
+        answer = self._request({"cli": name, "args": argv, "stdin": stdin, "step": step, "env": given})
         data: dict[str, Any] = answer["data"] if isinstance(answer.get("data"), dict) else {}
         if answer.get("status") != "done":
             code = str(data.get("code") or "E_CLI")

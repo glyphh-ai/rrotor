@@ -68,6 +68,7 @@ class Welcome(Message):
     # The catalogue's whole word on this rrotor's apps (None: an older server); protocol 2 called it `artifacts`.
     apps: list[Reviewed] | None = Field(None, validation_alias=AliasChoices("apps", "artifacts"))
     reviewers: list[str] | None = None  # the groups that review the org's apps, beside its admin
+    platform: str | None = None  # the platform's address, where a review is done (the index page links there)
 
 
 class App(Reviewed, Message):
@@ -189,9 +190,11 @@ def deployed(
     repo: str | None = None,
     manifest: dict[str, Any] | None = None,
     by: str | None = None,
+    secrets_missing: list[str] | None = None,
 ) -> dict[str, Any]:
     """After every deploy, however it was asked for: `repo` only for a deploy from a repo; `by` the Glyphh subject
-    who published an app (null for a key, the local token or a deploy from a repo)."""
+    who published an app (null for a key, the local token or a deploy from a repo); `secrets_missing` the secrets
+    the manifest declares that are not set in the vault (the catalogue shows them at review)."""
     return {
         "type": "deployed",
         "id": new_id(),
@@ -201,7 +204,14 @@ def deployed(
         "repo": repo,
         "manifest": manifest,
         "by": by,
+        "secrets_missing": list(secrets_missing or []),
     }
+
+
+def secrets(program: str, missing: list[str]) -> dict[str, Any]:
+    """After a secret of an app is set or deleted: which of its declared secrets are not set now, so the review card
+    is current without a new version. Names only, never a value."""
+    return {"type": "secrets", "id": new_id(), "program": program, "missing": list(missing)}
 
 
 def usage(seq: int, keys: list[dict[str, Any]]) -> dict[str, Any]:

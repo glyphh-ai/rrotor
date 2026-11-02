@@ -73,7 +73,7 @@ def test_a_protocol_1_message_naming_a_model_is_refused_not_misread():
 
 
 def test_up_messages():
-    hello = p.hello("0.3.0", "local", "rid", [])
+    hello = p.hello("0.4.0", "local", "rid", [])
     assert (hello["type"], hello["protocol"], hello["runtime_id"]) == ("hello", 3, "rid")  # 3: `app`, not `artifact`
     result = p.result(3, "r", {"status": "done", "data": 1, "extra": "no"}, 2.9)
     assert result["result"] == {"status": "done", "data": 1, "step": None, "prompt": None}
@@ -98,10 +98,17 @@ def test_deployed_carries_the_repo_and_the_manifest_or_nulls():
         "repo": "owner/x",
         "manifest": {"name": "x"},
         "by": None,
+        "secrets_missing": [],
     }
     bare = p.deployed("x", 2, SHA)
     assert (bare["repo"], bare["manifest"]) == (None, None) and len(bare["id"]) == 32 and bare["id"] != full["id"]
     assert p.deployed("x", 2, SHA, by="user_1")["by"] == "user_1"
+    assert p.deployed("x", 2, SHA, secrets_missing=["GH_TOKEN"])["secrets_missing"] == ["GH_TOKEN"]
+    told = p.secrets("x", ["GH_TOKEN"])
+    assert told == {"type": "secrets", "id": told["id"], "program": "x", "missing": ["GH_TOKEN"]}
+    welcome = p.DOWN.validate_python({"type": "welcome", "platform": "https://platform.glyphh.ai"})
+    assert isinstance(welcome, p.Welcome) and welcome.platform == "https://platform.glyphh.ai"
+    assert p.Welcome(type="welcome").platform is None
 
 
 @pytest.mark.parametrize("name", ["app", "artifact"])

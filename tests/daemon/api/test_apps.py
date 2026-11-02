@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -20,14 +21,16 @@ from rrotord import apps
 from rrotord.access import Access, digest
 from rrotord.api import forward, ops
 from rrotord.api.app import make
-from rrotord.audit import Audit
+from rrotord.audit import Audit, Who, acting
 from rrotord.browser import SESSION_COOKIE, Browser
 from rrotord.catalogue import Catalogue
 from rrotord.errors import BadRequest
 from tests.daemon.api.conftest import Api, linked, services
 from tests.daemon.api.test_hosted import Vouches
 from tests.daemon.api.test_mcp import rpc, tool
-from tests.fakes import install, manifest, token
+from tests.fakes import FakeFetch, cli_manifest, install, install_cli, manifest, sha, tarball, token
+
+URL = "https://example.com/tool.tar.gz"
 
 PAGE = "<!doctype html><title>Board</title><script src='https://cdnjs.cloudflare.com/x.js'></script><p>hi</p>"
 ROWS = """
@@ -94,6 +97,7 @@ async def test_an_app_is_published_listed_and_served_on_a_local_rrotor(local: Ap
             "active": True,
             "roles": [],
             "functions": [],
+            "run_as": "viewer",
             "state": "unknown",
             "url": "http://127.0.0.1:7777/apps/board/",
         }
@@ -394,8 +398,9 @@ async def test_a_rrotor_without_a_catalogue_keeps_no_apps(api: Api):
     for method, path, body in (("POST", "/v1/apps", publish_body()), ("GET", "/v1/apps", None)):
         status, answer = await send(api, method, path, json=body)
         assert (status, answer["error"]["code"]) == (503, "E_APPS"), path
-    res = await api.client.get("/apps/board/")
-    assert res.status == 503 and (await res.json())["error"]["code"] == "E_APPS"
+    for path in ("/apps/board/", "/apps/", "/apps/board/me", "/apps/board/clis"):
+        res = await api.client.get(path)
+        assert res.status == 503 and (await res.json())["error"]["code"] == "E_APPS", path
 
 
 class Glyphh:
@@ -589,6 +594,242 @@ def test_what_is_served_and_what_is_not(tmp_path):
     assert apps.content_type("x.md") == "text/markdown" and apps.content_type("noext") == "application/octet-stream"
     err = apps.AppError("x", code="E_OTHER", status=400)
     assert "Not served" in apps.refused_page(err, signed_in=False)
+
+
+WHOAMI = """
+from rrotor import Result
+
+def whoami(ctx, inputs):
+    got = ctx.cli("tool", ["whoami"])
+    return Result.done({"out": got.stdout, "signed_in": "creds" in got.stdout})
+"""
+
+
+async def sign_in_cli(api: Api) -> None:
+    """A CLI with a sign-in, whose `whoami` says which HOME it ran in (the sign-in's `creds` file, if there)."""
+    script = (
+        '#!/bin/sh\ncase "$1" in whoami) ls "$HOME"; exit 0;; esac\n'
+        'echo "visit https://auth.example.com/x"\nread code\necho "$code" > "$HOME/creds"\n'
+    )
+    archive = tarball({"bin/tool": script}, {"bin/tool": 0o755})
+    login = {"args": ["login"], "signed_in": "creds"}
+    block = {"install": {"url": URL, "sha256": sha(archive)}, "home": True, "login": login}
+    await install_cli(api.services.programs, cli_manifest(cli=block), FakeFetch({URL: archive}))
+
+
+async def test_run_as_app_runs_the_pages_calls_as_the_app_itself(local: Api):
+    """`run_as: app`: a page's call is nobody's run (subject none: the CLI's shared HOME), the viewer's roles still
+    gating the page; a viewer does not sign such an app's CLI in (409 E_APP_RUN_AS); its clis say `login` false."""
+    await sign_in_cli(local)
+    body = publish_body(functions={"whoami": {}}, program=WHOAMI, clis=["tool"], run_as="app")
+    status, made = await send(local, "POST", "/v1/apps", json=body)
+    assert status == 201, made
+    assert local.services.programs.get("board").manifest.app.run_as == "app"  # type: ignore[union-attr]
+    listed = (await send(local, "GET", "/v1/apps"))[1]["apps"][0]
+    assert listed["run_as"] == "app"
+    with acting(Who({"type": "sign-in", "sub": "user_1", "role": "member"})):
+        answer = await ops.call(
+            local.services, {"program": "board", "function": "whoami"}, caller="app", origin="app", shared=True
+        )
+    run = local.services.runner.get(answer["run_id"])
+    assert (run.subject, answer["data"]["signed_in"]) == (None, False)
+    res = await local.client.get("/apps/board/clis")
+    assert await res.json() == {"clis": [{"name": "tool", "title": "tool", "signed_in": False, "login": False}]}
+    res = await local.client.post("/apps/board/clis/tool/login")
+    assert res.status == 409 and (await res.json())["error"]["code"] == "E_APP_RUN_AS"
+    res = await local.client.get("/apps/board/me")
+    assert await res.json() == {"name": "board", "title": "The board", "type": "page", "run_as": "app", "viewer": None}
+    status, refused = await send(local, "POST", "/v1/apps", json=publish_body(run_as="root"))
+    assert (status, refused["error"]["code"]) == (400, "E_INPUTS") and "run_as is viewer" in refused["error"]["message"]
+    status, refused = await send(local, "POST", "/v1/apps", json=publish_body(name="_"))
+    assert (status, refused["error"]["code"]) == (400, "E_INPUTS")  # `_` is rrotor.js's, no app's
+
+
+async def test_the_viewer_signs_an_apps_cli_in_from_the_page_on_a_local_rrotor(local: Api, tmp_path):
+    local.services.audit = local.services.runner.audit = Audit(
+        tmp_path / "audit", "rrotor-1", tier=lambda: "enterprise"
+    )
+    await sign_in_cli(local)
+    body = publish_body(functions={"whoami": {}}, program=WHOAMI, clis=["tool"])
+    status, made = await send(local, "POST", "/v1/apps", json=body)
+    assert status == 201, made
+    res = await local.client.get("/apps/board/clis")
+    assert await res.json() == {"clis": [{"name": "tool", "title": "tool", "signed_in": False, "login": True}]}
+    res = await local.client.post("/apps/board/clis/tool/login")
+    asked = await res.json()
+    assert (
+        res.status == 200 and asked["status"] == "needs_input" and asked["data"]["url"] == "https://auth.example.com/x"
+    )
+    res = await local.client.get(f"/apps/board/runs/{asked['run_id']}")
+    polled = await res.json()
+    assert res.status == 200 and polled["status"] == "needs_input" and polled["subject"] is None
+    res = await local.client.post(f"/apps/board/runs/{asked['run_id']}/continue", json={"answer": "code-1"})
+    assert (await res.json())["status"] == "done"
+    assert (await (await local.client.get("/apps/board/clis")).json())["clis"][0]["signed_in"] is True
+    res = await local.client.post("/apps/board/call/whoami", data=b"{}")
+    assert (await res.json())["data"]["signed_in"] is True  # the page's call runs in the HOME just signed in
+    res = await local.client.post("/apps/board/clis/other/login")
+    assert res.status == 404 and (await res.json())["error"]["code"] == "E_APP_CLI"
+    events = [e for e in local.services.audit.query({"limit": "50"})["events"] if e["kind"] == "run.call"]
+    sign_in = next(e for e in events if e.get("command") == "login")
+    assert (sign_in["program"], sign_in["actor"]["type"]) == ("tool", "local")
+    run = local.services.runner.get(sign_in["run_id"])
+    assert (run.caller, run.origin) == ("app", "app")
+    install(local.services.programs, manifest("plain"), "def start(ctx, inputs):\n    pass\n", sha="e" * 40)
+    status, other = await send(local, "POST", "/v1/runs", json={"program": "plain"})
+    res = await local.client.get(f"/apps/board/runs/{other['run_id']}")
+    assert res.status == 404 and (await res.json())["error"]["code"] == "E_RUN_MISSING"
+    res = await local.client.get("/apps/board/runs/nope")
+    assert res.status == 404
+    for version in local.services.programs.versions("tool"):  # the CLI gone since: named, no sign-in
+        local.services.programs.remove(version)
+    res = await local.client.get("/apps/board/clis")
+    assert await res.json() == {"clis": [{"name": "tool", "title": "tool", "signed_in": None, "login": False}]}
+
+
+async def test_a_cli_without_a_login_cannot_be_signed_in_from_the_page(local: Api):
+    archive = tarball({"bin/tool": "#!/bin/sh\necho hi\n"}, {"bin/tool": 0o755})
+    block = {"install": {"url": URL, "sha256": sha(archive)}, "home": True}
+    await install_cli(local.services.programs, cli_manifest(cli=block), FakeFetch({URL: archive}))
+    status, made = await send(local, "POST", "/v1/apps", json=publish_body(clis=["tool"]))
+    assert status == 201, made
+    res = await local.client.post("/apps/board/clis/tool/login")
+    assert res.status == 400 and (await res.json())["error"]["code"] == "E_CLI_LOGIN"
+
+
+async def test_rrotor_js_is_served_to_the_page(local: Api):
+    res = await local.client.get("/apps/_/rrotor.js")
+    text = await res.text()
+    assert (res.status, res.content_type, res.headers["Cache-Control"]) == (200, "text/javascript", "no-store")
+    assert text == apps.client_js().decode() and "window.rrotor = rrotor" in text
+    for marker in (
+        "call: call",
+        "continue: resume",
+        "resume: resume",
+        "clis: clis",
+        "ready: ready",
+        '"app", { get: app',
+        "attachShadow",
+        "position:fixed;right:1rem;bottom:1rem",
+        '"Sign in to " + cli.title + " to continue"',
+        'target: "_blank", rel: "noopener"',
+        '"Copy"',
+        '"Waiting…"',
+        '"Signed in"',
+        "POLL_MS = 2000",
+        '"/runs/" + encodeURIComponent(runId)',
+        '"/clis/" + encodeURIComponent(cli.name) + "/login"',
+        "/^\\/apps\\/([a-z][a-z0-9_]{0,62})\\//",
+        'me.run_as === "app"',
+    ):
+        assert marker in text, marker
+    assert (await local.client.get("/apps/_/other.js")).status == 404  # `_` is no app
+
+
+async def test_the_index_page_lists_the_apps_on_a_local_rrotor(local: Api):
+    res = await local.client.get("/apps/")
+    text = await res.text()
+    assert (res.status, res.content_type) == (200, "text/html") and "Nothing published yet" in text
+    assert '"apps": []' in text and '"reviewer": true' in text and '"platform": null' in text
+    await send(local, "POST", "/v1/apps", json=publish_body(description="A </script><b>bold</b> one"))
+    res = await local.client.get("/apps/")
+    text = await res.text()
+    assert '"name": "board"' in text and '"open": true' in text and "</script><b>" not in text  # escaped
+    assert "<\\/script><b>bold" in text and "Review on Glyphh" in text and res.headers["Cache-Control"] == "no-store"
+    catalogue(local).set_one("board", 1, "draft", [])  # the local person reviews anything, and opens anything
+    cards, reviewer = apps.Apps(local.services.programs, catalogue(local), "http://x").index(None)
+    assert reviewer and cards[0]["open"] is True and cards[0]["state"] == "draft"
+
+
+async def test_the_viewer_signs_in_from_the_page_as_themselves(hosted: Hosted, tmp_path):
+    """On a self-hosted rrotor the page's sign-in runs as the viewer (their HOME), its run is theirs to poll and
+    answer (another viewer's is E_RUN_MISSING), and `me` says who the gate let in."""
+    audit = Audit(tmp_path / "audit", "rrotor-1", tier=lambda: "enterprise")
+    hosted.api.services.audit = hosted.api.services.runner.audit = audit
+    await sign_in_cli(hosted.api)
+    await publish_as_person(hosted, functions={"whoami": {}}, program=WHOAMI, clis=["tool"])
+    client, cookie = hosted.api.client, hosted.session()
+    catalogue(hosted.api).set_one("board", 1, "approved", [])
+    res = await client.get("/apps/board/me", headers=cookie)
+    assert await res.json() == {
+        "name": "board",
+        "title": "The board",
+        "type": "page",
+        "run_as": "viewer",
+        "viewer": {"sub": "user_1", "role": "member", "groups": ["SRE"]},
+    }
+    res = await client.get("/apps/board/clis", headers=cookie)
+    assert (await res.json())["clis"] == [{"name": "tool", "title": "tool", "signed_in": False, "login": True}]
+    res = await client.post("/apps/board/clis/tool/login", headers=cookie)
+    asked = await res.json()
+    assert res.status == 200 and asked["status"] == "needs_input", asked
+    run = hosted.api.services.runner.get(asked["run_id"])
+    assert (run.caller, run.origin, run.subject) == ("app", "app", "user_1")
+    res = await client.get(f"/apps/board/runs/{asked['run_id']}", headers=cookie)
+    assert res.status == 200 and (await res.json())["subject"] == "user_1"
+    hosted.vouches.sub = "user_2"  # another person, same browser: not their run
+    res = await client.get(f"/apps/board/runs/{asked['run_id']}", headers=cookie)
+    assert res.status == 404 and (await res.json())["error"]["code"] == "E_RUN_MISSING"
+    res = await client.post(f"/apps/board/runs/{asked['run_id']}/continue", headers=cookie, json={"answer": "x"})
+    assert res.status == 404 and (await res.json())["error"]["code"] == "E_RUN_MISSING"
+    hosted.vouches.sub = "user_1"
+    res = await client.post(f"/apps/board/runs/{asked['run_id']}/continue", headers=cookie, json={"answer": "c-1"})
+    assert (await res.json())["status"] == "done"
+    assert (hosted.api.services.programs.folder("tool") / "homes" / "user_1" / "creds").read_text() == "c-1\n"
+    res = await client.get("/apps/board/clis", headers=cookie)
+    assert (await res.json())["clis"][0]["signed_in"] is True
+    hosted.vouches.sub = "user_2"
+    res = await client.get("/apps/board/clis", headers=cookie)
+    assert (await res.json())["clis"][0]["signed_in"] is False  # theirs is not
+    res = await client.post("/apps/board/call/whoami", headers=cookie, data=b"{}")
+    assert (await res.json())["data"]["signed_in"] is False
+    events = hosted.api.services.audit.query({"limit": "50", "kind": "run.call"})["events"]
+    sign_in = next(e for e in events if e.get("command") == "login")
+    assert sign_in["actor"] == {"type": "sign-in", "sub": "user_1", "role": "member", "groups": ["SRE"]}
+    res = await client.get("/apps/board/clis", allow_redirects=False)
+    assert res.status == 302  # no session: sign in first
+
+
+def inlined(page: str) -> dict[str, Any]:
+    """What the index page inlines as JSON for its script."""
+    found: dict[str, Any] = json.loads(page.split('type="application/json">')[1].split("</script>")[0])
+    return found
+
+
+async def test_the_index_page_for_a_member_and_for_a_reviewer(hosted: Hosted):
+    await publish_as_person(hosted, roles=["sre"])
+    await publish_as_person(hosted, name="other", title="Other", files={"index.html": "<p>o</p>"}, roles=["ops"])
+    await publish_as_person(hosted, name="draft", title="Draft", files={"index.html": "<p>d</p>"})
+    client, cookie, word = hosted.api.client, hosted.session(), catalogue(hosted.api)
+    word.set_one("board", 1, "approved", ["sre"])
+    word.set_one("other", 1, "approved", ["ops"])
+    word.set_one("draft", 1, "rejected", [])
+    res = await client.get("/apps/", allow_redirects=False)
+    assert res.status == 302 and res.headers["Location"] == "/auth/start?next=/apps/"
+    res = await client.get("/apps/", headers=cookie)
+    text = await res.text()
+    assert res.status == 200 and res.content_type == "text/html"
+    given = inlined(text)
+    assert [a["name"] for a in given["apps"]] == ["board"] and given["apps"][0]["open"] is True  # sre, not ops
+    assert given["reviewer"] is False and given["signed_in"] is True
+    hosted.vouches.role = "admin"
+    res = await client.get("/apps/", headers=cookie)
+    text = await res.text()
+    given = inlined(text)
+    assert [(a["name"], a["state"], a["open"]) for a in given["apps"]] == [
+        ("board", "approved", True),
+        ("draft", "rejected", False),
+        ("other", "approved", True),  # a reviewer opens any approved app
+    ]
+    assert given["reviewer"] is True and given["platform"] is None and "Review it on the Glyphh platform" in text
+    word.set_all([], None, "https://platform.glyphh.ai")
+    word.set_one("draft", 1, "draft", [])
+    given = inlined(await (await client.get("/apps/", headers=cookie)).text())
+    states = {a["name"]: a["state"] for a in given["apps"]}
+    assert given["platform"] == "https://platform.glyphh.ai"
+    assert states == {"board": "unknown", "draft": "draft", "other": "unknown"}
+    res = await client.get("/apps/_/rrotor.js", headers=cookie)
+    assert res.status == 200 and res.content_type == "text/javascript"
 
 
 async def test_a_follower_sends_a_publish_to_its_head(local: Api, monkeypatch):

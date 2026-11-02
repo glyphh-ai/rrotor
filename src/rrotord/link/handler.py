@@ -63,7 +63,7 @@ class LinkHandler:
         if message.keys is not None and self.access is not None:
             self.access.set_keys(message.keys)
         if message.apps is not None and self.catalogue is not None:
-            self.catalogue.set_all([a.model_dump() for a in message.apps], message.reviewers)
+            self.catalogue.set_all([a.model_dump() for a in message.apps], message.reviewers, message.platform)
             for reviewed in message.apps:
                 if reviewed.state == "approved":
                     self._activate(reviewed.program, reviewed.version)
@@ -114,16 +114,35 @@ class LinkHandler:
             outcome={"status": "done", "code": None},
         )
 
+    def missing_secrets(self, version: Version) -> list[str]:
+        """The secrets the version declares that are not set in the vault (every one, with no vault)."""
+        vault = getattr(self.runner, "vault", None)
+        held = set(vault.names(version.program)) if vault is not None else set()
+        return [name for name in version.manifest.secrets if name not in held]
+
     async def report(self, version: Version, repo: str | None, by: str | None = None) -> None:
         """`deployed` up the link after every deploy, however it was asked for (not numbered, kept until
-        acknowledged), with `by` for an app a person published; nothing while this rrotor has no runtime token."""
+        acknowledged), with `by` for an app a person published and the declared secrets not set here; nothing while
+        this rrotor has no runtime token."""
         if self.link is None or not self.link.configured:
             return
         manifest = version.manifest.model_dump(mode="json")
+        missing = self.missing_secrets(version)
         await self.link.owe(
-            lambda _seq: p.deployed(version.program, version.version, version.commit_sha, repo, manifest, by),
+            lambda _seq: p.deployed(version.program, version.version, version.commit_sha, repo, manifest, by, missing),
             numbered=False,
         )
+
+    async def secrets(self, program: str) -> None:
+        """`secrets` up the link after a secret of an app is set or deleted (not numbered, kept until acknowledged):
+        which of its declared secrets are not set now. Nothing for a program that is not an app, or with no link."""
+        if self.link is None or not self.link.configured:
+            return
+        active = self.programs.active(program)
+        if active is None or active.manifest.app is None:
+            return
+        missing = self.missing_secrets(active)
+        await self.link.owe(lambda _seq: p.secrets(program, missing), numbered=False)
 
     async def notify(self, run: Run) -> None:
         """A Result of a run the Cloud called goes up the link, numbered, until acknowledged."""

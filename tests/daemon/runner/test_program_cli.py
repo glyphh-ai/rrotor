@@ -65,6 +65,54 @@ async def test_a_program_runs_a_cli_as_the_clis_own_run(env):
     assert step in RunState.from_json(env.runner.get(run.id).state).checkpoints
 
 
+ENV_PROGRAM = """
+from rrotor import CliError, Result
+
+def start(ctx, inputs):
+    own = {"TOKEN": "ghp_from_" + "the_program", "EXTRA_ONE": "yes", "N": "1"}
+    env = own if inputs.get("env") is None else inputs["env"]
+    try:
+        got = ctx.cli("tool", inputs["args"], env=env)
+    except CliError as err:
+        return Result.done({"refused": err.code})
+    ctx.log("ran", out=got.stdout)
+    return Result.done({"exit": got.exit_code, "out": got.stdout})
+"""
+
+
+async def test_a_programs_env_reaches_the_command_and_is_masked(env):
+    """`ctx.cli(..., env=)`: the names and values the command gets beside the CLI's own, for that command; a value
+    of 4 characters or more masked in both runs' logs, the CLI run's Result and its record, as a secret is; the
+    record keeps the names only."""
+    await deploy(env, {"env": {"TOKEN": "secret:TOKEN"}, "allow": []})
+    install(env.programs, manifest("prog", clis=["tool"]), ENV_PROGRAM, sha="f" * 40, version=2)
+    run = await env.runner.call(program="prog", function="start", inputs={"args": ["pr", "list"]})
+    data = outcome(run)["data"]
+    assert run.status == "done" and data["exit"] == 3, run.result
+    assert "token: [secret]\n" in data["out"]  # the program's TOKEN took the CLI's own place, and is masked
+    cli_run = next(r for r in env.records.all() if r.program == "tool")
+    assert cli_run.inputs["env"] == ["EXTRA_ONE", "N", "TOKEN"]  # names, never a value
+    kept = "".join(p.read_text() for p in env.records.folder(cli_run.id).rglob("*") if p.is_file())
+    kept += "".join(p.read_text() for p in env.records.folder(run.id).rglob("*") if p.is_file())
+    assert "ghp_from_the_program" not in kept and "[secret]" in kept
+    assert env.runner.envs == {} and env.runner.hidden == {}
+    bad = {"args": [], "env": {"lower": "x"}}
+    run = await env.runner.call(program="prog", function="start", inputs=bad)
+    assert outcome(run)["data"] == {"refused": "E_CLI_ENV"}  # refused in the program, before rrotor is asked
+    for asked in (
+        {"PATH": "/x"},
+        {"OK": 1},
+        {"bad name": "x"},
+        {"HTTPS_PROXY": "x"},
+        {"LD_PRELOAD": "x"},
+        {"OK": "a\x00b"},
+        ["X"],
+        {"OK": "x" * 5000},
+    ):
+        answer = await env.runner.program_cli(run, {"cli": "tool", "args": [], "env": asked})  # rrotor checks too
+        assert answer["data"]["code"] == "E_CLI_INPUTS", asked
+
+
 async def test_what_the_cli_does_not_allow_is_refused_in_the_program(env):
     await deploy(env, {"allow": ["pr *"]})
     run = await env.runner.call(program="prog", function="start", inputs={"args": ["repo", "delete"]})

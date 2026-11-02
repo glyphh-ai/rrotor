@@ -84,6 +84,20 @@ async def test_refusals(api, method, path, body, status, code):
     assert (got, answer["error"]["code"]) == (status, code)
 
 
+async def test_a_secret_set_or_deleted_tells_the_catalogue_what_an_app_misses(api):
+    """Every set and delete goes through the hook (the handler sends `secrets` for an app, nothing otherwise)."""
+    deploy(api)
+    told: list[str] = []
+
+    async def tell(program: str) -> None:
+        told.append(program)
+
+    api.services.secrets = tell
+    await send(api, "PUT", "/v1/programs/sample/secrets/API_KEY", json={"value": VALUE})
+    await send(api, "DELETE", "/v1/programs/sample/secrets/API_KEY")
+    assert told == ["sample", "sample"]
+
+
 async def test_a_rrotor_with_no_vault_refuses(api):
     deploy(api)
     api.services.runner.vault = None

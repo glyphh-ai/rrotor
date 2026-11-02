@@ -21,7 +21,11 @@ def test_the_welcomes_list_and_each_change_are_kept_and_read_back(tmp_path):
     assert Catalogue(tmp_path).reviewers == ["platform-admins"]  # kept with the apps
     assert (tmp_path / "apps.json").is_file() and not (tmp_path / "artifacts.json").exists()
     a.set_all([], None)  # the catalogue holds nothing of this rrotor now; the reviewers stay as they were
-    assert a.entries == {} and a.reviewers == ["platform-admins"]
+    assert a.entries == {} and a.reviewers == ["platform-admins"] and a.platform is None
+    a.set_all([], None, "https://platform.glyphh.ai/")  # the welcome's platform, kept for the index page's link
+    assert a.platform == "https://platform.glyphh.ai" and Catalogue(tmp_path).platform == "https://platform.glyphh.ai"
+    a.set_all([], None, "")  # an empty one: none
+    assert a.platform is None and Catalogue(tmp_path).platform is None
 
 
 def test_with_the_link_off_every_version_is_approved(tmp_path):
