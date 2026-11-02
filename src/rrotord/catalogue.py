@@ -1,8 +1,11 @@
 """What the Glyphh catalogue says of this rrotor's apps (docs/architecture.md, 5.8; the server's
-docs/specs/artifacts.md): each app's reviewed version and its state (draft, approved, rejected, retired) and the
-roles that may open it, told down the link (`artifact` messages, and the welcome's whole list) and kept in
-/data/artifacts.json so a restart serves the same; and the reviewer groups, who may open a draft. With the link off
-there is no catalogue: a deploy is the approval, and the manifest's roles decide."""
+docs/specs/apps.md, 3.4): each app's reviewed version and its state (draft, approved, rejected, retired) and the
+roles that may open it, told down the link (`app` messages, and the welcome's whole list) and kept in /data/apps.json
+so a restart serves the same; and the reviewer groups, who may open a draft. With the link off there is no
+catalogue: a deploy is the approval, and the manifest's roles decide.
+
+rrotor 0.2.0 kept the same file as /data/artifacts.json: when apps.json is not there yet and artifacts.json is, it
+is read once and written as apps.json (the one line of compatibility; the old file is left alone)."""
 
 from __future__ import annotations
 
@@ -13,13 +16,19 @@ from rrotord.store import read_json, write_json
 
 STATES = ("draft", "approved", "rejected", "retired")
 ADMIN = "admin"
+FORMER = "artifacts.json"  # 0.2.0's name for the file, taken over once
 
 
-class Artifacts:
+class Catalogue:
     def __init__(self, data: Path, linked: bool = True) -> None:
-        self.path = data / "artifacts.json"
+        self.path = data / "apps.json"
         self.linked = linked
-        kept = read_json(self.path) or {}
+        kept = read_json(self.path)
+        if kept is None:  # not written yet: what a 0.2.0 left, if anything, taken over
+            kept = read_json(data / FORMER)
+            if kept is not None:
+                write_json(self.path, kept)
+        kept = kept or {}
         self.entries: dict[str, dict[str, Any]] = dict(kept.get("apps") or {})
         self.reviewers: list[str] = list(kept.get("reviewers") or [])
 

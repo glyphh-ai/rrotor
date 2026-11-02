@@ -140,7 +140,7 @@ Unchanged in where and when (self-hosted with the link on, at boot and every 24 
 {RROTOR_SERVER}/v1/license/verify`, the runtime token, fail-open). The body gains three fields:
 
 ```json
-{"machine": "<64 hex>", "licence_id": "<uuid or null>", "version": "0.2.0", "active_runs": 0,
+{"machine": "<64 hex>", "licence_id": "<uuid or null>", "version": "0.3.0", "active_runs": 0,
  "node_id": "rrotor-1", "cluster_id": "<uuid or null>", "role": "standalone | head | follower"}
 ```
 

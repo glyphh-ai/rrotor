@@ -53,9 +53,9 @@ def test_a_bad_message_is_refused():
 
 
 def test_a_protocol_1_message_naming_a_model_is_refused_not_misread():
-    """Protocol 1 named a program `model`: such a message fails validation (the client skips it), and `hello` says 2,
+    """Protocol 1 named a program `model`: such a message fails validation (the client skips it), and `hello` says 3,
     so a server of protocol 1 closes the link with 4426 (`upgrade_needed`)."""
-    assert p.PROTOCOL == 2
+    assert p.PROTOCOL == 3
     for old in (
         {"type": "deploy", "model": "x", "version": 1, "commit_sha": SHA},
         {
@@ -73,8 +73,8 @@ def test_a_protocol_1_message_naming_a_model_is_refused_not_misread():
 
 
 def test_up_messages():
-    hello = p.hello("0.1.0", "local", "rid", [])
-    assert (hello["type"], hello["protocol"], hello["runtime_id"]) == ("hello", 2, "rid")
+    hello = p.hello("0.3.0", "local", "rid", [])
+    assert (hello["type"], hello["protocol"], hello["runtime_id"]) == ("hello", 3, "rid")  # 3: `app`, not `artifact`
     result = p.result(3, "r", {"status": "done", "data": 1, "extra": "no"}, 2.9)
     assert result["result"] == {"status": "done", "data": 1, "step": None, "prompt": None}
     assert (result["seq"], result["seconds"]) == (3, 2)
@@ -104,23 +104,26 @@ def test_deployed_carries_the_repo_and_the_manifest_or_nulls():
     assert p.deployed("x", 2, SHA, by="user_1")["by"] == "user_1"
 
 
-def test_artifact_messages_and_the_welcomes_word_on_the_apps():
+@pytest.mark.parametrize("name", ["app", "artifact"])
+def test_app_messages_and_the_welcomes_word_on_the_apps_in_protocol_3_and_the_protocol_2_names(name):
+    """Protocol 3 says `app` and `apps`; protocol 2 said `artifact` and `artifacts`: both are read the same."""
     reviewed = p.DOWN.validate_python(
-        {"type": "artifact", "program": "board", "version": 2, "state": "approved", "roles": ["sre"]}
+        {"type": name, "program": "board", "version": 2, "state": "approved", "roles": ["sre"]}
     )
-    assert isinstance(reviewed, p.Artifact) and (reviewed.version, reviewed.roles) == (2, ["sre"])
+    assert isinstance(reviewed, p.App) and (reviewed.version, reviewed.roles) == (2, ["sre"])
     with pytest.raises(ValidationError):
-        p.DOWN.validate_python({"type": "artifact", "program": "board", "version": 2, "state": "pending"})
+        p.DOWN.validate_python({"type": name, "program": "board", "version": 2, "state": "pending"})
     welcome = p.DOWN.validate_python(
         {
             "type": "welcome",
-            "artifacts": [{"program": "board", "version": 1, "state": "draft"}],
+            name + "s": [{"program": "board", "version": 1, "state": "draft"}],
             "reviewers": ["Platform-Admins"],
         }
     )
-    assert isinstance(welcome, p.Welcome) and welcome.artifacts is not None
-    assert (welcome.artifacts[0].roles, welcome.reviewers) == ([], ["Platform-Admins"])
-    assert p.DOWN.validate_python({"type": "welcome"}).artifacts is None  # type: ignore[union-attr]
+    assert isinstance(welcome, p.Welcome) and welcome.apps is not None
+    assert (welcome.apps[0].roles, welcome.reviewers) == ([], ["Platform-Admins"])
+    assert p.DOWN.validate_python({"type": "welcome"}).apps is None  # type: ignore[union-attr]
+    assert p.Welcome(type="welcome", apps=[]).apps == []  # built by name here too
 
 
 def test_usage_is_numbered_and_carries_each_keys_calls():

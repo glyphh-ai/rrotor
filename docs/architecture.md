@@ -28,7 +28,7 @@ One image, four modes, set by `RROTOR_MODE` at start (`rrotord/config.py`):
 | `doorman` | One always-on Fly machine per app | Every `*.glyphh.app` request's first hop | Nobody: it only replays ([3](#3-hosted-machines)) |
 | `local` (the default) | Any container host | `127.0.0.1:<port>` only | A local token, held as its SHA-256 (`RROTOR_LOCAL_TOKEN_SHA256`); the runtime token is handed in with `PUT /v1/runtime/token` |
 
-rrotor has no sign-in of its own and nothing to log into. It connects out to the server (the link, [6](#6-the-link-protocol-2));
+rrotor has no sign-in of its own and nothing to log into. It connects out to the server (the link, [6](#6-the-link-protocol-3));
 the server never connects in. A call goes from the caller to the runtime and back: nothing of Glyphh's sees its
 inputs or its answer.
 
@@ -174,7 +174,7 @@ flowchart TB
         subgraph D["rrotord: one Python 3.13 asyncio process"]
             Gate["the gate<br/>runtime key, Glyphh sign-in or local token"]
             API["REST and MCP on :7777"]
-            Link["link client<br/>protocol 2, outbound"]
+            Link["link client<br/>protocol 3, outbound"]
             Runner["program runner<br/>deploys, runs, checkpoints, seconds"]
             Proxy["egress proxy<br/>per-run host allowlist, CONNECT and SNI"]
             Parts["part store<br/>install, switch, remove"]
@@ -201,7 +201,7 @@ flowchart TB
 |---|---|
 | **gate** | Who may call, by mode ([7](#7-the-api)); counts each request a runtime key let in |
 | **REST and MCP** | One set of operations (`api/ops.py`) behind both ([7](#7-the-api)) |
-| **link client** | Connects out, reconnects with backoff (1 s to 30 s, with jitter), replays what is not acknowledged ([6](#6-the-link-protocol-2)) |
+| **link client** | Connects out, reconnects with backoff (1 s to 30 s, with jitter), replays what is not acknowledged ([6](#6-the-link-protocol-3)) |
 | **program runner** | Launches each run in its sandbox, keeps a waiting run's worker up to 15 minutes, runs `end` always, counts each run's seconds |
 | **egress proxy** | A run's only network: an HTTP `CONNECT` proxy on a unix socket per run; lets through port 443 of the hosts the manifest declares when the TLS SNI matches, refuses addresses that resolve to loopback, private or link-local ranges, and records what it refuses |
 | **part store** | Checks a part's hash and signature, unpacks it, switches it in one rename ([10](#10-parts)) |
@@ -273,8 +273,9 @@ A git repo; a version is a commit.
 | `requirements.lock` | Optional: its Python dependencies, pinned with hashes, installed at deploy, never at run |
 | `files/` | Optional: seed files, copied into its folder on the first deploy |
 
-An **app** is a kind of program too (`"kind": "app"`, [5.8](#58-apps)): a page Claude wrote, published from Claude with
-its files, reviewed in the Glyphh catalogue and served to the org's people at `/apps/<name>/`.
+An **app** is a kind of program too (`"kind": "app"`, [5.8](#58-apps)): what Claude made (a page, a dashboard, a
+document, a diagram, a deck, a design), published from Claude with its files, reviewed in the Glyphh catalogue and
+served to the org's people at `/apps/<name>/`.
 A **CLI** is a kind of program (`"kind": "cli"`, [5.7](#57-clis)): the same repo, manifest, deploy, sandbox, vault,
 egress proxy, approvals, limits and audit, with no `program.py`: its manifest names a command-line tool to install
 and the arguments it may be run with.
@@ -299,8 +300,8 @@ and the arguments it may be run with.
 | Key | What |
 |---|---|
 | `name` | `^[a-z][a-z0-9_]{0,62}$`; a deploy names the program by it |
-| `kind` | `program` (the default), `cli` (a CLI has a `cli` block and no functions, schedules, data, databases or parts, [5.7](#57-clis)) or `app` (a page Claude wrote, served to the org's people: an `app` block, and functions only when the page calls them, [5.8](#58-apps)) |
-| `app` | An app's: `entry` (its page in `src/`, `.html`, `.htm` or `.md`; default `index.html`), `title`, `roles` (the roles that may open it, lower-cased; none: everyone in the org) and `functions` (those of its own the page may call) ([5.8](#58-apps)) |
+| `kind` | `program` (the default), `cli` (a CLI has a `cli` block and no functions, schedules, data, databases or parts, [5.7](#57-clis)) or `app` (what Claude made, served to the org's people: an `app` block, and functions only when the page calls them, [5.8](#58-apps)) |
+| `app` | An app's: `entry` (the file opened at `/apps/<name>/`, in `src/`: `.html`, `.htm`, `.jsx`, `.tsx`, `.md`, `.pdf`, `.mmd`, `.mermaid`, `.svg`, `.png`, `.jpg`, `.jpeg`, `.webp` or `.gif`; default `index.html`), `type` (`page`, `dashboard`, `doc`, `diagram`, `deck` or `design`; absent, the entry's own: `dashboard` and `deck` are never inferred), `title` (1–120 characters), `roles` (the roles that may open it, lower-cased; none: everyone in the org) and `functions` (those of its own the page may call) ([5.8](#58-apps)) |
 | `version` | Optional, 1 or more |
 | `description`, `python` | Free text; `python` must be `3.13` |
 | `functions` | Each callable function: `description`, `inputs` (a JSON Schema the call's inputs are checked against, `E_INPUTS`), `approvals` (the steps that may ask), `writes` (whether it runs on a cluster's head: `true` runs it there, `false` on whichever node the call reaches, read-only there; default whether the program keeps data (`data` or a SQLite database); every call of a program that keeps data runs on the head whatever it says) ([14](#14-the-cluster)). At least one; `load` and `end` are not functions |
@@ -642,38 +643,74 @@ the wait (`rrotor/_worker/login.py`).
 
 ### 5.8 Apps
 
-An app is a page Claude wrote (a Claude Code artifact: one `.html` or `.md` file and any files beside it) published
-to this rrotor for the org's people, reviewed in the Glyphh catalogue and served to a browser signed in to Glyphh for
-this rrotor (`rrotord/apps.py`, `rrotord/browser.py`, `rrotord/artifacts.py`; the spec is the server's
-`docs/specs/artifacts.md`, pointed at by [`specs/apps.md`](specs/apps.md)). It is a program of `"kind": "app"`
-([5.2](#52-the-manifest-glyphhjson)): the same deploy, versions, sandbox, vault, hosts, CLIs and audit; its page's
-calls run its functions as the viewer.
+An app is what Claude made (a Claude Code artifact: one `.html` or `.md` file and any files beside it; or a React
+page, a Markdown document, a diagram, a PDF, an image) published to this rrotor for the org's people, reviewed in
+the Glyphh catalogue and served to a browser signed in to Glyphh for this rrotor (`rrotord/apps.py`,
+`rrotord/browser.py`, `rrotord/catalogue.py`; the spec is the server's `docs/specs/apps.md`, pointed at by
+[`specs/apps.md`](specs/apps.md)). It is a program of `"kind": "app"` ([5.2](#52-the-manifest-glyphhjson)): the
+same deploy, versions, sandbox, vault, hosts, CLIs and audit; its page's calls run its functions as the viewer.
 
-- **Publishing** (`POST /v1/apps`, MCP `app_publish`): `{name, title, description?, roles?, files, entry?, functions?,
-  program?, hosts?, secrets?, clis?, limits?}`; `files` the page's files by relative path (text, or `{base64: …}`;
-  64 files and 16 MiB in all at most; never `glyphh.json`, `program.py`, `requirements.lock` or `files/`, which are
-  rrotor's own), `functions` as a manifest's (`{name: {description, inputs}}`) with `program` the text of
+- **The entry and its type.** `app.entry` is the file opened at `/apps/<name>/`; its extension, lower-cased, says
+  how it is served and what type the app is unless the manifest says one (`rrotord/manifest.py`, `ENTRIES`):
+
+  | Entry | Served as | Default `type` |
+  |---|---|---|
+  | `.html`, `.htm` | as it is | `page` |
+  | `.jsx`, `.tsx` | rrotor's React shell (below) | `page` |
+  | `.md` | rrotor's document shell: `marked` from cdnjs renders it; the source as text when the library does not load | `doc` |
+  | `.pdf` | as it is (`application/pdf`, `Content-Disposition: inline`: the browser's own viewer) | `doc` |
+  | `.mmd`, `.mermaid` | rrotor's diagram shell: `mermaid` from jsDelivr renders it; the source as text when the library does not load | `diagram` |
+  | `.svg` | as it is (`image/svg+xml`, inline) | `diagram` |
+  | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` | rrotor's image shell: the image centred on a page, at its size, with the title | `design` |
+
+  Any other entry is refused (`E_INPUTS` at publish, `E_MANIFEST` from a repo: "entry is a page (.html, .jsx,
+  .tsx), a document (.md, .pdf), a diagram (.mmd, .svg) or an image"). `app.type` is one of `page`, `dashboard`,
+  `doc`, `diagram`, `deck`, `design`; `dashboard` and `deck` are never inferred, the publisher says them. A
+  dashboard is a page whose numbers come from the app's own functions, one per chart, called as the viewer.
+- **The React shell** (a `.jsx` or `.tsx` entry: what claude.ai's React artifacts are, one file with ES imports and
+  a default export that is the component): an HTML page with an import map for `react`, `react-dom`,
+  `react-dom/client`, `react/jsx-runtime`, `recharts`, `lucide-react`, `framer-motion`, `d3`, `three`, `date-fns`,
+  `lodash`, `papaparse`, `mathjs` and the common `@radix-ui/*` packages, each at a pinned major (one table,
+  `REACT_PACKAGES`), the Tailwind CDN, and `@babel/standalone` from cdnjs transforming the file in the browser:
+  the source is inline in one `<script type="text/babel" data-type="module">` with a trailer that mounts the
+  default export into `#root` with `createRoot` (the `export default` rewritten to a binding, since a module inline
+  in a page exports to nobody; Babel standalone transforms each script on its own, so a second script could not
+  import the entry). Two presets are registered before Babel runs: React's with the automatic runtime and, for
+  `.tsx`, TypeScript's for any filename. The packages that import React come from esm.sh with `react` and
+  `react-dom` external, so the page has one React (jsDelivr's `+esm` bundles pin their own exact React each, which
+  gives two and breaks hooks); the libraries that do not import React come from jsDelivr. rrotor builds nothing; a
+  package the import map does not name fails in the browser as it would on claude.ai.
+- **Publishing** (`POST /v1/apps`, MCP `app_publish`): `{name, title, description?, type?, roles?, files, entry?,
+  functions?, program?, hosts?, secrets?, clis?, limits?}`; `files` the app's files by relative path (text, or
+  `{base64: …}` for a PDF or an image; 64 files and 16 MiB in all at most; never `glyphh.json`, `program.py`,
+  `requirements.lock` or `files/`, which are rrotor's own), `entry` default `index.html`, or the one file when one
+  is sent, `type` as above, `functions` as a manifest's (`{name: {description, inputs}}`) with `program` the text of
   `program.py` when any are named. rrotor writes the manifest beside the files, commits them in a scratch repo (the
   commit is the version's SHA; the same files again are the same commit, held already) and deploys the version as
   any (`Deployer.from_files`): activated, unless an **approved** version of the app is active, which keeps serving
   until the catalogue approves the new one (the `approved` message activates the version it names). The answer is
-  `{program, version, commit_sha, deployed_at, active, state, url}`, `url` where a browser opens it
+  `{program, version, commit_sha, deployed_at, type, active, state, url}`, `url` where a browser opens it
   (`https://<host>/apps/<name>/`; a local rrotor's `http://127.0.0.1:7777/apps/<name>/`). `deployed` goes up the
   link with the manifest and `by`, the Glyphh subject who published (null for the local token). On a hosted or
   self-hosted rrotor publishing is a person's act: a runtime key is refused 403 `E_FORBIDDEN`; a local rrotor's
   token publishes. A follower sends it to its head.
-- **The catalogue's word** (`/data/artifacts.json`): the server tells this rrotor each app's reviewed version, its
-  state (`draft`, `approved`, `rejected`, `retired`) and roles, and the reviewer groups, down the link (`artifact`
-  messages, and the welcome's `artifacts` and `reviewers`, [6](#6-the-link-protocol-2)), kept across restarts. An
-  app is served only while its active version is the approved one; a newer version here is a `draft`, an older one
-  `retired`, one the catalogue has not spoken of `unknown`. With the link off (air-gapped) there is no catalogue:
-  the deploy is the approval and the manifest's `roles` decide. `GET /v1/apps` (MCP `apps_list`) lists each app:
-  `{name, title, description, version, active, roles, functions, state, url}`.
-- **Serving** (`GET /apps/{name}/`, `GET /apps/{name}/{path}`): the active version's `src/` (`/` the entry; a
-  Markdown entry inside rrotor's own document shell, rendered by `marked` from cdnjs), with `Content-Type` by
-  extension, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and a Content-Security-Policy that lets
-  the page load scripts and styles only from itself (inline too: an artifact is one file) and the five CDN hosts
-  Claude Code's artifacts use (cdnjs, jsDelivr, the Tailwind and jQuery CDNs, unpkg), fonts from Google Fonts, and
+- **The catalogue's word** (`/data/apps.json`): the server tells this rrotor each app's reviewed version, its
+  state (`draft`, `approved`, `rejected`, `retired`) and roles, and the reviewer groups, down the link (`app`
+  messages, and the welcome's `apps` and `reviewers`, [6](#6-the-link-protocol-3)), kept across restarts (what a
+  0.2.0 left in `/data/artifacts.json` is read once and written as `apps.json`). An app is served only while its
+  active version is the approved one; a newer version here is a `draft`, an older one `retired`, one the catalogue
+  has not spoken of `unknown`. With the link off (air-gapped) there is no catalogue: the deploy is the approval and
+  the manifest's `roles` decide. `GET /v1/apps` (MCP `apps_list`) lists each app: `{name, title, description,
+  type, version, active, roles, functions, state, url}`.
+- **Serving** (`GET /apps/{name}/`, `GET /apps/{name}/{path}`): the active version's `src/` (`/` the entry, inside
+  its shell when it has one; a `.md` fetched by its path is shelled too, so a document may link to another; any
+  other file by its path as it is, a `.jsx` or `.tsx` as text), with `Content-Type` by extension (`.html`, `.htm`,
+  `.css`, `.js`, `.mjs`, `.json`, `.map`, `.svg`, `.txt`, `.md`, `.csv`, `.mmd`, `.mermaid`, `.jsx`, `.tsx`,
+  `.wasm`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ico`, `.woff`, `.woff2`; anything else
+  `application/octet-stream`), `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and a
+  Content-Security-Policy that lets the page load scripts and styles only from itself (inline too: an artifact is
+  one file), the five CDN hosts Claude Code's artifacts use (cdnjs, jsDelivr, the Tailwind and jQuery CDNs, unpkg)
+  and esm.sh (the React shell's packages), fonts from Google Fonts, images from itself, `data:` and `blob:`, and
   `fetch` only its own origin. A refusal is a page too, since a browser is reading, its code in `X-Error`: 404
   `E_APP_MISSING` (no such app, a program that is not one, a file not there or rrotor's own), 409 `E_APP_UNREVIEWED`
   (nothing approved yet, or rejected), 403 `E_APP_FORBIDDEN` (the viewer's roles do not open it; the page has a
@@ -703,17 +740,17 @@ calls run its functions as the viewer.
   function `app.functions` does not name is 403 `E_APP_FUNCTION`; a run of another program 404 `E_RUN_MISSING`.
   Every call is a run: `run_status`, `run_log` and the audit log's `run.call` as any.
 
-## 6. The link: protocol 2
+## 6. The link: protocol 3
 
 JSON messages over the WebSocket `{RROTOR_SERVER}/v1/runtime/link` (`Authorization: Bearer <runtime token>`, never
 in a URL), one per frame, each with `type` and `id`. rrotor connects out; the server never connects in.
 
 | Direction | `type` | Carries |
 |---|---|---|
-| up | `hello` | protocol 2 (protocol 1 named a program `model`: the server closes a link of the other protocol with 4426), rrotor's version, mode, runtime id, the versions deployed |
-| down | `welcome` | accepted; for a hosted or self-hosted runtime, the licence key (`license_key`, [9](#9-the-licence)), in release N also the legacy licence (`licence: {payload, signature}`; the key is preferred), and the runtime keys' SHA-256s (`keys`, the whole list); the catalogue's whole word on this rrotor's apps (`artifacts: [{program, version, state, roles}]`) and the org's `reviewers` (groups), [5.8](#58-apps) |
+| up | `hello` | protocol 3 (protocol 2, rrotor 0.2.0, said `artifact` and `artifacts` where 3 says `app` and `apps`; the server takes both and answers in the names the runtime said; protocol 1 named a program `model`: the server closes a link of another protocol with 4426), rrotor's version, mode, runtime id, the versions deployed |
+| down | `welcome` | accepted; for a hosted or self-hosted runtime, the licence key (`license_key`, [9](#9-the-licence)), in release N also the legacy licence (`licence: {payload, signature}`; the key is preferred), and the runtime keys' SHA-256s (`keys`, the whole list); the catalogue's whole word on this rrotor's apps (`apps: [{program, version, state, roles}]`; protocol 2's `artifacts` is read as the same) and the org's `reviewers` (groups), [5.8](#58-apps) |
 | down | `keys` | `hashes`: the whole list again, whenever a key is made, revoked or expires |
-| down | `artifact` | program, version, state (`draft`, `approved`, `rejected`, `retired`), roles: an app's review changed; `approved` activates the version named when this rrotor holds it ([5.8](#58-apps)) |
+| down | `app` | program, version, state (`draft`, `approved`, `rejected`, `retired`), roles: an app's review changed; `approved` activates the version named when this rrotor holds it ([5.8](#58-apps)); protocol 2's `artifact` is read as the same message |
 | down | `deploy`, `activate`, `remove` | program, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
 | down | `continue` | `run_id`, `answer` |
 | down | `call`, `cancel` | `run_id`, program, version, function, inputs, caller, clearance; `cancel` the `run_id`. Handled; the server sends neither |
@@ -791,8 +828,8 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `GET /v1/schedules` | `{schedules: [{id, program, name, version, function, cron, tz, input, paused, next_at, last, skipped}]}` ([5.6](#56-schedules)) |
 | `POST /v1/schedules/{program}/{name}/pause`, `…/resume` | The schedule paused or resumed, kept across restarts: the schedule as listed |
 | `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
-| `GET /v1/apps` | `{apps: [{name, title, description, version, active, roles, functions, state, url}]}`: the apps here and the catalogue's word on each ([5.8](#58-apps)) |
-| `POST /v1/apps` | `{name, title, description?, roles?, files, entry?, functions?, program?, hosts?, secrets?, clis?, limits?}`: a page published as an app, a new version: `201 {program, version, commit_sha, deployed_at, active, state, url}`; a person's act on a public rrotor (a key is 403 `E_FORBIDDEN`) ([5.8](#58-apps)) |
+| `GET /v1/apps` | `{apps: [{name, title, description, type, version, active, roles, functions, state, url}]}`: the apps here and the catalogue's word on each ([5.8](#58-apps)) |
+| `POST /v1/apps` | `{name, title, description?, type?, roles?, files, entry?, functions?, program?, hosts?, secrets?, clis?, limits?}`: what Claude made published as an app, a new version: `201 {program, version, commit_sha, deployed_at, type, active, state, url}`; a person's act on a public rrotor (a key is 403 `E_FORBIDDEN`) ([5.8](#58-apps)) |
 | `GET /apps/{name}/`, `GET /apps/{name}/{path}` | The app's page, or a file beside it, to a browser signed in (`?version=N`: a draft, for a reviewer); a refusal is a page, its code in `X-Error` (404 `E_APP_MISSING`, 409 `E_APP_UNREVIEWED`, 403 `E_APP_FORBIDDEN`) ([5.8](#58-apps)) |
 | `POST /apps/{name}/call/{function}`, `POST /apps/{name}/runs/{id}/continue` | The page's call into one of the app's functions as the viewer (the body the inputs): the run's first `Result`, as `POST /v1/runs`; and its answer to a waiting run (`{answer}`); 403 `E_APP_FUNCTION` for a function the page may not call |
 | `GET /auth/start?next=`, `GET /auth/callback`, `POST /auth/logout` | The browser's Glyphh sign-in for this rrotor's apps, and its end ([5.8](#58-apps)); hosted and self-hosted with the link on |
@@ -827,7 +864,7 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `secrets_list` `{program}`, `secret_set` `{program, name, value}`, `secret_delete` `{program, name}` | A program's secrets ([5.5](#55-secrets)): names only back, never a value |
 | `schedules_list`, `schedule_pause` `{program, name}`, `schedule_resume` `{program, name}` | `GET /v1/schedules`; pause and resume ([5.6](#56-schedules)) |
 | `apps_list` | `GET /v1/apps` ([5.8](#58-apps)) |
-| `app_publish` `{name, title, description?, roles?, files, entry?, functions?, program?, …}` | `POST /v1/apps`: a page Claude wrote published as an app for the org's people, awaiting the catalogue's review |
+| `app_publish` `{name, title, description?, type?, roles?, files, entry?, functions?, program?, …}` | `POST /v1/apps`: what Claude made (a page, a React page, a Markdown document, a diagram, a PDF, an image) published as an app for the org's people, awaiting the catalogue's review |
 | `clis_list` | `GET /v1/clis` ([5.7](#57-clis)) |
 | `cli_run` `{cli, args, stdin?, files?}` | `POST /v1/clis/{name}/run`; a command that needs approval is answered with `program_continue` like a program's run |
 | `cli_login` `{cli}` | `POST /v1/clis/{name}/login`; answered with `program_continue` (the code the page shows) |

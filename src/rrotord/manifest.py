@@ -8,7 +8,7 @@ import ast
 import datetime as dt
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -260,17 +260,43 @@ class Cli(BaseModel):
         return {m["name"] for m in refs} - {m["name"] for m in refs if not m["optional"]}
 
 
-ENTRY = re.compile(r"^[A-Za-z0-9._-]{1,128}(/[A-Za-z0-9._-]{1,128}){0,7}\.(html|htm|md)$")
+ENTRY = HOME_FILE  # the same shape as a relative path in HOME: a file in src/, up to eight parts
 ROLE = r"^[A-Za-z0-9][A-Za-z0-9_.@:/ -]{0,119}$"
+# What an app's entry may be, by its extension (lower-cased), and the type it is unless the manifest says one;
+# `dashboard` and `deck` are never inferred (docs/architecture.md, 5.8; the server's docs/specs/apps.md, 4.1).
+AppType = Literal["page", "dashboard", "doc", "diagram", "deck", "design"]
+ENTRIES: dict[str, AppType] = {
+    ".html": "page",
+    ".htm": "page",
+    ".jsx": "page",
+    ".tsx": "page",
+    ".md": "doc",
+    ".pdf": "doc",
+    ".mmd": "diagram",
+    ".mermaid": "diagram",
+    ".svg": "diagram",
+    ".png": "design",
+    ".jpg": "design",
+    ".jpeg": "design",
+    ".webp": "design",
+    ".gif": "design",
+}
+ENTRY_REFUSED = "entry is a page (.html, .jsx, .tsx), a document (.md, .pdf), a diagram (.mmd, .svg) or an image"
+
+
+def entry_type(entry: str) -> AppType | None:
+    """The type an entry is by its extension; None for an extension that is no entry."""
+    return ENTRIES.get(PurePosixPath(entry).suffix.lower())
 
 
 class App(BaseModel):
     """A page Claude wrote, served to the org's people (`"kind": "app"`, docs/architecture.md, 5.8): its entry
-    file in src/, its title, the roles that may open it (none: everyone in the org) and the functions the page may
-    call."""
+    file in src/, its type, its title, the roles that may open it (none: everyone in the org) and the functions
+    the page may call."""
 
     model_config = ConfigDict(extra="forbid")
-    entry: str = "index.html"  # the page, a .html, .htm or .md file in src/
+    entry: str = "index.html"  # the file opened at /apps/<name>/, in src/: one of ENTRIES
+    type: AppType | None = None  # what the app is; absent, the entry's own (ENTRIES)
     title: Annotated[str, Field(min_length=1, max_length=120)]
     roles: list[Annotated[str, Field(pattern=ROLE)]] = Field([], max_length=50)
     functions: list[Annotated[str, Field(pattern=FUNCTION)]] = Field([], max_length=100)
@@ -279,8 +305,16 @@ class App(BaseModel):
     @classmethod
     def _entry(cls, value: str) -> str:
         if not ENTRY.match(value) or {".", ".."} & set(value.split("/")):
-            raise ValueError("app.entry is a .html, .htm or .md file inside src/, by its relative path")
+            raise ValueError("app.entry is a file inside src/, by its relative path")
+        if entry_type(value) is None:
+            raise ValueError(ENTRY_REFUSED)
         return value
+
+    @model_validator(mode="after")
+    def _type(self) -> App:
+        if self.type is None:
+            self.type = entry_type(self.entry)  # never None: _entry checked the extension
+        return self
 
     @field_validator("roles")
     @classmethod

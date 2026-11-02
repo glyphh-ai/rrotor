@@ -24,9 +24,9 @@ from rrotord.access import Access
 from rrotord.aggregate import ClusterAudit
 from rrotord.api import mcp, ops
 from rrotord.api.gate import METADATA, SCOPE, public_url, viewer_roles
-from rrotord.artifacts import Artifacts
 from rrotord.audit import Audit, current
 from rrotord.browser import Browser
+from rrotord.catalogue import Catalogue
 from rrotord.cluster.node import Cluster
 from rrotord.config import Config
 from rrotord.deploy import Deployer
@@ -86,7 +86,7 @@ class Services:
     cluster: Cluster | None = None  # this node's place in its cluster; none: standalone
     gathered: ClusterAudit | None = None  # the cluster's audit store, read on its head
     scheduler: Scheduler | None = None  # the programs' schedules: fired by the daemon, listed and paused here
-    artifacts: Artifacts | None = None  # the catalogue's word on the apps here (docs/architecture.md, 5.8)
+    catalogue: Catalogue | None = None  # the catalogue's word on the apps here (docs/architecture.md, 5.8)
     browser: Browser | None = None  # public, the link on: a browser's Glyphh sign-in, to open the apps
 
 
@@ -291,9 +291,9 @@ def setup(app: web.Application, s: Services) -> None:
         return web.json_response(await ops.app_publish(s, await body(request)), status=201)
 
     def served() -> apps.Apps:
-        if s.artifacts is None:
+        if s.catalogue is None:
             raise Unavailable("This rrotor keeps no apps.", code="E_APPS")
-        return apps.Apps(s.programs, s.artifacts, s.config.address)
+        return apps.Apps(s.programs, s.catalogue, s.config.address)
 
     async def app_page(request: web.Request) -> web.Response:
         """The app's page or one of its files, to a browser the gate let in (docs/architecture.md, 5.8); a
@@ -314,6 +314,8 @@ def setup(app: web.Application, s: Services) -> None:
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
         }
+        if kind in apps.INLINE:  # a PDF or an SVG opened as it is: the browser's own viewer, never a download
+            headers["Content-Disposition"] = "inline"
         return web.Response(body=data, content_type=kind, headers=headers)
 
     async def app_call(request: web.Request) -> web.Response:

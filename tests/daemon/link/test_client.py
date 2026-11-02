@@ -1,4 +1,4 @@
-"""The link client against a fake Cloud: a real aiohttp WebSocket server speaking protocol 2."""
+"""The link client against a fake Cloud: a real aiohttp WebSocket server speaking protocol 3."""
 
 from __future__ import annotations
 
@@ -112,8 +112,8 @@ class Handler:
     async def on_access(self, message: p.Keys | p.Pause | p.Resume) -> None:
         self.calls.append((message.type, message))
 
-    async def on_artifact(self, message: p.Artifact) -> None:
-        self.calls.append(("artifact", message))
+    async def on_app(self, message: p.App) -> None:
+        self.calls.append(("app", message))
 
 
 async def fast(delay: float) -> None:
@@ -199,7 +199,7 @@ async def test_it_says_hello_goes_online_and_replays_what_it_owes(tmp_path, sess
     await until(lambda: bool(cloud.of("event")))
     assert cloud.headers == [f"Bearer {secret}"]
     hello = cloud.hellos[0]
-    assert (hello["protocol"], hello["runtime_id"], hello["deployed"][0]["program"]) == (2, str(uuid.UUID(int=1)), "x")
+    assert (hello["protocol"], hello["runtime_id"], hello["deployed"][0]["program"]) == (3, str(uuid.UUID(int=1)), "x")
     assert link.client.state == "online" and link.client.attempt == 0
     welcomed = [m for kind, m in link.handler.calls if kind == "welcome"]
     assert len(welcomed) == 1 and welcomed[0].licence is not None and welcomed[0].licence.payload == LICENCE["payload"]
@@ -238,7 +238,8 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
             {"type": "keys", "hashes": ["a" * 64]},
             {"type": "pause", "reason": "runtime_hours"},
             {"type": "resume"},
-            {"type": "artifact", "program": "x", "version": 2, "state": "approved", "roles": []},
+            {"type": "app", "program": "x", "version": 2, "state": "approved", "roles": []},
+            {"type": "artifact", "program": "x", "version": 2, "state": "rejected", "roles": []},  # protocol 2's name
             {"type": "secret_set"},
             {"type": "pong"},
         ):
@@ -255,7 +256,7 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
     await link.client.owe(lambda seq: p.event(seq, "x", "k", {}))
     link.start()
     await asyncio.wait_for(acked.wait(), 5)
-    await until(lambda: len(link.handler.calls) == 9)
+    await until(lambda: len(link.handler.calls) == 10)
     assert [c[0] for c in link.handler.calls] == [
         "welcome",
         "call",
@@ -265,8 +266,10 @@ async def test_it_answers_pings_takes_acks_and_hands_messages_to_the_handler(tmp
         "keys",
         "pause",
         "resume",
-        "artifact",
+        "app",
+        "app",
     ]
+    assert [c[1].state for c in link.handler.calls[-2:]] == ["approved", "rejected"]  # `artifact` read as `app`
     await until(lambda: not link.client.outbox.pending)
     await until(lambda: "a message from the Cloud failed" in caplog.text)
     assert "unreadable message skipped" in caplog.text  # an earlier server's secret_set among them
