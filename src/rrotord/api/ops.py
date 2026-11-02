@@ -107,17 +107,17 @@ async def app_publish(s: Services, data: dict[str, Any]) -> dict[str, Any]:
         raise Forbidden("Publishing an app is a person's act: sign in to Glyphh for this runtime.", code="E_FORBIDDEN")
     name = apps.check_name(data.get("name"))
     files = apps.read_files(data.get("files"))
-    manifest = apps.manifest_of(data, name)
+    manifest = apps.manifest_of(data, name, files)
     files["glyphh.json"] = json.dumps(manifest, indent=2).encode()
     program = data.get("program")
     if program is not None:
         if not isinstance(program, str):
             raise BadRequest("program is the text of program.py.", code="E_INPUTS")
         files["program.py"] = program.encode()
-    if s.artifacts is None:
+    if s.catalogue is None:
         raise Unavailable("This rrotor keeps no apps.", code="E_APPS")
     active = s.programs.active(name) if name in s.programs.names() else None
-    keep = active is not None and active.manifest.app is not None and s.artifacts.approved(name, active.version)
+    keep = active is not None and active.manifest.app is not None and s.catalogue.approved(name, active.version)
     term = forward.leading(s)
     try:
         version, made = await s.deployer.from_files(files, activate=not keep)
@@ -140,17 +140,18 @@ async def app_publish(s: Services, data: dict[str, Any]) -> dict[str, Any]:
     now_active = s.programs.active(name)
     return {
         **version.to_json(),
+        "type": manifest["app"]["type"],
         "active": now_active is not None and now_active.commit_sha == version.commit_sha,
-        "state": s.artifacts.state(name, version.version),
+        "state": s.catalogue.state(name, version.version),
         "url": f"{s.config.address}/apps/{name}/",
     }
 
 
 async def apps_list(s: Services) -> dict[str, Any]:
-    """The apps here: each one's title, version, roles, the catalogue's state and where a browser opens it."""
-    if s.artifacts is None:
+    """The apps here: each one's title, type, version, roles, the catalogue's state and where a browser opens it."""
+    if s.catalogue is None:
         raise Unavailable("This rrotor keeps no apps.", code="E_APPS")
-    return {"apps": apps.Apps(s.programs, s.artifacts, s.config.address).listed()}
+    return {"apps": apps.Apps(s.programs, s.catalogue, s.config.address).listed()}
 
 
 async def call(s: Services, data: dict[str, Any], caller: str = "claude", origin: str = "local") -> dict[str, Any]:

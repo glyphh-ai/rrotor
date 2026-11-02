@@ -1,5 +1,5 @@
 """What the Cloud's messages do here: a welcome's licence key is offered (and its word on the apps kept), a call
-opens a run, continue and cancel go to it, deploy, activate and remove change the versions, `artifact` keeps an app's
+opens a run, continue and cancel go to it, deploy, activate and remove change the versions, `app` keeps an app's
 review (an approved version activated). Every run the Cloud called answers its Results up the link; a deploy answers
 `deployed`, or an event `deploy_failed` (the protocol has no refusal of its own). Every other deploy (the API's and
 its MCP's) reports `deployed` through here too.
@@ -14,8 +14,8 @@ import logging
 from typing import Any
 
 from rrotord.access import Access
-from rrotord.artifacts import Artifacts
 from rrotord.audit import SERVER, Audit, acting
+from rrotord.catalogue import Catalogue
 from rrotord.deploy import Deployer
 from rrotord.errors import RrotorError
 from rrotord.licence import Licence
@@ -37,7 +37,7 @@ class LinkHandler:
         licence: Licence | None = None,
         access: Access | None = None,
         audit: Audit | None = None,
-        artifacts: Artifacts | None = None,
+        catalogue: Catalogue | None = None,
     ) -> None:
         self.programs, self.runner, self.deployer, self.licence, self.access = (
             programs,
@@ -47,7 +47,7 @@ class LinkHandler:
             access,
         )
         self.audit = audit
-        self.artifacts = artifacts
+        self.catalogue = catalogue
         self.link: LinkClient | None = None
 
     def _audit(self, kind: str, **detail: Any) -> None:
@@ -62,9 +62,9 @@ class LinkHandler:
         offered: a refused one is logged by the licence, never fatal."""
         if message.keys is not None and self.access is not None:
             self.access.set_keys(message.keys)
-        if message.artifacts is not None and self.artifacts is not None:
-            self.artifacts.set_all([a.model_dump() for a in message.artifacts], message.reviewers)
-            for reviewed in message.artifacts:
+        if message.apps is not None and self.catalogue is not None:
+            self.catalogue.set_all([a.model_dump() for a in message.apps], message.reviewers)
+            for reviewed in message.apps:
                 if reviewed.state == "approved":
                     self._activate(reviewed.program, reviewed.version)
         if self.licence is None:
@@ -87,13 +87,13 @@ class LinkHandler:
             self.access.resume()
             log.info("resumed by the Cloud")
 
-    async def on_artifact(self, message: p.Artifact) -> None:
+    async def on_app(self, message: p.App) -> None:
         """The catalogue's word on an app changed: kept; an approved version is the one served, and activated when
         this rrotor holds it and another was active (docs/architecture.md, 5.8)."""
-        if self.artifacts is None:
+        if self.catalogue is None:
             return
-        self.artifacts.set_one(message.program, message.version, message.state, message.roles)
-        log.info("artifact %s", message.state, extra={"program": message.program, "version": message.version})
+        self.catalogue.set_one(message.program, message.version, message.state, message.roles)
+        log.info("app %s", message.state, extra={"program": message.program, "version": message.version})
         if message.state == "approved":
             self._activate(message.program, message.version)
 

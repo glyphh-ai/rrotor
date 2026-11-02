@@ -12,7 +12,7 @@ import pytest
 
 import rrotor
 from rrotord.access import Access
-from rrotord.artifacts import Artifacts
+from rrotord.catalogue import Catalogue
 from rrotord.deploy import Deployer, Tools
 from rrotord.licence import Licence
 from rrotord.link import protocol as p
@@ -225,38 +225,42 @@ def app_versions(env: Env, n: int) -> None:
 
 
 async def test_the_catalogues_word_on_an_app_is_kept_and_an_approved_version_activated(env, tmp_path):
-    env.handler.artifacts = Artifacts(tmp_path / "data")
+    env.handler.catalogue = Catalogue(tmp_path / "data")
     app_versions(env, 2)
     assert env.programs.active("board").version == 2
-    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=1, state="approved"))
-    assert env.handler.artifacts.get("board") == {"version": 1, "state": "approved", "roles": []}
+    await env.handler.on_app(p.App(type="app", program="board", version=1, state="approved"))
+    assert env.handler.catalogue.get("board") == {"version": 1, "state": "approved", "roles": []}
     assert env.programs.active("board").version == 1  # the version approved is the one served
-    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=1, state="approved"))
+    await env.handler.on_app(p.App(type="app", program="board", version=1, state="approved"))
     assert env.programs.active("board").version == 1  # already active: nothing more
-    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=2, state="rejected"))
-    assert env.programs.active("board").version == 1 and env.handler.artifacts.state("board", 2) == "rejected"
-    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=9, state="approved"))
+    await env.handler.on_app(p.App(type="artifact", program="board", version=2, state="rejected"))  # protocol 2's
+    assert env.programs.active("board").version == 1 and env.handler.catalogue.state("board", 2) == "rejected"
+    await env.handler.on_app(p.App(type="app", program="board", version=9, state="approved"))
     assert env.programs.active("board").version == 1  # a version not held here: kept, nothing activated
-    await env.handler.on_artifact(p.Artifact(type="artifact", program="nope", version=1, state="approved"))
-    assert env.handler.artifacts.get("nope") == {"version": 1, "state": "approved", "roles": []}
-    env.handler.artifacts = None
-    await env.handler.on_artifact(p.Artifact(type="artifact", program="board", version=2, state="approved"))
+    await env.handler.on_app(p.App(type="app", program="nope", version=1, state="approved"))
+    assert env.handler.catalogue.get("nope") == {"version": 1, "state": "approved", "roles": []}
+    env.handler.catalogue = None
+    await env.handler.on_app(p.App(type="app", program="board", version=2, state="approved"))
     assert env.programs.active("board").version == 1  # no catalogue here: ignored
 
 
 async def test_a_welcome_carries_the_catalogues_whole_word_and_the_reviewers(env, tmp_path):
-    env.handler.artifacts = Artifacts(tmp_path / "data")
+    env.handler.catalogue = Catalogue(tmp_path / "data")
     app_versions(env, 2)
     reviewed = [
         p.Reviewed(program="board", version=1, state="approved", roles=["sre"]),
         p.Reviewed(program="other", version=3, state="rejected"),
     ]
-    await env.handler.on_welcome(p.Welcome(type="welcome", artifacts=reviewed, reviewers=["Ops"]))
-    assert env.handler.artifacts.get("board") == {"version": 1, "state": "approved", "roles": ["sre"]}
-    assert env.handler.artifacts.get("other") == {"version": 3, "state": "rejected", "roles": []}
-    assert env.handler.artifacts.reviewers == ["ops"] and env.programs.active("board").version == 1
+    await env.handler.on_welcome(p.Welcome(type="welcome", apps=reviewed, reviewers=["Ops"]))
+    assert env.handler.catalogue.get("board") == {"version": 1, "state": "approved", "roles": ["sre"]}
+    assert env.handler.catalogue.get("other") == {"version": 3, "state": "rejected", "roles": []}
+    assert env.handler.catalogue.reviewers == ["ops"] and env.programs.active("board").version == 1
     await env.handler.on_welcome(p.Welcome(type="welcome"))  # an older server: nothing said, nothing changed
-    assert env.handler.artifacts.get("board") is not None
+    assert env.handler.catalogue.get("board") is not None
+    old = {"type": "welcome", "artifacts": [{"program": "board", "version": 2, "state": "approved"}]}  # protocol 2's
+    await env.handler.on_welcome(p.Welcome.model_validate(old))
+    assert env.handler.catalogue.get("board") == {"version": 2, "state": "approved", "roles": []}
+    assert env.programs.active("board").version == 2
 
 
 async def test_report_carries_who_published(env):

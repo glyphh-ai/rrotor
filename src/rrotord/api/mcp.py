@@ -35,9 +35,10 @@ INSTRUCTIONS = (
     "answers needs_approval, then program_continue runs it once the person approves). The vendors' agent CLIs (claude, "
     "codex, gemini, cursor, grok, copilot) and glyphh come built in; cli_login signs one in from the person's phone: "
     "it answers needs_input with an address (and a device code) to open, and program_continue brings back the code "
-    "the page shows. A program runs a CLI it names in its clis with ctx.cli. app_publish puts a page Claude wrote (a "
-    "Claude Code artifact, .html or .md) on this runtime as an app for the org's people, reviewed in Glyphh's "
-    "catalogue before it is served at /apps/<name>/; apps_list shows the apps here and each one's review state."
+    "the page shows. A program runs a CLI it names in its clis with ctx.cli. app_publish puts what Claude made (a "
+    "Claude Code artifact, .html or .md; or a React page, a Markdown document, a diagram, a PDF or an image) on this "
+    "runtime as an app for the org's people, reviewed in Glyphh's catalogue before it is served at /apps/<name>/; "
+    "apps_list shows the apps here, each one's type and its review state."
 )
 
 
@@ -157,26 +158,31 @@ FILES = {
 TOOLS: tuple[Tool, ...] = (
     Tool(
         "apps_list",
-        "The apps here (pages published from Claude for the org's people): each one's title, version, roles, the "
-        "catalogue's review state (draft, approved, rejected, retired, unknown) and the address a browser opens it at.",
+        "The apps here (what Claude made, published for the org's people): each one's title, type (page, dashboard, "
+        "doc, diagram, deck, design), version, roles, the catalogue's review state (draft, approved, rejected, "
+        "retired, unknown) and the address a browser opens it at.",
         _obj({}),
         apps_list,
         True,
     ),
     Tool(
         "app_publish",
-        "Publish a page Claude wrote (a Claude Code artifact: one .html or .md file, and any files beside it) to this "
-        "runtime as an app for the org's people: name (the program's name, kebab-free: lower-case, digits, _), title, "
-        "description, roles (groups, admin, member; empty: everyone in the org), files (path to text or {base64}; 64 "
-        "and 16 MiB at most), entry (default index.html), and, when the page calls functions, functions ({name: "
-        "{description, inputs}}) with program (the text of program.py; a function runs as the viewer, with their "
-        "CLIs). The app awaits the org's review in Glyphh (an admin or a reviewer approves it), then is served at the "
-        "url answered. A new version of an approved app keeps the approved one serving until it is approved.",
+        "Publish what Claude made (a Claude Code artifact: one .html or .md file and any files beside it; or a React "
+        "page (.jsx, .tsx), a Markdown document, a diagram (.mmd, .svg), a PDF or an image) to this runtime as an app "
+        "for the org's people: name (the program's name: lower-case, digits, _), title, description, type (page, "
+        "dashboard, doc, diagram, deck, design; default by the entry: a page, .md and .pdf a doc, .mmd and .svg a "
+        "diagram, an image a design; say dashboard or deck yourself), roles (groups, admin, member; empty: everyone in "
+        "the org), files (path to text or {base64} for a PDF or an image; 64 and 16 MiB at most), entry (default "
+        "index.html, or the one file sent), and, when the page calls functions, functions ({name: {description, "
+        "inputs}}) with program (the text of program.py; a function runs as the viewer, with their CLIs). The app "
+        "awaits the org's review in Glyphh (an admin or a reviewer approves it), then is served at the url answered. "
+        "A new version of an approved app keeps the approved one serving until it is approved.",
         _obj(
             {
                 "name": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
+                "type": {"type": "string", "enum": ["page", "dashboard", "doc", "diagram", "deck", "design"]},
                 "roles": {"type": "array", "items": {"type": "string"}, "maxItems": 50},
                 "files": FILES,
                 "entry": {"type": "string"},

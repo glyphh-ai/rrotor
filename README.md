@@ -23,6 +23,11 @@ with `cli_login` (`POST /v1/clis/{name}/login`): it answers `needs_input` with t
 imports without a `requirements.lock`. A program runs a CLI with `ctx.cli(name, args)` (its manifest's `clis`), in
 that CLI's own sandbox and signed-in HOME.
 
+A program can also be an **app** (`"kind": "app"`, [5.8](docs/architecture.md#58-apps)): what Claude made (a page,
+a dashboard, a Markdown document, a React page, a diagram, a deck or a design as a PDF or an image), published from
+Claude with `app_publish` (`POST /v1/apps`), reviewed in the Glyphh catalogue, and served at `/apps/<name>/` to the
+org's people signed in to Glyphh, whose roles the app allows; a page's calls run the app's functions as the viewer.
+
 | Where | What |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, the licence, parts, CI |

@@ -21,9 +21,9 @@ from rrotord.access import Access
 from rrotord.aggregate import Aggregate, ClusterAudit
 from rrotord.api.app import make
 from rrotord.api.routes import Services
-from rrotord.artifacts import Artifacts
 from rrotord.audit import SERVER, Audit, current
 from rrotord.browser import Browser
+from rrotord.catalogue import Catalogue
 from rrotord.cluster.node import Cluster
 from rrotord.config import Config
 from rrotord.deploy import Deployer
@@ -74,7 +74,7 @@ class Daemon:
     drain: Drain | None = field(init=False)
     cluster: Cluster = field(init=False)
     scheduler: Scheduler = field(init=False)
-    artifacts: Artifacts = field(init=False)
+    catalogue: Catalogue = field(init=False)
     browser: Browser | None = field(init=False)
     session: aiohttp.ClientSession | None = None
 
@@ -126,7 +126,7 @@ class Daemon:
         self.aggregate = Aggregate(self.audit, self.gathered, self.cluster)
         self.aggregate.drain = self.drain
         self.cluster.on_telemetry = self.aggregate.received
-        self.artifacts = Artifacts(c.data, linked=c.link)
+        self.catalogue = Catalogue(c.data, linked=c.link)
         self.handler = handler = LinkHandler(
             programs,
             None,  # type: ignore[arg-type]
@@ -134,7 +134,7 @@ class Daemon:
             self.licence,
             self.access,
             self.audit,
-            self.artifacts,
+            self.catalogue,
         )
         self.runner = Runner(
             programs=programs,
@@ -302,7 +302,7 @@ class Daemon:
             self.cluster,
             self.gathered,
             self.scheduler,
-            self.artifacts,
+            self.catalogue,
             self.browser,
         )
 

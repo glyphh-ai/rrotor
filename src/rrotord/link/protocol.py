@@ -1,17 +1,20 @@
-"""Protocol 2's messages, as the server builds them (glyphh-ai/server, ops/link/protocol.py): JSON, one per frame,
-each with `type` and `id`. Protocol 1 named a program `model`; `hello` says 2, so a server of protocol 1 closes the
-link with 4426 (`upgrade_needed`) rather than misreading it, and a protocol 1 message that still reaches rrotor
-fails validation and is skipped. The server never sets a program's secrets (they are set on the runtime itself,
-rrotord/vault.py): an earlier server's `secret_set` is an unknown type, and skipped the same way."""
+"""Protocol 3's messages, as the server builds them (glyphh-ai/server, ops/link/protocol.py): JSON, one per frame,
+each with `type` and `id`. Protocol 3 (rrotor 0.3.0) is protocol 2 with the catalogue's names changed: the `app`
+message for `artifact`, and `apps` in the welcome for `artifacts`; the old names are still read here (the same `App`
+message, the same list), so a server speaking protocol 2 is understood, though none is expected. Protocol 1 named a
+program `model`; `hello` says 3, so a server of protocol 1 closes the link with 4426 (`upgrade_needed`) rather than
+misreading it, and a protocol 1 message that still reaches rrotor fails validation and is skipped. The server never
+sets a program's secrets (they are set on the runtime itself, rrotord/vault.py): an earlier server's `secret_set` is
+an unknown type, and skipped the same way."""
 
 from __future__ import annotations
 
 import uuid
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, TypeAdapter
 
-PROTOCOL = 2  # 1 named a program `model`
+PROTOCOL = 3  # 2 said `artifact` where 3 says `app`; 1 named a program `model`
 
 REFUSED, BAD_HELLO, SILENT, REPLACED, UPGRADE = 4401, 4400, 4408, 4409, 4426
 FAILED, RESTART = 1011, 1012
@@ -55,20 +58,23 @@ class Reviewed(BaseModel):
 
 
 class Welcome(Message):
+    model_config = ConfigDict(populate_by_name=True)
     type: Literal["welcome"]
     accepted: bool = True
     limits: Limits = Limits()
     licence: Signed | None = None
     license_key: str | None = None  # the licence key, preferred to `licence`
     keys: list[str] | None = None  # hosted: the runtime keys' SHA-256s, the whole list
-    artifacts: list[Reviewed] | None = None  # the catalogue's whole word on this rrotor's apps (None: an older server)
+    # The catalogue's whole word on this rrotor's apps (None: an older server); protocol 2 called it `artifacts`.
+    apps: list[Reviewed] | None = Field(None, validation_alias=AliasChoices("apps", "artifacts"))
     reviewers: list[str] | None = None  # the groups that review the org's apps, beside its admin
 
 
-class Artifact(Reviewed, Message):
-    """An app's review changed: approved (the version named is served, and activated), rejected or retired."""
+class App(Reviewed, Message):
+    """An app's review changed: approved (the version named is served, and activated), rejected or retired.
+    Protocol 2 typed the same message `artifact`: read as this one."""
 
-    type: Literal["artifact"]
+    type: Literal["app", "artifact"]
 
 
 class Keys(Message):
@@ -134,7 +140,7 @@ class Ack(Message):
 
 
 Down = Annotated[
-    Welcome | Call | Continue | Cancel | Deploy | Keys | Pause | Resume | Artifact | Ping | Pong | Ack,
+    Welcome | Call | Continue | Cancel | Deploy | Keys | Pause | Resume | App | Ping | Pong | Ack,
     Field(discriminator="type"),
 ]
 DOWN: TypeAdapter[Down] = TypeAdapter(Down)

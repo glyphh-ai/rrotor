@@ -20,9 +20,9 @@ from rrotord import apps
 from rrotord.access import Access, digest
 from rrotord.api import forward, ops
 from rrotord.api.app import make
-from rrotord.artifacts import Artifacts
 from rrotord.audit import Audit
 from rrotord.browser import SESSION_COOKIE, Browser
+from rrotord.catalogue import Catalogue
 from rrotord.errors import BadRequest
 from tests.daemon.api.conftest import Api, linked, services
 from tests.daemon.api.test_hosted import Vouches
@@ -54,15 +54,15 @@ async def send(api: Api, method: str, path: str, **kw: Any) -> tuple[int, Any]:
     return res.status, await res.json()
 
 
-def catalogue(api: Api) -> Artifacts:
+def catalogue(api: Api) -> Catalogue:
     """The rrotor's word from the catalogue, which every rrotor here holds."""
-    assert api.services.artifacts is not None
-    return api.services.artifacts
+    assert api.services.catalogue is not None
+    return api.services.catalogue
 
 
 @pytest.fixture
 async def local(api: Api) -> Api:
-    api.services.artifacts = Artifacts(api.services.config.data)
+    api.services.catalogue = Catalogue(api.services.config.data)
     return api
 
 
@@ -73,7 +73,9 @@ async def test_an_app_is_published_listed_and_served_on_a_local_rrotor(local: Ap
     )
     assert status == 201, body
     assert (body["program"], body["version"], body["active"], body["state"]) == ("board", 1, True, "unknown")
-    assert body["url"] == "http://127.0.0.1:7777/apps/board/" and len(body["commit_sha"]) == 40
+    assert (
+        body["type"] == "page" and body["url"] == "http://127.0.0.1:7777/apps/board/" and len(body["commit_sha"]) == 40
+    )
     [sent] = link.sent
     assert (sent["type"], sent["by"], sent["manifest"]["kind"], sent["manifest"]["app"]["title"]) == (
         "deployed",
@@ -87,6 +89,7 @@ async def test_an_app_is_published_listed_and_served_on_a_local_rrotor(local: Ap
             "name": "board",
             "title": "The board",
             "description": "Hi there",
+            "type": "page",
             "version": 1,
             "active": True,
             "roles": [],
@@ -130,15 +133,155 @@ async def test_a_publish_is_an_audit_event_done_or_failed_and_a_forwarded_one_is
     assert kinds == [("program.deploy_failed", "failed"), ("program.deploy", "done")]  # oldest first
 
 
-async def test_a_markdown_page_is_served_in_the_document_shell(local: Api):
+async def test_a_markdown_document_is_served_in_the_document_shell(local: Api):
     files = {"notes/main.md": "# Hello\n\n<b>bold</b>", "notes/extra.md": "# Two"}
     status, body = await send(local, "POST", "/v1/apps", json=publish_body(entry="notes/main.md", files=files))
-    assert status == 201, body
+    assert status == 201 and body["type"] == "doc", body
     res = await local.client.get("/apps/board/")
     text = await res.text()
     assert res.status == 200 and res.content_type == "text/html"
     assert "<title>The board</title>" in text and "# Hello\n\n&lt;b&gt;bold&lt;/b&gt;" in text and "marked" in text
-    assert "# Two" in await (await local.client.get("/apps/board/notes/extra.md")).text()
+    assert "# Two" in await (await local.client.get("/apps/board/notes/extra.md")).text()  # shelled by its path too
+
+
+TSX = """import { useState } from "react";
+import { LineChart } from "recharts";
+type Row = { x: number };
+export const rows: Row[] = [{ x: 1 }];
+export default function App(): JSX.Element {
+  const [n] = useState<number>(0);
+  return <div className="p-4">{n}<LineChart data={rows} /></div>;
+}
+"""
+
+
+async def test_a_react_page_is_served_in_the_react_shell(local: Api):
+    files = {"app.tsx": TSX, "note.jsx": "export default () => <p>hi</p>;\n"}
+    status, body = await send(local, "POST", "/v1/apps", json=publish_body(entry="app.tsx", files=files))
+    assert status == 201 and body["type"] == "page", body
+    res = await local.client.get("/apps/board/")
+    text = await res.text()
+    assert res.status == 200 and res.content_type == "text/html" and "<title>The board</title>" in text
+    assert (
+        '<script type="importmap">' in text
+        and '"recharts":"https://esm.sh/recharts@3?external=react,react-dom"' in text
+    )
+    assert '"react-dom/client":"https://esm.sh/react-dom@19/client?external=react"' in text
+    assert '"react":"https://esm.sh/react@19"' in text and '"d3":"https://cdn.jsdelivr.net/npm/d3@7/+esm"' in text
+    assert "babel-standalone" in text and "cdn.tailwindcss.com" in text
+    assert '<script type="text/babel" data-type="module" data-presets="jsx,tsx">' in text
+    assert (
+        "\nfunction App(): JSX.Element {" in text
+        and "\nconst __App = App;" in text
+        and 'from "react-dom/client"' in text
+    )
+    assert "const rows: Row[]" in text and "export" not in text.split("</script>")[-2]
+    res = await local.client.get("/apps/board/app.tsx")  # by its path: the file as it is
+    assert (res.status, res.content_type, await res.text()) == (200, "text/plain", TSX)
+    assert "esm.sh" in res.headers["Content-Security-Policy"]
+    status, body = await send(
+        local, "POST", "/v1/apps", json=publish_body(files={"note.jsx": "export default () => 1;\n"})
+    )
+    assert status == 201 and body["type"] == "page"  # the one file sent is the entry
+    text = await (await local.client.get("/apps/board/")).text()
+    assert 'data-presets="jsx">' in text and "\nconst __App = () => 1;\n" in text
+
+
+def test_a_react_files_default_export_is_bound_for_the_mount():
+    assert apps.mounted("export default function App() {}\n").startswith("function App() {}\n\nconst __App = App;\n")
+    assert apps.mounted("export default class B extends C {}\n").startswith("class B extends C {}\n\nconst __App = B;")
+    assert apps.mounted("export default async function* g() {}\n").startswith(
+        "async function* g() {}\n\nconst __App = g;"
+    )
+    assert apps.mounted("export default memo(App);\n").startswith("const __App = memo(App);\n")
+    assert apps.mounted("function A() {}\nexport { A as default };\n").startswith("function A() {}\nconst __App = A;\n")
+    assert apps.mounted("export const a = 1;\nexport type T = 1;\nexport { a, b };\nexport default a;\n").startswith(
+        "const a = 1;\ntype T = 1;\n\nconst __App = a;\n"
+    )
+    assert apps.mounted("export default () => 1;\nexport { x } from './y';\n").startswith("const __App = () => 1;\n\n")
+    assert apps.mounted("const a = 1;\n").startswith("const a = 1;\n\nimport")  # no default: the browser says so
+    assert apps.script_text('"</SCRIPT><!-- x"') == r'"<\/SCRIPT><\!-- x"'
+
+
+async def test_a_diagram_is_served_in_the_diagram_shell_and_an_svg_as_it_is(local: Api):
+    files = {"flow.mmd": "graph TD\n  A --> B & C\n"}
+    status, body = await send(local, "POST", "/v1/apps", json=publish_body(files=files))
+    assert status == 201 and body["type"] == "diagram", body
+    res = await local.client.get("/apps/board/")
+    text = await res.text()
+    assert res.status == 200 and res.content_type == "text/html"
+    assert "mermaid@11" in text and '<pre class="mermaid">graph TD\n  A --&gt; B &amp; C\n</pre>' in text
+    assert "<h1>The board</h1>" in text and "Content-Disposition" not in res.headers
+    svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>'
+    status, body = await send(local, "POST", "/v1/apps", json=publish_body(files={"d.svg": svg}, type="diagram"))
+    assert status == 201 and body["type"] == "diagram", body
+    res = await local.client.get("/apps/board/")
+    assert (res.status, res.content_type, await res.text()) == (200, "image/svg+xml", svg)
+    assert res.headers["Content-Disposition"] == "inline"
+    status, body = await send(local, "POST", "/v1/apps", json=publish_body(files={"d.mermaid": "graph LR\n"}))
+    assert (status, body["type"]) == (201, "diagram") and "mermaid@11" in await (
+        await local.client.get("/apps/board/")
+    ).text()
+
+
+async def test_a_pdf_is_served_as_it_is_and_an_image_in_the_image_shell(local: Api):
+    pdf = {"base64": base64.b64encode(b"%PDF-1.4 x").decode()}
+    status, body = await send(local, "POST", "/v1/apps", json=publish_body(files={"deck.pdf": pdf}, type="deck"))
+    assert status == 201 and body["type"] == "deck", body
+    res = await local.client.get("/apps/board/")
+    assert (res.status, res.content_type, await res.read()) == (200, "application/pdf", b"%PDF-1.4 x")
+    assert res.headers["Content-Disposition"] == "inline" and res.headers["X-Content-Type-Options"] == "nosniff"
+    png = {"base64": base64.b64encode(b"\x89PNG").decode()}
+    files = {"img/a-b.png": png, "readme.md": "# About"}
+    status, body = await send(local, "POST", "/v1/apps", json=publish_body(files=files, entry="img/a-b.png"))
+    assert status == 201 and body["type"] == "design", body
+    res = await local.client.get("/apps/board/")
+    text = await res.text()
+    assert res.status == 200 and res.content_type == "text/html" and "<h1>The board</h1>" in text
+    assert '<img src="./img/a-b.png" alt="The board">' in text
+    res = await local.client.get("/apps/board/img/a-b.png")
+    assert (res.status, res.content_type, await res.read()) == (200, "image/png", b"\x89PNG")
+    for name, kind in (
+        ("x.jpg", "image/jpeg"),
+        ("x.JPEG", "image/jpeg"),
+        ("x.webp", "image/webp"),
+        ("x.gif", "image/gif"),
+    ):
+        status, body = await send(local, "POST", "/v1/apps", json=publish_body(files={name: png}))
+        assert (status, body["type"]) == (201, "design"), body
+        assert "<img src=" in await (await local.client.get("/apps/board/")).text()
+        assert (await local.client.get(f"/apps/board/{name}")).content_type == kind
+
+
+@pytest.mark.parametrize(
+    ("entry", "given", "expected"),
+    [
+        ("index.html", None, "page"),
+        ("index.htm", "dashboard", "dashboard"),
+        ("app.jsx", None, "page"),
+        ("notes.md", None, "doc"),
+        ("deck.pdf", None, "doc"),
+        ("deck.pdf", "deck", "deck"),
+        ("d.mmd", None, "diagram"),
+        ("d.svg", "design", "design"),
+        ("a.png", None, "design"),
+    ],
+)
+async def test_the_type_is_the_entrys_unless_the_publisher_says(local: Api, entry, given, expected):
+    over: dict[str, Any] = {"files": {entry: "x"}}
+    if given is not None:
+        over["type"] = given
+    status, body = await send(local, "POST", "/v1/apps", json=publish_body(**over))
+    assert status == 201 and body["type"] == expected, body
+    listed = (await send(local, "GET", "/v1/apps"))[1]["apps"][0]
+    assert listed["type"] == expected
+    kept = local.services.programs.get("board").manifest.app
+    assert kept is not None and kept.type == expected  # the manifest keeps it
+
+
+async def test_a_dashboard_is_never_inferred(local: Api):
+    status, body = await send(local, "POST", "/v1/apps", json=publish_body())  # a page with functions is still a page
+    assert status == 201 and body["type"] == "page"
 
 
 async def test_a_new_version_of_an_approved_app_waits_for_its_review(local: Api):
@@ -173,9 +316,16 @@ async def test_a_new_version_of_an_approved_app_waits_for_its_review(local: Api)
         ({"roles": "sre"}, "roles is a list"),
         ({"functions": {"rows": "x"}}, "functions is an object"),
         ({"functions": {"rows": {}}, "program": 3}, "program is the text of program.py"),
-        ({"entry": "page.txt"}, "app.entry is a .html"),
+        (
+            {"entry": "page.txt"},
+            "entry is a page (.html, .jsx, .tsx), a document (.md, .pdf), a diagram (.mmd, .svg) or an image",
+        ),
+        ({"entry": 3}, "entry is a page"),
+        ({"files": {"page.txt": "x"}}, "entry is a page"),  # the one file sent is the entry: not one that can be
+        ({"files": {"page.txt": "x", "a.css": ""}}, "no index.html, the app's page"),
+        ({"type": "slides"}, "type is one of page, dashboard, doc, diagram, deck, design"),
         ({"functions": {"rows": {}}}, "no program.py"),
-        ({"files": {"other.html": PAGE}}, "no index.html, the app's page"),
+        ({"files": {"other.html": PAGE, "a.css": ""}}, "no index.html, the app's page"),
     ],
 )
 async def test_a_publish_that_is_not_right_is_refused(local: Api, over, why):
@@ -228,16 +378,19 @@ async def test_the_pages_calls_run_the_apps_functions_as_the_viewer(local: Api):
 
 
 async def test_apps_over_mcp(local: Api):
-    _, done = await rpc(local, "tools/call", {"name": "app_publish", "arguments": publish_body(roles=["SRE"])})
+    arguments = publish_body(roles=["SRE"], type="dashboard")
+    _, done = await rpc(local, "tools/call", {"name": "app_publish", "arguments": arguments})
     assert done["result"]["isError"] is False and done["result"]["structuredContent"]["version"] == 1
+    assert done["result"]["structuredContent"]["type"] == "dashboard"
     listed = await tool(local, "apps_list")
     assert listed["structuredContent"]["apps"][0]["roles"] == ["sre"]
+    assert listed["structuredContent"]["apps"][0]["type"] == "dashboard"
     _, refused = await rpc(local, "tools/call", {"name": "app_publish", "arguments": publish_body(name="Bad Name")})
     assert refused["result"]["isError"] and refused["result"]["structuredContent"]["error"]["code"] == "E_INPUTS"
 
 
 async def test_a_rrotor_without_a_catalogue_keeps_no_apps(api: Api):
-    assert api.services.artifacts is None
+    assert api.services.catalogue is None
     for method, path, body in (("POST", "/v1/apps", publish_body()), ("GET", "/v1/apps", None)):
         status, answer = await send(api, method, path, json=body)
         assert (status, answer["error"]["code"]) == (503, "E_APPS"), path
@@ -284,7 +437,7 @@ async def open_self_hosted(tmp_path: Path, short_dir: Path, link: bool = True, *
     s.access = Access(s.config.data, (digest(key),))
     vouches = Vouches(signed_in, **who)
     s.introspect = vouches  # type: ignore[assignment]
-    s.artifacts = Artifacts(s.config.data, linked=link)
+    s.catalogue = Catalogue(s.config.data, linked=link)
     glyphh = Glyphh()
     if link:
         s.browser = Browser(s.config.data, SERVER, s.config.address, "rrotor-1", glyphh.post_json, glyphh.post_form)
@@ -427,7 +580,13 @@ async def test_with_the_link_off_a_deploy_is_the_approval_and_there_is_no_sign_i
 
 def test_what_is_served_and_what_is_not(tmp_path):
     assert apps.content_type("a/b.svg") == "image/svg+xml" and apps.content_type("x.bin") == "application/octet-stream"
-    assert apps.content_type("x.png") == "image/png"
+    assert apps.content_type("x.png") == "image/png" and apps.content_type("x.PDF") == "application/pdf"
+    assert (apps.content_type("x.woff2"), apps.content_type("x.csv"), apps.content_type("x.ico")) == (
+        "font/woff2",
+        "text/csv",
+        "image/x-icon",
+    )
+    assert apps.content_type("x.md") == "text/markdown" and apps.content_type("noext") == "application/octet-stream"
     err = apps.AppError("x", code="E_OTHER", status=400)
     assert "Not served" in apps.refused_page(err, signed_in=False)
 

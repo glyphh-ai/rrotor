@@ -93,7 +93,7 @@ the edge of Glyphh's hosting provider); it is not in the request and the server 
 
 ## The link, when it is on
 
-The link is the same as a hosted rrotor's ([architecture, section 6](../architecture.md#6-the-link-protocol-2)):
+The link is the same as a hosted rrotor's ([architecture, section 6](../architecture.md#6-the-link-protocol-3)):
 one WebSocket rrotor opens to the server, authenticated with the runtime token; the server never connects in. What
 goes up it:
 
