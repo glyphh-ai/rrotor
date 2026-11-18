@@ -14,6 +14,10 @@ A program that declares secrets gets their values from the vault (rrotord/vault.
 and nowhere else: a declared one not set stops the run before `load`, `failed {step: secrets, missing: [...]}`, and
 the values are masked in the run's log lines.
 
+A program whose manifest names the graph (`"graph": "read"` or `"write"`) reads and writes the rrotor's graph
+(rrotord/graph.py) through `ctx.graph`: its worker asks over its channel (`graph`, answered `graph_result`), the
+runner checks what its manifest allows, and what it writes is marked with the program as its source.
+
 A CLI (`"kind": "cli"`, rrotord/clis.py) runs the same way, one command per run (`cli_run`): its arguments checked
 against `allow` first (E_CLI_DENIED, never a run), a run that waits for the person's approval when `approvals` names
 them (resumed by a continue like a program's), then the worker runs the command in the sandbox with the CLI's install,
@@ -43,6 +47,7 @@ from rrotord import clis
 from rrotord import log as logs
 from rrotord.audit import Audit, current
 from rrotord.errors import BadRequest, Conflict, Forbidden, NotFound, RrotorError, Unavailable
+from rrotord.graph import WRITES, Graph
 from rrotord.manifest import check_inputs
 from rrotord.otel import Telemetry
 from rrotord.parts import KNOWN, Parts
@@ -117,8 +122,9 @@ class Runner:
         node: Callable[[], str | None] = lambda: None,
         readonly: Callable[[], bool] = lambda: False,
         vault: Vault | None = None,
+        graph: Graph | None = None,
     ) -> None:
-        self.node, self.readonly, self.vault = node, readonly, vault
+        self.node, self.readonly, self.vault, self.graph = node, readonly, vault, graph
         self.hidden: dict[str, list[str]] = {}  # each run's secret values, masked in its log lines
         self.programs, self.records, self.proxy, self.launcher = programs, records, proxy, launcher
         self.sdk, self.layers, self.wait_limit = sdk, layers, wait_limit
@@ -562,6 +568,7 @@ class Runner:
             secrets={"declared": manifest.secrets, "values": values},
             sqlite="sqlite" in manifest.databases,
             clis={name: self._cli_patterns(name) for name in manifest.clis},
+            graph=manifest.graph,
             **self.launcher.paths(mounts),
         )
 
@@ -605,6 +612,28 @@ class Runner:
         self.records.log(run.id, {"event": "cli", "cli": name, "run_id": done.id, "status": done.status})
         return dict(done.result or {})
 
+    async def program_graph(self, run: Run, ask: dict[str, Any]) -> dict[str, Any]:
+        """A program's ctx.graph: one call of the rrotor's graph (rrotord/graph.py), as its manifest's `graph` allows
+        (checked here too, so a program cannot write a graph it only reads); what it writes is marked with the
+        program as its source, and noted in the run's log. Answers a Result: `done` with what the graph answered."""
+        op = str(ask.get("graph") or "")
+        try:
+            access = self.programs.get(run.program, run.version).manifest.graph
+            if access is None:
+                raise Forbidden(f"{run.program} does not name the graph in its glyphh.json.", code="E_GRAPH_UNDECLARED")
+            if op in WRITES and access != "write":
+                raise Forbidden(
+                    f'{run.program} reads the graph: writing needs "graph": "write".', code="E_GRAPH_READONLY"
+                )
+            if self.graph is None:
+                raise Unavailable("This rrotor keeps no graph.", code="E_GRAPH")
+            data = await self.graph.call(op, ask, run.program)
+        except RrotorError as err:
+            return failed("graph", err.code, err.message)
+        if op in WRITES:
+            self.records.log(run.id, {"event": "graph", "op": op, **data})
+        return {"status": "done", "data": data}
+
     async def _start(self, run: Run, found: Version, mounts: bwrap.Mounts, **start: Any) -> None:
         """The run's worker started in its sandbox and sent `start`, then its first Result awaited."""
         manifest = found.manifest
@@ -616,6 +645,7 @@ class Runner:
                     lambda fd: Spec(mounts, limits, fd),
                     lambda m: self._note(run, m),
                     lambda ask: self.program_cli(run, ask),
+                    lambda ask: self.program_graph(run, ask),
                 )
         except OSError as err:
             await self.proxy.close(run.id)
@@ -797,3 +827,5 @@ class Runner:
         for worker in list(self.workers.values()):
             await worker.stop(grace=1)
         self.workers.clear()
+        if self.graph is not None:
+            self.graph.close()

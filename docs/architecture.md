@@ -243,6 +243,7 @@ There is no s6 and no other process: everything is `rrotord` under `tini`.
 | `programs/<name>/files/` | The program's own folder, seeded from the commit's `files/` on its first deploy |
 | `programs/<name>/data/` | Its persistent data, outside git (`"data": true`) |
 | `vault/key`, `vault/<name>.json` | The rrotor's own key (32 bytes, 0600, made on first use); a program's secrets, each encrypted with it ([5.5](#55-secrets)) |
+| `graph/graph.sqlite3` | The graph: nodes, edges and the passages search reads ([5.9](#59-the-graph)) |
 | `models/` | An earlier release's name for `programs/`: moved to `programs/` when the daemon starts, if `programs/` is not there; its runs' and audit events' `model` reads as `program` |
 | `runs/<run_id>/` | Each run's `run.json` (with its checkpoints) and `log.jsonl` |
 | `schedules.json` | Each schedule's pause, last run and last skip ([5.6](#56-schedules)) |
@@ -313,6 +314,7 @@ and the arguments it may be run with.
 | `secrets` | The secrets it reads by name, `^[A-Z][A-Z0-9_]{0,63}$` ([5.5](#55-secrets)) |
 | `schedules` | Functions the runtime calls by itself: each `{function, cron, tz?, input?, name?}` ([5.6](#56-schedules)) |
 | `clis` | The CLIs on this rrotor its functions run with `ctx.cli` (built in or deployed, [5.7](#57-clis)): a deploy naming one this rrotor does not hold is refused (`E_MANIFEST`); every call runs on a cluster's head, where CLIs run |
+| `graph` | `read` or `write`: the rrotor's graph as `ctx.graph` ([5.9](#59-the-graph)), to search and walk it, or to write it too (a pipeline). Unset, `ctx.graph` refuses (`E_GRAPH_UNDECLARED`). Every call runs on a cluster's head, which keeps the graph. Not for a CLI |
 | `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `program.py` does not
@@ -346,6 +348,7 @@ ctx.caller                    # who called: "claude", or "schedule" for a run it
 ctx.readonly                  # a cluster follower's run: its folders are read-only
 ctx.secrets["NAME"], ctx.secrets.get("NAME")   # a secret the manifest declares (5.5)
 ctx.cli(name, args, stdin=None) -> CliResult   # a command of a CLI the manifest names: exit_code, stdout, stderr
+ctx.graph                     # the rrotor's graph ("graph": "read" or "write"): rows, upsert, search, node, … (5.9)
 ctx.log(message, **detail)
 ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 ```
@@ -376,7 +379,11 @@ without a `requirements.lock`, and a program that pins its own version gets its 
 - **`rrotor.testing`** gives a program's own tests a `Ctx` with no sandbox (`Harness`): inputs, answers, a folder,
   an `http` that answers what the test says, `secrets={...}` (with `declared=[...]`, the names the manifest
   declares), `database=<a file>` for `ctx.db`, and `clis={"claude": FakeCli("answer", allow=…, approvals=…)}` for
-  `ctx.cli` (stdout, a `CliResult`, or a function of the arguments and stdin; `h.cli_calls` lists what ran).
+  `ctx.cli` (stdout, a `CliResult`, or a function of the arguments and stdin; `h.cli_calls` lists what ran), and
+  `graph=FakeGraph("write")` for `ctx.graph`: a graph kept in memory (`h.graph.nodes`, `h.graph.edges` hold what the
+  program wrote; its search is by plain words, not BM25).
+- **`load` and `end` are rrotor's:** it calls a program's `load(ctx)` before every run and `end(ctx)` after, so a
+  helper of another shape must not take those names (a pipeline's last step is `store`, not `load`).
 
 ### 5.4 A run
 
@@ -427,6 +434,14 @@ A program reads an API key or a password as `ctx.secrets["ANALYTICS_KEY"]`; its 
   (`E_SECRET_UNDECLARED`). A declared secret not set stops the run before `load`:
   `failed {step: secrets, code: E_SECRET_MISSING, missing: ["ANALYTICS_KEY"]}`, so the caller knows what to ask the
   person for.
+- **Set by the person, in a form, never in the chat:** MCP's `secrets_form` `{program}` answers the names and which
+  are unset, and names a panel (`ui://rrotor/secrets/1`, an MCP App: `rrotord/api/panel.py`) that Claude shows with
+  the answer: each secret with a field for its value. What the person types goes from the form to `secret_set`
+  through the host, into the vault; it is not in the conversation, and the form tells Claude only which names were
+  set or removed. Claude calls it whenever a run fails `E_SECRET_MISSING` or a program that declares secrets was just
+  deployed, and never asks for a value. Where no form shows (a client without MCP Apps), the answer says how the
+  person sets it themselves, with `PUT …/secrets/{secret}`. The runtime's `resources/list` and `resources/read`
+  serve the panel; on MCP 2026-07-28 those and `tools/list` answer `ttlMs: 0, cacheScope: private`.
 - **Never kept anywhere else:** no route, tool, run record or audit event carries a value; setting and deleting are
   audit events (`secret.set`, `secret.delete`) naming the program and the secret. A value of 4 characters or more
   that a program prints or logs is masked as `[secret]` in the run's log; what a program returns or checkpoints
@@ -740,6 +755,69 @@ same deploy, versions, sandbox, vault, hosts, CLIs and audit; its page's calls r
   function `app.functions` does not name is 403 `E_APP_FUNCTION`; a run of another program 404 `E_RUN_MISSING`.
   Every call is a run: `run_status`, `run_log` and the audit log's `run.call` as any.
 
+### 5.9 The graph
+
+The rrotor's semantic layer: **one knowledge graph for the whole rrotor**, which pipelines write and apps, programs
+and Claude read (`rrotord/graph.py`, the SDK's `rrotor/graph.py`). It is where the org's data, shaped once, sits
+behind everything Claude builds here.
+
+```mermaid
+flowchart LR
+    Source["a source<br/>an API, a file, a database"] -- "a pipeline: a program on a schedule,<br/>its key a secret in the vault" --> Write["ctx.graph.rows / upsert"]
+    Claude["Claude"] -- "graph_upsert" --> Graph
+    Write --> Graph[("the graph<br/>nodes, edges, passages")]
+    Graph -- "ctx.graph.search / nodes / neighbours" --> App["an app's functions<br/>(as the viewer)"]
+    Graph -- "graph_search, graph_schema, …" --> Claude
+```
+
+| Thing | What |
+|---|---|
+| **node** | A type and a key (`deal`, `d-1042`), with a `title`, `props` (a JSON object, 64 KB at most) and `text` (1,048,576 characters at most). The type is `^[a-z][a-z0-9_]{0,62}$`; the key 1 to 256 characters. `(type, key)` names it: writing it again changes it |
+| **edge** | `from` a node, a relation (`rel`, named as a type is), `to` a node, with `props`. One per `(from, rel, to)` |
+| **passage** | A node's words (its title, its props' plain values as `name: value`, its text) cut into chunks of at most 1,200 characters at paragraphs, each indexed for search |
+
+- **A pipeline is a program.** Its manifest says `"graph": "write"`, declares the source's host and its key as a
+  secret ([5.5](#55-secrets)), and names a schedule ([5.6](#56-schedules)). Its steps are plain functions: read the
+  source, shape the records, write them. There is no DAG engine: the order is the order the function calls them in,
+  and a step that must not run twice in one run is a `ctx.checkpoint`. `examples/hubspot_pipeline` is one.
+- **`ctx.graph`** ([5.3](#53-the-sdk-rrotor)): `rows(records, type=, key=, title=, text=, props=, links=)` writes a
+  table of records as nodes and edges (`links={"account_id": ("belongs_to", "account")}` turns a column that names
+  another record into an edge; a third `"in"` points it the other way; a list links each); `upsert(nodes, edges)`
+  writes them as given; `delete(nodes, edges)`; `search(query, types=, limit=, expand=)`; `node(type, key)`;
+  `nodes(type, where=, limit=, offset=)`; `neighbours(type, key, rel=, direction=, depth=, limit=)`; `schema()`.
+  A program that does not name the graph gets `E_GRAPH_UNDECLARED`; one that says `"read"` and writes,
+  `E_GRAPH_READONLY`, in the program and again in the runner, which is what does the call: the worker asks over the
+  run's channel (`graph`, answered `graph_result`), so the graph's file is never in the sandbox.
+- **A write** is one transaction: all of it or none (at most 2,000 nodes and 10,000 edges; `ctx.graph` sends a
+  larger one 500 at a time, or 4 MB, each batch whole). A node written again keeps what the write does not name
+  (`title`, `props`, `text`), so a pipeline runs again and again and the graph holds one of each. An edge to a node
+  not written yet makes that node, empty, to be filled when its own pipeline runs. Each node and edge carries its
+  `source` (the program that last wrote it; empty for Claude and the API) and `updated_at`.
+- **Search** is SQLite's FTS5 over the passages (Porter stemming, Unicode), ranked by BM25: any of the query's
+  words, the best passages first, one hit a node. A hit is `{type, key, title, props, passage, snippet, chunk,
+  score}`: the `passage` is the text to answer from, so a function hands a model the passages and their nodes
+  (retrieval-augmented generation), and `expand` adds the nodes each hit is linked to (`out`, `in`, 20 a side), the
+  graph around the answer. **No embeddings:** no model runs on rrotor, so search is by words, not by meaning.
+- **Reading the rest:** `node` answers one node whole with its edges each way (200 a side, and the totals);
+  `nodes` the nodes of a type, the newest first, those whose props equal every value in `where`, with the total;
+  `neighbours` the nodes within `depth` edges (1 to 3) with each one's distance and the edges among them, by one
+  relation or all, out, in or both; `schema` each type (count, the props its newest 200 nodes carry, the programs
+  that wrote them), each relation between two types (count) and the totals: what Claude reads before it writes a
+  pipeline or an app.
+- **Apps on the graph:** an app whose functions read it is published with `graph: "read"` (`app_publish`), and its
+  `program.py` uses `ctx.graph`; the page calls the function as the viewer ([5.8](#58-apps)). The graph is not
+  divided by role: who may open the app is who may read what its functions answer.
+- **The API:** `GET /v1/graph` (the schema) and `POST /v1/graph/{op}` with the operation's arguments as the body
+  (`search`, `node`, `nodes`, `neighbours`, `upsert`, `delete`), and the MCP tools `graph_schema`, `graph_search`,
+  `graph_node`, `graph_nodes`, `graph_neighbours`, `graph_upsert`, `graph_delete` ([7](#7-the-api)), behind the same
+  gate as every other route. What is misshapen is 400 `E_GRAPH` with why; a node not there, 404 `E_GRAPH_NODE`. A
+  write through the API is an audit event (`graph.upsert`, `graph.delete`) with its counts, never its content; a
+  program's write is a line in its run's log.
+- **Kept** in `/data/graph/graph.sqlite3` (WAL), on this rrotor only. **In a cluster the graph is node-local**, as
+  the vault is: it is not in the replicated log or a snapshot. The head keeps it: every call of a program that names
+  the graph runs on the head, and a follower sends the API's graph calls to it ([14](#14-the-cluster)). A node made
+  head has its own, empty until the pipelines run again.
+
 ## 6. The link: protocol 3
 
 JSON messages over the WebSocket `{RROTOR_SERVER}/v1/runtime/link` (`Authorization: Bearer <runtime token>`, never
@@ -825,6 +903,8 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `POST /v1/programs/deploy` | `{repo, commit, token?}` or `{bundle, commit}` ([2.2](#22-build-deploy-and-call)): `201 {program, version, commit_sha, deployed_at}` |
 | `GET /v1/programs/{name}/secrets` | `{program, secrets: [{name, declared, set}]}`: never a value ([5.5](#55-secrets)) |
 | `PUT /v1/programs/{name}/secrets/{secret}`, `DELETE …` | `{value}`: a secret set, encrypted with the rrotor's key; deleted. `{program, name, set}` |
+| `GET /v1/graph` | The graph's schema: `{types: [{type, count, props, sources}], relations: [{from, rel, to, count}], nodes, edges, chunks}` ([5.9](#59-the-graph)) |
+| `POST /v1/graph/{op}` | One operation of the graph, its arguments the body: `search` `{query, types?, limit?, expand?}` → `{hits}`; `node` `{type, key}`; `nodes` `{type, where?, limit?, offset?}` → `{nodes, total}`; `neighbours` `{type, key, rel?, direction?, depth?, limit?}` → `{nodes, edges}`; `upsert` `{nodes?, edges?}` and `delete` `{nodes?, edges?}` → `{nodes, edges}` (how many). 400 `E_GRAPH`, 404 `E_GRAPH_NODE` |
 | `GET /v1/schedules` | `{schedules: [{id, program, name, version, function, cron, tz, input, paused, next_at, last, skipped}]}` ([5.6](#56-schedules)) |
 | `POST /v1/schedules/{program}/{name}/pause`, `…/resume` | The schedule paused or resumed, kept across restarts: the schedule as listed |
 | `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
@@ -862,6 +942,9 @@ each request's `_meta` naming the version) and the `initialize` revisions 2025-1
 | `audit_query` `{since?, until?, kind?, program?, run_id?, limit?}` | `GET /v1/audit` |
 | `cluster_status` | `GET /v1/cluster` |
 | `secrets_list` `{program}`, `secret_set` `{program, name, value}`, `secret_delete` `{program, name}` | A program's secrets ([5.5](#55-secrets)): names only back, never a value |
+| `secrets_form` `{program}` | The secrets form ([5.5](#55-secrets)): `{program, secrets, unset, how}`, shown in the panel `ui://rrotor/secrets/1`, where the person types each value; never a value in the chat |
+| `graph_schema`, `graph_search` `{query, types?, limit?, expand?}`, `graph_node` `{type, key}`, `graph_nodes` `{type, where?, limit?, offset?}`, `graph_neighbours` `{type, key, rel?, direction?, depth?, limit?}` | The graph, read: `GET /v1/graph` and `POST /v1/graph/{op}` ([5.9](#59-the-graph)) |
+| `graph_upsert` `{nodes?, edges?}`, `graph_delete` `{nodes?, edges?}` | The graph, written directly: `POST /v1/graph/upsert`, `…/delete` |
 | `schedules_list`, `schedule_pause` `{program, name}`, `schedule_resume` `{program, name}` | `GET /v1/schedules`; pause and resume ([5.6](#56-schedules)) |
 | `apps_list` | `GET /v1/apps` ([5.8](#58-apps)) |
 | `app_publish` `{name, title, description?, type?, roles?, files, entry?, functions?, program?, …}` | `POST /v1/apps`: what Claude made (a page, a React page, a Markdown document, a diagram, a PDF, an image) published as an app for the org's people, awaiting the catalogue's review |
@@ -1193,8 +1276,9 @@ write to the head.
 - **Which calls write** (`manifest.py`): each function's `"writes"`, default the program's `data`. Every call of a
   program with `"data": true` runs on the head (`head_only`), whatever its functions say: its data folder never
   replicates; so does every call of a program that declares `secrets`, which only the head's vault holds
-  ([5.5](#55-secrets): node-local, a follower refuses to set one). A follower runs a `false` function of a program
-  without data or secrets itself, with `/files` mounted read-only
+  ([5.5](#55-secrets): node-local, a follower refuses to set one), and of one that names the graph, which only the
+  head keeps ([5.9](#59-the-graph)). A follower runs a `false` function of a program
+  without data, secrets or the graph itself, with `/files` mounted read-only
   (`--ro-bind`, and Landlock read-only; `ctx.readonly` is true): a function marked `false` that writes fails
   `E_READ_ONLY`, naming it, and the folder is untouched.
 - **Forwarding** (`api/forward.py`, `cluster/node.py`): a writing call, a deploy, and continue, cancel, status and
@@ -1261,6 +1345,10 @@ write to the head.
 
 - **Database parts:** Postgres with pgvector, MongoDB and Neo4j for a program's `databases` (a run of a program
   that declares one fails `E_PART_MISSING`; `ctx.db` is SQLite, built).
+- **The graph, further** ([5.9](#59-the-graph)): search by meaning (embeddings: it is by words, BM25, today); the
+  graph replicated across a cluster (it is the head's alone); read access by role inside the graph (an app's roles
+  gate what its functions answer); removing what a source no longer holds (a pipeline deletes by key itself);
+  connections signed in once and shared by pipelines (each pipeline holds its own secret).
 - **SSO and SAML, roles (RBAC).**
 - **Interactive CLI sessions:** `cli_start`, `cli_send`, `cli_read`, `cli_stop` on a pseudo-terminal, for tools that
   prompt (`"interactive": true`, refused today) ([`specs/cli-server.md`](specs/cli-server.md), build step 3). A CLI's

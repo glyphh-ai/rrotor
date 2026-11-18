@@ -28,12 +28,19 @@ a dashboard, a Markdown document, a React page, a diagram, a deck or a design as
 Claude with `app_publish` (`POST /v1/apps`), reviewed in the Glyphh catalogue, and served at `/apps/<name>/` to the
 org's people signed in to Glyphh, whose roles the app allows; a page's calls run the app's functions as the viewer.
 
+The rrotor keeps one **graph**, its semantic layer ([5.9](docs/architecture.md#59-the-graph)): nodes, the edges
+between them and the passages search reads, in SQLite on its own volume. A **pipeline** is a program on a schedule
+whose manifest says `"graph": "write"`: plain Python that reads a source with a key from the vault and writes records
+as nodes and edges with `ctx.graph` (`examples/hubspot_pipeline`). Apps and programs that say `"graph": "read"`
+search and walk it, and so does Claude (`graph_search`, `graph_schema`, …; `GET /v1/graph`, `POST /v1/graph/{op}`).
+A secret is typed by the person into a form Claude shows (`secrets_form`, an MCP App), never into the chat.
+
 | Where | What |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | How it works: the modes, the sandbox, the API and MCP, the link, the licence, parts, CI |
 | [`docs/self-hosting/`](docs/self-hosting/README.md) | Running your own: Docker Compose, Helm, Terraform; privileges, licensing, backups |
 | `src/rrotord/`, `src/rrotor/` | The daemon; the program SDK every sandbox imports |
-| `examples/` | `daily_sales`, a program with its tests; `cli_gh` and `cli_glyphh`, CLIs' manifests (placeholder pins) |
+| `examples/` | `daily_sales`, a program with its tests; `hubspot_pipeline`, a pipeline into the graph with its tests; `cli_gh` and `cli_glyphh`, CLIs' manifests (placeholder pins) |
 | `scripts/part.py` | Building and signing a part |
 | `deploy/` | The self-hosting packages |
 | `benchmarks/` | Ada (Ada Cloud's) measured against LLMs; kept here because other repos read it by path |

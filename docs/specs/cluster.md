@@ -58,7 +58,9 @@ Free (Community) is one node and has no head: everything here is off and rrotor 
 sandbox state and `/tmp`, parts (each node's come from its image), `runtime.json` (every node has the same id and
 token from its own environment), `machine-id`, the link's outbox (the head's alone), the local audit store (each
 node's own, gathered at the head, [7](#7-logging-audit-and-drains)), every program's data folder, and the vault
-(`vault/`: the rrotor's key and the programs' secrets, node-local; a follower refuses to set or delete one), and
+(`vault/`: the rrotor's key and the programs' secrets, node-local; a follower refuses to set or delete one), the
+graph (`graph/`: the head's alone; a program that names it runs on the head, and a follower sends the API's graph
+calls there), and
 `schedules.json` (the schedules' pauses and last runs: only the head fires schedules, and a follower refuses a pause).
 
 **No program's state replicates.** A program with `"data": true` keeps its state in its data folder on the head, and

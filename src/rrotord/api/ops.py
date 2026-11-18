@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rrotord import apps, clis
+from rrotord import graph as graphs
 from rrotord.api import forward
 from rrotord.audit import current
 from rrotord.cluster.transport import ClusterError
@@ -326,6 +327,37 @@ async def secret_delete(s: Services, program: str, name: str) -> dict[str, Any]:
     if s.audit is not None:
         s.audit.emit("secret.delete", program=program, secret=name, outcome={"status": "done", "code": None})
     return {"program": program, "name": name, "set": False}
+
+
+async def secrets_form(s: Services, program: str) -> dict[str, Any]:
+    """What the secrets form shows (api/panel.py): the program's secrets by name, as `secrets_list` answers them, and
+    how a person sets one where no form shows: themselves, never through Claude."""
+    listed = await secrets_list(s, program)
+    unset = [x["name"] for x in listed["secrets"] if x["declared"] and not x["set"]]
+    address = f"{s.config.address}/v1/programs/{program}/secrets/<NAME>"
+    return {
+        **listed,
+        "unset": unset,
+        "how": (
+            "The person types each value into the form shown with this answer; it goes to this runtime's vault and "
+            "never into the chat. Never ask them to paste a secret into the chat. Where no form shows, they set it "
+            f'themselves: PUT {address} with {{"value": "…"}} and their own Authorization header.'
+        ),
+    }
+
+
+async def graph(s: Services, op: str, data: dict[str, Any]) -> dict[str, Any]:
+    """One operation of the rrotor's graph (rrotord/graph.py): schema, search, node, nodes, neighbours, upsert,
+    delete. The graph is the head's, as the vault is: a follower sends the call to it. A write from here is no
+    program's (its source is empty) and is an audit event with its counts, never its content."""
+    if forward.follower(s):
+        return await forward.relayed(s, "graph", {"graph": op, "data": data})
+    if s.runner.graph is None:
+        raise Unavailable("This rrotor keeps no graph.", code="E_GRAPH")
+    done = await s.runner.graph.call(op, data)
+    if op in graphs.WRITES and s.audit is not None:
+        s.audit.emit(f"graph.{op}", nodes=done["nodes"], edges=done["edges"], outcome={"status": "done", "code": None})
+    return done
 
 
 def scheduler(s: Services) -> Scheduler:

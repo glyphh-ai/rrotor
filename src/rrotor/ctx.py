@@ -22,6 +22,7 @@ from rrotor.errors import (
     StepUndeclared,
     Wait,
 )
+from rrotor.graph import Graph
 from rrotor.http import Http
 from rrotor.result import Result
 
@@ -130,8 +131,8 @@ class Secrets:
 
 
 class Ctx:
-    """The run's context. Programs read `inputs`, `answer`, `files`, `data`, `home`, `clearance`, `caller` and `db`,
-    and call the methods below."""
+    """The run's context. Programs read `inputs`, `answer`, `files`, `data`, `home`, `clearance`, `caller`, `db` and
+    `graph`, and call the methods below."""
 
     def __init__(
         self,
@@ -153,8 +154,11 @@ class Ctx:
         database: Path | None = None,
         clis: Mapping[str, Mapping[str, Any] | None] | None = None,
         request: Request | None = None,
+        graph: Graph | None = None,
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
+        # the rrotor's graph (rrotor/graph.py): a manifest that does not name it gets one that refuses every call
+        self.graph: Graph = graph or Graph()
         self._clis = dict(clis or {})  # each CLI the manifest names: its allow and approval patterns (None: not here)
         self._request = request or _no_cli
         self._database = database  # the SQLite file, when the manifest asks for one

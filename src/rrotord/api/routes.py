@@ -196,6 +196,14 @@ def setup(app: web.Application, s: Services) -> None:
         m = request.match_info
         return web.json_response(await ops.secret_delete(s, m["name"], m["secret"]))
 
+    async def graph_schema(_: web.Request) -> web.Response:
+        return web.json_response(await ops.graph(s, "schema", {}))
+
+    async def graph_op(request: web.Request) -> web.Response:
+        """One operation of the graph by its name (search, node, nodes, neighbours, upsert, delete), its arguments
+        the body (docs/architecture.md, 5.9)."""
+        return web.json_response(await ops.graph(s, request.match_info["op"], await body(request)))
+
     async def schedules(_: web.Request) -> web.Response:
         return web.json_response(await ops.schedules(s))
 
@@ -373,6 +381,8 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/v1/programs/{name}/secrets", secrets_list)
     app.router.add_put("/v1/programs/{name}/secrets/{secret}", secret_set)
     app.router.add_delete("/v1/programs/{name}/secrets/{secret}", secret_delete)
+    app.router.add_get("/v1/graph", graph_schema)
+    app.router.add_post("/v1/graph/{op}", graph_op)
     app.router.add_get("/v1/schedules", schedules)
     app.router.add_post("/v1/schedules/{program}/{name}/pause", pausing(True))
     app.router.add_post("/v1/schedules/{program}/{name}/resume", pausing(False))

@@ -34,8 +34,11 @@ jobs:
         run: uv run mypy
       - name: Tests (100% line and branch coverage of rrotor and rrotord)
         run: uv run pytest
-      - name: The sample program's tests
-        run: uv run pytest examples/daily_sales/tests -o addopts="" -p no:cacheprovider --import-mode=importlib
+      - name: The sample programs' tests
+        run: |
+          for example in daily_sales hubspot_pipeline; do
+            uv run pytest "examples/$example/tests" -o addopts="" -p no:cacheprovider --import-mode=importlib
+          done
 
   # The self-hosting packages (deploy/, docs/self-hosting/): each is checked as written, nothing is started.
   deploy:

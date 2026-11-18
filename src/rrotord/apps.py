@@ -287,7 +287,7 @@ def manifest_of(data: dict[str, Any], name: str, files: dict[str, bytes]) -> dic
         },
         "functions": functions,
     }
-    for key in ("hosts", "secrets", "clis", "limits", "data", "databases", "schedules"):
+    for key in ("hosts", "secrets", "clis", "limits", "data", "databases", "schedules", "graph"):
         if key in data:
             manifest[key] = data[key]
     return manifest

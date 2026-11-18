@@ -152,4 +152,6 @@ async def _serve(s: Services, op: Any, args: dict[str, Any]) -> dict[str, Any]:
             return await ops.secrets_list(s, str(args.get("program") or ""))
         case "schedules":
             return await ops.schedules(s)
+        case "graph":
+            return await ops.graph(s, str(args.get("graph") or ""), dict(args.get("data") or {}))
     raise BadRequest(f"There is no forwarded operation {op!r}.", code="E_CLUSTER_MESSAGE")
