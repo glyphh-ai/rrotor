@@ -83,6 +83,27 @@ class CliError(ProgramError):
         return cls(f"The CLI {name!r} is not on this rrotor.", "E_CLI_MISSING")
 
 
+class GraphError(ProgramError):
+    """`ctx.graph` refused or failed: a program whose manifest does not name the graph, one that only reads it
+    writing, or a call the graph refused (E_GRAPH, with why)."""
+
+    def __init__(self, message: str, code: str = "E_GRAPH") -> None:
+        super().__init__(message)
+        self.code = code
+
+    @classmethod
+    def undeclared(cls) -> GraphError:
+        return cls(
+            'ctx.graph is the rrotor\'s graph: add "graph": "read" (or "write") to glyphh.json.', "E_GRAPH_UNDECLARED"
+        )
+
+    @classmethod
+    def readonly(cls) -> GraphError:
+        return cls(
+            'This program reads the graph: writing it needs "graph": "write" in glyphh.json.', "E_GRAPH_READONLY"
+        )
+
+
 class NotJson(ProgramError):
     """A checkpoint's value or a Result's data that JSON cannot carry."""
 

@@ -9,12 +9,14 @@ from rrotor.ctx import CliResult, Ctx, Secrets
 from rrotor.errors import (
     CliError,
     DatabaseUndeclared,
+    GraphError,
     PartMissing,
     ProgramError,
     SecretMissing,
     SecretUndeclared,
     StepUndeclared,
 )
+from rrotor.graph import Graph
 from rrotor.http import Http, Response
 from rrotor.result import STATUSES, Result
 
@@ -24,6 +26,8 @@ __all__ = [
     "CliResult",
     "Ctx",
     "DatabaseUndeclared",
+    "Graph",
+    "GraphError",
     "Http",
     "PartMissing",
     "ProgramError",

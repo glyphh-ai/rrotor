@@ -19,6 +19,7 @@ from rrotord.api.app import make
 from rrotord.api.routes import Services
 from rrotord.config import Config
 from rrotord.deploy import Deployer, Tools
+from rrotord.graph import Graph
 from rrotord.licence import Licence
 from rrotord.link.credentials import Credentials
 from rrotord.link.handler import LinkHandler
@@ -74,6 +75,7 @@ def services(root: Path, sock: Path, local_token: str, fetch: Any = None) -> Ser
         layers=layers,
         parts=parts,
         vault=Vault(config.data),
+        graph=Graph(config.data),
     )
     deployer = Deployer(
         programs,

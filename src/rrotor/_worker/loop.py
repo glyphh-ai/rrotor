@@ -28,6 +28,7 @@ from rrotor._worker.channel import Channel
 from rrotor._worker.forward import Forwarder
 from rrotor._worker.landlock import Landlock, Rules
 from rrotor.ctx import Ctx, RunState, Secrets
+from rrotor.graph import Graph
 from rrotor.http import Http
 from rrotor.invoke import Outcome, crash, failure, invoke, lifecycle
 from rrotor.result import Result
@@ -68,7 +69,7 @@ class Worker:
         self.channel = channel
         self.landlock = landlock
         self.inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
-        self.replies: queue.Queue[dict[str, Any] | None] = queue.Queue()  # what rrotor answered ctx.cli
+        self.replies: queue.Queue[dict[str, Any] | None] = queue.Queue()  # what rrotor answered ctx.cli, ctx.graph
         self.asked = 0
         self.running = threading.Event()
         self._main = threading.get_ident()  # a cancel is a signal to this thread: it interrupts a blocking call too
@@ -79,22 +80,31 @@ class Worker:
                 if self.running.is_set():
                     signal.pthread_kill(self._main, signal.SIGUSR1)
                 continue
-            if message.get("op") == "cli_result":
+            if message.get("op") in ("cli_result", "graph_result"):
                 self.replies.put(message)
                 continue
             self.inbox.put(message)
         self.replies.put(None)
         self.inbox.put(None)
 
-    def _cli(self, ask: dict[str, Any]) -> dict[str, Any]:
-        """A CLI's command a program asked for (ctx.cli), run by rrotor in that CLI's sandbox: its Result."""
+    def _asked(self, op: str, ask: dict[str, Any], code: str) -> dict[str, Any]:
+        """What a program asked rrotor for over its channel, and rrotor's answer (a failure with `code` when rrotor
+        went away meanwhile)."""
         self.asked += 1
-        self.channel.send("cli", id=self.asked, **ask)
+        self.channel.send(op, id=self.asked, **ask)
         while (reply := self.replies.get()) is not None:
             if reply.get("id") == self.asked:
                 result: dict[str, Any] = reply.get("result") or {}
                 return result
-        return {"status": "failed", "data": {"code": "E_CLI", "reason": "rrotor went away during the command."}}
+        return {"status": "failed", "data": {"code": code, "reason": "rrotor went away during the call."}}
+
+    def _cli(self, ask: dict[str, Any]) -> dict[str, Any]:
+        """A CLI's command a program asked for (ctx.cli), run by rrotor in that CLI's sandbox: its Result."""
+        return self._asked("cli", ask, "E_CLI")
+
+    def _graph(self, ask: dict[str, Any]) -> dict[str, Any]:
+        """A call of the rrotor's graph a program made (ctx.graph), done by rrotor: its Result."""
+        return self._asked("graph", ask, "E_GRAPH")
 
     def _sink(self, op: str, data: dict[str, Any]) -> None:
         self.channel.send(op, **data)
@@ -170,6 +180,7 @@ class Worker:
             database=Path(start["data"]) / DATABASE if start.get("sqlite") and start.get("data") else None,
             clis=start.get("clis"),
             request=self._cli,
+            graph=Graph(start.get("graph"), self._graph),
         )
         for sdk in SDKS:  # the SDKs the image carries (glyphh), after the program's own venv
             if os.path.isdir(sdk) and sdk not in sys.path:

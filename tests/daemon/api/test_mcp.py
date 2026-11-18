@@ -57,6 +57,7 @@ async def test_initialize_discover_ping_and_the_tools_listed(api):
         "audit_query",
         "cluster_status",
         "secrets_list",
+        "secrets_form",
         "secret_set",
         "secret_delete",
         "schedules_list",
@@ -65,6 +66,13 @@ async def test_initialize_discover_ping_and_the_tools_listed(api):
         "clis_list",
         "cli_run",
         "cli_login",
+        "graph_schema",
+        "graph_search",
+        "graph_node",
+        "graph_nodes",
+        "graph_neighbours",
+        "graph_upsert",
+        "graph_delete",
     ]
     assert tools[2]["annotations"]["readOnlyHint"] is True and tools[3]["inputSchema"]["required"] == ["program"]
     assert tools[1]["inputSchema"]["required"] == ["name", "title", "files"]
@@ -106,9 +114,9 @@ async def test_refusals_are_tool_errors_and_bad_rpc_is_refused(api):
     assert status == 200 and body["error"]["code"] == mcp.INVALID_PARAMS
     status, body = await rpc(api, "tools/call", {"name": "programs_list", "arguments": "x"})
     assert body["error"]["code"] == mcp.INVALID_PARAMS
-    status, body = await rpc(api, "resources/list")
+    status, body = await rpc(api, "prompts/list")
     assert status == 200 and body["error"]["code"] == mcp.METHOD_NOT_FOUND
-    status, body = await rpc(api, "resources/list", META)
+    status, body = await rpc(api, "prompts/list", META)
     assert status == 404
     status, body = await rpc(api, "notifications/initialized", rpc_id=None)
     assert status == 202 and body is None

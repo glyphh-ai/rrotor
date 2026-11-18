@@ -29,6 +29,7 @@ from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.drain import Drain, warning
 from rrotord.errors import RrotorError
+from rrotord.graph import Graph
 from rrotord.heartbeat import Heartbeat
 from rrotord.introspect import Introspector
 from rrotord.keys import public_key
@@ -150,6 +151,7 @@ class Daemon:
             node=lambda: c.node_id if self.cluster.member else None,
             readonly=lambda: self.cluster.role == "follower",
             vault=Vault(c.data),
+            graph=Graph(c.data),
         )
         self.scheduler = Scheduler(
             programs,

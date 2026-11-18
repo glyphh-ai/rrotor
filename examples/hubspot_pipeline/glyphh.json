@@ -1,0 +1,17 @@
+{
+  "name": "hubspot_pipeline",
+  "version": 1,
+  "description": "A pipeline: HubSpot's companies, contacts and deals read with a private app's token and written to this rrotor's graph, each hour",
+  "python": "3.13",
+  "functions": {
+    "sync": {
+      "description": "Read every company, contact and deal from HubSpot and write them to the graph as nodes, with the edges between them",
+      "inputs": { "type": "object", "additionalProperties": false }
+    }
+  },
+  "hosts": ["api.hubapi.com"],
+  "secrets": ["HUBSPOT_TOKEN"],
+  "graph": "write",
+  "limits": { "seconds": 900, "memory_mb": 512 },
+  "schedules": [{ "function": "sync", "cron": "5 * * * *", "name": "each_hour" }]
+}

@@ -1,7 +1,8 @@
 """The runtime's own MCP server, `POST /mcp` (Streamable HTTP, stateless, one JSON-RPC message per POST): Claude adds
 the runtime as a connector with a runtime key and talks to it directly. MCP 2026-07-28 (`server/discover`, each
 request's _meta naming the version) and the earlier initialize revisions are both served. The tools are the API's
-operations (ops.py), so REST and MCP do the same thing."""
+operations (ops.py), so REST and MCP do the same thing. Its resources are its panels (panel.py): the secrets form,
+an MCP App `secrets_form` names, where a person types a secret's value so that it never passes through the chat."""
 
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from rrotord import VERSION
-from rrotord.api import ops
+from rrotord.api import ops, panel
 from rrotord.errors import RrotorError
 
 if TYPE_CHECKING:
@@ -28,8 +29,10 @@ INSTRUCTIONS = (
     "program_call runs a function and answers its Result (done, needs_input, needs_approval or failed, with data); "
     "program_continue answers a run waiting for input; run_status and run_log read a run; approvals lists the steps "
     "waiting for the person; program_deploy deploys a commit of a program's GitHub repo; audit_query reads the audit "
-    "log (Enterprise); cluster_status shows the runtime's cluster; secrets_list, secret_set and secret_delete keep a "
-    "program's secrets (values are never shown back); schedules_list, schedule_pause and schedule_resume show and "
+    "log (Enterprise); cluster_status shows the runtime's cluster; secrets_form shows the person a form to set a "
+    "program's secrets themselves (call it whenever a program needs a secret set, and never ask for a secret's value "
+    "in the chat); secrets_list, secret_set and secret_delete keep them (values are never shown back); "
+    "schedules_list, schedule_pause and schedule_resume show and "
     "pause the schedules this runtime fires itself. clis_list shows the command-line tools installed here, and "
     "cli_run runs one command of one in the sandbox (args checked against its allow patterns; one that needs approval "
     "answers needs_approval, then program_continue runs it once the person approves). The vendors' agent CLIs (claude, "
@@ -38,8 +41,19 @@ INSTRUCTIONS = (
     "the page shows. A program runs a CLI it names in its clis with ctx.cli. app_publish puts what Claude made (a "
     "Claude Code artifact, .html or .md; or a React page, a Markdown document, a diagram, a PDF or an image) on this "
     "runtime as an app for the org's people, reviewed in Glyphh's catalogue before it is served at /apps/<name>/; "
-    "apps_list shows the apps here, each one's type and its review state."
+    "apps_list shows the apps here, each one's type and its review state. The graph is this runtime's semantic "
+    "layer, one knowledge graph of the org's data: nodes (a type and a key, with a title, props and text) and edges "
+    'between them. A pipeline is a program on a schedule whose glyphh.json says "graph": "write": it reads a '
+    "source with its secrets and writes nodes and edges with ctx.graph. graph_schema shows what the graph holds (read "
+    "it before writing a pipeline or an app); graph_search finds nodes by their words and answers the passages to "
+    "answer from; graph_node, graph_nodes and graph_neighbours read it; graph_upsert and graph_delete write it "
+    'directly. An app whose functions read it says "graph": "read" and uses ctx.graph.'
 )
+# MCP 2026-07-28: these results carry ttlMs and cacheScope (a client's SDK refuses a resources/read without them);
+# never reused, since what they hold changes.
+CACHEABLE = frozenset({"tools/list", "resources/list", "resources/templates/list", "resources/read"})
+NO_CACHE: dict[str, Any] = {"ttlMs": 0, "cacheScope": "private"}
+CAPABILITIES: dict[str, Any] = {"tools": {}, "resources": {}}
 
 
 class RpcError(Exception):
@@ -55,6 +69,7 @@ class Tool:
     schema: dict[str, Any]
     handler: Callable[[Services, dict[str, Any]], Awaitable[dict[str, Any]]]
     read_only: bool = False
+    panel: str | None = None  # the MCP App its answer is shown in (api/panel.py)
 
 
 def _obj(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -117,6 +132,17 @@ async def secret_delete(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.secret_delete(s, ops.text_of(args, "program"), ops.text_of(args, "name"))
 
 
+async def secrets_form(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+    return await ops.secrets_form(s, ops.text_of(args, "program"))
+
+
+def graph_tool(op: str) -> Callable[[Services, dict[str, Any]], Awaitable[dict[str, Any]]]:
+    async def handler(s: Services, args: dict[str, Any]) -> dict[str, Any]:
+        return await ops.graph(s, op, args)
+
+    return handler
+
+
 async def clis_list(s: Services, _: dict[str, Any]) -> dict[str, Any]:
     return await ops.clis_list(s)
 
@@ -149,6 +175,110 @@ async def schedule_resume(s: Services, args: dict[str, Any]) -> dict[str, Any]:
     return await ops.schedule_pause(s, ops.text_of(args, "program"), ops.text_of(args, "name"), False)
 
 
+NODE_REF = _obj({"type": {"type": "string"}, "key": {"type": "string"}}, ["type", "key"])
+NODE = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string"},
+        "key": {"type": "string"},
+        "title": {"type": "string"},
+        "props": {"type": "object"},
+        "text": {"type": "string"},
+    },
+    "required": ["type", "key"],
+}
+EDGE = {
+    "type": "object",
+    "properties": {"from": NODE_REF, "rel": {"type": "string"}, "to": NODE_REF, "props": {"type": "object"}},
+    "required": ["from", "rel", "to"],
+}
+PAGE = {"type": "integer", "minimum": 1, "maximum": 200}
+GRAPH_TOOLS: tuple[Tool, ...] = (
+    Tool(
+        "graph_schema",
+        "What this runtime's graph holds: each type of node (how many, the props its nodes carry, the programs that "
+        "wrote them), each relation between two types (how many), and the totals. Read it before writing a pipeline, "
+        "an app's functions or a search.",
+        _obj({}),
+        graph_tool("schema"),
+        True,
+    ),
+    Tool(
+        "graph_search",
+        "Search the graph by words: the nodes whose title, props or text answer the query, the best first (BM25), "
+        "each with the passage that matched (the text to answer from), a snippet and its score; types narrows it to "
+        "some types of node; expand adds the nodes each hit is linked to (out, in).",
+        _obj(
+            {
+                "query": {"type": "string"},
+                "types": {"type": "array", "items": {"type": "string"}, "maxItems": 50},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "expand": {"type": "boolean"},
+            },
+            ["query"],
+        ),
+        graph_tool("search"),
+        True,
+    ),
+    Tool(
+        "graph_node",
+        "One node of the graph, whole: its title, props, text, the program that wrote it and when, and its edges "
+        "each way (out, in) with the nodes they reach.",
+        NODE_REF,
+        graph_tool("node"),
+        True,
+    ),
+    Tool(
+        "graph_nodes",
+        "The nodes of one type, the newest first: those whose props equal every value in where ({prop: value}); "
+        "total counts them all.",
+        _obj(
+            {
+                "type": {"type": "string"},
+                "where": {"type": "object"},
+                "limit": PAGE,
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            ["type"],
+        ),
+        graph_tool("nodes"),
+        True,
+    ),
+    Tool(
+        "graph_neighbours",
+        "The graph around a node: the nodes within depth edges of it (1 to 3), each with its distance, and the edges "
+        "among them; rel follows one relation alone, direction out, in or both.",
+        _obj(
+            {
+                "type": {"type": "string"},
+                "key": {"type": "string"},
+                "rel": {"type": "string"},
+                "direction": {"type": "string", "enum": ["out", "in", "both"]},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 3},
+                "limit": PAGE,
+            },
+            ["type", "key"],
+        ),
+        graph_tool("neighbours"),
+        True,
+    ),
+    Tool(
+        "graph_upsert",
+        "Write nodes and edges to the graph, each made or changed, all of them or none: a node is {type, key, title?, "
+        "props?, text?} (type: lower-case, digits, _; written again, it keeps what this write does not name), an edge "
+        "{from: {type, key}, rel, to: {type, key}, props?} (an end not written yet is made, empty). At most 2,000 "
+        'nodes and 10,000 edges a call. For data that keeps changing, write a pipeline (a program with "graph": '
+        '"write" on a schedule) instead.',
+        _obj({"nodes": {"type": "array", "items": NODE}, "edges": {"type": "array", "items": EDGE}}),
+        graph_tool("upsert"),
+    ),
+    Tool(
+        "graph_delete",
+        "Remove nodes ({type, key}, with their edges) and edges ({from, rel, to}) from the graph: how many were there.",
+        _obj({"nodes": {"type": "array", "items": NODE_REF}, "edges": {"type": "array", "items": EDGE}}),
+        graph_tool("delete"),
+    ),
+)
 RUN = _obj({"run_id": {"type": "string"}}, ["run_id"])
 SCHEDULE_ARGS = _obj({"program": {"type": "string"}, "name": {"type": "string"}}, ["program", "name"])
 FILES = {
@@ -174,7 +304,8 @@ TOOLS: tuple[Tool, ...] = (
         "diagram, an image a design; say dashboard or deck yourself), roles (groups, admin, member; empty: everyone in "
         "the org), files (path to text or {base64} for a PDF or an image; 64 and 16 MiB at most), entry (default "
         "index.html, or the one file sent), and, when the page calls functions, functions ({name: {description, "
-        "inputs}}) with program (the text of program.py; a function runs as the viewer, with their CLIs). The app "
+        "inputs}}) with program (the text of program.py; a function runs as the viewer, with their CLIs; graph: "
+        '"read" lets its functions read this runtime\'s graph with ctx.graph). The app '
         "awaits the org's review in Glyphh (an admin or a reviewer approves it), then is served at the url answered. "
         "A new version of an approved app keeps the approved one serving until it is approved.",
         _obj(
@@ -191,6 +322,7 @@ TOOLS: tuple[Tool, ...] = (
                 "hosts": {"type": "array", "items": {"type": "string"}},
                 "secrets": {"type": "array", "items": {"type": "string"}},
                 "clis": {"type": "array", "items": {"type": "string"}},
+                "graph": {"type": "string", "enum": ["read", "write"]},
                 "limits": {"type": "object"},
             },
             ["name", "title", "files"],
@@ -275,8 +407,20 @@ TOOLS: tuple[Tool, ...] = (
         True,
     ),
     Tool(
+        "secrets_form",
+        "Show the person a form to set a program's secrets themselves: each name its glyphh.json declares, whether it "
+        "is set, and a field for its value, which goes straight to this runtime's vault and never into the chat. Call "
+        "this whenever a program needs a secret set (a run failed E_SECRET_MISSING, or a pipeline was just deployed); "
+        "never ask the person to paste a secret's value into the chat. Answers the names and which are unset.",
+        _obj({"program": {"type": "string"}}, ["program"]),
+        secrets_form,
+        True,
+        panel.SECRETS_URI,
+    ),
+    Tool(
         "secret_set",
-        "Set a program's secret (a name its glyphh.json declares), kept encrypted on this runtime; never shown back.",
+        "Set a program's secret (a name its glyphh.json declares), kept encrypted on this runtime; never shown back. "
+        "The secrets form calls this with what the person typed; do not ask for a value in the chat: use secrets_form.",
         _obj(
             {"program": {"type": "string"}, "name": {"type": "string"}, "value": {"type": "string"}},
             ["program", "name", "value"],
@@ -347,18 +491,29 @@ TOOLS: tuple[Tool, ...] = (
         _obj({"cli": {"type": "string"}}, ["cli"]),
         cli_login,
     ),
+    *GRAPH_TOOLS,
 )
 BY_NAME = {t.name: t for t in TOOLS}
 
 
 def listed(tool: Tool) -> dict[str, Any]:
-    return {
+    shown: dict[str, Any] = {
         "name": tool.name,
         "title": tool.name.replace("_", " ").capitalize(),
         "description": tool.description,
         "inputSchema": tool.schema,
         "annotations": {"readOnlyHint": tool.read_only, "openWorldHint": False},
     }
+    if tool.panel is not None:  # a client without panels ignores it
+        shown["_meta"] = {"ui": {"resourceUri": tool.panel}}
+    return shown
+
+
+def read_resource(params: dict[str, Any]) -> dict[str, Any]:
+    uri = params.get("uri")
+    if uri not in panel.PAGES:
+        raise RpcError(INVALID_PARAMS, f"There is no resource {uri!r}.")
+    return {"contents": [panel.contents(uri)]}
 
 
 def server_info() -> dict[str, str]:
@@ -405,18 +560,24 @@ async def handle(s: Services, msg: dict[str, Any], version: str) -> dict[str, An
             asked = params.get("protocolVersion")
             return {
                 "protocolVersion": asked if asked in LEGACY else LEGACY[0],
-                "capabilities": {"tools": {}},
+                "capabilities": CAPABILITIES,
                 "serverInfo": server_info(),
                 "instructions": INSTRUCTIONS,
             }
         case "ping":
             return {}
         case "server/discover":
-            return {"supportedVersions": [MODERN, *LEGACY], "capabilities": {"tools": {}}, "instructions": INSTRUCTIONS}
+            return {"supportedVersions": [MODERN, *LEGACY], "capabilities": CAPABILITIES, "instructions": INSTRUCTIONS}
         case "tools/list":
             return {"tools": [listed(t) for t in TOOLS]}
         case "tools/call":
             return await tool_call(s, params)
+        case "resources/list":
+            return {"resources": list(panel.RESOURCES)}
+        case "resources/templates/list":
+            return {"resourceTemplates": []}
+        case "resources/read":
+            return read_resource(params)
     raise RpcError(METHOD_NOT_FOUND, f"There is no method {msg['method']!r}.", 404 if version == MODERN else 200)
 
 
@@ -442,6 +603,7 @@ def route(s: Services) -> Callable[[web.Request], Awaitable[web.StreamResponse]]
         if version == MODERN:
             result = {
                 **result,
+                **(NO_CACHE if msg["method"] in CACHEABLE else {}),
                 "resultType": "complete",
                 "_meta": {"io.modelcontextprotocol/serverInfo": server_info()},
             }
