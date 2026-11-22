@@ -10,6 +10,7 @@ import contextlib
 import logging
 import signal
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -336,15 +337,25 @@ class Daemon:
         """The vendors' CLIs the image carries (/usr/local/lib/rrotor-clis/<name>/glyphh.json), each deployed at boot
         unless the person deployed their own of that name (Deployer.builtin). Answers each one deployed now, as
         <name> v<version>; one that cannot be is logged and left out."""
+        return await self._builtins(self.config.builtin_clis, "CLI")
+
+    async def install_builtin_programs(self) -> list[str]:
+        """Glyphh's own programs the image carries (/usr/local/lib/rrotor-programs/<name>/glyphh.json: glyphh_bot and
+        glyphh_swarm, which the server calls over the link), deployed at boot after the CLIs they run, the same way."""
+        return await self._builtins(self.config.builtin_programs, "program")
+
+    async def _builtins(self, folder: Path, what: str) -> list[str]:
         done: list[str] = []
-        folder = self.config.builtin_clis
         if not folder.is_dir():
             return done
         for manifest in sorted(folder.glob("*/glyphh.json")):
             try:
                 made = await self.deployer.builtin(manifest.parent)
             except (OSError, RrotorError) as err:
-                log.warning("a built-in CLI was not deployed", extra={"cli": manifest.parent.name, "reason": str(err)})
+                log.warning(
+                    f"a built-in {what} was not deployed",
+                    extra={what.lower(): manifest.parent.name, "reason": str(err)},
+                )
                 continue
             if made is not None:
                 done.append(f"{made.program} v{made.version}")
@@ -401,6 +412,8 @@ class Daemon:
             log.info("built-in part installed", extra={"part": stem})
         for cli in await self.install_builtin_clis():
             log.info("built-in CLI deployed", extra={"cli": cli})
+        for program in await self.install_builtin_programs():
+            log.info("built-in program deployed", extra={"program": program})
         await self.runner.recover()
         api = web.AppRunner(make(self.services()), access_log=None)
         await api.setup()

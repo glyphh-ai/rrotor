@@ -525,7 +525,7 @@ class Runner:
             values, missing = self.vault.values(run.program, declared) if self.vault else ({}, list(declared))
         except RrotorError as err:
             return {}, failed("secrets", err.code, err.message)
-        optional = found.manifest.cli.optional_secrets() if found.manifest.cli else set()
+        optional = found.manifest.optional()
         missing = [name for name in missing if name not in optional]
         if not missing:
             return values, None

@@ -29,7 +29,7 @@ jobs:
           python-version: "3.13"
       - run: uv sync --frozen
       - name: Lint
-        run: uv run ruff check src tests examples && uv run ruff format --check src tests examples
+        run: uv run ruff check src tests examples programs && uv run ruff format --check src tests examples programs
       - name: Types
         run: uv run mypy
       - name: Tests (100% line and branch coverage of rrotor and rrotord)
@@ -38,6 +38,15 @@ jobs:
         run: |
           for example in daily_sales hubspot_pipeline; do
             uv run pytest "examples/$example/tests" -o addopts="" -p no:cacheprovider --import-mode=importlib
+          done
+      # glyphh_bot runs the Glyphh SDK's glyphh.bots.remote (3.12): the SDK pinned here by its commit until 3.12.0 is
+      # on PyPI and image/sdk.lock carries it, then by that version.
+      - name: The built-in programs' tests (programs/)
+        env:
+          GLYPHH_SDK: "glyphh @ git+https://github.com/glyphh-ai/glyphh@cf77b799f3a05654a4562acdebd28fe2726b0b1e#subdirectory=sdk/python"
+        run: |
+          for program in glyphh_bot glyphh_swarm; do
+            uv run --with "$GLYPHH_SDK" pytest "programs/$program/tests" -o addopts="" -p no:cacheprovider --import-mode=importlib
           done
 
   # The self-hosting packages (deploy/, docs/self-hosting/): each is checked as written, nothing is started.

@@ -1,0 +1,33 @@
+{
+  "name": "glyphh_bot",
+  "description": "One of the Glyphh server's hosted bots, run on this rrotor: the Glyphh SDK's runner, its agent steps on the org's Anthropic key (or Claude Code signed in here), its gates in Ada, its tools at the server. Called by the server over the link.",
+  "python": "3.13",
+  "functions": {
+    "run": {
+      "writes": true,
+      "description": "One go of the bot: from its first step, or (with answer) the run that waited carried on; each question it asks waits as needs_input; the Result carries the run, its state among it",
+      "inputs": {
+        "type": "object",
+        "required": ["package", "ada_base", "ada_key", "tool_url", "tool_token"],
+        "properties": {
+          "package": { "type": "object", "required": ["bot.json"], "description": "The bot's files by path: bot.json (an object or its text), agent.md, skills/<name>/SKILL.md; no code" },
+          "state": { "type": ["string", "null"], "description": "The runner's state (its runs.sqlite, base64) the last go left; null for a bot's first" },
+          "given": { "description": "What the run is given to work on ($input to its steps)" },
+          "answer": { "description": "The person's answer to the run that waits in state (one of its options, or a batch's map): carries it on instead of starting a run" },
+          "ada_base": { "type": "string", "pattern": "^https://" },
+          "ada_key": { "type": "string", "minLength": 1 },
+          "tool_url": { "type": "string", "pattern": "^https://" },
+          "tool_token": { "type": "string", "minLength": 1 },
+          "model": { "type": "string", "description": "opus, sonnet, haiku or a model id; agent.md's own wins" },
+          "claude": { "enum": ["api", "cli"], "description": "api (the default): the Claude API on the secret ANTHROPIC_API_KEY; cli: Claude Code signed in on this rrotor" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "hosts": ["*.glyphh.ai", "api.anthropic.com"],
+  "secrets": ["ANTHROPIC_API_KEY"],
+  "optional_secrets": ["ANTHROPIC_API_KEY"],
+  "clis": ["claude"],
+  "limits": { "seconds": 1800, "memory_mb": 1024 }
+}

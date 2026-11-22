@@ -24,9 +24,16 @@ class Result:
         return cls("done", data)
 
     @classmethod
-    def needs_input(cls, prompt: str, schema: dict[str, Any] | None = None, options: list[Any] | None = None) -> Result:
-        """A value is missing, or a choice: the caller answers with `continue`."""
-        return cls("needs_input", {"schema": schema, "options": options}, prompt=prompt)
+    def needs_input(
+        cls,
+        prompt: str,
+        schema: dict[str, Any] | None = None,
+        options: list[Any] | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> Result:
+        """A value is missing, or a choice: the caller answers with `continue`. `detail` is more the caller is told
+        beside the question (JSON), in `data` with `schema` and `options`."""
+        return cls("needs_input", {**(detail or {}), "schema": schema, "options": options}, prompt=prompt)
 
     @classmethod
     def needs_approval(cls, step: str, prompt: str) -> Result:
@@ -34,9 +41,9 @@ class Result:
         return cls("needs_approval", None, step=step, prompt=prompt)
 
     @classmethod
-    def failed(cls, step: str, reason: str) -> Result:
-        """Stopped at `step`, with why."""
-        return cls("failed", {"reason": reason}, step=step)
+    def failed(cls, step: str, reason: str, detail: dict[str, Any] | None = None) -> Result:
+        """Stopped at `step`, with why; `detail` is more the caller is told (JSON), in `data` beside `reason`."""
+        return cls("failed", {**(detail or {}), "reason": reason}, step=step)
 
     @property
     def waiting(self) -> bool:

@@ -25,5 +25,12 @@ def test_failed_is_not_waiting():
     assert (r.status, r.step, r.data, r.waiting) == ("failed", "read", {"reason": "no file"}, False)
 
 
+def test_a_question_and_a_failure_carry_their_detail_beside_what_they_always_say():
+    asked = Result.needs_input("Worth it?", options=["send", "skip"], detail={"run_id": "r1", "options": "never"})
+    assert asked.data == {"run_id": "r1", "schema": None, "options": ["send", "skip"]}
+    failed = Result.failed("bot", "it broke", {"state": "c3Q=", "reason": "never"})
+    assert failed.data == {"state": "c3Q=", "reason": "it broke"}
+
+
 def test_statuses_are_the_four():
     assert {"done", "needs_input", "needs_approval", "failed"} == STATUSES
