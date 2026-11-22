@@ -99,7 +99,7 @@ class Call(Message):
     type: Literal["call"]
     run_id: uuid.UUID
     program: Name
-    version: int
+    version: int | None = None  # None: the active version (a built-in program's, which the hello does not list)
     function: Name
     inputs: dict[str, Any]
     caller: Literal["routine", "claude", "panel", "test"]

@@ -825,8 +825,9 @@ flowchart LR
 A bot or a swarm the person made in Glyphh can run on a rrotor they choose instead of in Glyphh's cloud. The server
 keeps the bot (its package, its runner's state, its connections) and the swarm (its crew, its rounds, its words); the
 rrotor does the work, through two programs the image carries (`programs/` in this repo). The server sends `call` for
-them over the link ([6](#6-the-link-protocol-3)), `continue` with the person's answers, `cancel` to stop one; each
-run answers its Results up the link like any run a `call` opened.
+them over the link ([6](#6-the-link-protocol-3)) with `"version": null` (a built-in sends no `deployed` and the hello
+leaves it out, so the server cannot know its versions; null runs the active one), `continue` with the person's
+answers, `cancel` to stop one; each run answers its Results up the link like any run a `call` opened.
 
 - **Built in:** each is a folder under `/usr/local/lib/rrotor-programs/` (`RROTOR_BUILTIN_PROGRAMS`): `glyphh.json`,
   `program.py` and its modules, and `vendor.json`. At boot, after the built-in CLIs (`glyphh_bot` runs `claude`),
@@ -879,7 +880,7 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 | down | `app` | program, version, state (`draft`, `approved`, `rejected`, `retired`), roles: an app's review changed; `approved` activates the version named when this rrotor holds it ([5.8](#58-apps)); protocol 2's `artifact` is read as the same message |
 | down | `deploy`, `activate`, `remove` | program, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
 | down | `continue` | `run_id`, `answer` |
-| down | `call`, `cancel` | `run_id`, program, version, function, inputs, caller, clearance; `cancel` the `run_id`. The server sends them for Glyphh's own programs, `glyphh_bot` and `glyphh_swarm`: a bot or a swarm run on this rrotor ([5.10](#510-glyphhs-own-programs-bots-and-swarms)) |
+| down | `call`, `cancel` | `run_id`, program, version (null or left out: the active version), function, inputs, caller, clearance; `cancel` the `run_id`. The server sends them for Glyphh's own programs, `glyphh_bot` and `glyphh_swarm`: a bot or a swarm run on this rrotor ([5.10](#510-glyphhs-own-programs-bots-and-swarms)) |
 | down | `pause`, `resume` | Handled (a paused hosted runtime answers 402 `E_LIMIT` to all but `/healthz`); the server sends neither |
 | up | `result` | `seq`, `run_id`, the `Result`, seconds: only for a run a `call` opened |
 | up | `deployed` | program, version, commit SHA, `repo` (null unless from a repo), `manifest`, `by` (the Glyphh subject who published an app; null otherwise); after **every** deploy, by any route; not numbered, kept until acknowledged |
