@@ -1,18 +1,26 @@
-"""glyphh_swarm: a swarm's git turns, taken on this rrotor (docs/architecture.md, 5.10). The server runs the swarm (the
-crew, the rounds, the words: swarm_turns.py, which it mirrors) and calls one function at a time over the link:
+"""glyphh_swarm: a project's steps, taken on this rrotor (docs/architecture.md, 5.10). A project is a crew of bots, a
+GitHub repo and instructions: no rounds, no order. The server runs it (who goes next, the words: swarm_turns.py, which
+it mirrors) and calls one function at a time over the link:
 
     turn    {repo, base, branch, prompt, persona, model, github_token, bot_id?, bot_name?}
             the repo cloned (or fetched) into this program's data folder, a fresh branch off origin/<base>, Claude Code
             (`claude -p`, the persona its system prompt) doing the bot's part in it, the changes committed as the bot,
             pushed, and a pull request opened: {status: open|unchanged, pr_url, number, head_sha, base_sha, files, said,
-            title, done}
+            title, done, usage: {input_tokens, output_tokens}}
+    pick    {repo, base, prompt, persona?, model?, github_token}
+            the orchestrator's step: Claude Code reading origin/<base> and answering the server's question (who goes
+            next); nothing is committed or pushed, and what it changed is dropped: {status: picked, answer, usage}.
+            The server reads the answer (swarm_turns.picked), not this program.
     merge   {repo, pr_url, github_token}   the pull request merged: {status: merged, sha} or {status: conflict}
     reject  {repo, pr_url, github_token}   the pull request closed: {status: rejected}
 
+The program keeps the name it was deployed under when a project was a swarm: servers and rrotors call it by it.
 Glyphh Bot's own (glyphh-bot, src/main/workspace.ts: beginTurn, endTurn, merge, reject), with GitHub's API in place of
 `gh` (the image carries none): `GitHub` is that seam. Claude Code runs on the org's Anthropic key, this program's
-secret ANTHROPIC_API_KEY. The GitHub token is the call's: in git's environment for a fetch or a push, never an
-argument or a file."""
+secret ANTHROPIC_API_KEY. The GitHub token is the call's and for that call alone: the server mints it for each step
+from the Glyphh GitHub App's installation on the repo (that one repo, contents and pull requests, one hour: longer
+than a step may run). It is in git's environment for a fetch or a push and in the header of the pull request's API
+calls, never an argument or a file, never in the clone's config, and not in Claude Code's environment."""
 
 from __future__ import annotations
 
@@ -45,6 +53,7 @@ GIT_SECONDS = 300
 CLAUDE_SECONDS = 1500  # within the manifest's 1800
 KEY = "ANTHROPIC_API_KEY"
 PASSED = ("PATH", "LANG", "HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "NO_PROXY", "no_proxy", "TMPDIR")
+INPUT_KINDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")  # Claude Code's `usage`
 
 
 class SwarmError(ProgramError):
@@ -112,7 +121,7 @@ def clone_of(ctx: Ctx, repo: str) -> Path:
 
 @contextlib.contextmanager
 def held(folder: Path) -> Iterator[None]:
-    """One turn at a time in a clone (another call for the same repo waits here)."""
+    """One step at a time in a clone (another call for the same repo waits here)."""
     folder.parent.mkdir(parents=True, exist_ok=True)
     with open(folder.with_suffix(".lock"), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -189,9 +198,22 @@ class GitHub:
 # Claude Code
 
 
-def claude_code(ctx: Ctx, prompt: str, persona: str, model: str | None, cwd: Path) -> str:
+def used(got: dict[str, Any]) -> dict[str, int]:
+    """The tokens of one Claude Code run, from its JSON output's `usage`: input (new, written to the cache and read
+    from it, together) and output. None reported: zeros."""
+    usage = got.get("usage")
+    counts = usage if isinstance(usage, dict) else {}
+
+    def count(kind: str) -> int:
+        n = counts.get(kind)
+        return int(n) if isinstance(n, int | float) and n > 0 else 0
+
+    return {"input_tokens": sum(count(kind) for kind in INPUT_KINDS), "output_tokens": count("output_tokens")}
+
+
+def claude_code(ctx: Ctx, prompt: str, persona: str, model: str | None, cwd: Path) -> tuple[str, dict[str, int]]:
     """`claude -p` in the clone, the persona its system prompt, edits and commands allowed (rrotor's sandbox is its
-    sandbox), on the org's key: what it said at the end. A test sets a fake."""
+    sandbox), on the org's key: what it said at the end, and the tokens it used (`used`). A test sets a fake."""
     key = ctx.secrets.get(KEY)
     if not key:
         raise SwarmError(
@@ -236,7 +258,7 @@ def claude_code(ctx: Ctx, prompt: str, persona: str, model: str | None, cwd: Pat
     if done.returncode != 0 or not isinstance(got, dict) or got.get("is_error"):
         said = (got or {}).get("result") if isinstance(got, dict) else None
         raise SwarmError(f"Claude Code failed: {str(said or done.stderr or done.stdout).strip()[:300]}")
-    return str(got.get("result") or "").strip()
+    return str(got.get("result") or "").strip(), used(got)
 
 
 # the functions
@@ -279,16 +301,42 @@ def turn(ctx: Ctx, inputs: dict[str, Any]) -> Result:
             git("checkout", "--quiet", "-B", base, f"origin/{base}")
             base_sha = git("rev-parse", "HEAD")
             git("checkout", "--quiet", "-B", branch)
-            persona = str(inputs.get("persona") or "")
-            if "Your working folder is" not in persona:
-                persona = f"{persona}\n{swarm_turns.working_folder(str(folder))}".strip()
-            said = claude_code(ctx, str(inputs["prompt"]), persona, inputs.get("model"), folder)
+            said, usage = claude_code(ctx, str(inputs["prompt"]), _persona(inputs, folder), inputs.get("model"), folder)
             ctx.log("turn taken", branch=branch, said=said[:200])
             bot = {"id": bot_id, "name": bot_name}
-            return Result.done(end_turn(ctx, git, token, (repo, base, base_sha, branch), bot, said))
+            return Result.done({**end_turn(ctx, git, token, (repo, base, base_sha, branch), bot, said), "usage": usage})
         finally:
             git("checkout", "--quiet", "--force", base, ok=True)
             git.close()
+
+
+def pick(ctx: Ctx, inputs: dict[str, Any]) -> Result:
+    """The orchestrator's step before a turn: Claude Code in the clone at origin/<base> (no branch), asked the
+    server's question (swarm_turns.pick_prompt): what it answered, for the server to read. An orchestrator changes
+    nothing: whatever it did change is dropped, and nothing is committed or pushed."""
+    repo, base = _repo(inputs), _branch(inputs.get("base"), "base")
+    folder = clone_of(ctx, repo)
+    with held(folder):
+        git = Git(folder, str(inputs["github_token"]))
+        try:
+            fetched(git, repo)
+            git("checkout", "--quiet", "--force", "--detach", f"origin/{base}")
+            said, usage = claude_code(ctx, str(inputs["prompt"]), _persona(inputs, folder), inputs.get("model"), folder)
+            ctx.log("picked", base=base, said=said[:200])
+            return Result.done({"status": "picked", "answer": said, "usage": usage})
+        finally:
+            git("checkout", "--quiet", "--force", "--detach", f"origin/{base}", ok=True)
+            git("reset", "--quiet", "--hard", ok=True)
+            git("clean", "-fdxq", ok=True)
+            git.close()
+
+
+def _persona(inputs: dict[str, Any], folder: Path) -> str:
+    """The call's persona (none: an orchestrator may have none) with the clone as its working folder."""
+    persona = str(inputs.get("persona") or "")
+    if "Your working folder is" in persona:
+        return persona
+    return f"{persona}\n{swarm_turns.working_folder(str(folder))}".strip()
 
 
 def _named(branch: str) -> tuple[int, str]:

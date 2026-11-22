@@ -257,7 +257,7 @@ rrotord's venv, the OpenTelemetry
 SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests); the vendors' agent CLIs (Claude
 Code, Codex, Gemini, Cursor, Grok, Copilot: about 1.7 GB unpacked, pinned in `image/clis.json`,
 [5.7](#57-clis)); the Glyphh SDK for every program and the `glyphh` CLI (`image/sdk.lock`, [5.3](#53-the-sdk-rrotor));
-Glyphh's own programs, `glyphh_bot` and `glyphh_swarm` (`programs/`, [5.10](#510-glyphhs-own-programs-bots-and-swarms)).
+Glyphh's own programs, `glyphh_bot` and `glyphh_swarm` (`programs/`, [5.10](#510-glyphhs-own-programs-bots-and-projects)).
 No browser, no database. It runs as
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
 is the `hosted` target: the base, with no part built in ([11](#11-the-image-and-ci)).
@@ -820,11 +820,12 @@ flowchart LR
   the graph runs on the head, and a follower sends the API's graph calls to it ([14](#14-the-cluster)). A node made
   head has its own, empty until the pipelines run again.
 
-### 5.10 Glyphh's own programs: bots and swarms
+### 5.10 Glyphh's own programs: bots and projects
 
-A bot or a swarm the person made in Glyphh can run on a rrotor they choose instead of in Glyphh's cloud. The server
-keeps the bot (its package, its runner's state, its connections) and the swarm (its crew, its rounds, its words); the
-rrotor does the work, through two programs the image carries (`programs/` in this repo). The server sends `call` for
+A bot or a project the person made in Glyphh can run on a rrotor they choose instead of in Glyphh's cloud. A project
+is a crew of bots, one GitHub repo and a set of instructions: the crew has no order and a run no rounds, one bot
+works at a time, and the server decides who goes next. The server keeps the bot (its package, its runner's state, its
+connections) and the project (its crew, its instructions, its words, whose turn it is); the rrotor does the work, through two programs the image carries (`programs/` in this repo). The server sends `call` for
 them over the link ([6](#6-the-link-protocol-3)) with `"version": null` (a built-in sends no `deployed` and the hello
 leaves it out, so the server cannot know its versions; null runs the active one), `continue` with the person's
 answers, `cancel` to stop one; each run answers its Results up the link like any run a `call` opened.
@@ -853,19 +854,38 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   twice. At the end the Result is `done` (`data` the same, with `output`) or `failed` (`reason`, and the same; a
   package that does not load fails at step `package` with every `problem`). `tokens` count the whole run. The SDK
   it runs is the image's (`image/sdk.lock`): one older than 3.12 fails the run, `E_SDK`.
-- **`glyphh_swarm`:** a swarm's git turns, in the program's data folder (`data: true`), one at a time per repo.
+- **`glyphh_swarm`:** a project's steps, in the program's data folder (`data: true`), one at a time per repo. The
+  program keeps the name it had when a project was called a swarm (deployed servers and rrotors call it by that
+  name); what a person sees of it says project (its title, Glyphh project). Who goes next is the server's to say, in
+  one of two ways. Wait your turn: the turn is offered to the bot that has waited longest and did not just say it
+  has nothing to do (a bot with nothing to do answers PASS and the turn moves on). Orchestrator: before each turn
+  the server calls `pick`, and a Claude step reads the repo and the instructions and names the next bot, or says the
+  project is done. Either way the run ends once two bots in a row said DONE, or the whole crew in a row had nothing
+  to do.
   `turn` `{repo, base, branch, prompt, persona, model, github_token, bot_id?, bot_name?}`: the repo cloned or fetched
-  from GitHub (the token in git's environment, never an argument or a file), a fresh `branch` off `origin/<base>`,
+  from GitHub (`github_token` is that call's own: the server mints it for each step from the Glyphh GitHub App's
+  installation on the repo, for that one repo, with contents and pull requests write, for one hour; it is in git's
+  environment and the pull request's API calls, never an argument, a file or the clone's config, and Claude Code is
+  not given it), a fresh `branch` off `origin/<base>`,
   Claude Code (`claude -p`, `persona` its system prompt with the clone as its working folder, edits and commands
   allowed: rrotor's sandbox is its sandbox) doing the bot's part on the org's key (the secret `ANTHROPIC_API_KEY`),
   everything committed as the bot (`<bot_name> <bot_id>@glyphhbot.local`, titled `<bot_name>: <its first
   sentence>`), pushed, and opened as a pull request: `{status: open, pr_url, number, head_sha, base_sha, branch,
-  base, files: [{path, added, removed}], said, title, done}`; a turn that changed nothing opens none and leaves no
-  branch (`status: unchanged`). `merge` `{repo, pr_url, github_token, delete_branch?}`: merged on GitHub (a merge
-  commit) and its branch deleted, `{status: merged, sha}`, or left open, `{status: conflict, reason}`. `reject`: the
-  pull request closed and its branch deleted, `{status: rejected}`. GitHub's API stands in for Glyphh Bot's `gh`
-  (the image carries none). `swarm_turns.py` holds Glyphh Bot's words and rules (the turn's prompt, the persona, the
-  transcript, the DONE rule, the branch name and title), which the server mirrors: the server runs the swarm.
+  base, files: [{path, added, removed}], said, title, done, usage}`; a turn that changed nothing opens none and
+  leaves no branch (`status: unchanged`). `usage` is `{input_tokens, output_tokens}`, what the turn's Claude Code
+  run reported (its JSON output's `usage`): input counts new input, input written to the cache and input read from
+  it together; zeros when none was reported. `pick` `{repo, base, prompt, persona?, model?, github_token}`: the
+  orchestrator's step, under the same lock: the repo cloned or fetched, `origin/<base>` checked out (no branch),
+  Claude Code run in it with `prompt` (the server's question, `swarm_turns.pick_prompt`) and the persona if one is
+  given, then the clone put back clean (`reset --hard`, `clean -fdx`: an orchestrator changes nothing, anything it
+  did change is dropped, nothing is committed or pushed): `{status: picked, answer, usage}`, `answer` what Claude
+  said, which the server reads (`swarm_turns.picked`), not the program. `merge` `{repo, pr_url, github_token,
+  delete_branch?}`: merged on GitHub (a merge commit) and its branch deleted, `{status: merged, sha}`, or left open,
+  `{status: conflict, reason}`. `reject`: the pull request closed and its branch deleted, `{status: rejected}`.
+  GitHub's API stands in for Glyphh Bot's `gh` (the image carries none). `swarm_turns.py` holds the words and rules
+  of a project's turns, grown from Glyphh Bot's (the brief, the turn's prompt, the orchestrator's question and how its answer is read, the persona, the transcript, the DONE
+  and PASS rules, who is next when bots wait their turn, when the crew is done, the branch name and title), which
+  the server mirrors: the server runs the project.
 
 ## 6. The link: protocol 3
 
@@ -880,7 +900,7 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 | down | `app` | program, version, state (`draft`, `approved`, `rejected`, `retired`), roles: an app's review changed; `approved` activates the version named when this rrotor holds it ([5.8](#58-apps)); protocol 2's `artifact` is read as the same message |
 | down | `deploy`, `activate`, `remove` | program, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
 | down | `continue` | `run_id`, `answer` |
-| down | `call`, `cancel` | `run_id`, program, version (null or left out: the active version), function, inputs, caller, clearance; `cancel` the `run_id`. The server sends them for Glyphh's own programs, `glyphh_bot` and `glyphh_swarm`: a bot or a swarm run on this rrotor ([5.10](#510-glyphhs-own-programs-bots-and-swarms)) |
+| down | `call`, `cancel` | `run_id`, program, version (null or left out: the active version), function, inputs, caller, clearance; `cancel` the `run_id`. The server sends them for Glyphh's own programs, `glyphh_bot` and `glyphh_swarm`: a bot or a project run on this rrotor ([5.10](#510-glyphhs-own-programs-bots-and-projects)) |
 | down | `pause`, `resume` | Handled (a paused hosted runtime answers 402 `E_LIMIT` to all but `/healthz`); the server sends neither |
 | up | `result` | `seq`, `run_id`, the `Result`, seconds: only for a run a `call` opened |
 | up | `deployed` | program, version, commit SHA, `repo` (null unless from a repo), `manifest`, `by` (the Glyphh subject who published an app; null otherwise); after **every** deploy, by any route; not numbered, kept until acknowledged |

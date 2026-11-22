@@ -1,6 +1,6 @@
 {
   "name": "glyphh_swarm",
-  "description": "A Glyphh swarm's git turns on this rrotor: a bot's turn on its own branch of the crew's GitHub repo (Claude Code doing its part, committed as the bot, opened as a pull request), and merging or closing that pull request. Called by the server over the link.",
+  "description": "A Glyphh project's steps on this rrotor: a bot's turn on its own branch of the project's GitHub repo (Claude Code doing its part, committed as the bot, opened as a pull request), the orchestrator's pick of who goes next, and merging or closing a turn's pull request. Called by the server over the link.",
   "python": "3.13",
   "functions": {
     "turn": {
@@ -19,6 +19,23 @@
           "github_token": { "type": "string", "minLength": 1 },
           "bot_id": { "type": "string" },
           "bot_name": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "pick": {
+      "writes": true,
+      "description": "A project's orchestrator step: Claude Code reads the repo at origin/<base> and answers who goes next (answer, for the server to read); nothing is committed or pushed, and the clone is left clean",
+      "inputs": {
+        "type": "object",
+        "required": ["repo", "base", "prompt", "github_token"],
+        "properties": {
+          "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$" },
+          "base": { "type": "string", "minLength": 1 },
+          "prompt": { "type": "string", "minLength": 1, "description": "The orchestrator's words (swarm_turns.pick_prompt)" },
+          "persona": { "type": "string", "description": "The orchestrator's system prompt, if it has one; its working folder line is added here" },
+          "model": { "type": ["string", "null"] },
+          "github_token": { "type": "string", "minLength": 1 }
         },
         "additionalProperties": false
       }
