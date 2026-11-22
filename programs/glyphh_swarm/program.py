@@ -12,7 +12,11 @@ crew, the rounds, the words: swarm_turns.py, which it mirrors) and calls one fun
 Glyphh Bot's own (glyphh-bot, src/main/workspace.ts: beginTurn, endTurn, merge, reject), with GitHub's API in place of
 `gh` (the image carries none): `GitHub` is that seam. Claude Code runs on the org's Anthropic key, this program's
 secret ANTHROPIC_API_KEY. The GitHub token is the call's: in git's environment for a fetch or a push, never an
-argument or a file."""
+argument or a file.
+
+What a turn runs is logged as it runs (terminal.py: git's commands, the shell commands Claude Code ran and what they
+answered) in the data folder's `terminal/<owner>__<repo>.jsonl`, which the person reads from this rrotor itself (the
+work panels' Terminal, `GET /v1/work/{ws}/terminal`); it never leaves the machine."""
 
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -33,6 +38,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import swarm_turns
+from terminal import Terminal, follow
 
 from rrotor import Ctx, ProgramError, Result
 
@@ -57,8 +63,9 @@ class SwarmError(ProgramError):
 class Git:
     """git in one clone, with the call's GitHub token in its environment (http.extraHeader), never in its config."""
 
-    def __init__(self, folder: Path, token: str | None) -> None:
+    def __init__(self, folder: Path, token: str | None, term: Terminal | None = None) -> None:
         self.folder = folder
+        self.term = term or Terminal(None)  # the clone's command log: each command as it is run, never its environment
         self.home = Path(tempfile.mkdtemp(prefix="glyphh-swarm-"))
         self.env = {k: v for k in PASSED if (v := os.environ.get(k))} | {
             "HOME": str(self.home),
@@ -76,6 +83,7 @@ class Git:
 
     def __call__(self, *args: str, ok: bool = False) -> str:
         """git with these arguments in the clone: its stdout; a failure raises SwarmError (with `ok`, answers None)."""
+        self.term.add("cmd", " ".join(["git", *args]))
         done = subprocess.run(
             ["git", *args],
             cwd=self.folder if self.folder.exists() else self.home,
@@ -89,10 +97,12 @@ class Git:
             if ok:
                 return ""
             said = (done.stderr or done.stdout).strip().splitlines()
+            self.term.add("err", said[-1] if said else f"exit {done.returncode}")
             raise SwarmError(f"git {args[0]} failed: {said[-1] if said else f'exit {done.returncode}'}")
         return done.stdout.strip()
 
     def succeeds(self, *args: str) -> bool:
+        self.term.add("cmd", " ".join(["git", *args]))
         return (
             subprocess.run(
                 ["git", *args], cwd=self.folder, env=self.env, capture_output=True, check=False, timeout=GIT_SECONDS
@@ -108,6 +118,11 @@ def clone_of(ctx: Ctx, repo: str) -> Path:
     if ctx.data is None:
         raise SwarmError('glyphh_swarm keeps its clones in its data folder ("data": true)')
     return ctx.data / "repos" / repo.replace("/", "__")
+
+
+def terminal_of(folder: Path) -> Terminal:
+    """A clone's command log, beside the clones: `<data>/terminal/<owner>__<repo>.jsonl` (terminal.py)."""
+    return Terminal(folder.parent.parent / "terminal" / f"{folder.name}.jsonl")
 
 
 @contextlib.contextmanager
@@ -189,9 +204,45 @@ class GitHub:
 # Claude Code
 
 
-def claude_code(ctx: Ctx, prompt: str, persona: str, model: str | None, cwd: Path) -> str:
+def streamed(argv: list[str], cwd: Path, env: dict[str, str], term: Terminal) -> tuple[int, dict[str, Any] | None, str]:
+    """Claude Code run to its end, its stream (one JSON event a line) read as it comes so the clone's command log
+    shows each command while the turn is still at work: (its exit code, its `result` event if it sent one, what
+    else it wrote: its stderr, else the lines that were not events). Killed after CLAUDE_SECONDS."""
+    result: dict[str, Any] | None = None
+    other: list[str] = []
+    shells: set[str] = set()
+    late = threading.Event()
+    with (
+        tempfile.TemporaryFile("w+") as errors,
+        subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=errors, text=True) as proc,
+    ):
+        timer = threading.Timer(CLAUDE_SECONDS, lambda: (late.set(), proc.kill()))
+        timer.start()
+        try:
+            for line in proc.stdout or ():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    event = None
+                if not isinstance(event, dict):
+                    other.append(line)
+                    continue
+                if event.get("type") == "result":
+                    result = event
+                follow(term, event, shells)
+            code = proc.wait()
+        finally:
+            timer.cancel()
+        if late.is_set():
+            raise SwarmError(f"Claude Code did not finish its turn within {CLAUDE_SECONDS} s")
+        errors.seek(0)
+        return code, result, errors.read() or "".join(other)
+
+
+def claude_code(ctx: Ctx, prompt: str, persona: str, model: str | None, cwd: Path, term: Terminal | None = None) -> str:
     """`claude -p` in the clone, the persona its system prompt, edits and commands allowed (rrotor's sandbox is its
-    sandbox), on the org's key: what it said at the end. A test sets a fake."""
+    sandbox), on the org's key: what it said at the end; what it ran goes to the clone's command log (`term`) as it
+    runs. A test sets a fake."""
     key = ctx.secrets.get(KEY)
     if not key:
         raise SwarmError(
@@ -213,7 +264,8 @@ def claude_code(ctx: Ctx, prompt: str, persona: str, model: str | None, cwd: Pat
         "--append-system-prompt",
         persona,
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
         "--permission-mode",
         "bypassPermissions",
         "--no-session-persistence",
@@ -222,20 +274,13 @@ def claude_code(ctx: Ctx, prompt: str, persona: str, model: str | None, cwd: Pat
     if model:
         argv += ["--model", model]
     try:
-        done = subprocess.run(
-            argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=CLAUDE_SECONDS, check=False
-        )
-    except subprocess.TimeoutExpired:
-        raise SwarmError(f"Claude Code did not finish its turn within {CLAUDE_SECONDS} s") from None
+        code, got, rest = streamed(argv, cwd, env, term or Terminal(None))
     except FileNotFoundError:
         raise SwarmError("Claude Code (claude) is not on this rrotor") from None
-    try:
-        got = json.loads(done.stdout)
-    except ValueError:
-        got = None
-    if done.returncode != 0 or not isinstance(got, dict) or got.get("is_error"):
-        said = (got or {}).get("result") if isinstance(got, dict) else None
-        raise SwarmError(f"Claude Code failed: {str(said or done.stderr or done.stdout).strip()[:300]}")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    if code != 0 or got is None or got.get("is_error"):
+        raise SwarmError(f"Claude Code failed: {str((got or {}).get('result') or rest).strip()[:300]}")
     return str(got.get("result") or "").strip()
 
 
@@ -273,7 +318,9 @@ def turn(ctx: Ctx, inputs: dict[str, Any]) -> Result:
     token = str(inputs["github_token"])
     folder = clone_of(ctx, repo)
     with held(folder):
-        git = Git(folder, token)
+        term = terminal_of(folder)
+        git = Git(folder, token, term)
+        term.add("note", f"{bot_name}'s turn on {branch}")
         try:
             fetched(git, repo)
             git("checkout", "--quiet", "-B", base, f"origin/{base}")
@@ -282,10 +329,16 @@ def turn(ctx: Ctx, inputs: dict[str, Any]) -> Result:
             persona = str(inputs.get("persona") or "")
             if "Your working folder is" not in persona:
                 persona = f"{persona}\n{swarm_turns.working_folder(str(folder))}".strip()
-            said = claude_code(ctx, str(inputs["prompt"]), persona, inputs.get("model"), folder)
+            said = claude_code(ctx, str(inputs["prompt"]), persona, inputs.get("model"), folder, term)
             ctx.log("turn taken", branch=branch, said=said[:200])
             bot = {"id": bot_id, "name": bot_name}
-            return Result.done(end_turn(ctx, git, token, (repo, base, base_sha, branch), bot, said))
+            ended = end_turn(ctx, git, token, (repo, base, base_sha, branch), bot, said)
+            number = f": pull request #{ended['number']}" if ended["number"] else ": nothing changed"
+            term.add("note", f"{bot_name}'s turn ended{number}")
+            return Result.done(ended)
+        except SwarmError as err:
+            term.add("err", str(err))
+            raise
         finally:
             git("checkout", "--quiet", "--force", base, ok=True)
             git.close()

@@ -48,7 +48,8 @@ COPY --from=clis /clis/ /
 COPY programs/glyphh_bot/glyphh.json programs/glyphh_bot/vendor.json programs/glyphh_bot/program.py \
      programs/glyphh_bot/claude_api.py /usr/local/lib/rrotor-programs/glyphh_bot/
 COPY programs/glyphh_swarm/glyphh.json programs/glyphh_swarm/vendor.json programs/glyphh_swarm/program.py \
-     programs/glyphh_swarm/swarm_turns.py /usr/local/lib/rrotor-programs/glyphh_swarm/
+     programs/glyphh_swarm/swarm_turns.py programs/glyphh_swarm/terminal.py \
+     /usr/local/lib/rrotor-programs/glyphh_swarm/
 RUN useradd --uid 10001 --user-group --create-home --home-dir /home/rrotor --shell /usr/sbin/nologin rrotor \
  && mkdir -p /data && chown rrotor:rrotor /data
 ENV PATH=/opt/rrotord/bin:/usr/local/bin:/usr/bin:/bin \

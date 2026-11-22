@@ -46,6 +46,8 @@ PROTOCOLS = tuple(
 )  # each, when set, http/protobuf
 ENDPOINTS = tuple(f"OTEL_EXPORTER_OTLP_{signal}ENDPOINT" for signal in ("", "LOGS_", "METRICS_", "TRACES_"))
 SERVER = "https://api.glyphh.ai"  # Glyphh's server: a self-hosted rrotor's default
+PLATFORM = "https://platform.glyphh.ai"  # Glyphh's platform: the web app whose folder picker reads this rrotor
+ORIGIN = re.compile(r"^https?://[^/\s]+$")
 CLUSTER_PORT = 7778
 SECRET_MIN = 32  # the cluster secret's bytes, at least
 HOST = re.compile(r"^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)$")
@@ -93,6 +95,8 @@ class Config:
     cluster_head: str | None = None  # the node that makes the cluster at bootstrap; None: the lowest node id
     cluster_log_keep: int = 1 << 30  # bytes of replication log kept for catch-up (replication: not built yet)
     cluster_evict_after: float = 24 * 3600.0  # seconds a member may go unseen before the head removes it
+    # RROTOR_PLATFORM_ORIGIN: the one web origin whose pages read GET /v1/folders (rrotord/api/cors.py)
+    platform_origin: str = PLATFORM
 
     @property
     def public(self) -> bool:
@@ -345,7 +349,11 @@ def load(env: Mapping[str, str] | None = None) -> Config:
     import rrotor
 
     port = int(env.get("RROTOR_LOCAL_PORT", "7777"))
+    platform_origin = (env.get("RROTOR_PLATFORM_ORIGIN") or PLATFORM).strip().rstrip("/")
+    if not ORIGIN.match(platform_origin):
+        raise RrotorError("RROTOR_PLATFORM_ORIGIN is the platform's origin, http(s)://host[:port].", code="E_CONFIG")
     return Config(
+        platform_origin=platform_origin,
         data=Path(env.get("RROTOR_DATA", "/data")),
         mode=mode,
         server=server.rstrip("/"),

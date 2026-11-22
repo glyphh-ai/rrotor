@@ -866,6 +866,10 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   pull request closed and its branch deleted, `{status: rejected}`. GitHub's API stands in for Glyphh Bot's `gh`
   (the image carries none). `swarm_turns.py` holds Glyphh Bot's words and rules (the turn's prompt, the persona, the
   transcript, the DONE rule, the branch name and title), which the server mirrors: the server runs the swarm.
+  What a turn runs is logged as it runs, in the data folder's `terminal/<owner>__<repo>.jsonl` (`terminal.py`): each
+  git command (never its environment, where the token is), each shell command Claude Code ran and what it answered
+  (Claude Code's stream, `--output-format stream-json`, read line by line), a note when a turn begins and ends. The
+  person reads it from this rrotor itself ([7.1](#71-the-work-read-from-the-browser)); it never leaves the machine.
 
 ## 6. The link: protocol 3
 
@@ -1019,6 +1023,44 @@ with the forward in flight, or a writing run in flight when it stepped down): 50
 (the write may have been applied: the SDKs never retry it); with HA, a write the head cannot get
 onto a majority of voters within 5 s: 503 `E_NOT_COMMITTED` (it is kept, and committed when they return); a run on a
 node no longer in the cluster: 410 `E_RUN_LOST`.
+
+### 7.1 The work, read from the browser
+
+A crew's work on a rrotor (the clones `glyphh_swarm` keeps, [5.10](#510-glyphhs-own-programs-bots-and-swarms)) is
+looked at from Glyphh's platform: files, a preview, an editor, a diff and a terminal beside the chat. The page reads
+all of it **from this rrotor's own address, in the person's browser** (`rrotord/work.py`, `rrotord/api/work.py`).
+Glyphh's server is not on that path and keeps none of it; nothing here goes up the link.
+
+| Route | Answers |
+|---|---|
+| `GET /v1/work` | `{workspaces: [{id, name, kind: "repo", branch, branches}]}`: each clone (`id` is its folder, `<owner>__<repo>`), the branch checked out (null when none), its local branches, newest first, 50 at most |
+| `GET /v1/work/{ws}/tree?under=` | `{under, entries: [{name, path, kind: "dir" \| "file", size}], truncated}`: one folder, folders first; never `.git`; 2000 entries at most |
+| `GET /v1/work/{ws}/file?path=&ref=` | `{path, size, binary, text, truncated}`: the working tree's file, or as the branch `ref` has it; text to 1 MB. With `raw=1`: its bytes (10 MB at most, else 413 `E_TOO_BIG`) with the content type its name suggests, `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox` |
+| `PUT /v1/work/{ws}/file?path=` `{text}` | `{path, size}`: the file saved in the working tree (1 MB at most), an audit event `work.write`. Refused: `.git` and any path that leaves the workspace once its symlinks are followed (400 `E_PATH`); while a turn holds the clone (409 `E_BUSY`: its lock, `repos/<id>.lock`). The next turn starts from GitHub's state, so a save that no turn committed is dropped then |
+| `GET /v1/work/{ws}/diff?branch=&base=` | `{base, branch, files: [{path, status: added \| modified \| deleted, added, removed, binary, before, after}], truncated}`: what `branch` (with none, the working tree, its untracked files among it) changed since it left `origin/<base>` (default: the branch GitHub's HEAD is on, else `main`); both sides of each file, 200 files and 400 KB a side at most. Renames are not followed: one shows as a file deleted and a file added |
+| `GET /v1/work/{ws}/terminal?after=` | `{lines: [{n, at, kind: cmd \| out \| err \| note, text}], next, live}`: the command log of the turns taken there from line `after` on (the newest 1000), the number to ask from next, and whether a turn is at work now. **Read only**: it is a log, not a shell; nothing is run for a caller |
+
+**Who gets in.** Any bearer the gate takes (the local token, a runtime key, a Glyphh sign-in), or a **work ticket**
+(`rrotord/ticket.py`), which is how the platform's page gets in: Glyphh's server, which knows who may use the
+runtime, signs `{"kind": "work", "runtime_id", "sub", "expires_at"}` as it signs a licence key
+(`<base64url payload>.<base64url signature>`, Ed25519, checked here with the public keys the code carries:
+[9](#9-the-licence)). A ticket is good on `/v1/work` and under it only, for this runtime only (a local rrotor's id is
+the one its link's credentials carry, `/data/runtime.json`; one with no id yet takes no ticket), until it expires;
+it is checked on the machine, without the Cloud, and the audit log names its `sub` as a sign-in. A local rrotor
+still answers only on loopback.
+
+**From a page.** The platform's one origin (`RROTOR_PLATFORM_ORIGIN`, `https://platform.glyphh.ai`) may make these
+requests across origins (`rrotord/api/cors.py`): `GET` and `PUT` here (and `GET /v1/folders`), with `Authorization`
+and `Content-Type`; the preflight is answered before the gate, on a private network too (a local rrotor on
+loopback); every answer, a refusal too, carries `Access-Control-Allow-Origin` for that origin and no other. No cookie
+crosses origins.
+
+**git, safely.** The daemon runs git with fixed arguments, never a shell: no system or global config, no hooks, no
+fsmonitor, no external diff, no textconv, no optional locks, 20 s at most. A clone's own config cannot make a read
+run anything.
+
+**In a cluster** the clones are the head's (a program's data folder is the head's alone) and a file's bytes do not
+travel node to node: a follower answers 409 `E_HEAD_ONLY`, and the caller asks the head.
 
 ## 8. Ada
 

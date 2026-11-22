@@ -39,6 +39,18 @@ def test_load_defaults():
     assert c.link_url == "ws://localhost:8080/v1/runtime/link"
     assert (c.runtime_id, c.runtime_token, c.builtin_parts) == (None, None, Path("/opt/parts-builtin"))
     assert (c.public_domain, c.machine_id, c.keys_sha256) == ("glyphh.app", "3d8f1a2b3c4d5e", ())
+    assert c.platform_origin == "https://platform.glyphh.ai"
+
+
+def test_the_platforms_origin_is_one_origin_and_may_be_set():
+    env = {"RROTOR_SERVER": "http://s", "RROTOR_LOCAL_TOKEN_SHA256": DIGEST}
+    assert config.load(env | {"RROTOR_PLATFORM_ORIGIN": " http://localhost:5173/ "}).platform_origin == (
+        "http://localhost:5173"
+    )
+    for bad in ("platform.glyphh.ai", "https://platform.glyphh.ai/bots", "*"):
+        with pytest.raises(RrotorError) as err:
+            config.load(env | {"RROTOR_PLATFORM_ORIGIN": bad})
+        assert err.value.code == "E_CONFIG" and "RROTOR_PLATFORM_ORIGIN" in err.value.message
 
 
 def test_a_hosted_rrotor_takes_its_runtime_credentials_and_built_in_parts_from_the_environment():

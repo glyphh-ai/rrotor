@@ -22,7 +22,7 @@ from rrotord import VERSION, apps
 from rrotord import drain as drains
 from rrotord.access import Access
 from rrotord.aggregate import ClusterAudit
-from rrotord.api import mcp, ops
+from rrotord.api import mcp, ops, work
 from rrotord.api.gate import METADATA, SCOPE, public_url, viewer_roles
 from rrotord.audit import Audit, current
 from rrotord.browser import Browser
@@ -412,3 +412,4 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/v1/licence", licence_get)
     app.router.add_put("/v1/licence", local_only(s.config.mode, licence_put))
     app.router.add_post("/mcp", mcp.route(s))
+    work.setup(app, s)

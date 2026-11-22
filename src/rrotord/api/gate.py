@@ -30,7 +30,9 @@ from urllib.parse import urlencode
 from aiohttp import web
 from aiohttp.typedefs import Middleware
 
+from rrotord import ticket
 from rrotord.access import Access
+from rrotord.api.cors import reads
 from rrotord.audit import WHO, Who, client_of
 from rrotord.browser import Browser
 from rrotord.config import Config
@@ -131,14 +133,25 @@ def browsing(path: str) -> bool:
 
 
 def gate(
-    config: Config, access: Access, introspect: Introspector | None = None, browser: Browser | None = None
+    config: Config,
+    access: Access,
+    introspect: Introspector | None = None,
+    browser: Browser | None = None,
+    runtime_id: Callable[[], str | None] = lambda: None,
 ) -> Middleware:
     """The local gate (the local token on loopback) or the hosted one (a runtime key, or a sign-in the Cloud vouches
     for, at this machine's address), which a self-hosted rrotor uses too. A browser's session (rrotord/browser.py)
     is taken on the apps' paths only, its access token introspected like a bearer; a page asked for with no
-    session is sent to sign in (docs/architecture.md, 5.8)."""
+    session is sent to sign in (docs/architecture.md, 5.8). On the work routes, and only there, both gates also take
+    a work ticket Glyphh signed for this runtime (`runtime_id` says which it is now; rrotord/ticket.py), and a page
+    of the platform may be the one asking (rrotord/api/cors.py)."""
     hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost") for port in (config.host_port, config.local_port)}
     origins = {f"http://{h}" for h in hosts}
+
+    def ticketed(request: web.Request, token: str) -> dict[str, Any] | None:
+        """The sign-in a work ticket names, on a path a ticket opens; None for anything else."""
+        sub = ticket.subject(token, runtime_id()) if token and ticket.covers(request.path) else None
+        return None if sub is None else {"type": "sign-in", "sub": sub}
 
     @web.middleware
     async def local(request: web.Request, handler: Handler) -> web.StreamResponse:
@@ -147,13 +160,17 @@ def gate(
         if request.host not in hosts:
             raise Forbidden("This API answers only on its loopback address.", code="E_HOST")
         origin = request.headers.get("Origin")
-        if origin is not None and origin not in origins:
+        if origin is not None and origin not in origins and not reads(request, config.platform_origin):
             raise Forbidden("No web page may call this API.", code="E_ORIGIN")
         if request.path.startswith("/apps/"):  # the person's own machine: its browser opens every app
             admit(request, {"type": "local"})
             return await handler(request)
         token = presented(request)
         digest = config.local_token_sha256
+        person = ticketed(request, token)
+        if person is not None:
+            admit(request, person)
+            return await handler(request)
         if digest is None or not token or not same(token, digest):
             raise Unauthorized("Send the local token: Authorization: Bearer <local token>.")
         admit(request, {"type": "local"})
@@ -201,10 +218,11 @@ def gate(
         if not token:
             raise challenge(request, False, config.public_host)
         key = access.match(token)
-        who = NOBODY if key is not None or introspect is None else await introspect.who(token)
-        if key is None and not who.active:
+        person = ticketed(request, token) if key is None else None
+        who = NOBODY if key is not None or person is not None or introspect is None else await introspect.who(token)
+        if key is None and person is None and not who.active:
             raise challenge(request, True, config.public_host)
-        admit(request, {"type": "key", "key_sha256": key} if key is not None else who.actor())
+        admit(request, {"type": "key", "key_sha256": key} if key is not None else person or who.actor())
         if access.paused is not None and config.mode == "hosted":
             raise RrotorError(
                 "This runtime is paused: its plan's hosted hours for the month are spent.",

@@ -1,6 +1,6 @@
 """The API's application: the request's context (who it is for, forgotten after it; its span, with a drain), the
-errors, a cluster's refusal and its seqs, the gate, the routes; and, in a cluster, what a forwarded request does
-here (rrotord/api/forward.py)."""
+platform's few reads from a browser (rrotord/api/cors.py), the errors, a cluster's refusal and its seqs, the gate,
+the routes; and, in a cluster, what a forwarded request does here (rrotord/api/forward.py)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from aiohttp.typedefs import Middleware
 
 from rrotord.access import Access
 from rrotord.api import forward
+from rrotord.api.cors import cors
 from rrotord.api.errors import AUDIT, Handler, errors
 from rrotord.api.gate import gate
 from rrotord.api.routes import BODY_MAX, Services, setup
@@ -80,10 +81,17 @@ def make(services: Services) -> web.Application:
     app = web.Application(
         middlewares=[
             context(telemetry),
+            cors(services.config.platform_origin),
             errors,
             refused(services.cluster),
             seqs(services.cluster),
-            gate(services.config, access, services.introspect, services.browser),
+            gate(
+                services.config,
+                access,
+                services.introspect,
+                services.browser,
+                lambda: services.credentials.runtime_id or services.config.runtime_id,
+            ),
         ],
         client_max_size=BODY_MAX,
     )
