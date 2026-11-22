@@ -90,6 +90,35 @@ async def test_a_call_that_is_refused_answers_failed(env):
     assert env.results()[0]["result"]["data"]["code"] == "E_PROGRAM_MISSING"
 
 
+async def test_a_call_with_no_version_runs_the_active_one_a_builtin_program_too(env, tmp_path):
+    from tests.daemon.test_builtin_clis import builtin_folder
+
+    await env.deployer.builtin(builtin_folder(tmp_path / "clis", "claude"))
+    await env.deployer.builtin(Path(__file__).resolve().parents[3] / "programs" / "glyphh_bot")
+    message = p.Call.model_validate(
+        {
+            "type": "call",
+            "run_id": str(uuid.uuid4()),
+            "program": "glyphh_bot",
+            "version": None,  # built-ins are not in the hello's deployed: the server cannot know their versions
+            "function": "run",
+            "inputs": {
+                "package": {"bot.json": {}},
+                "ada_base": "https://ada.glyphh.ai",
+                "ada_key": "k",
+                "tool_url": "https://platform.glyphh.ai/v1/bots/runs/1/tool",
+                "tool_token": "t",
+            },
+            "caller": "routine",
+        }
+    )
+    assert message.version is None
+    await env.handler.on_call(message)
+    result = env.results()[0]["result"]
+    # it ran glyphh_bot's own code: this test's Python has no Glyphh SDK, which the program says itself
+    assert (result["status"], result["data"]["code"]) == ("failed", "E_SDK"), result
+
+
 async def test_continue_and_cancel_of_a_waiting_run(env):
     install(env.programs, manifest("sample"), WAITS)
     message = call()

@@ -81,6 +81,14 @@ def test_needs_input_waits_by_its_key(tmp_path):
     assert caught.value.pending == {"kind": "input", "key": "day"}
 
 
+def test_needs_input_tells_its_detail_beside_the_question(tmp_path):
+    with pytest.raises(Wait) as caught:
+        make(tmp_path).needs_input("Worth it?", options=["send"], key="leg-0", detail={"run_id": "r1"})
+    assert caught.value.result.data == {"run_id": "r1", "schema": None, "options": ["send"]}  # type: ignore[attr-defined]
+    with pytest.raises(NotJson):
+        make(tmp_path).needs_input("Worth it?", detail={"when": dt.date(2026, 1, 1)})
+
+
 def test_needs_input_answers_by_the_prompt_by_default(tmp_path):
     assert make(tmp_path, RunState(answers={"Which day?": "x"})).needs_input("Which day?") == "x"
 

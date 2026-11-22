@@ -43,6 +43,12 @@ LABEL org.opencontainers.image.source="https://github.com/glyphh-ai/glyphh" \
       org.opencontainers.image.version="${VERSION}"
 COPY --from=build /opt/rrotord /opt/rrotord
 COPY --from=clis /clis/ /
+# Glyphh's own programs (programs/: glyphh_bot and glyphh_swarm, which the server calls over the link), deployed at boot
+# as built-ins after the CLIs they run (docs/architecture.md, 5.10): their code and manifests, not their tests.
+COPY programs/glyphh_bot/glyphh.json programs/glyphh_bot/vendor.json programs/glyphh_bot/program.py \
+     programs/glyphh_bot/claude_api.py /usr/local/lib/rrotor-programs/glyphh_bot/
+COPY programs/glyphh_swarm/glyphh.json programs/glyphh_swarm/vendor.json programs/glyphh_swarm/program.py \
+     programs/glyphh_swarm/swarm_turns.py /usr/local/lib/rrotor-programs/glyphh_swarm/
 RUN useradd --uid 10001 --user-group --create-home --home-dir /home/rrotor --shell /usr/sbin/nologin rrotor \
  && mkdir -p /data && chown rrotor:rrotor /data
 ENV PATH=/opt/rrotord/bin:/usr/local/bin:/usr/bin:/bin \

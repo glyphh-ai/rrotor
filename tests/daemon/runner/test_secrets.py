@@ -85,6 +85,14 @@ async def test_a_declared_secret_not_set_stops_the_run_before_load(env, tmp_path
     assert env.launcher.specs == []  # no worker started: load never ran
 
 
+async def test_an_optional_secret_not_set_lets_the_run_go_without_it(env, tmp_path):
+    env.runner.vault = Vault(tmp_path / "data")
+    env.runner.vault.set("sample", "API_KEY", VALUE)
+    install(env.programs, manifest("sample", secrets=["API_KEY", "OTHER"], optional_secrets=["OTHER"]), READS)
+    run = await env.runner.call(program="sample", function="start", inputs={})
+    assert (run.status, outcome(run)["data"]) == ("done", {"length": len(VALUE), "other": None}), run.result
+
+
 async def test_without_a_vault_every_declared_secret_is_missing(env):
     deploy(env, LOADS, ["API_KEY"])
     run = await env.runner.call(program="sample", function="start", inputs={})

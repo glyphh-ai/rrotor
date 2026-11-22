@@ -187,13 +187,15 @@ class Ctx:
         schema: dict[str, Any] | None = None,
         options: list[Any] | None = None,
         key: str | None = None,
+        detail: dict[str, Any] | None = None,
     ) -> Any:
         """The answer once the caller gave it; until then the run waits for it. `key` names the question (the
-        prompt by default), so a function can ask several."""
+        prompt by default), so a function can ask several; `detail` is more the caller is told beside it (JSON)."""
         name = key or prompt
         if name in self._state.answers:
             return self._state.answers[name]
-        raise Wait(Result.needs_input(prompt, schema, options), {"kind": "input", "key": name})
+        waiting = Result.needs_input(prompt, schema, options, _json_value(detail, "A question's detail"))
+        raise Wait(waiting, {"kind": "input", "key": name})
 
     def checkpoint(self, key: str, fn: Callable[[], Any]) -> Any:
         """Run `fn` once per run: a resumed run reads the value it stored."""

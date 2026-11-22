@@ -1,6 +1,6 @@
 [project]
 name = "rrotor"
-version = "0.4.0"
+version = "0.5.0"
 description = "rrotor: Glyphh's per-person runtime. The daemon (rrotord: link client, local API, program runner, sandbox, egress proxy) and the SDK programs import (rrotor)"
 requires-python = ">=3.13"
 dependencies = [
@@ -75,3 +75,4 @@ ignore = ["S603", "S607", "ASYNC109", "ASYNC240", "PT018"]
 "src/rrotord/sandbox/bwrap.py" = ["S108"]
 "tests/**" = ["S101", "S105", "S106", "S108", "S311"]
 "examples/**/tests/**" = ["S101"]
+"programs/**/tests/**" = ["S101", "S105", "S106"]

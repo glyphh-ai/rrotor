@@ -338,6 +338,8 @@ class Manifest(BaseModel):
     app: App | None = None  # an app's: its page, title, roles and the functions the page calls
     hosts: list[str] = []
     secrets: list[Annotated[str, Field(pattern=CAPS)]] = []  # what it reads from the vault (rrotord/vault.py)
+    # of its secrets, those a run goes without when they are not set (an optional API key): ctx.secrets.get is None
+    optional_secrets: list[Annotated[str, Field(pattern=CAPS)]] = []
     # sqlite: a database file in its data folder, opened as ctx.db (rrotor's own); the others are parts, not built yet
     databases: list[Literal["sqlite", "postgres", "mongodb", "neo4j"]] = []
     needs: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,39}$")]] = []  # parts by name
@@ -363,6 +365,17 @@ class Manifest(BaseModel):
         if value != PYTHON:
             raise ValueError(f"this rrotor runs Python {PYTHON}")
         return value
+
+    @model_validator(mode="after")
+    def _optional(self) -> Manifest:
+        unknown = sorted(set(self.optional_secrets) - set(self.secrets))
+        if unknown:
+            raise ValueError(f"optional_secrets names {', '.join(unknown)}, not in secrets: declare it there")
+        return self
+
+    def optional(self) -> set[str]:
+        """The secrets a run goes without when they are not set: its optional_secrets, and a CLI's secret?:NAME."""
+        return set(self.optional_secrets) | (self.cli.optional_secrets() if self.cli else set())
 
     @model_validator(mode="after")
     def _functions(self) -> Manifest:

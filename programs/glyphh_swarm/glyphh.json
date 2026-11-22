@@ -1,0 +1,61 @@
+{
+  "name": "glyphh_swarm",
+  "description": "A Glyphh swarm's git turns on this rrotor: a bot's turn on its own branch of the crew's GitHub repo (Claude Code doing its part, committed as the bot, opened as a pull request), and merging or closing that pull request. Called by the server over the link.",
+  "python": "3.13",
+  "functions": {
+    "turn": {
+      "writes": true,
+      "description": "One bot's turn: a fresh branch off origin/<base>, Claude Code doing its part, committed as the bot, pushed and opened as a pull request (none when it changed nothing)",
+      "inputs": {
+        "type": "object",
+        "required": ["repo", "base", "branch", "prompt", "github_token"],
+        "properties": {
+          "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$" },
+          "base": { "type": "string", "minLength": 1 },
+          "branch": { "type": "string", "minLength": 1, "description": "turn-<n>-<botId>-<stamp>" },
+          "prompt": { "type": "string", "minLength": 1, "description": "The turn's words (swarm_turns.turn_prompt)" },
+          "persona": { "type": "string", "description": "The bot's system prompt (swarm_turns.persona); its working folder line is added here" },
+          "model": { "type": ["string", "null"] },
+          "github_token": { "type": "string", "minLength": 1 },
+          "bot_id": { "type": "string" },
+          "bot_name": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "merge": {
+      "writes": true,
+      "description": "A turn's pull request merged on GitHub (merged), or left open when it conflicts (conflict); its branch deleted",
+      "inputs": {
+        "type": "object",
+        "required": ["repo", "pr_url", "github_token"],
+        "properties": {
+          "repo": { "type": "string" },
+          "pr_url": { "type": "string", "pattern": "^https://github\\.com/" },
+          "github_token": { "type": "string", "minLength": 1 },
+          "delete_branch": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "reject": {
+      "writes": true,
+      "description": "A turn's pull request closed on GitHub (rejected); its branch deleted",
+      "inputs": {
+        "type": "object",
+        "required": ["repo", "pr_url", "github_token"],
+        "properties": {
+          "repo": { "type": "string" },
+          "pr_url": { "type": "string", "pattern": "^https://github\\.com/" },
+          "github_token": { "type": "string", "minLength": 1 },
+          "delete_branch": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "hosts": ["github.com", "api.github.com", "codeload.github.com", "api.anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai"],
+  "secrets": ["ANTHROPIC_API_KEY"],
+  "data": true,
+  "limits": { "seconds": 1800, "memory_mb": 4096 }
+}

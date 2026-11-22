@@ -131,6 +131,13 @@ def test_a_program_that_reads_secrets_is_the_heads():
     assert (keyed.head_only, keyed.writes("start")) == (True, True)
 
 
+def test_an_optional_secret_is_one_of_its_secrets():
+    given = {"name": "k", "secrets": ["API_KEY"], "optional_secrets": ["API_KEY"], "functions": {"start": {}}}
+    assert m.Manifest.model_validate(given).optional() == {"API_KEY"}
+    with pytest.raises(ValueError, match="optional_secrets names OTHER, not in secrets"):
+        m.Manifest.model_validate({**given, "optional_secrets": ["OTHER"]})
+
+
 SCHEDULED = {"type": "object", "properties": {"day": {"type": "string"}}, "additionalProperties": False}
 
 

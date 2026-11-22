@@ -256,7 +256,8 @@ Node 22, git, bubblewrap, libseccomp, util-linux (`prlimit`), CA certificates, t
 rrotord's venv, the OpenTelemetry
 SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests); the vendors' agent CLIs (Claude
 Code, Codex, Gemini, Cursor, Grok, Copilot: about 1.7 GB unpacked, pinned in `image/clis.json`,
-[5.7](#57-clis)); the Glyphh SDK for every program and the `glyphh` CLI (`image/sdk.lock`, [5.3](#53-the-sdk-rrotor)).
+[5.7](#57-clis)); the Glyphh SDK for every program and the `glyphh` CLI (`image/sdk.lock`, [5.3](#53-the-sdk-rrotor));
+Glyphh's own programs, `glyphh_bot` and `glyphh_swarm` (`programs/`, [5.10](#510-glyphhs-own-programs-bots-and-swarms)).
 No browser, no database. It runs as
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
 is the `hosted` target: the base, with no part built in ([11](#11-the-image-and-ci)).
@@ -312,6 +313,7 @@ and the arguments it may be run with.
 | `databases` | `sqlite`: a SQLite database, `/data/db.sqlite3` in its data folder (mounted, as `data` would), opened as `ctx.db`; it keeps data, so every call runs on a cluster's head. `postgres`, `mongodb`, `neo4j` are parts, not built yet ([10](#10-parts)) |
 | `limits` | `seconds` (1 to 3600, default 300) and `memory_mb` (64 to 8192, default 512) per run |
 | `secrets` | The secrets it reads by name, `^[A-Z][A-Z0-9_]{0,63}$` ([5.5](#55-secrets)) |
+| `optional_secrets` | Of its `secrets`, those a run goes without when they are not set (an optional API key: `ctx.secrets.get` is None); one not in `secrets` is refused |
 | `schedules` | Functions the runtime calls by itself: each `{function, cron, tz?, input?, name?}` ([5.6](#56-schedules)) |
 | `clis` | The CLIs on this rrotor its functions run with `ctx.cli` (built in or deployed, [5.7](#57-clis)): a deploy naming one this rrotor does not hold is refused (`E_MANIFEST`); every call runs on a cluster's head, where CLIs run |
 | `graph` | `read` or `write`: the rrotor's graph as `ctx.graph` ([5.9](#59-the-graph)), to search and walk it, or to write it too (a pipeline). Unset, `ctx.graph` refuses (`E_GRAPH_UNDECLARED`). Every call runs on a cluster's head, which keeps the graph. Not for a CLI |
@@ -329,14 +331,14 @@ The `rrotor` package, standard library only, ships in the image and is mounted r
 from rrotor import Ctx, Result
 
 Result.done(data)                                     # finished, with data (JSON)
-Result.needs_input(prompt, schema=None, options=None) # a value or a choice
+Result.needs_input(prompt, schema=None, options=None, detail=None) # a value or a choice (detail: more, in data)
 Result.needs_approval(step, prompt)                   # about to act; a continue answers it
-Result.failed(step, reason)                           # stopped, with why
+Result.failed(step, reason, detail=None)              # stopped, with why (detail: more, in data)
 
 ctx.inputs                    # the call's inputs, checked against the function's schema
 ctx.answer                    # what the last continue brought (None on the first call)
 ctx.ask_approval(step, prompt) -> bool   # True once approved, False if declined; until then the run waits
-ctx.needs_input(prompt, schema=None, options=None, key=None)   # the answer once given; until then the run waits
+ctx.needs_input(prompt, schema=None, options=None, key=None, detail=None)   # the answer once given; until then it waits
 ctx.checkpoint(key, fn)       # fn runs once per run; a resumed run reads the stored value
 ctx.http                      # HTTPS to the declared hosts (any library works too: HTTPS_PROXY is set)
 ctx.files                     # its folder, a pathlib.Path
@@ -604,7 +606,7 @@ link's `hello` leaves it out (it is the image's, not the Cloud's).
 | `cursor` | Cursor's agent CLI (`cursor-agent`, Cursor's download, its own node) | 2026.10.22-27dcf5f | `login` with `NO_OPEN_BROWSER`: an address it polls (`paste: false`) |
 | `grok` | xAI's Grok Build CLI (`grok`, npm, brotli-packed native binary) | 1.0.70 | `login --device-auth`: an xAI device code |
 | `copilot` | GitHub's Copilot CLI (`copilot`, native build from npm) | 1.0.105 | `login --device-code`: a GitHub device code |
-| `glyphh` | Glyphh's own CLI (`glyphh`, the Glyphh SDK's console script: `image/sdk.lock`, run with the image's Python) | 3.6.0 | `login`: an API key from platform.glyphh.ai, pasted; or the secret `GLYPHH_API_KEY` |
+| `glyphh` | Glyphh's own CLI (`glyphh`, the Glyphh SDK's console script: `image/sdk.lock`, run with the image's Python) | 3.12.0 | `login`: an API key from platform.glyphh.ai, pasted; or the secret `GLYPHH_API_KEY` |
 
 Each vendor's agent keeps its private HOME (`home: true`), allows its one-shot forms only (`-p <prompt>` and the
 like, its status, `--version`; a bare command would open its interface and wait), waits for the person's approval to
@@ -818,6 +820,53 @@ flowchart LR
   the graph runs on the head, and a follower sends the API's graph calls to it ([14](#14-the-cluster)). A node made
   head has its own, empty until the pipelines run again.
 
+### 5.10 Glyphh's own programs: bots and swarms
+
+A bot or a swarm the person made in Glyphh can run on a rrotor they choose instead of in Glyphh's cloud. The server
+keeps the bot (its package, its runner's state, its connections) and the swarm (its crew, its rounds, its words); the
+rrotor does the work, through two programs the image carries (`programs/` in this repo). The server sends `call` for
+them over the link ([6](#6-the-link-protocol-3)) with `"version": null` (a built-in sends no `deployed` and the hello
+leaves it out, so the server cannot know its versions; null runs the active one), `continue` with the person's
+answers, `cancel` to stop one; each run answers its Results up the link like any run a `call` opened.
+
+- **Built in:** each is a folder under `/usr/local/lib/rrotor-programs/` (`RROTOR_BUILTIN_PROGRAMS`): `glyphh.json`,
+  `program.py` and its modules, and `vendor.json`. At boot, after the built-in CLIs (`glyphh_bot` runs `claude`),
+  rrotord deploys each as it does a built-in CLI (`Deployer.builtin`): when this rrotor has no program of its name,
+  or as a new version when the image's files changed and the active one is built-in too; one of that name the person
+  deployed is theirs. Its commit is the SHA-1 of its manifest, vendor file and code, so every node of a cluster makes
+  the same; `src/builtin.json` marks it and the link's `hello` leaves it out. Their tests run in CI with the Glyphh
+  SDK they need beside rrotor.
+- **`glyphh_bot`, `run`:** one go of a bot, the Glyphh SDK's runner (`glyphh.bots.remote.go`, SDK 3.12) here.
+  Inputs `{package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude}`: `package` the
+  bot's files by path (bot.json, agent.md, skills/; no code), `state` the runner's runs.sqlite (base64) the last go
+  left (null for a bot's first), `given` what the run works on, `answer` an answer to the run waiting in `state`
+  (carries it on instead of starting one: for a run whose rrotor run expired), the bot's Ada by `ada_base` and its
+  own `ada_key`, its tools at the server (`HttpProgram`: `POST tool_url`, bearer `tool_token`, `{tool, input,
+  run_id}`, answered `{result}` or `{error}`; `fetch` is one of them, so the server fetches as it does in the
+  cloud), its agent steps on Claude: `claude` `api` (the default) on the org's Anthropic key, this program's secret
+  `ANTHROPIC_API_KEY` (optional: a run that needs it and has none fails saying so), over `ctx.http` (the image has no
+  `anthropic` package); or `cli`, Claude Code signed in on this rrotor (`ctx.cli("claude", ["-p", …])`).
+  Each question the bot asks (a gate, a batch of items, an approval) is the run's `needs_input` (the question its
+  prompt; `data` the whole run as `RunResult.to_result` gives it: `run_id`, `step`, `approval`, `options`, `batch`,
+  `answer_with`, `log`, `data`, `tokens` and its `state` then) and a `continue` answers it: one of its options, a
+  batch's map, or an approval's `{"approved": bool}`. Each go is a checkpoint, so a resumed run never runs one
+  twice. At the end the Result is `done` (`data` the same, with `output`) or `failed` (`reason`, and the same; a
+  package that does not load fails at step `package` with every `problem`). `tokens` count the whole run. The SDK
+  it runs is the image's (`image/sdk.lock`): one older than 3.12 fails the run, `E_SDK`.
+- **`glyphh_swarm`:** a swarm's git turns, in the program's data folder (`data: true`), one at a time per repo.
+  `turn` `{repo, base, branch, prompt, persona, model, github_token, bot_id?, bot_name?}`: the repo cloned or fetched
+  from GitHub (the token in git's environment, never an argument or a file), a fresh `branch` off `origin/<base>`,
+  Claude Code (`claude -p`, `persona` its system prompt with the clone as its working folder, edits and commands
+  allowed: rrotor's sandbox is its sandbox) doing the bot's part on the org's key (the secret `ANTHROPIC_API_KEY`),
+  everything committed as the bot (`<bot_name> <bot_id>@glyphhbot.local`, titled `<bot_name>: <its first
+  sentence>`), pushed, and opened as a pull request: `{status: open, pr_url, number, head_sha, base_sha, branch,
+  base, files: [{path, added, removed}], said, title, done}`; a turn that changed nothing opens none and leaves no
+  branch (`status: unchanged`). `merge` `{repo, pr_url, github_token, delete_branch?}`: merged on GitHub (a merge
+  commit) and its branch deleted, `{status: merged, sha}`, or left open, `{status: conflict, reason}`. `reject`: the
+  pull request closed and its branch deleted, `{status: rejected}`. GitHub's API stands in for Glyphh Bot's `gh`
+  (the image carries none). `swarm_turns.py` holds Glyphh Bot's words and rules (the turn's prompt, the persona, the
+  transcript, the DONE rule, the branch name and title), which the server mirrors: the server runs the swarm.
+
 ## 6. The link: protocol 3
 
 JSON messages over the WebSocket `{RROTOR_SERVER}/v1/runtime/link` (`Authorization: Bearer <runtime token>`, never
@@ -831,7 +880,7 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 | down | `app` | program, version, state (`draft`, `approved`, `rejected`, `retired`), roles: an app's review changed; `approved` activates the version named when this rrotor holds it ([5.8](#58-apps)); protocol 2's `artifact` is read as the same message |
 | down | `deploy`, `activate`, `remove` | program, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
 | down | `continue` | `run_id`, `answer` |
-| down | `call`, `cancel` | `run_id`, program, version, function, inputs, caller, clearance; `cancel` the `run_id`. Handled; the server sends neither |
+| down | `call`, `cancel` | `run_id`, program, version (null or left out: the active version), function, inputs, caller, clearance; `cancel` the `run_id`. The server sends them for Glyphh's own programs, `glyphh_bot` and `glyphh_swarm`: a bot or a swarm run on this rrotor ([5.10](#510-glyphhs-own-programs-bots-and-swarms)) |
 | down | `pause`, `resume` | Handled (a paused hosted runtime answers 402 `E_LIMIT` to all but `/healthz`); the server sends neither |
 | up | `result` | `seq`, `run_id`, the `Result`, seconds: only for a run a `call` opened |
 | up | `deployed` | program, version, commit SHA, `repo` (null unless from a repo), `manifest`, `by` (the Glyphh subject who published an app; null otherwise); after **every** deploy, by any route; not numbered, kept until acknowledged |
@@ -1040,7 +1089,7 @@ carries none.
 
 | Job | What |
 |---|---|
-| `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the sample program's tests |
+| `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the sample programs' tests, the built-in programs' tests (`programs/`, with the Glyphh SDK they need) |
 | `deploy` | Compose (the air-gapped overlay, the cluster file and the per-node file, which refuses to render without its node's settings) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file (one replica, and two clusters of three), `terraform fmt -check` and `validate` for both modules and their examples (one node and a cluster). Nothing is started |
 | `image` | Builds the base (with the vendors' CLIs, their downloads checked against `image/clis.json`) and runs the sandbox tests inside it (each vendor CLI deployed as at boot and run in the sandbox; their sign-ins reach the vendors only with `RROTOR_VENDOR_SIGN_IN=1`); starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off`; with the secret `CI_CLUSTER_LICENSE_KEY` (a key with cluster sync), brings up the three-node Compose cluster and checks every node ready, `rrotor-0` the head of three |
 | `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with the release public key baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |

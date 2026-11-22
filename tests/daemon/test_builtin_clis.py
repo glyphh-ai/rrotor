@@ -103,7 +103,7 @@ def test_the_build_script_writes_an_sdk_clis_console_script(tmp_path):
     wrapper = (tmp_path / "usr/local/lib/rrotor-clis/glyphh/glyphh").read_text()
     assert wrapper.startswith("#!/usr/bin/python3\n") and "from glyphh.cli import main" in wrapper
     assert '"/usr/local/lib/rrotor-sdk"' in wrapper
-    assert json.loads((tmp_path / "usr/local/lib/rrotor-clis/glyphh/vendor.json").read_text())["version"] == "3.6.0"
+    assert json.loads((tmp_path / "usr/local/lib/rrotor-clis/glyphh/vendor.json").read_text())["version"] == "3.12.0"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node unpacks a brotli-packed binary")

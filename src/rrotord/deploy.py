@@ -37,6 +37,24 @@ class Tools:
     git_env: Mapping[str, str] | None = None  # extra git config, for tests (file:// transport)
 
 
+BUILTIN_SKIPPED = frozenset({"glyphh.json", "vendor.json", "tests", "__pycache__"})  # not a built-in program's code
+
+
+def builtin_files(folder: Path) -> list[tuple[str, bytes]]:
+    """A built-in program's files beside its manifest (program.py, its modules, files/), by their path in it, in
+    order: not its tests, caches or dotfiles."""
+    out = []
+    for path in sorted(folder.rglob("*")):
+        rel = path.relative_to(folder)
+        if (
+            path.is_file()
+            and rel.parts[0] not in BUILTIN_SKIPPED
+            and not any(p.startswith(".") or p == "__pycache__" for p in rel.parts)
+        ):
+            out.append((rel.as_posix(), path.read_bytes()))
+    return out
+
+
 def check_sha(commit: str) -> str:
     if not SHA.match(commit):
         raise BadRequest("A commit is its full 40-character SHA.", code="E_COMMIT")
@@ -148,13 +166,17 @@ class Deployer:
         return found
 
     async def builtin(self, folder: Path) -> Version | None:
-        """A built-in CLI the image carries (its folder: glyphh.json, installing from the image, and vendor.json), at
-        boot: deployed when this rrotor has no program of its name, or a new version of it when the image's pins
-        changed and the active one is built-in too. A CLI of that name the person deployed is theirs: left as it is.
-        Its commit is the SHA-1 of its manifest and vendor file, so every node of a cluster makes the same one."""
+        """A built-in the image carries, at boot: a CLI (its folder: glyphh.json, installing from the image, and
+        vendor.json) or one of Glyphh's own programs (glyphh.json, program.py and its other files, and vendor.json;
+        the repo's programs/). Deployed when this rrotor has no program of its name, or as a new version when the
+        image's changed and the active one is built-in too. One of that name the person deployed is theirs: left as
+        it is. Its commit is the SHA-1 of its manifest and vendor file (and a program's files), so every node of a
+        cluster makes the same one."""
         found = manifests.read(folder)
         vendor = (folder / "vendor.json").read_bytes()
-        named = (b"rrotor-builtin\0", (folder / "glyphh.json").read_bytes(), vendor)
+        code = [] if found.kind == "cli" else builtin_files(folder)
+        named = [b"rrotor-builtin\0", (folder / "glyphh.json").read_bytes(), vendor]
+        named += [f"\0{rel}\0".encode() + data for rel, data in code]
         commit = hashlib.sha1(b"".join(named), usedforsecurity=False).hexdigest()
         known = found.name in self.programs.names()
         active = self.programs.active(found.name) if known else None
@@ -164,15 +186,20 @@ class Deployer:
             return None
         if self.programs.by_sha(found.name, commit) is not None:
             return await self.held(found.name, commit)
+        self._check_clis(found)
         root = self.programs.version_root(found.name, commit)
         staging = root.with_name(f".{commit}.staging")
         shutil.rmtree(staging, ignore_errors=True)
         (staging / "src").mkdir(parents=True)
         try:
             shutil.copyfile(folder / "glyphh.json", staging / "src" / "glyphh.json")
+            for rel, data in code:
+                (staging / "src" / rel).parent.mkdir(parents=True, exist_ok=True)
+                (staging / "src" / rel).write_bytes(data)
             (staging / "src" / BUILTIN).write_bytes(vendor)
             await self._venv(staging, lock=False)
-            await self.installer.install(found, staging / "cli", staging / "src")
+            if found.kind == "cli":
+                await self.installer.install(found, staging / "cli", staging / "src")
             staging.rename(root)
         except BaseException:
             shutil.rmtree(staging if known else self.programs.folder(found.name), ignore_errors=True)
