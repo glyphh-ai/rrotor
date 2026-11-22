@@ -97,3 +97,26 @@ def test_a_sign_in_that_listens_is_not_held_to_the_proxys_port():
     on_follower = bwrap.command(follower, Limits(256, 10), 7, 9, exists=lambda p: False)
     assert ["/h", "/home/cli"] in after(on_follower, "--ro-bind")
     assert "/home/cli" in bwrap.landlock_rules(follower)["read"]  # type: ignore[operator]
+
+
+def test_the_folders_a_run_is_given_are_bound_at_their_own_paths_as_chosen():
+    given = (("/home/ana/docs/out", True), ("/home/ana/docs", False), ("/srv/shared", True))
+    mounts = Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, None, folders=given)
+    argv = bwrap.command(mounts, Limits(256, 10), 7, 9, exists=lambda p: False)
+    assert ["/home/ana/docs", "/home/ana/docs"] in after(argv, "--ro-bind")
+    assert after(argv, "--bind")[1:] == [["/home/ana/docs/out", "/home/ana/docs/out"], ["/srv/shared", "/srv/shared"]]
+    # a folder is bound before the folders inside it, so the inner one's say holds
+    assert argv.index("/home/ana/docs") < argv.index("/home/ana/docs/out")
+    rules = bwrap.landlock_rules(mounts)
+    assert rules["write"] == ["/files", "/tmp", "/dev", "/home/ana/docs/out", "/srv/shared"]
+    assert rules["read"][-1] == "/home/ana/docs"  # type: ignore[index]
+    assert "/home/ana" not in rules["read"] and "/home" not in rules["read"]  # type: ignore[operator]
+    # with none given, nothing of the machine is bound
+    plain = bwrap.command(MOUNTS, Limits(256, 10), 7, 9, exists=lambda p: False)
+    assert after(plain, "--bind") == [["/d/files", "/files"]]
+    # on a cluster's follower nothing is written, a folder given to change included
+    follower = Mounts(MOUNTS.src, MOUNTS.venv, MOUNTS.sdk, MOUNTS.files, None, readonly=True, folders=given)
+    on_follower = bwrap.command(follower, Limits(256, 10), 7, 9, exists=lambda p: False)
+    assert after(on_follower, "--bind") == [] and ["/srv/shared", "/srv/shared"] in after(on_follower, "--ro-bind")
+    assert bwrap.landlock_rules(follower)["write"] == ["/tmp", "/dev"]
+    assert "/srv/shared" in bwrap.landlock_rules(follower)["read"]  # type: ignore[operator]

@@ -9,6 +9,7 @@ h = Harness(program, tmp_path, approvals={"start": {"write"}}, http=FakeHttp({"h
 #   FakeCli(..., allow=[...], approvals=[...]) as the CLI's manifest has them; h.cli_calls lists what ran
 # the graph (ctx.graph): graph=FakeGraph("write") (or "read"), kept in memory; h.graph.nodes and h.graph.edges
 #   hold what the program wrote
+# the machine's folders the run is given (ctx.folders): folders=[{"path": str(tmp_path / "docs"), "access": "read"}]
 r = h.call("start", {"day": "2026-10-14"})   # Result needs_approval
 r = h.resume({"approved": True})               # Result done
 """
@@ -250,8 +251,10 @@ class Harness:
         database: Path | None = None,
         clis: Mapping[str, FakeCli | None] | None = None,
         graph: FakeGraph | None = None,
+        folders: Iterable[Mapping[str, str]] = (),
     ) -> None:
         self.program, self.files, self.database = program, files, database
+        self.folders = tuple(folders)  # ctx.folders: the machine's folders the run is given
         self.graph = graph or FakeGraph(None)  # ctx.graph: a manifest that names none refuses, as on rrotor
         self.clis = dict(clis or {})  # the CLIs the manifest names: None for one not on the rrotor
         self.cli_calls: list[tuple[str, list[str], str | None]] = []
@@ -291,6 +294,7 @@ class Harness:
             clis={k: {"allow": c.allow, "approvals": c.approvals} if c else None for k, c in self.clis.items()},
             request=self._cli,
             graph=Graph(self.graph.access, self.graph.ask),
+            folders=self.folders,
         )
 
     def _cli(self, ask: dict[str, Any]) -> dict[str, Any]:

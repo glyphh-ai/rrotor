@@ -19,7 +19,8 @@
           "tool_url": { "type": "string", "pattern": "^https://" },
           "tool_token": { "type": "string", "minLength": 1 },
           "model": { "type": "string", "description": "opus, sonnet, haiku or a model id; agent.md's own wins" },
-          "claude": { "enum": ["api", "cli"], "description": "api (the default): the Claude API on the secret ANTHROPIC_API_KEY; cli: Claude Code signed in on this rrotor" }
+          "claude": { "enum": ["api", "cli"], "description": "api (the default): the Claude API on the secret ANTHROPIC_API_KEY; cli: Claude Code signed in on this rrotor" },
+          "effort": { "enum": ["low", "medium", "high", "xhigh", "max"], "description": "How hard Claude works on its agent steps (the Claude API's output_config.effort; api only): left out, or on a model that takes none, the model's own default" }
         },
         "additionalProperties": false
       }
@@ -29,5 +30,6 @@
   "secrets": ["ANTHROPIC_API_KEY"],
   "optional_secrets": ["ANTHROPIC_API_KEY"],
   "clis": ["claude"],
+  "folders": true,
   "limits": { "seconds": 1800, "memory_mb": 1024 }
 }

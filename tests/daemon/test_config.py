@@ -40,6 +40,19 @@ def test_load_defaults():
     assert (c.runtime_id, c.runtime_token, c.builtin_parts) == (None, None, Path("/opt/parts-builtin"))
     assert (c.public_domain, c.machine_id, c.keys_sha256) == ("glyphh.app", "3d8f1a2b3c4d5e", ())
     assert c.platform_origin == "https://platform.glyphh.ai"
+    assert c.folders == ()  # no folder of the machine is offered until its owner names one
+
+
+def test_the_folders_the_owner_offers_are_read(tmp_path, monkeypatch):
+    monkeypatch.setattr("rrotord.folders.RESERVED", (Path("/usr"),))  # the tests' own folder is in /tmp on Linux
+    local = {"RROTOR_SERVER": "http://s", "RROTOR_LOCAL_TOKEN_SHA256": DIGEST, "RROTOR_DATA": str(tmp_path / "data")}
+    docs, work = tmp_path.resolve() / "docs", tmp_path.resolve() / "work"
+    docs.mkdir()
+    assert config.load({**local, "RROTOR_FOLDERS": f"{docs}:{work}"}).folders == (docs, work)
+    for bad in ("docs", str(tmp_path / "data"), "/"):
+        with pytest.raises(RrotorError) as caught:
+            config.load({**local, "RROTOR_FOLDERS": bad})
+        assert caught.value.code == "E_CONFIG" and "RROTOR_FOLDERS" in caught.value.message, bad
 
 
 def test_the_platforms_origin_is_one_origin_and_may_be_set():

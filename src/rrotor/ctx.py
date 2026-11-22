@@ -131,8 +131,8 @@ class Secrets:
 
 
 class Ctx:
-    """The run's context. Programs read `inputs`, `answer`, `files`, `data`, `home`, `clearance`, `caller`, `db` and
-    `graph`, and call the methods below."""
+    """The run's context. Programs read `inputs`, `answer`, `files`, `data`, `home`, `clearance`, `caller`, `db`,
+    `graph` and `folders`, and call the methods below."""
 
     def __init__(
         self,
@@ -155,8 +155,11 @@ class Ctx:
         clis: Mapping[str, Mapping[str, Any] | None] | None = None,
         request: Request | None = None,
         graph: Graph | None = None,
+        folders: Iterable[Mapping[str, str]] = (),
     ) -> None:
         self.data, self.home, self.clearance, self.caller = data, home, clearance, caller
+        # the machine's folders this run was given, at their own paths: ({"path", "access": "read" | "write"}, ...)
+        self.folders: tuple[dict[str, str], ...] = tuple(dict(f) for f in folders)
         # the rrotor's graph (rrotor/graph.py): a manifest that does not name it gets one that refuses every call
         self.graph: Graph = graph or Graph()
         self._clis = dict(clis or {})  # each CLI the manifest names: its allow and approval patterns (None: not here)

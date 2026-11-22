@@ -30,6 +30,8 @@ class Mounts:
     work: Path | None = None  # its per-call working folder, at /work
     home: Path | None = None  # its private persistent HOME ("home": true), at /home/cli
     listen: bool = False  # a CLI's sign-in that listens on loopback: TCP left to the sandbox's own network
+    # the machine's folders the run was given (rrotord/folders.py), each at its own path: (path, writable)
+    folders: tuple[tuple[str, bool], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +50,13 @@ def landlock_rules(mounts: Mounts) -> dict[str, object]:
     mine = [FILES] + ([DATA] if mounts.data else []) + ([CLI_HOME] if mounts.home else [])
     write = [FILES, "/tmp", "/dev", *mine[1:]] if not mounts.readonly else ["/tmp", "/dev"]
     read = [*SYSTEM_RO, PROGRAM, VENV, SDK, "/proc", *(f"{PARTS}/{name}" for name, _ in mounts.parts)]
+    given = [path for path, writable in mounts.folders if writable and not mounts.readonly]
     return {
-        "read": read + ([CLI] if mounts.cli else []) + (mine if mounts.readonly else []),
-        "write": write + ([WORK] if mounts.work else []),
+        "read": read
+        + ([CLI] if mounts.cli else [])
+        + (mine if mounts.readonly else [])
+        + [path for path, _ in mounts.folders if path not in given],
+        "write": write + ([WORK] if mounts.work else []) + given,
         "tcp_ports": [3128] if mounts.proxy else [],
         "exec_writes": mounts.cli is None,
         "net": not mounts.listen,
@@ -119,6 +125,8 @@ def command(
         argv += ["--ro-bind" if mounts.readonly else "--bind", str(mounts.data), DATA]
     for name, where in mounts.parts:
         argv += ["--ro-bind", str(where), f"{PARTS}/{name}"]
+    for path, writable in sorted(mounts.folders):  # a folder before the folders inside it: the inner one's say holds
+        argv += ["--bind" if writable and not mounts.readonly else "--ro-bind", path, path]
     if mounts.cli:
         argv += ["--ro-bind", str(mounts.cli), CLI]
     if mounts.work:

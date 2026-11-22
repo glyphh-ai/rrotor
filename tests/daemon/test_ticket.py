@@ -39,7 +39,7 @@ def test_anything_else_is_nobody():
     assert ticket.subject(signed(expires_at="2999-01-01T00:00:00+02:00"), RUNTIME, NOW) is None  # UTC only
 
 
-def test_a_ticket_opens_the_work_routes_and_nothing_else():
-    assert ticket.covers("/v1/work") and ticket.covers("/v1/work/acme__crew/tree")
-    for path in ("/v1/workers", "/v1/runs", "/v1/folders", "/mcp", "/v1/work-x"):
+def test_a_ticket_opens_the_work_routes_and_the_folder_picker_and_nothing_else():
+    assert ticket.covers("/v1/work") and ticket.covers("/v1/work/acme__crew/tree") and ticket.covers("/v1/folders")
+    for path in ("/v1/workers", "/v1/runs", "/v1/folders/x", "/v1/folders-x", "/mcp", "/v1/work-x"):
         assert not ticket.covers(path), path
