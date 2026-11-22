@@ -191,3 +191,9 @@ def test_two_schedules_of_one_name_are_refused(tmp_path):
     two = [{"function": "start", "cron": "0 6 * * *"}, {"function": "start", "cron": "0 18 * * *"}]
     data = {"name": "p", "functions": {"start": {}}, "schedules": two}
     assert "schedules.1: two schedules are named start; give each its own name" in refusal(tmp_path, data)
+
+
+def test_a_program_says_whether_its_calls_may_carry_folders():
+    plain = {"name": "p", "functions": {"start": {}}}
+    assert m.Manifest.model_validate(plain).folders is False
+    assert m.Manifest.model_validate({**plain, "folders": True}).folders is True

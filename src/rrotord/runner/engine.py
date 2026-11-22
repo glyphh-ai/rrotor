@@ -47,6 +47,7 @@ from rrotord import clis
 from rrotord import log as logs
 from rrotord.audit import Audit, current
 from rrotord.errors import BadRequest, Conflict, Forbidden, NotFound, RrotorError, Unavailable
+from rrotord.folders import Folders
 from rrotord.graph import WRITES, Graph
 from rrotord.manifest import check_inputs
 from rrotord.otel import Telemetry
@@ -123,7 +124,9 @@ class Runner:
         readonly: Callable[[], bool] = lambda: False,
         vault: Vault | None = None,
         graph: Graph | None = None,
+        folders: Folders | None = None,
     ) -> None:
+        self.folders = folders or Folders()  # the machine's folders a call may give its run: none unless offered
         self.node, self.readonly, self.vault, self.graph = node, readonly, vault, graph
         self.hidden: dict[str, list[str]] = {}  # each run's secret values, masked in its log lines
         self.programs, self.records, self.proxy, self.launcher = programs, records, proxy, launcher
@@ -167,11 +170,13 @@ class Runner:
         origin: str = "local",
         run_id: str | None = None,
         clearance: float = 1.0,
+        folders: Any = None,
     ) -> Run:
         """A run opened and its first Result; the call is an audit event either way (`refused` with its code when it
-        never became a run)."""
+        never became a run). `folders`: the machine's folders the run is given (rrotord/folders.py); the call is
+        refused whole when the program's manifest takes none or the rrotor's owner does not offer one of them."""
         try:
-            run = await self._call(program, function, inputs, version, caller, origin, run_id, clearance)
+            run = await self._call(program, function, inputs, version, caller, origin, run_id, clearance, folders)
         except RrotorError as err:
             asked = {"program": program, "version": version, "function": function, "run_id": run_id}
             self._audit("run.call", **asked, outcome={"status": "refused", "code": err.code})
@@ -189,6 +194,7 @@ class Runner:
         origin: str,
         run_id: str | None,
         clearance: float,
+        folders: Any = None,
     ) -> Run:
         if not self.layers.ready:
             raise Unavailable(
@@ -201,10 +207,11 @@ class Runner:
         if fn is None:
             raise NotFound(f"{program} has no function {function}.", code="E_FUNCTION_MISSING")
         check_inputs(fn, inputs)
+        given = self._given(found, folders)
         run = Run(
             run_id or new_id(self.node()), program, found.version, found.commit_sha, function, inputs, caller, origin
         )
-        run.clearance, run.subject = clearance, clis.subject_of(current().actor)
+        run.clearance, run.subject, run.folders = clearance, clis.subject_of(current().actor), given
         self.records.save(run)
         self.records.log(run.id, {"event": "called", "function": function, "caller": caller, "version": found.version})
         with logs.bind(**about(run)):
@@ -515,6 +522,18 @@ class Runner:
             self.readonly(),
         )
 
+    def _given(self, found: Version, asked: Any) -> list[dict[str, str]]:
+        """A call's `folders` as its run keeps them, or why the call is refused: the program's manifest takes none,
+        or one is not a folder the rrotor's owner offers."""
+        if not asked:
+            return []
+        if not found.manifest.folders:
+            raise Forbidden(
+                f'{found.program} takes no folders: its glyphh.json does not say "folders": true.',
+                code="E_FOLDERS_UNDECLARED",
+            )
+        return [grant.view() for grant in self.folders.grants(asked)]
+
     def _secrets(self, run: Run, found: Version) -> tuple[dict[str, str], dict[str, Any] | None]:
         """The values of the secrets the version declares, or why the run cannot go: one not set, or one the
         rrotor's key does not open."""
@@ -543,6 +562,11 @@ class Runner:
         if manifest.kind == "cli":
             await self._go_cli(run, found)
             return
+        try:  # checked at every start: a continue after the owner stopped offering a folder is refused too
+            shared = self.folders.grants(run.folders or None)
+        except RrotorError as err:
+            await self._finish(run, failed("folders", err.code, err.message))
+            return
         values, refused = self._secrets(run, found)
         if refused is not None:
             await self._finish(run, refused)
@@ -552,11 +576,13 @@ class Runner:
             self.hidden[run.id] = hidden
         hosts = frozenset(manifest.hosts)
         socket = await self.proxy.open(run.id, hosts, lambda e: self.records.log(run.id, e)) if hosts else None
-        mounts = self._mounts(run.program, found, socket)
+        given = tuple((g.path, g.write) for g in shared)
+        mounts = dataclasses.replace(self._mounts(run.program, found, socket), folders=given)
         await self._start(
             run,
             found,
             mounts,
+            folders=[g.view() for g in shared],
             function=run.function,
             inputs=run.inputs,
             approvals=manifest.functions[run.function].approvals,

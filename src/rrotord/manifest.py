@@ -350,6 +350,8 @@ class Manifest(BaseModel):
     clis: list[Annotated[str, Field(pattern=NAME)]] = []  # the CLIs on this rrotor its functions run (ctx.cli)
     # the rrotor's graph (rrotord/graph.py), as ctx.graph: read it, or write it too (a pipeline); unset: neither
     graph: Literal["read", "write"] | None = None
+    # its calls may carry folders of this machine (rrotord/folders.py), mounted for the run and told as ctx.folders
+    folders: bool = False
 
     @field_validator("hosts")
     @classmethod
@@ -422,6 +424,7 @@ class Manifest(BaseModel):
                 ("needs", self.needs),
                 ("clis", self.clis),
                 ("graph", self.graph),
+                ("folders", self.folders),
             )
             if value
         ]

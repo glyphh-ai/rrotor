@@ -104,6 +104,8 @@ class Call(Message):
     inputs: dict[str, Any]
     caller: Literal["routine", "claude", "panel", "test"]
     clearance: float = Field(1.0, ge=0, le=1)
+    # the machine's folders the run is given, [{path, access}]: the runner checks them (rrotord/folders.py)
+    folders: list[dict[str, Any]] | None = None
 
 
 class Continue(Message):

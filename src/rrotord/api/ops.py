@@ -168,7 +168,7 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude", origin
         or not isinstance(clearance, int | float)
         or not 0 <= clearance <= 1
     ):
-        raise BadRequest("Send {program, function, inputs, version?, clearance? (0 to 1)}.")
+        raise BadRequest("Send {program, function, inputs, version?, clearance? (0 to 1), folders?}.")
     c = s.cluster
     if (
         c is not None
@@ -185,6 +185,7 @@ async def call(s: Services, data: dict[str, Any], caller: str = "claude", origin
         caller=caller,
         origin=origin,
         clearance=float(clearance),
+        folders=data.get("folders"),
     )
     await forward.committed(s, term)
     return answer(run)

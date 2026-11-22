@@ -59,6 +59,8 @@ What rrotor reads in `self` mode. Each package sets these for you.
 | `RROTOR_LINK` | no, default `on` | `off` for air-gapped: no link and no heartbeat; rrotor runs on its licence key from the variable or the file |
 | `RROTOR_KEYS_SHA256` | air-gapped | The SHA-256 of each runtime key that may call it, comma-separated (`printf %s "$KEY" \| sha256sum`). With the link on, the keys come down the link and this is not needed. With the link off there is no Glyphh sign-in either: runtime keys are the only way in |
 | `RROTOR_DATA` | no, default `/data` | The persistent volume. One rrotor writes it, never two |
+| `RROTOR_FOLDERS` | no, default none | The folders of this machine a bot may be given, absolute paths joined by `:` (e.g. `/srv/shared:/home/ana/Documents`). Mount each into the container at the same path. None by default: a bot's run then sees nothing of the machine but its own workspace, and the platform's folder picker lists nothing. Never `/`, the data volume, or a system path |
+| `RROTOR_PLATFORM_ORIGIN` | no, default `https://platform.glyphh.ai` | The one web origin whose pages may read this rrotor from the browser (the folder picker, `GET /v1/folders`), with a read ticket from Glyphh |
 
 What it logs and where that goes are [below](#logs-audit-and-drains).
 
