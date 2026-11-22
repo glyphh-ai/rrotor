@@ -8,13 +8,16 @@ from pathlib import Path
 
 import pytest
 
+from rrotord import folders
 from rrotord.errors import BadRequest, Forbidden, RrotorError
-from rrotord.folders import MAX, Folders, Grant, roots_of
+from rrotord.folders import MAX, RESERVED, Folders, Grant, roots_of
 
 
 @pytest.fixture
-def home(tmp_path: Path) -> Path:
-    """A machine: Documents (offered) with invoices and a hidden folder in it, Private beside it, and rrotor's data."""
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A machine: Documents (offered) with invoices and a hidden folder in it, Private beside it, and rrotor's data.
+    It is under the tests' temporary folder, which on Linux is in /tmp: the sandbox's own, here, is /usr alone."""
+    monkeypatch.setattr(folders, "RESERVED", (Path("/usr"),))
     root = Path(os.path.realpath(tmp_path)) / "home"
     for folder in ("Documents/invoices/2026", "Documents/.hidden", "Documents/letters", "Private", "data"):
         (root / folder).mkdir(parents=True)
@@ -47,6 +50,15 @@ def test_a_root_that_cannot_be_offered_stops_rrotor(home, bad):
     with pytest.raises(RrotorError) as refused:
         roots_of(bad.format(home=home), home / "data")
     assert refused.value.code == "E_CONFIG" and "RROTOR_FOLDERS" in refused.value.message
+
+
+def test_what_the_sandbox_keeps_for_itself_is_never_offered():
+    kept = ("/usr", "/etc", "/tmp", "/proc", "/dev", "/data", "/program", "/venv", "/opt", "/files", "/work")
+    assert {Path(p) for p in kept} <= set(RESERVED)
+    for path in ("/usr/share", "/program/files", "/data/programs", "/opt/parts"):  # none a link on any test host
+        with pytest.raises(RrotorError) as refused:
+            roots_of(path, Path("/data"))
+        assert refused.value.code == "E_CONFIG", path
 
 
 def test_a_call_is_given_the_folders_it_asks_for_inside_the_roots(home):

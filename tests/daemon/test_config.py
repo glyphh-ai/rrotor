@@ -43,7 +43,8 @@ def test_load_defaults():
     assert c.folders == ()  # no folder of the machine is offered until its owner names one
 
 
-def test_the_folders_the_owner_offers_are_read(tmp_path):
+def test_the_folders_the_owner_offers_are_read(tmp_path, monkeypatch):
+    monkeypatch.setattr("rrotord.folders.RESERVED", (Path("/usr"),))  # the tests' own folder is in /tmp on Linux
     local = {"RROTOR_SERVER": "http://s", "RROTOR_LOCAL_TOKEN_SHA256": DIGEST, "RROTOR_DATA": str(tmp_path / "data")}
     docs, work = tmp_path.resolve() / "docs", tmp_path.resolve() / "work"
     docs.mkdir()
