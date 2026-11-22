@@ -20,6 +20,8 @@ from rrotor.testing import FakeHttp, Harness
 HERE = Path(__file__).resolve().parent.parent
 REPO = "acme/crew"
 API = "https://api.github.com/"
+USAGE = {"input_tokens": 1200, "output_tokens": 80}
+ZERO = {"input_tokens": 0, "output_tokens": 0}
 ENV = {
     **os.environ,
     "GIT_AUTHOR_NAME": "t",
@@ -101,12 +103,12 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(program, "GITHUB", f"file://{remote}")
     turns: list[dict[str, Any]] = []
 
-    def claude(ctx: Any, prompt: str, persona: str, model: str | None, cwd: Path) -> str:
+    def claude(ctx: Any, prompt: str, persona: str, model: str | None, cwd: Path) -> tuple[str, dict[str, int]]:
         turns.append({"prompt": prompt, "persona": persona, "model": model, "cwd": cwd})
         act = world_state["act"]
-        return act(cwd) if callable(act) else str(act)
+        return (act(cwd) if callable(act) else str(act)), dict(world_state["usage"])
 
-    world_state: dict[str, Any] = {"act": None}
+    world_state: dict[str, Any] = {"act": None, "usage": USAGE}
     monkeypatch.setattr(program, "claude_code", claude)
     hub = Hub()
     return {
@@ -153,6 +155,7 @@ def test_a_turn_commits_as_the_bot_pushes_and_opens_a_pull_request(world):
     assert (out["status"], out["number"], out["pr_url"]) == ("open", 1, f"https://github.com/{REPO}/pull/1")
     assert out["files"] == [{"path": "hello.txt", "added": 1, "removed": 0}] and out["done"] is False
     assert out["title"] == "Ada: I wrote hello." and out["said"].endswith("test it.")
+    assert out["usage"] == USAGE
     assert out["head_sha"] == git(world["bare"], "rev-parse", "turn-1-ada-k3x9")
     assert out["base_sha"] == git(world["bare"], "rev-parse", "main")
     assert git(world["bare"], "log", "-1", "--format=%an <%ae> %s", "turn-1-ada-k3x9") == (
@@ -195,6 +198,7 @@ def test_a_turn_that_changed_nothing_opens_nothing_and_leaves_no_branch(world):
     world["state"]["act"] = "Nothing to do here."
     out = harness(world).call("turn", turn_inputs()).data
     assert (out["status"], out["pr_url"], out["head_sha"], out["files"]) == ("unchanged", None, None, [])
+    assert out["usage"] == USAGE  # a turn that changed nothing still used tokens
     clone = world["data"] / "repos" / "acme__crew"
     assert git(clone, "branch", "--list", "turn-*") == "" and world["hub"].asked == []
     assert (
@@ -262,6 +266,95 @@ def test_a_turn_needs_its_data_folder(world):
     h = Harness(world["program"], world["files"], http=FakeHttp({API: world["hub"]}))
     world["files"].mkdir(exist_ok=True)
     assert '"data": true' in h.call("turn", turn_inputs()).data["reason"]
+
+
+def pick_inputs(**over: Any) -> dict[str, Any]:
+    return {"repo": REPO, "base": "main", "prompt": "Who goes next?", "github_token": "ghs_test", **over}
+
+
+def test_a_pick_answers_what_claude_said_with_its_usage(world):
+    def reads(cwd: Path) -> str:
+        assert (cwd / "README.md").read_text() == "# crew\n"
+        return '{"next": "bo", "why": "Tests are missing.", "done": false}'
+
+    world["state"]["act"] = reads
+    done = harness(world).call("pick", pick_inputs())
+    assert done.status == "done", done.data
+    assert done.data == {
+        "status": "picked",
+        "answer": '{"next": "bo", "why": "Tests are missing.", "done": false}',
+        "usage": USAGE,
+    }
+    clone = world["data"] / "repos" / "acme__crew"
+    told = world["turns"][0]
+    assert (told["cwd"], told["prompt"], told["model"]) == (clone, "Who goes next?", None)
+    assert told["persona"] == f"Your working folder is {clone}."
+    assert world["hub"].asked == [] and "ghs_test" not in (clone / ".git" / "config").read_text()
+    world["state"]["act"] = "not json at all"  # the server reads the answer, not the program
+    again = harness(world).call("pick", pick_inputs(persona="You run this project.", model="opus")).data
+    assert again["answer"] == "not json at all"
+    told = world["turns"][1]
+    assert (told["persona"], told["model"]) == (f"You run this project.\nYour working folder is {clone}.", "opus")
+
+
+def test_a_pick_reads_what_github_has_now_and_leaves_the_clone_clean(world):
+    world["state"]["act"] = writes_hello
+    harness(world).call("turn", turn_inputs())  # the clone is there, on main as the turn left it
+    (world["seed"] / "more.md").write_text("more\n")
+    git(world["seed"], "add", "-A")
+    git(world["seed"], "commit", "--quiet", "-m", "More")
+    git(world["seed"], "push", "--quiet", "origin", "HEAD:main")
+    before = git(world["bare"], "for-each-ref")
+
+    def meddles(cwd: Path) -> str:
+        assert (cwd / "more.md").exists() and not (cwd / "hello.txt").exists()
+        (cwd / "notes.txt").write_text("an orchestrator changes nothing\n")
+        (cwd / "README.md").write_text("# mine now\n")
+        git(cwd, "add", "README.md")
+        git(cwd, "commit", "--quiet", "-m", "my own commit")
+        (cwd / "more.md").write_text("less\n")
+        return "Bo goes next."
+
+    world["state"]["act"] = meddles
+    out = harness(world).call("pick", pick_inputs()).data
+    assert out["status"] == "picked" and out["answer"] == "Bo goes next."
+    clone = world["data"] / "repos" / "acme__crew"
+    assert git(clone, "status", "--porcelain", "--ignored") == "" and not (clone / "notes.txt").exists()
+    assert git(clone, "rev-parse", "HEAD") == git(world["seed"], "rev-parse", "HEAD")
+    assert (clone / "README.md").read_text() == "# crew\n" and (clone / "more.md").read_text() == "more\n"
+    assert git(world["bare"], "for-each-ref") == before and world["hub"].asked == [world["hub"].asked[0]]
+    world["state"]["act"] = writes_hello  # and the next turn starts from GitHub's base, not the orchestrator's commit
+    turn = harness(world).call("turn", turn_inputs(branch="turn-2-ada-k3x9")).data
+    assert turn["base_sha"] == git(world["seed"], "rev-parse", "HEAD")
+    assert turn["files"] == [{"path": "hello.txt", "added": 1, "removed": 0}]
+
+
+@pytest.mark.parametrize(
+    ("over", "said"),
+    [
+        ({"repo": "not a repo"}, "repo is owner/name"),
+        ({"base": "a..b"}, "base is not a branch name"),
+        ({"base": "-x"}, "base is not a branch name"),
+        ({"base": "gone"}, "git checkout failed"),
+    ],
+)
+def test_a_pick_refuses_a_repo_or_a_base_it_cannot_read(world, over, said):
+    failed = harness(world).call("pick", pick_inputs(**over))
+    assert (failed.status, failed.data["code"]) == ("failed", "E_SWARM") and said in failed.data["reason"]
+    assert world["turns"] == []
+
+
+def test_a_pick_claude_could_not_make_fails_saying_why_and_leaves_the_clone_clean(world):
+    def fails(cwd: Path) -> str:
+        (cwd / "half.txt").write_text("half")
+        raise world["program"].SwarmError("Claude Code failed: overloaded")
+
+    world["state"]["act"] = fails
+    failed = harness(world).call("pick", pick_inputs())
+    assert (failed.status, failed.data["code"]) == ("failed", "E_SWARM")
+    assert failed.data["reason"] == "Claude Code failed: overloaded"
+    clone = world["data"] / "repos" / "acme__crew"
+    assert git(clone, "status", "--porcelain", "--ignored") == "" and not (clone / "half.txt").exists()
 
 
 def test_merge_merges_on_github_and_drops_the_branch_everywhere(world):
@@ -381,15 +474,42 @@ def test_claude_code_runs_in_the_clone_on_the_orgs_key(tmp_path, monkeypatch):
     ran = Ran({"result": " I did it. ", "is_error": False})
     monkeypatch.setattr(program.subprocess, "run", ran)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
-    said = program.claude_code(ctx_with("sk-ant-x"), "Do it.", "You are Ada.", "opus", tmp_path)
+    said, usage = program.claude_code(ctx_with("sk-ant-x"), "Do it.", "You are Ada.", "opus", tmp_path)
     assert said == "I did it." and ran.kw["cwd"] == tmp_path
+    assert usage == ZERO  # no usage reported: zeros
     assert ran.argv[:3] == ["claude", "-p", "Do it."] and ran.argv[-2:] == ["--model", "opus"]
     assert "--append-system-prompt" in ran.argv and "bypassPermissions" in ran.argv
     env = ran.kw["env"]
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-x" and env["HTTPS_PROXY"] == "http://127.0.0.1:3128"
     assert "sk-ant-x" not in ran.argv
     monkeypatch.setattr(program.subprocess, "run", Ran({"result": "x"}))
-    assert program.claude_code(ctx_with("k"), "p", "s", None, tmp_path) == "x"
+    assert program.claude_code(ctx_with("k"), "p", "s", None, tmp_path)[0] == "x"
+
+
+@pytest.mark.parametrize(
+    ("usage", "counted"),
+    [
+        (
+            {
+                "input_tokens": 12,
+                "cache_creation_input_tokens": 300,
+                "cache_read_input_tokens": 4000,
+                "output_tokens": 77,
+                "server_tool_use": {"web_search_requests": 1},
+            },
+            {"input_tokens": 4312, "output_tokens": 77},
+        ),
+        ({"input_tokens": 5, "output_tokens": 2}, {"input_tokens": 5, "output_tokens": 2}),
+        ({"input_tokens": None, "cache_read_input_tokens": "many", "output_tokens": -3}, ZERO),
+        ({}, ZERO),
+        (None, ZERO),
+        ("a lot", ZERO),
+    ],
+)
+def test_claude_code_counts_its_tokens_the_three_kinds_of_input_together(tmp_path, monkeypatch, usage, counted):
+    program = load()
+    monkeypatch.setattr(program.subprocess, "run", Ran({"result": "ok", "usage": usage}))
+    assert program.claude_code(ctx_with("k"), "p", "s", None, tmp_path) == ("ok", counted)
 
 
 @pytest.mark.parametrize(

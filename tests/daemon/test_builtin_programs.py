@@ -38,7 +38,8 @@ def test_glyphh_bot_reads_the_orgs_key_only_when_set_and_runs_claude():
     assert found.optional() == {"ANTHROPIC_API_KEY"} and found.clis == ["claude"]
     assert set(found.functions) == {"run"} and found.functions["run"].writes
     swarm = m.read(PROGRAMS / "glyphh_swarm")
-    assert set(swarm.functions) == {"turn", "merge", "reject"} and swarm.data and swarm.optional() == set()
+    assert set(swarm.functions) == {"turn", "pick", "merge", "reject"} and swarm.data and swarm.optional() == set()
+    assert all(f.writes for f in swarm.functions.values())
 
 
 def test_a_builtin_programs_files_leave_out_its_tests_caches_and_dotfiles(tmp_path):
@@ -64,7 +65,7 @@ async def test_a_builtin_program_is_deployed_once_and_again_when_its_code_change
     image = tmp_path / "image"
     shutil.copytree(PROGRAMS / "glyphh_swarm", image / "glyphh_swarm")
     first = await d.builtin(image / "glyphh_swarm")
-    assert first is not None and first.builtin == {"vendor": "Glyphh", "title": "Glyphh swarm", "version": "1"}
+    assert first is not None and first.builtin == {"vendor": "Glyphh", "title": "Glyphh project", "version": "2"}
     assert (first.src / "program.py").is_file() and (first.src / "swarm_turns.py").is_file()
     assert not (first.src / "tests").exists() and (first.root / "venv").is_dir()
     assert d.programs.deployed() == [] and d.programs.active("glyphh_swarm") == first
