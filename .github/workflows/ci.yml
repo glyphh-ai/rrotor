@@ -183,11 +183,11 @@ jobs:
           retention-days: 14
 
   # The published image: the base, one image for hosted, self-hosted and local rrotors (RROTOR_MODE decides; the
-  # licence key sets its limits). Pushed first to Fly's own registry for the runtimes app
-  # (vars.FLY_RUNTIME_APP, glyphh-ai-runtime), the one private registry Fly machines pull from, amd64, which is what
-  # Fly runs (the server's GLYPHH_FLY_IMAGE names registry.fly.io/<app>:<version>); then to
-  # ghcr.io/glyphh-ai/rrotor:<version> and :latest, amd64 and arm64, for the deploy packages. Built only when
-  # images are published and FLY_API_TOKEN is set.
+  # licence key sets its limits). Pushed first to ghcr.io/glyphh-ai/rrotor:<version> and :latest, amd64 and arm64,
+  # for the deploy packages (the release); then to Fly's own registry for the runtimes app (vars.FLY_RUNTIME_APP,
+  # glyphh-ai-runtime), the one private registry Fly machines pull from, amd64, which is what Fly runs (the server's
+  # GLYPHH_FLY_IMAGE names registry.fly.io/<app>:<version>), skipped with a warning while that app is not there.
+  # Built only when images are published and FLY_API_TOKEN is set.
   image-hosted:
     runs-on: ubuntu-24.04
     needs: [image]
@@ -204,34 +204,40 @@ jobs:
       - name: Version
         id: v
         run: echo "version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
-      - uses: docker/login-action@v3
-        with:
-          registry: registry.fly.io
-          username: x
-          password: ${{ secrets.FLY_API_TOKEN }}
-      - name: Push the hosted image to Fly's registry (amd64)
-        env:
-          # The key a hosted rrotor checks a part's signature with, baked in (the licence key's is in the code).
-          RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
-        run: |
-          [ -n "$RELEASE_PUBLIC_KEY" ] || { echo "::error::Set the variable RELEASE_PUBLIC_KEY."; exit 1; }
-          repo=registry.fly.io/$APP; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
-          docker buildx build -f image/Dockerfile --target hosted --platform linux/amd64 \
-            --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:$s" \
-            --push .
-          echo "hosted: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
       - name: Sign in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push the same image to GHCR (amd64 and arm64), :<version> and :latest
+      - name: Push the image to GHCR (amd64 and arm64), :<version> and :latest
         env:
+          # The key a hosted rrotor checks a part's signature with, baked in (the licence key's is in the code).
           RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
         run: |
+          [ -n "$RELEASE_PUBLIC_KEY" ] || { echo "::error::Set the variable RELEASE_PUBLIC_KEY."; exit 1; }
           repo=ghcr.io/glyphh-ai/rrotor; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
           docker buildx build -f image/Dockerfile --target hosted --platform linux/amd64,linux/arm64 \
             --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" \
             -t "$repo:$v" -t "$repo:latest" -t "$repo:$s" --push .
           echo "ghcr: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
+      - uses: docker/login-action@v3
+        with:
+          registry: registry.fly.io
+          username: x
+          password: ${{ secrets.FLY_API_TOKEN }}
+      - name: Push the hosted image to Fly's registry (amd64), when the runtimes app is there
+        env:
+          RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
+        run: |
+          repo=registry.fly.io/$APP; v=${{ steps.v.outputs.version }}; s=sha-${GITHUB_SHA::12}
+          # Hosted rrotors are off while the runtimes app is gone: its registry answers "app repository not found",
+          # and the image on GHCR is the release.
+          if ! docker buildx build -f image/Dockerfile --target hosted --platform linux/amd64 \
+            --build-arg VERSION="$v" --build-arg RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY" -t "$repo:$v" -t "$repo:$s" \
+            --push . 2>&1 | tee push.log; then
+            grep -q "app repository not found" push.log || exit 1
+            echo "::warning::Fly app $APP is not there: the hosted image went to GHCR only."
+            exit 0
+          fi
+          echo "hosted: $repo:$v ($(docker buildx imagetools inspect "$repo:$s" --format '{{json .Manifest.Digest}}'))" >> "$GITHUB_STEP_SUMMARY"
