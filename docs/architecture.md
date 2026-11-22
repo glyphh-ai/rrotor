@@ -606,7 +606,7 @@ link's `hello` leaves it out (it is the image's, not the Cloud's).
 | `cursor` | Cursor's agent CLI (`cursor-agent`, Cursor's download, its own node) | 2026.10.22-27dcf5f | `login` with `NO_OPEN_BROWSER`: an address it polls (`paste: false`) |
 | `grok` | xAI's Grok Build CLI (`grok`, npm, brotli-packed native binary) | 1.0.70 | `login --device-auth`: an xAI device code |
 | `copilot` | GitHub's Copilot CLI (`copilot`, native build from npm) | 1.0.105 | `login --device-code`: a GitHub device code |
-| `glyphh` | Glyphh's own CLI (`glyphh`, the Glyphh SDK's console script: `image/sdk.lock`, run with the image's Python) | 3.6.0 | `login`: an API key from platform.glyphh.ai, pasted; or the secret `GLYPHH_API_KEY` |
+| `glyphh` | Glyphh's own CLI (`glyphh`, the Glyphh SDK's console script: `image/sdk.lock`, run with the image's Python) | 3.12.0 | `login`: an API key from platform.glyphh.ai, pasted; or the secret `GLYPHH_API_KEY` |
 
 Each vendor's agent keeps its private HOME (`home: true`), allows its one-shot forms only (`-p <prompt>` and the
 like, its status, `--version`; a bare command would open its interface and wait), waits for the person's approval to

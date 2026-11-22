@@ -166,7 +166,7 @@
     "glyphh": {
       "vendor": "Glyphh",
       "title": "Glyphh CLI",
-      "version": "3.6.0",
+      "version": "3.12.0",
       "command": "glyphh",
       "sdk": { "entry": "glyphh.cli:main" },
       "manifest": {
