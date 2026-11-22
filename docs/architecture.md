@@ -353,6 +353,7 @@ ctx.secrets["NAME"], ctx.secrets.get("NAME")   # a secret the manifest declares 
 ctx.cli(name, args, stdin=None) -> CliResult   # a command of a CLI the manifest names: exit_code, stdout, stderr
 ctx.graph                     # the rrotor's graph ("graph": "read" or "write"): rows, upsert, search, node, … (5.9)
 ctx.folders                   # the machine's folders this run was given: ({"path", "access": "read" | "write"}, …) (5.11)
+rrotor.files.Files(ctx.folders, before=None)   # their files, every path checked: list, read, search, write, move (5.11)
 ctx.log(message, **detail)
 ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 ```
@@ -840,7 +841,7 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   the same; `src/builtin.json` marks it and the link's `hello` leaves it out. Their tests run in CI with the Glyphh
   SDK they need beside rrotor.
 - **`glyphh_bot`, `run`:** one go of a bot, the Glyphh SDK's runner (`glyphh.bots.remote.go`, SDK 3.12) here.
-  Inputs `{package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort}`: `package` the
+  Inputs `{package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort, file_tools}`: `package` the
   bot's files by path (bot.json, agent.md, skills/; no code), `state` the runner's runs.sqlite (base64) the last go
   left (null for a bot's first), `given` what the run works on, `answer` an answer to the run waiting in `state`
   (carries it on instead of starting one: for a run whose rrotor run expired), the bot's Ada by `ada_base` and its
@@ -854,6 +855,30 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   Haiku 5.5 take all five) and left out otherwise, so a run never fails over it; `cli` takes none. Its manifest says
   `"folders": true`: the server's `call` carries the folders of this machine the bot's owner chose
   ([5.11](#511-the-machines-folders)), and the run has exactly those.
+  **Its folders' files** (`file_tools: true`, rrotor 0.8.0; `file_agent.py`): with folders given and `claude` `api`,
+  an agent step is no longer one request with no tools but a loop of tool use (the Messages API's `tools`,
+  `tool_use` and `tool_result`, the assistant's turns sent back as they came, until `end_turn`; at most 40 requests
+  a step) with five tools over exactly those folders, by `rrotor.files` ([5.11](#511-the-machines-folders)):
+  `list_folder {path?}`, `read_file {path}` (text; a Word `.docx` by the standard library; a PDF handed to Claude
+  as a `document`, which reads it itself: the image carries no PDF library; any other type says it cannot be read),
+  `search_files {query, under?}`, `write_file {path, content}` and `move_file {path, to}`. No delete, no shell.
+  A refusal (a path outside, a link, a read-only folder, a limit) is the tool's `is_error` result, in a plain
+  sentence, and Claude carries on. What the person typed for the run (`given`) is put before the step with its own
+  words. **A change is made only on the server's word**: before a write or a move the program calls the server's
+  tool `file_change` with the change's action and names (`{action, path, name, to?, to_name?}`), answered
+  `{allowed: true}` (the bot acts on its own, or the person's yes to this very change was there and is now used
+  up) or `{allowed: false}` (the person is to be asked). Then the step stops: the run is `needs_input` ("Write
+  Notes/Summary.md?", `yes` or `no`; `data.approval` true, `data.file` the change), and the conversation so far is
+  kept beside the leg's result in the run's checkpoint, on this machine. The `continue` carries the same
+  conversation on: a yes asks the server again (which takes the yes) and makes the change; a no is the tool's
+  refusal, told to Claude. A run whose wait expired (a fresh `call` with `answer`) has no conversation left: the
+  step starts again, and a yes the server holds is taken by the same change. Reads never ask. Every Result of such
+  a run names the files it read and changed so far, `data.files` (`[{name, did: read | written | moved}]`, `name`
+  the folder's name and the way down, `Invoices/2025/March.pdf`). **What is in a file never leaves the machine but
+  to Claude**: it is in no step's data, no log line and not in the runner's state; the step's own answer is the
+  bot's words, as before. Tokens are counted as a step's always were, every request of the loop added up, input
+  read from or written to the prompt cache counted as input. Without `file_tools` (an older server), without
+  folders, or with `claude` `cli`, a step is the single request it was.
   Each question the bot asks (a gate, a batch of items, an approval) is the run's `needs_input` (the question its
   prompt; `data` the whole run as `RunResult.to_result` gives it: `run_id`, `step`, `approval`, `options`, `batch`,
   `answer_with`, `log`, `data`, `tokens` and its `state` then) and a `continue` answers it: one of its options, a
@@ -927,6 +952,17 @@ with each `call` of `glyphh_bot`). The run then has exactly those, and nothing e
   one given is not in the sandbox at all: the way down to a given folder is bare directories. On a cluster's
   follower every folder is read-only, as the run's own are. `ctx.folders` tells the program what it was given. A
   CLI's run is given none.
+- **Their files, for a program that lets a model choose the paths:** `rrotor.files.Files(ctx.folders)` (standard
+  library only) lists a folder, reads a file (`Read`: `text`, cut at 200,000 characters and saying so, a Word
+  document's text, or a PDF's bytes), searches by name or text, writes a text file whole and moves or renames a
+  file. Every call checks its path against the folders given, by its real path: a path outside them, one with `..`,
+  and one that is a link or is reached through one are refused, and so is a change in a folder given to read
+  (`FileRefused`, `E_FILE_REFUSED`, a plain sentence). There is no delete, and a move never lands on a file that is
+  there. `before` is called with each `Change` (`action`, `path`, `name`, `to`) before anything is touched: there a
+  program asks the person, or refuses. Bounded: 8 MB read a run, 4 MB a file, 1 MB written a file, 50 matches a
+  search. `touched` names what was read and changed (`[{name, did}]`), never what is in it. The sandbox is the hard
+  wall (the mounts above); this check is the polite one, which says why. `glyphh_bot` builds a bot's file tools on
+  it ([5.10](#510-glyphhs-own-programs-bots-and-projects)).
 - **The picker.** `GET /v1/folders` lists the roots (those that exist); `GET /v1/folders?under=<path>` the folders
   directly inside `under`, itself a root or inside one, by name: `{folders: [{path, name}]}`. Folders only: no
   file, no hidden folder, no symlink, at most 1,000; nothing of what is in them. The same refusals as a call's.
