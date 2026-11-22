@@ -863,7 +863,10 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   project is done. Either way the run ends once two bots in a row said DONE, or the whole crew in a row had nothing
   to do.
   `turn` `{repo, base, branch, prompt, persona, model, github_token, bot_id?, bot_name?}`: the repo cloned or fetched
-  from GitHub (the token in git's environment, never an argument or a file), a fresh `branch` off `origin/<base>`,
+  from GitHub (`github_token` is that call's own: the server mints it for each step from the Glyphh GitHub App's
+  installation on the repo, for that one repo, with contents and pull requests write, for one hour; it is in git's
+  environment and the pull request's API calls, never an argument, a file or the clone's config, and Claude Code is
+  not given it), a fresh `branch` off `origin/<base>`,
   Claude Code (`claude -p`, `persona` its system prompt with the clone as its working folder, edits and commands
   allowed: rrotor's sandbox is its sandbox) doing the bot's part on the org's key (the secret `ANTHROPIC_API_KEY`),
   everything committed as the bot (`<bot_name> <bot_id>@glyphhbot.local`, titled `<bot_name>: <its first

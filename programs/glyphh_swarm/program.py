@@ -17,8 +17,10 @@ it mirrors) and calls one function at a time over the link:
 The program keeps the name it was deployed under when a project was a swarm: servers and rrotors call it by it.
 Glyphh Bot's own (glyphh-bot, src/main/workspace.ts: beginTurn, endTurn, merge, reject), with GitHub's API in place of
 `gh` (the image carries none): `GitHub` is that seam. Claude Code runs on the org's Anthropic key, this program's
-secret ANTHROPIC_API_KEY. The GitHub token is the call's: in git's environment for a fetch or a push, never an
-argument or a file."""
+secret ANTHROPIC_API_KEY. The GitHub token is the call's and for that call alone: the server mints it for each step
+from the Glyphh GitHub App's installation on the repo (that one repo, contents and pull requests, one hour: longer
+than a step may run). It is in git's environment for a fetch or a push and in the header of the pull request's API
+calls, never an argument or a file, never in the clone's config, and not in Claude Code's environment."""
 
 from __future__ import annotations
 
