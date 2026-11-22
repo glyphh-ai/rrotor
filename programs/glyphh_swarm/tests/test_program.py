@@ -8,6 +8,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -103,8 +105,12 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(program, "GITHUB", f"file://{remote}")
     turns: list[dict[str, Any]] = []
 
-    def claude(ctx: Any, prompt: str, persona: str, model: str | None, cwd: Path) -> tuple[str, dict[str, int]]:
+    def claude(
+        ctx: Any, prompt: str, persona: str, model: str | None, cwd: Path, term: Any = None
+    ) -> tuple[str, dict[str, int]]:
         turns.append({"prompt": prompt, "persona": persona, "model": model, "cwd": cwd})
+        term.add("cmd", "pytest -q")  # as Claude Code's stream is logged (terminal.follow)
+        term.add("out", "3 passed")
         act = world_state["act"]
         return (act(cwd) if callable(act) else str(act)), dict(world_state["usage"])
 
@@ -170,6 +176,42 @@ def test_a_turn_commits_as_the_bot_pushes_and_opens_a_pull_request(world):
     assert told["persona"] == f"You are Ada.\nYour working folder is {clone}."
     assert git(clone, "rev-parse", "--abbrev-ref", "HEAD") == "main" and not (clone / "hello.txt").exists()
     assert "ghs_test" not in (clone / ".git" / "config").read_text()
+
+
+def logged(world: dict[str, Any]) -> list[dict[str, Any]]:
+    log = world["data"] / "terminal" / "acme__crew.jsonl"
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def test_a_turn_logs_what_it_ran_for_the_person_to_read_and_never_the_token(world):
+    world["state"]["act"] = writes_hello
+    harness(world).call("turn", turn_inputs())
+    lines = logged(world)
+    assert [line["n"] for line in lines] == list(range(len(lines))) and all(line["at"] for line in lines)
+    said = [(line["kind"], line["text"]) for line in lines]
+    assert said[0] == ("note", "Ada's turn on turn-1-ada-k3x9")
+    assert said[1][0] == "cmd" and said[1][1].startswith("git clone --quiet --no-checkout ")
+    at = said.index(("cmd", "pytest -q"))
+    assert said[at + 1] == ("out", "3 passed") and said[at - 1] == ("cmd", "git checkout --quiet -B turn-1-ada-k3x9")
+    assert ("cmd", "git push --quiet --force -u origin turn-1-ada-k3x9") in said
+    assert ("note", "Ada's turn ended: pull request #1") in said
+    assert said[-1] == ("cmd", "git checkout --quiet --force main")
+    assert "ghs_test" not in json.dumps(lines) and "Authorization" not in json.dumps(lines)
+
+    world["state"]["act"] = "Nothing to do here."
+    harness(world).call("turn", turn_inputs(branch="turn-2-bo-k3x9", bot_name="Bo"))
+    more = logged(world)
+    assert more[: len(lines)] == lines and more[len(lines)]["n"] == len(lines)  # the log goes on, numbered on
+    assert {"note": "Bo's turn ended: nothing changed"}.items() <= {m["kind"]: m["text"] for m in more[-3:]}.items()
+
+
+def test_a_turn_that_fails_says_so_in_the_log(world):
+    def fails(cwd: Path) -> str:
+        raise world["program"].SwarmError("Claude Code failed: overloaded")
+
+    world["state"]["act"] = fails
+    harness(world).call("turn", turn_inputs())
+    assert ("err", "Claude Code failed: overloaded") in [(line["kind"], line["text"]) for line in logged(world)]
 
 
 def test_the_next_turn_starts_from_what_github_has_now(world):
@@ -290,6 +332,12 @@ def test_a_pick_answers_what_claude_said_with_its_usage(world):
     assert (told["cwd"], told["prompt"], told["model"]) == (clone, "Who goes next?", None)
     assert told["persona"] == f"Your working folder is {clone}."
     assert world["hub"].asked == [] and "ghs_test" not in (clone / ".git" / "config").read_text()
+    said = [(line["kind"], line["text"]) for line in logged(world)]  # a pick is logged as a turn is
+    assert said[0] == ("note", "the orchestrator's pick on main")
+    at = said.index(("cmd", "pytest -q"))
+    assert said[at - 1] == ("cmd", "git checkout --quiet --force --detach origin/main")
+    assert said[at + 1 : at + 3] == [("out", "3 passed"), ("note", "the orchestrator picked")]
+    assert said[-1] == ("cmd", "git clean -fdxq") and "ghs_test" not in json.dumps(said)
     world["state"]["act"] = "not json at all"  # the server reads the answer, not the program
     again = harness(world).call("pick", pick_inputs(persona="You run this project.", model="opus")).data
     assert again["answer"] == "not json at all"
@@ -355,6 +403,7 @@ def test_a_pick_claude_could_not_make_fails_saying_why_and_leaves_the_clone_clea
     assert failed.data["reason"] == "Claude Code failed: overloaded"
     clone = world["data"] / "repos" / "acme__crew"
     assert git(clone, "status", "--porcelain", "--ignored") == "" and not (clone / "half.txt").exists()
+    assert ("err", "Claude Code failed: overloaded") in [(line["kind"], line["text"]) for line in logged(world)]
 
 
 def test_merge_merges_on_github_and_drops_the_branch_everywhere(world):
@@ -450,17 +499,47 @@ def test_merge_and_reject_without_a_clone_here_touch_only_github(world):
 
 
 class Ran:
-    def __init__(self, out: Any = None, code: int = 0, err: str = "", raises: BaseException | None = None) -> None:
-        self.out, self.code, self.err, self.raises = out, code, err, raises
+    """Claude Code as `subprocess.Popen` starts it: its stream (stream-json, one event a line) on stdout, `err` on
+    the file it was given for stderr, its exit code; `hangs` never ends until it is killed."""
+
+    def __init__(
+        self, out: Any = None, code: int = 0, err: str = "", raises: BaseException | None = None, hangs: bool = False
+    ) -> None:
+        self.out, self.code, self.err, self.raises, self.hangs = out, code, err, raises, hangs
         self.argv: list[str] = []
         self.kw: dict[str, Any] = {}
+        self.killed = threading.Event()
 
-    def __call__(self, argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+    def __call__(self, argv: list[str], **kw: Any) -> Ran:
         self.argv, self.kw = argv, kw
         if self.raises:
             raise self.raises
-        stdout = self.out if isinstance(self.out, str) else json.dumps(self.out)
-        return subprocess.CompletedProcess(argv, self.code, stdout, self.err)
+        kw["stderr"].write(self.err)
+        return self
+
+    def __enter__(self) -> Ran:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    @property
+    def stdout(self) -> Iterator[str]:
+        events = self.out if isinstance(self.out, list) else [self.out]
+        for event in events:
+            yield (event if isinstance(event, str) else json.dumps(event)) + "\n"
+        if self.hangs:
+            self.killed.wait(5)
+
+    def wait(self) -> int:
+        return self.code
+
+    def kill(self) -> None:
+        self.killed.set()
+
+
+def ended(said: str, is_error: bool = False) -> dict[str, Any]:
+    return {"type": "result", "subtype": "success", "is_error": is_error, "result": said}
 
 
 def ctx_with(key: str | None) -> Any:
@@ -471,18 +550,20 @@ def ctx_with(key: str | None) -> Any:
 
 def test_claude_code_runs_in_the_clone_on_the_orgs_key(tmp_path, monkeypatch):
     program = load()
-    ran = Ran({"result": " I did it. ", "is_error": False})
-    monkeypatch.setattr(program.subprocess, "run", ran)
+    ran = Ran([{"type": "system", "subtype": "init"}, ended(" I did it. ")])
+    monkeypatch.setattr(program.subprocess, "Popen", ran)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
     said, usage = program.claude_code(ctx_with("sk-ant-x"), "Do it.", "You are Ada.", "opus", tmp_path)
     assert said == "I did it." and ran.kw["cwd"] == tmp_path
     assert usage == ZERO  # no usage reported: zeros
     assert ran.argv[:3] == ["claude", "-p", "Do it."] and ran.argv[-2:] == ["--model", "opus"]
     assert "--append-system-prompt" in ran.argv and "bypassPermissions" in ran.argv
+    at = ran.argv.index("--output-format")
+    assert ran.argv[at + 1 : at + 3] == ["stream-json", "--verbose"]
     env = ran.kw["env"]
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-x" and env["HTTPS_PROXY"] == "http://127.0.0.1:3128"
-    assert "sk-ant-x" not in ran.argv
-    monkeypatch.setattr(program.subprocess, "run", Ran({"result": "x"}))
+    assert "sk-ant-x" not in ran.argv and not Path(env["HOME"]).exists()  # its scratch home goes with it
+    monkeypatch.setattr(program.subprocess, "Popen", Ran(ended("x")))
     assert program.claude_code(ctx_with("k"), "p", "s", None, tmp_path)[0] == "x"
 
 
@@ -508,22 +589,84 @@ def test_claude_code_runs_in_the_clone_on_the_orgs_key(tmp_path, monkeypatch):
 )
 def test_claude_code_counts_its_tokens_the_three_kinds_of_input_together(tmp_path, monkeypatch, usage, counted):
     program = load()
-    monkeypatch.setattr(program.subprocess, "run", Ran({"result": "ok", "usage": usage}))
+    # The stream's last event, `result`, carries the run's usage; an earlier event's own usage is not the run's.
+    stream = [
+        {"type": "assistant", "message": {"content": [], "usage": {"input_tokens": 999, "output_tokens": 999}}},
+        {**ended("ok"), "usage": usage},
+    ]
+    monkeypatch.setattr(program.subprocess, "Popen", Ran(stream))
     assert program.claude_code(ctx_with("k"), "p", "s", None, tmp_path) == ("ok", counted)
+
+
+def test_what_claude_code_runs_is_logged_as_it_runs(tmp_path, monkeypatch):
+    program = load()
+    stream = [
+        {"type": "system", "subtype": "init"},
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Running the tests."},
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pytest -q"}},
+                    {"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file_path": "/data/repos/a/x.py"}},
+                    {"type": "tool_use", "id": "t3", "name": "Glob", "input": {"pattern": "*.py"}},
+                    "not a block",
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "3 passed"}, 7]},
+                    {"type": "tool_result", "tool_use_id": "t2", "content": "edited"},
+                ]
+            },
+        },
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t4", "name": "Bash", "input": {}}]}},
+        {
+            "type": "user",
+            "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "t4", "content": "no such", "is_error": True}]
+            },
+        },
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": {"odd": 1}}]}},
+        {"type": "user", "message": "not an object"},
+        "a line that is not JSON",
+        "[1, 2]",
+        {**ended("Done."), "usage": {"input_tokens": 7, "cache_read_input_tokens": 100, "output_tokens": 9}},
+    ]
+    monkeypatch.setattr(program.subprocess, "Popen", Ran(stream))
+    term = program.Terminal(tmp_path / "terminal" / "acme__crew.jsonl")
+    # the same run gives both: the commands logged as they came, and the tokens from its last event
+    assert program.claude_code(ctx_with("k"), "p", "s", None, tmp_path, term) == (
+        "Done.",
+        {"input_tokens": 107, "output_tokens": 9},
+    )
+    lines = [json.loads(line) for line in (tmp_path / "terminal" / "acme__crew.jsonl").read_text().splitlines()]
+    assert [(line["kind"], line["text"]) for line in lines] == [
+        ("cmd", "pytest -q"),
+        ("note", "Edit /data/repos/a/x.py"),
+        ("out", "3 passed"),
+        ("err", "no such"),
+    ]
 
 
 @pytest.mark.parametrize(
     ("ran", "said"),
     [
-        (Ran({"result": "rate limited", "is_error": True}, 1), "Claude Code failed: rate limited"),
+        (Ran(ended("rate limited", is_error=True), 1), "Claude Code failed: rate limited"),
         (Ran("not json", 1, "boom"), "Claude Code failed: boom"),
-        (Ran(raises=subprocess.TimeoutExpired("claude", 1)), "did not finish its turn"),
+        (Ran("not json", 1), "Claude Code failed: not json"),
+        (Ran({"type": "system"}), "Claude Code failed: $"),
+        (Ran(ended("x"), hangs=True), "did not finish its turn"),
         (Ran(raises=FileNotFoundError()), "is not on this rrotor"),
     ],
 )
 def test_claude_code_that_fails_says_why(tmp_path, monkeypatch, ran, said):
     program = load()
-    monkeypatch.setattr(program.subprocess, "run", ran)
+    monkeypatch.setattr(program.subprocess, "Popen", ran)
+    monkeypatch.setattr(program, "CLAUDE_SECONDS", 0.05 if ran.hangs else 30)
     with pytest.raises(program.SwarmError, match=said):
         program.claude_code(ctx_with("k"), "p", "s", None, tmp_path)
 

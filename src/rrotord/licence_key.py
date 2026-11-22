@@ -134,9 +134,10 @@ def _count(data: dict[str, Any], field: str, least: int) -> int | None:
     raise Refused(f"{field} is not a whole number of at least {least}, or null")
 
 
-def parse(text: str) -> Key:
-    """A key from its text: refused (Refused, with why) unless it is `<payload>.<signature>`, the signature verifies
-    and every known field is there with its type. Unknown fields are ignored."""
+def signed(text: str) -> dict[str, Any]:
+    """What Glyphh signed, from `<payload>.<signature>`: the payload's JSON object, once its signature verifies with
+    one of `PUBLIC_KEYS`; refused (Refused, with why) otherwise. A licence key is one (`parse`); so is a work ticket
+    (rrotord/ticket.py)."""
     parts = text.strip().split(".")
     if len(parts) != 2:
         raise Refused("not <payload>.<signature>")
@@ -149,6 +150,13 @@ def parse(text: str) -> Key:
         raise Refused("the payload is not UTF-8 JSON") from None
     if not isinstance(data, dict):
         raise Refused("the payload is not a JSON object")
+    return data
+
+
+def parse(text: str) -> Key:
+    """A key from its text: refused (Refused, with why) unless it is `<payload>.<signature>`, the signature verifies
+    and every known field is there with its type. Unknown fields are ignored."""
+    data = signed(text)
     missing = [f for f in FIELDS if f not in data]
     if missing:
         raise Refused(f"{', '.join(missing)} missing")

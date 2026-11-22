@@ -150,6 +150,7 @@ class LinkHandler:
                 origin="link",
                 run_id=str(message.run_id),
                 clearance=message.clearance,
+                folders=message.folders,
             )
         except RrotorError as err:
             await self._answer(str(message.run_id), failed("call", err.code, err.message))

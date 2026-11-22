@@ -317,6 +317,7 @@ and the arguments it may be run with.
 | `schedules` | Functions the runtime calls by itself: each `{function, cron, tz?, input?, name?}` ([5.6](#56-schedules)) |
 | `clis` | The CLIs on this rrotor its functions run with `ctx.cli` (built in or deployed, [5.7](#57-clis)): a deploy naming one this rrotor does not hold is refused (`E_MANIFEST`); every call runs on a cluster's head, where CLIs run |
 | `graph` | `read` or `write`: the rrotor's graph as `ctx.graph` ([5.9](#59-the-graph)), to search and walk it, or to write it too (a pipeline). Unset, `ctx.graph` refuses (`E_GRAPH_UNDECLARED`). Every call runs on a cluster's head, which keeps the graph. Not for a CLI |
+| `folders` | `true`: a call of it may carry folders of the machine, mounted for the run and told as `ctx.folders` ([5.11](#511-the-machines-folders)). Unset, a call that carries any is refused (`E_FOLDERS_UNDECLARED`). Not for a CLI |
 | `connectors` | Accepted and kept; nothing uses them yet ([Not built yet](#not-built-yet)) |
 
 A deploy refuses (`E_MANIFEST`) a manifest with an unknown key, a bad value, or a function `program.py` does not
@@ -351,6 +352,7 @@ ctx.readonly                  # a cluster follower's run: its folders are read-o
 ctx.secrets["NAME"], ctx.secrets.get("NAME")   # a secret the manifest declares (5.5)
 ctx.cli(name, args, stdin=None) -> CliResult   # a command of a CLI the manifest names: exit_code, stdout, stderr
 ctx.graph                     # the rrotor's graph ("graph": "read" or "write"): rows, upsert, search, node, … (5.9)
+ctx.folders                   # the machine's folders this run was given: ({"path", "access": "read" | "write"}, …) (5.11)
 ctx.log(message, **detail)
 ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 ```
@@ -838,7 +840,7 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   the same; `src/builtin.json` marks it and the link's `hello` leaves it out. Their tests run in CI with the Glyphh
   SDK they need beside rrotor.
 - **`glyphh_bot`, `run`:** one go of a bot, the Glyphh SDK's runner (`glyphh.bots.remote.go`, SDK 3.12) here.
-  Inputs `{package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude}`: `package` the
+  Inputs `{package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort}`: `package` the
   bot's files by path (bot.json, agent.md, skills/; no code), `state` the runner's runs.sqlite (base64) the last go
   left (null for a bot's first), `given` what the run works on, `answer` an answer to the run waiting in `state`
   (carries it on instead of starting one: for a run whose rrotor run expired), the bot's Ada by `ada_base` and its
@@ -846,7 +848,12 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   run_id}`, answered `{result}` or `{error}`; `fetch` is one of them, so the server fetches as it does in the
   cloud), its agent steps on Claude: `claude` `api` (the default) on the org's Anthropic key, this program's secret
   `ANTHROPIC_API_KEY` (optional: a run that needs it and has none fails saying so), over `ctx.http` (the image has no
-  `anthropic` package); or `cli`, Claude Code signed in on this rrotor (`ctx.cli("claude", ["-p", …])`).
+  `anthropic` package); or `cli`, Claude Code signed in on this rrotor (`ctx.cli("claude", ["-p", …])`). `effort`
+  (`low`, `medium`, `high`, `xhigh`, `max`) is how hard Claude works on those steps: the Claude API's
+  `output_config.effort`, sent with each request when the step's model takes it (Claude Opus 5.5, Sonnet 5.5 and
+  Haiku 5.5 take all five) and left out otherwise, so a run never fails over it; `cli` takes none. Its manifest says
+  `"folders": true`: the server's `call` carries the folders of this machine the bot's owner chose
+  ([5.11](#511-the-machines-folders)), and the run has exactly those.
   Each question the bot asks (a gate, a batch of items, an approval) is the run's `needs_input` (the question its
   prompt; `data` the whole run as `RunResult.to_result` gives it: `run_id`, `step`, `approval`, `options`, `batch`,
   `answer_with`, `log`, `data`, `tokens` and its `state` then) and a `continue` answers it: one of its options, a
@@ -873,8 +880,9 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   sentence>`), pushed, and opened as a pull request: `{status: open, pr_url, number, head_sha, base_sha, branch,
   base, files: [{path, added, removed}], said, title, done, usage}`; a turn that changed nothing opens none and
   leaves no branch (`status: unchanged`). `usage` is `{input_tokens, output_tokens}`, what the turn's Claude Code
-  run reported (its JSON output's `usage`): input counts new input, input written to the cache and input read from
-  it together; zeros when none was reported. `pick` `{repo, base, prompt, persona?, model?, github_token}`: the
+  run reported (the `usage` of its stream's last event, `result`): input counts new input, input written to the
+  cache and input read from it together; zeros when none was reported. `pick` `{repo, base, prompt, persona?,
+  model?, github_token}`: the
   orchestrator's step, under the same lock: the repo cloned or fetched, `origin/<base>` checked out (no branch),
   Claude Code run in it with `prompt` (the server's question, `swarm_turns.pick_prompt`) and the persona if one is
   given, then the clone put back clean (`reset --hard`, `clean -fdx`: an orchestrator changes nothing, anything it
@@ -886,6 +894,52 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   of a project's turns, grown from Glyphh Bot's (the brief, the turn's prompt, the orchestrator's question and how its answer is read, the persona, the transcript, the DONE
   and PASS rules, who is next when bots wait their turn, when the crew is done, the branch name and title), which
   the server mirrors: the server runs the project.
+  What a step runs (a turn or a pick) is logged as it runs, in the data folder's `terminal/<owner>__<repo>.jsonl`
+  (`terminal.py`): each git command (never its environment, where the token is), each shell command Claude Code ran
+  and what it answered (Claude Code's stream, `--output-format stream-json`, read line by line; the same stream's
+  last event gives what it said and its `usage`), a note when a step begins and ends. The person reads it from this
+  rrotor itself ([7.1](#71-the-work-read-from-the-browser)); it never leaves the machine.
+
+### 5.11 The machine's folders
+
+A run sees nothing of the machine's files but its own folders ([4](#4-rrotor-inside)). A call may carry `folders`,
+`[{path, access: "read" | "write"}]`: for a bot, the folders its owner chose on the platform (the server sends them
+with each `call` of `glyphh_bot`). The run then has exactly those, and nothing else of the machine
+(`rrotord/folders.py`).
+
+- **The owner offers, the bot's owner chooses.** `RROTOR_FOLDERS` names the folders of this machine that may be
+  given at all: absolute paths joined by `:`. **The default is none**: until the rrotor's owner names a folder, every
+  call that asks for one is refused and the picker lists nothing. rrotor runs in a container, so a folder of the
+  computer is offered by mounting it into the container (at the same path, so the person sees the path they know:
+  `-v /Users/ana/Documents:/Users/ana/Documents`) and naming it (`RROTOR_FOLDERS=/Users/ana/Documents`). A root is
+  never rrotor's own data folder (its vault, its keys), a folder that holds it (`/`), or a path a run's sandbox
+  keeps for itself (`/usr`, `/etc`, `/tmp`, `/data`, `/program`, …): rrotor does not start with one (`E_CONFIG`).
+- **A call's folders are checked whole, before anything runs.** Each must be a root or lie inside one, exist, be a
+  folder, and be named by its real path: `..` is refused, and so is a symlink (a link out of a root is no way in). At
+  most 20. A program whose manifest does not say `"folders": true` takes none (403 `E_FOLDERS_UNDECLARED`). A refusal
+  is 403 `E_FOLDER_REFUSED` with a plain sentence that reaches the run's `failed` Result and so the person
+  ("/Users/ana/Secret is not in a folder this rrotor's owner shares with bots: it shares /Users/ana/Documents.");
+  a list that is no list of `{path, access}` is 400 `E_FOLDER`. No run is opened. They are checked again each time
+  the run's worker starts (a `continue` after a restart): a folder no longer offered fails the run at step `folders`.
+- **Mounted, not merely allowed.** bwrap binds each folder into the run's mount namespace at its own path,
+  `--ro-bind` for `read` and `--bind` for `write`, parents before the folders inside them (so a read-only folder
+  inside a writable one stays read-only); Landlock is given the same paths, read or read-write. The folder beside
+  one given is not in the sandbox at all: the way down to a given folder is bare directories. On a cluster's
+  follower every folder is read-only, as the run's own are. `ctx.folders` tells the program what it was given. A
+  CLI's run is given none.
+- **The picker.** `GET /v1/folders` lists the roots (those that exist); `GET /v1/folders?under=<path>` the folders
+  directly inside `under`, itself a root or inside one, by name: `{folders: [{path, name}]}`. Folders only: no
+  file, no hidden folder, no symlink, at most 1,000; nothing of what is in them. The same refusals as a call's.
+- **Read by the browser itself.** The platform's page asks this rrotor, not Glyphh's server: what a listing says
+  stays between the machine and the person's browser. `rrotord/api/cors.py` names the paths a page of the platform
+  may read (`/v1/folders`), `GET` only, for the platform's one origin (`RROTOR_PLATFORM_ORIGIN`, default
+  `https://platform.glyphh.ai`): the answer carries `Access-Control-Allow-Origin` for it, and the preflight is
+  answered (`GET`, `Authorization`, and `Access-Control-Allow-Private-Network` for a local rrotor on loopback). No
+  cookie is taken across origins. The page's bearer is the **work ticket** the work panels use
+  ([7](#7-the-api), `rrotord/ticket.py`): the server signs one for the signed-in person and this rrotor alone
+  (`POST /v1/bots/places/{id}/ticket`, ten minutes), checked on the machine without the Cloud, on a local rrotor
+  too; it opens `GET /v1/folders` and the work routes and nothing else. Every other caller (the local token, a
+  runtime key, a sign-in) reads `/v1/folders` as it reads the rest.
 
 ## 6. The link: protocol 3
 
@@ -900,7 +954,7 @@ in a URL), one per frame, each with `type` and `id`. rrotor connects out; the se
 | down | `app` | program, version, state (`draft`, `approved`, `rejected`, `retired`), roles: an app's review changed; `approved` activates the version named when this rrotor holds it ([5.8](#58-apps)); protocol 2's `artifact` is read as the same message |
 | down | `deploy`, `activate`, `remove` | program, version, commit SHA, `repo` and a short-lived `token` (null for a commit the runtime already holds) |
 | down | `continue` | `run_id`, `answer` |
-| down | `call`, `cancel` | `run_id`, program, version (null or left out: the active version), function, inputs, caller, clearance; `cancel` the `run_id`. The server sends them for Glyphh's own programs, `glyphh_bot` and `glyphh_swarm`: a bot or a project run on this rrotor ([5.10](#510-glyphhs-own-programs-bots-and-projects)) |
+| down | `call`, `cancel` | `run_id`, program, version (null or left out: the active version), function, inputs, caller, clearance, `folders` (null or left out: none; the machine's folders the run is given, [5.11](#511-the-machines-folders)); `cancel` the `run_id`. The server sends them for Glyphh's own programs, `glyphh_bot` and `glyphh_swarm`: a bot or a project run on this rrotor ([5.10](#510-glyphhs-own-programs-bots-and-projects)) |
 | down | `pause`, `resume` | Handled (a paused hosted runtime answers 402 `E_LIMIT` to all but `/healthz`); the server sends neither |
 | up | `result` | `seq`, `run_id`, the `Result`, seconds: only for a run a `call` opened |
 | up | `deployed` | program, version, commit SHA, `repo` (null unless from a repo), `manifest`, `by` (the Glyphh subject who published an app; null otherwise); after **every** deploy, by any route; not numbered, kept until acknowledged |
@@ -976,7 +1030,8 @@ is who the audit log names for what the request does, and every 401 and 403 is a
 | `POST /v1/graph/{op}` | One operation of the graph, its arguments the body: `search` `{query, types?, limit?, expand?}` → `{hits}`; `node` `{type, key}`; `nodes` `{type, where?, limit?, offset?}` → `{nodes, total}`; `neighbours` `{type, key, rel?, direction?, depth?, limit?}` → `{nodes, edges}`; `upsert` `{nodes?, edges?}` and `delete` `{nodes?, edges?}` → `{nodes, edges}` (how many). 400 `E_GRAPH`, 404 `E_GRAPH_NODE` |
 | `GET /v1/schedules` | `{schedules: [{id, program, name, version, function, cron, tz, input, paused, next_at, last, skipped}]}` ([5.6](#56-schedules)) |
 | `POST /v1/schedules/{program}/{name}/pause`, `…/resume` | The schedule paused or resumed, kept across restarts: the schedule as listed |
-| `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?}` (`function` defaults to `start`, `clearance` to 1): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
+| `GET /v1/folders` | `?under=<path>`: `{folders: [{path, name}]}`, the folders of this machine a bot may be given: the roots its owner offers, or the folders inside `under`. The platform's page reads it from the browser ([5.11](#511-the-machines-folders)). 403 `E_FOLDER_REFUSED`, 400 `E_FOLDER` |
+| `POST /v1/runs` | `{program, function?, inputs?, version?, clearance?, folders?}` (`function` defaults to `start`, `clearance` to 1; `folders` `[{path, access}]`, [5.11](#511-the-machines-folders)): opens a run and answers its first `Result`: `{run_id, program, version, function, status, data, step, prompt, seconds}` |
 | `GET /v1/apps` | `{apps: [{name, title, description, type, version, active, roles, functions, state, url}]}`: the apps here and the catalogue's word on each ([5.8](#58-apps)) |
 | `POST /v1/apps` | `{name, title, description?, type?, roles?, files, entry?, functions?, program?, hosts?, secrets?, clis?, limits?}`: what Claude made published as an app, a new version: `201 {program, version, commit_sha, deployed_at, type, active, state, url}`; a person's act on a public rrotor (a key is 403 `E_FORBIDDEN`) ([5.8](#58-apps)) |
 | `GET /apps/{name}/`, `GET /apps/{name}/{path}` | The app's page, or a file beside it, to a browser signed in (`?version=N`: a draft, for a reviewer); a refusal is a page, its code in `X-Error` (404 `E_APP_MISSING`, 409 `E_APP_UNREVIEWED`, 403 `E_APP_FORBIDDEN`) ([5.8](#58-apps)) |
@@ -1039,6 +1094,45 @@ with the forward in flight, or a writing run in flight when it stepped down): 50
 (the write may have been applied: the SDKs never retry it); with HA, a write the head cannot get
 onto a majority of voters within 5 s: 503 `E_NOT_COMMITTED` (it is kept, and committed when they return); a run on a
 node no longer in the cluster: 410 `E_RUN_LOST`.
+
+### 7.1 The work, read from the browser
+
+A crew's work on a rrotor (the clones `glyphh_swarm` keeps, [5.10](#510-glyphhs-own-programs-bots-and-projects)) is
+looked at from Glyphh's platform: files, a preview, an editor, a diff and a terminal beside the chat. The page reads
+all of it **from this rrotor's own address, in the person's browser** (`rrotord/work.py`, `rrotord/api/work.py`).
+Glyphh's server is not on that path and keeps none of it; nothing here goes up the link.
+
+| Route | Answers |
+|---|---|
+| `GET /v1/work` | `{workspaces: [{id, name, kind: "repo", branch, branches}]}`: each clone (`id` is its folder, `<owner>__<repo>`), the branch checked out (null when none), its local branches, newest first, 50 at most |
+| `GET /v1/work/{ws}/tree?under=` | `{under, entries: [{name, path, kind: "dir" \| "file", size}], truncated}`: one folder, folders first; never `.git`; 2000 entries at most |
+| `GET /v1/work/{ws}/file?path=&ref=` | `{path, size, binary, text, truncated}`: the working tree's file, or as the branch `ref` has it; text to 1 MB. With `raw=1`: its bytes (10 MB at most, else 413 `E_TOO_BIG`) with the content type its name suggests, `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox` |
+| `PUT /v1/work/{ws}/file?path=` `{text}` | `{path, size}`: the file saved in the working tree (1 MB at most), an audit event `work.write`. Refused: `.git` and any path that leaves the workspace once its symlinks are followed (400 `E_PATH`); while a turn holds the clone (409 `E_BUSY`: its lock, `repos/<id>.lock`). The next turn starts from GitHub's state, so a save that no turn committed is dropped then |
+| `GET /v1/work/{ws}/diff?branch=&base=` | `{base, branch, files: [{path, status: added \| modified \| deleted, added, removed, binary, before, after}], truncated}`: what `branch` (with none, the working tree, its untracked files among it) changed since it left `origin/<base>` (default: the branch GitHub's HEAD is on, else `main`); both sides of each file, 200 files and 400 KB a side at most. Renames are not followed: one shows as a file deleted and a file added |
+| `GET /v1/work/{ws}/terminal?after=` | `{lines: [{n, at, kind: cmd \| out \| err \| note, text}], next, live}`: the command log of the turns taken there from line `after` on (the newest 1000), the number to ask from next, and whether a turn is at work now. **Read only**: it is a log, not a shell; nothing is run for a caller |
+
+**Who gets in.** Any bearer the gate takes (the local token, a runtime key, a Glyphh sign-in), or a **work ticket**
+(`rrotord/ticket.py`), which is how the platform's page gets in: Glyphh's server, which knows who may use the
+runtime, signs `{"kind": "work", "runtime_id", "sub", "expires_at"}` as it signs a licence key
+(`<base64url payload>.<base64url signature>`, Ed25519, checked here with the public keys the code carries:
+[9](#9-the-licence)). A ticket is good on `/v1/work` and under it, and on `GET /v1/folders`
+([5.11](#511-the-machines-folders)), and nowhere else, for this runtime only (a local rrotor's id is
+the one its link's credentials carry, `/data/runtime.json`; one with no id yet takes no ticket), until it expires;
+it is checked on the machine, without the Cloud, and the audit log names its `sub` as a sign-in. A local rrotor
+still answers only on loopback.
+
+**From a page.** The platform's one origin (`RROTOR_PLATFORM_ORIGIN`, `https://platform.glyphh.ai`) may make these
+requests across origins (`rrotord/api/cors.py`): `GET` and `PUT` here (and `GET /v1/folders`), with `Authorization`
+and `Content-Type`; the preflight is answered before the gate, on a private network too (a local rrotor on
+loopback); every answer, a refusal too, carries `Access-Control-Allow-Origin` for that origin and no other. No cookie
+crosses origins.
+
+**git, safely.** The daemon runs git with fixed arguments, never a shell: no system or global config, no hooks, no
+fsmonitor, no external diff, no textconv, no optional locks, 20 s at most. A clone's own config cannot make a read
+run anything.
+
+**In a cluster** the clones are the head's (a program's data folder is the head's alone) and a file's bytes do not
+travel node to node: a follower answers 409 `E_HEAD_ONLY`, and the caller asks the head.
 
 ## 8. Ada
 

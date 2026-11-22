@@ -90,6 +90,27 @@ async def test_a_call_that_is_refused_answers_failed(env):
     assert env.results()[0]["result"]["data"]["code"] == "E_PROGRAM_MISSING"
 
 
+async def test_a_call_carries_the_folders_its_run_is_given(env, tmp_path):
+    from rrotord.folders import Folders
+
+    docs = tmp_path.resolve() / "docs"
+    docs.mkdir()
+    env.runner.folders = Folders((docs,))
+    sees = "from rrotor import Result\n\ndef start(ctx, inputs):\n    return Result.done(list(ctx.folders))\n"
+    install(env.programs, manifest("sample", folders=True), sees)
+    given = [{"path": str(docs), "access": "write"}]
+    await env.handler.on_call(p.Call.model_validate({**call().model_dump(), "folders": given}))
+    assert env.results()[0]["result"] == {"status": "done", "data": given, "step": None, "prompt": None}
+    # a folder the owner does not offer: the call is refused, saying why in a plain sentence
+    asked = [{"path": str(tmp_path.resolve()), "access": "read"}]
+    await env.handler.on_call(p.Call.model_validate({**call().model_dump(), "folders": asked}))
+    refused = env.results()[1]["result"]
+    assert (refused["status"], refused["data"]["code"]) == ("failed", "E_FOLDER_REFUSED")
+    assert refused["data"]["reason"] == (
+        f"{tmp_path.resolve()} is not in a folder this rrotor's owner shares with bots: it shares {docs}."
+    )
+
+
 async def test_a_call_with_no_version_runs_the_active_one_a_builtin_program_too(env, tmp_path):
     from tests.daemon.test_builtin_clis import builtin_folder
 

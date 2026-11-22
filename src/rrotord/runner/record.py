@@ -35,6 +35,8 @@ class Run:
     status: str = "running"
     subject: str | None = None  # the signed-in person it is for (a CLI runs in their own HOME); None: nobody's
     clearance: float = 1.0  # who asks, as a share of what the program may show (ctx.clearance): 1 sees all
+    # the machine's folders it was given, [{path, access}] (rrotord/folders.py): mounted at each of its starts
+    folders: list[dict[str, str]] = field(default_factory=list)
     created_at: str = field(default_factory=now)
     updated_at: str = field(default_factory=now)
     waiting_since: str | None = None

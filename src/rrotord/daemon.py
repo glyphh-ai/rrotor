@@ -30,6 +30,7 @@ from rrotord.config import Config
 from rrotord.deploy import Deployer
 from rrotord.drain import Drain, warning
 from rrotord.errors import RrotorError
+from rrotord.folders import Folders
 from rrotord.graph import Graph
 from rrotord.heartbeat import Heartbeat
 from rrotord.introspect import Introspector
@@ -153,6 +154,7 @@ class Daemon:
             readonly=lambda: self.cluster.role == "follower",
             vault=Vault(c.data),
             graph=Graph(c.data),
+            folders=Folders(c.folders),
         )
         self.scheduler = Scheduler(
             programs,

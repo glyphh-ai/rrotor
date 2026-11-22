@@ -4,9 +4,11 @@ bot (its package and its runner's state) and sends `call` over the link; this pr
 signed in here), its gates in Ada with the bot's own key, its tools at the server (HttpProgram: the server calls the
 bot's connections and fetches for it). Each question the bot asks is the run's `needs_input`; the server's
 `continue` carries the answer and the bot goes on in the same run. What the run leaves goes back as the Result: its
-state among it, for the server to keep.
+state among it, for the server to keep. `effort` is how hard Claude works on the agent steps (the Claude API's
+`output_config.effort`). The call may carry the machine's folders the bot's owner chose (the link's `folders`,
+rrotord/folders.py): rrotor mounts exactly those in this run's sandbox, and `ctx.folders` names them.
 
-    run(ctx, {package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude})
+    run(ctx, {package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort})
 """
 
 from __future__ import annotations
@@ -73,7 +75,27 @@ def claude_of(ctx: Ctx, inputs: dict[str, Any]) -> Any:
             "(PUT /v1/programs/glyphh_bot/secrets/ANTHROPIC_API_KEY or secret_set), or call it with "
             '"claude": "cli" to use Claude Code signed in here.'
         )
-    return ApiClaude(model=model, client=Messages(ctx.http, key))
+    return ApiClaude(model=model, client=Effort(Messages(ctx.http, key), inputs.get("effort")))
+
+
+# The Claude models that take `output_config.effort`, and the levels each takes (the Claude API's own): a model not
+# here is asked without it, and so is a level it does not take (a run never fails over its effort).
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+EFFORT_MODELS = {"claude-opus-5-5": EFFORTS, "claude-sonnet-5-5": EFFORTS, "claude-haiku-5-5": EFFORTS}
+
+
+class Effort:
+    """The Claude client ApiClaude calls, each request carrying the bot's effort (`output_config: {effort}`) when
+    its model takes it; whatever the SDK's ApiClaude is (one older than 3.14 knows no effort)."""
+
+    def __init__(self, client: Any, effort: Any) -> None:
+        self._client, self._effort = client, effort
+        self.messages = self
+
+    def stream(self, **kw: Any) -> Any:
+        if "output_config" not in kw and self._effort in EFFORT_MODELS.get(str(kw.get("model")), ()):
+            kw["output_config"] = {"effort": self._effort}
+        return self._client.messages.stream(**kw)
 
 
 def tool_post(ctx: Ctx) -> Any:

@@ -9,6 +9,7 @@ from a caller: a runtime key or a Glyphh sign-in calls and deploys programs, and
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -22,7 +23,7 @@ from rrotord import VERSION, apps
 from rrotord import drain as drains
 from rrotord.access import Access
 from rrotord.aggregate import ClusterAudit
-from rrotord.api import mcp, ops
+from rrotord.api import mcp, ops, work
 from rrotord.api.gate import METADATA, SCOPE, public_url, viewer_roles
 from rrotord.audit import Audit, current
 from rrotord.browser import Browser
@@ -207,6 +208,12 @@ def setup(app: web.Application, s: Services) -> None:
     async def schedules(_: web.Request) -> web.Response:
         return web.json_response(await ops.schedules(s))
 
+    async def folders_list(request: web.Request) -> web.Response:
+        """The folders of this machine a bot may be given, for the platform's picker (rrotord/folders.py): the roots
+        its owner offers, or the folders inside `under`. Read by the browser itself (rrotord/api/cors.py)."""
+        under = request.query.get("under")
+        return web.json_response(await asyncio.to_thread(s.runner.folders.listing, under))
+
     def pausing(paused: bool) -> Handler:
         async def handler(request: web.Request) -> web.Response:
             m = request.match_info
@@ -384,6 +391,7 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/v1/graph", graph_schema)
     app.router.add_post("/v1/graph/{op}", graph_op)
     app.router.add_get("/v1/schedules", schedules)
+    app.router.add_get("/v1/folders", folders_list)
     app.router.add_post("/v1/schedules/{program}/{name}/pause", pausing(True))
     app.router.add_post("/v1/schedules/{program}/{name}/resume", pausing(False))
     app.router.add_get("/v1/apps", apps_list)
@@ -412,3 +420,4 @@ def setup(app: web.Application, s: Services) -> None:
     app.router.add_get("/v1/licence", licence_get)
     app.router.add_put("/v1/licence", local_only(s.config.mode, licence_put))
     app.router.add_post("/mcp", mcp.route(s))
+    work.setup(app, s)

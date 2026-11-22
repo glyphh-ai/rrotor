@@ -265,6 +265,37 @@ def test_the_real_ada_is_the_bots_own():
     assert (ada.url, ada.key) == ("https://ada.example", "ak_x")
 
 
+def test_the_bots_effort_goes_with_each_agent_step_when_its_model_takes_it(bot, tmp_path):
+    program, _ = bot
+    h = harness(program, tmp_path, Server(), secrets={"ANTHROPIC_API_KEY": KEY})
+    h.call("run", inputs(effort="high"))
+    h.resume("send")
+    sent = json.loads(h.http.calls[-1][2])  # type: ignore[attr-defined]
+    assert sent["model"] == "claude-sonnet-5-5" and sent["output_config"] == {"effort": "high"}
+
+    class Inner:
+        def __init__(self) -> None:
+            self.messages, self.asked = self, []
+
+        def stream(self, **kw: Any) -> str:
+            self.asked.append(kw)
+            return "streamed"
+
+    # no effort, a level or a model that takes none, or a caller's own output_config: asked as it was, never refused
+    for effort, model, config in (
+        (None, "claude-opus-5-5", None),
+        ("extreme", "claude-opus-5-5", None),
+        ("high", "claude-haiku-4-5", None),
+        ("high", "claude-opus-5-5", {"effort": "low"}),
+    ):
+        inner = Inner()
+        kw = {"model": model} | ({"output_config": config} if config else {})
+        assert program.Effort(inner, effort).messages.stream(**kw) == "streamed" and inner.asked == [kw]
+    inner = Inner()
+    program.Effort(inner, "max").stream(model="claude-haiku-5-5")
+    assert inner.asked == [{"model": "claude-haiku-5-5", "output_config": {"effort": "max"}}]
+
+
 # The Claude API over ctx.http
 
 

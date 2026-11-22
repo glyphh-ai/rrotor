@@ -36,6 +36,15 @@ def test_fake_http_answers_404_without_a_route():
     assert http.get("https://a.example.com/").status == 404
 
 
+def test_harness_tells_the_folders_the_run_is_given(tmp_path):
+    def start(ctx, inputs):
+        return Result.done(list(ctx.folders))
+
+    given = [{"path": str(tmp_path / "docs"), "access": "read"}]
+    assert Harness(module(start=start), tmp_path, folders=given).call("start").data == given
+    assert Harness(module(start=start), tmp_path).call("start").data == []
+
+
 def test_harness_hands_secrets_by_declared_name(tmp_path):
     def start(ctx, inputs):
         return Result.done([ctx.secrets["API_KEY"], ctx.secrets.get("UNSET", "none")])

@@ -67,6 +67,7 @@ async def test_a_builtin_program_is_deployed_once_and_again_when_its_code_change
     first = await d.builtin(image / "glyphh_swarm")
     assert first is not None and first.builtin == {"vendor": "Glyphh", "title": "Glyphh project", "version": "2"}
     assert (first.src / "program.py").is_file() and (first.src / "swarm_turns.py").is_file()
+    assert (first.src / "terminal.py").is_file()  # the clone's command log, imported by program.py
     assert not (first.src / "tests").exists() and (first.root / "venv").is_dir()
     assert d.programs.deployed() == [] and d.programs.active("glyphh_swarm") == first
     assert await d.builtin(image / "glyphh_swarm") is None  # the same files: nothing to do

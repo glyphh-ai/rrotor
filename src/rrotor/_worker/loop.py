@@ -181,6 +181,7 @@ class Worker:
             clis=start.get("clis"),
             request=self._cli,
             graph=Graph(start.get("graph"), self._graph),
+            folders=start.get("folders") or (),
         )
         for sdk in SDKS:  # the SDKs the image carries (glyphh), after the program's own venv
             if os.path.isdir(sdk) and sdk not in sys.path:
