@@ -3,6 +3,20 @@
   "description": "One of the Glyphh server's hosted bots, run on this rrotor. agent: one Claude Agent SDK conversation turn on the org's Anthropic key, its tools the server's, the folders' files and its plugins' scripts. run (older servers): the Glyphh SDK's runner walking the bot's loop. Called by the server over the link.",
   "python": "3.13",
   "functions": {
+    "code": {
+      "writes": true,
+      "description": "A code step of a program the server walks (rrotor 0.10.0): one function of the program's program.py, called with the step's input in this run's sandbox, in a process of its own given none of this program's secrets; the Result is what it returned (data.result, JSON) and what it printed, or failed with why",
+      "inputs": {
+        "type": "object",
+        "required": ["source", "function"],
+        "properties": {
+          "source": { "type": "string", "description": "program.py, the whole file" },
+          "function": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "description": "The top-level function to call" },
+          "given": { "description": "The step's input: the function's one argument" }
+        },
+        "additionalProperties": false
+      }
+    },
     "run": {
       "writes": true,
       "description": "One go of the bot: from its first step, or (with answer) the run that waited carried on; each question it asks waits as needs_input; the Result carries the run, its state among it",

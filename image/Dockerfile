@@ -51,6 +51,7 @@ COPY --from=clis /clis/ /
 COPY programs/glyphh_bot/glyphh.json programs/glyphh_bot/vendor.json programs/glyphh_bot/program.py \
      programs/glyphh_bot/claude_api.py programs/glyphh_bot/file_agent.py programs/glyphh_bot/agent_loop.py \
      programs/glyphh_bot/agent_tools.py programs/glyphh_bot/agent_run.py programs/glyphh_bot/agent_plugins.py \
+     programs/glyphh_bot/code_step.py \
      /usr/local/lib/rrotor-programs/glyphh_bot/
 COPY programs/glyphh_swarm/glyphh.json programs/glyphh_swarm/vendor.json programs/glyphh_swarm/program.py \
      programs/glyphh_swarm/swarm_turns.py programs/glyphh_swarm/terminal.py \

@@ -845,6 +845,15 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   deployed is theirs. Its commit is the SHA-1 of its manifest, vendor file and code, so every node of a cluster makes
   the same; `src/builtin.json` marks it and the link's `hello` leaves it out. Their tests run in CI with the Glyphh
   SDK they need beside rrotor.
+- **`glyphh_bot`, `code`** (rrotor 0.10.0; `code_step.py`): one `code` step of a program the server walks (the
+  server's `docs/specs/programs.md`). The server walks every step of a program itself, for Glyphh cloud and a rrotor
+  alike; only a `code` step comes here, as `{source, function, given}`: the program's `program.py`, the top-level
+  function to call and the step's input. It runs in this run's sandbox like everything of the run (the folders the
+  call carries, this program's hosts), in a process of its own (`python -I`) whose environment is only the few
+  names a plugin's script gets, so none of this program's secrets reach it; the file is run as a module named
+  `program`, never as `__main__`. The Result is `done` with `data.result` (what the function returned, JSON) and
+  `data.printed`, or `failed` with why (it raised, with the line; it took more than 300 seconds; what it returned is
+  not JSON). This is rrotor's programs runtime doing what it already does: not a second runtime.
 - **`glyphh_bot`, `agent`** (rrotor 0.9.0; `agent_loop.py`, `agent_tools.py`, `agent_run.py`, `agent_plugins.py`):
   a bot's run as the server makes it now, one conversation turn of a Claude agent, not a loop of steps. The server
   sends `{system, message, tools, plugins, skills, model, effort, limits, resume, tool_url, tool_token, claude,

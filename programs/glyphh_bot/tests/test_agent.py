@@ -875,4 +875,4 @@ def test_the_manifest_takes_what_the_server_sends():
     jsonschema.validate(inputs(model=None, effort=None), schema)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(inputs(claude="cli"), schema)
-    assert set(manifest["functions"]) == {"run", "agent"} and "api.anthropic.com" in manifest["hosts"]
+    assert set(manifest["functions"]) == {"run", "agent", "code"} and "api.anthropic.com" in manifest["hosts"]

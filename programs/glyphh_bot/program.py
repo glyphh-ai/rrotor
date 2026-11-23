@@ -21,6 +21,12 @@ tools (agent_tools.py). `run` stays for a server that still walks a bot's loop.
 
     agent(ctx, {system, message, tools, plugins, skills, model, effort, limits, resume, tool_url, tool_token,
                 claude, file_tools})
+
+`code` (rrotor 0.10.0) is one `code` step of a program the server walks (its docs/specs/programs.md): a function of
+the program's `program.py`, run here in this run's sandbox with the step's input, none of this program's secrets
+given to it (code_step.py). The server walks every other step itself; only code comes here.
+
+    code(ctx, {source, function, given})
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import agent_loop
+import code_step
 from claude_api import Messages
 from file_agent import FileClaude
 
@@ -235,3 +242,12 @@ def agent(ctx: Ctx, inputs: dict[str, Any]) -> Result:
     with, a `continue` carrying the same session on; at the end `done` (`data.output` the agent's words, `steps`,
     `files`, `tokens`) or `failed` (`data.reason`)."""
     return agent_loop.run(ctx, inputs)
+
+
+def code(ctx: Ctx, inputs: dict[str, Any]) -> Result:
+    """A program's code step: `function` of `source` (its program.py) called with `given`; `done` with
+    `data.result` (what it returned) and `data.printed`, or `failed` saying why."""
+    work = ctx.files / "code"
+    work.mkdir(parents=True, exist_ok=True)
+    ok, data = code_step.run(inputs.get("source"), inputs.get("function"), inputs.get("given"), work)
+    return Result.done(data) if ok else Result.failed("code", str(data["reason"]), data)
