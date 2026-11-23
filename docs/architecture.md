@@ -257,6 +257,8 @@ rrotord's venv, the OpenTelemetry
 SDK and its OTLP/HTTP exporter (pinned, about 8 MB with protobuf and requests); the vendors' agent CLIs (Claude
 Code, Codex, Gemini, Cursor, Grok, Copilot: about 1.7 GB unpacked, pinned in `image/clis.json`,
 [5.7](#57-clis)); the Glyphh SDK for every program and the `glyphh` CLI (`image/sdk.lock`, [5.3](#53-the-sdk-rrotor));
+the Claude Agent SDK beside it, for a bot's agent (`image/agent-sdk.lock`: about 32 MB with what it imports, the
+360 MB copy of Claude Code its wheel bundles dropped, since the image has Claude Code already);
 Glyphh's own programs, `glyphh_bot` and `glyphh_swarm` (`programs/`, [5.10](#510-glyphhs-own-programs-bots-and-projects)).
 No browser, no database. It runs as
 `rrotor` (uid 10001) on a read-only root with a tmpfs `/tmp`; everything kept is on `/data`. The published image
@@ -360,7 +362,10 @@ ctx.today(), ctx.yesterday()  # UTC dates, YYYY-MM-DD
 
 The image also carries the Glyphh SDK (`glyphh`, pinned with its hash in `image/sdk.lock`) at
 `/usr/local/lib/rrotor-sdk`, which the worker puts on `sys.path` after the program's own venv: `import glyphh` works
-without a `requirements.lock`, and a program that pins its own version gets its own.
+without a `requirements.lock`, and a program that pins its own version gets its own. The Claude Agent SDK
+(`claude_agent_sdk`, and what it imports: `mcp`, `pydantic`, `anyio` and the rest, each pinned with its hashes in
+`image/agent-sdk.lock`, resolved from `image/agent-sdk.in`) is there too, for `glyphh_bot`'s agent
+([5.10](#510-glyphhs-own-programs-bots-and-projects)); it runs the image's `claude`, not a copy of its own.
 
 - **Approvals and inputs are re-entrant.** A `continue` calls the same function again with the same inputs: steps
   done are skipped by `ctx.checkpoint`, and `ctx.ask_approval(step, …)` then answers the decision for that step
@@ -603,7 +608,7 @@ link's `hello` leaves it out (it is the image's, not the Cloud's).
 
 | Name | CLI | Pinned | Signs in (`login`) |
 |---|---|---|---|
-| `claude` | Anthropic's Claude Code (`claude`, native build from npm) | 2.1.316 | `auth login --claudeai`: the claude.ai account's address and a pasted code; it listens on loopback (`listen`) |
+| `claude` | Anthropic's Claude Code (`claude`, native build from npm) | 2.1.330 (the version the Claude Agent SDK in the image ships with) | `auth login --claudeai`: the claude.ai account's address and a pasted code; it listens on loopback (`listen`) |
 | `codex` | OpenAI's Codex CLI (`codex`, GitHub release, musl) | 0.166.0 | `login --device-auth`: a ChatGPT device code |
 | `gemini` | Google's Gemini CLI (`gemini`, npm bundle run with the image's node) | 0.66.0 | the bare command with `NO_BROWSER` and Google sign-in seeded in `~/.gemini/settings.json`: an address and a pasted code; stopped once `~/.gemini/oauth_creds.json` is written |
 | `cursor` | Cursor's agent CLI (`cursor-agent`, Cursor's download, its own node) | 2026.10.22-27dcf5f | `login` with `NO_OPEN_BROWSER`: an address it polls (`paste: false`) |
@@ -840,7 +845,68 @@ answers, `cancel` to stop one; each run answers its Results up the link like any
   deployed is theirs. Its commit is the SHA-1 of its manifest, vendor file and code, so every node of a cluster makes
   the same; `src/builtin.json` marks it and the link's `hello` leaves it out. Their tests run in CI with the Glyphh
   SDK they need beside rrotor.
-- **`glyphh_bot`, `run`:** one go of a bot, the Glyphh SDK's runner (`glyphh.bots.remote.go`, SDK 3.12) here.
+- **`glyphh_bot`, `agent`** (rrotor 0.9.0; `agent_loop.py`, `agent_tools.py`, `agent_run.py`, `agent_plugins.py`):
+  a bot's run as the server makes it now, one conversation turn of a Claude agent, not a loop of steps. The server
+  sends `{system, message, tools, plugins, skills, model, effort, limits, resume, tool_url, tool_token, claude,
+  file_tools}`: the bot's own system prompt, what the person typed, the server-side tools (`[{name, description,
+  input_schema, read_only}]`), the bot's Claude plugins (`[{name, files: {path: text}, code?: [{skill, scripts:
+  [path]}]}]`) and its skills (`<plugin>:<skill>`), and `limits` (`turns`, `seconds`, `tokens`). The turn is the
+  Claude Agent SDK's (`claude-agent-sdk`, `ClaudeSDKClient`; in the image under `/usr/local/lib/rrotor-sdk`,
+  `image/agent-sdk.lock`), which drives the image's own Claude Code (`claude`, the built-in CLI's binary, pinned to
+  the version that SDK ships) inside this run's sandbox, on the org's Anthropic key (the secret
+  `ANTHROPIC_API_KEY`; `claude` is `api` only: a sign-in lives in the CLI's own HOME, which a program's run does not
+  have). A rrotor without the SDK fails the run, `E_SDK`. The program's limits are 1800 seconds and 4 GB (Claude
+  Code is a child of the run's worker and has its `prlimit`, as in `glyphh_swarm`).
+  - **The agent's tools are exactly these**, as one in-process MCP server named `bot`: each server-side tool (its
+    name with anything but letters, digits and `_` made `_`), called by `POST tool_url` `{tool, input}` with the
+    bearer `tool_token`, answered `{result}`, `{error}` or `{ask: true, question?}`; with `file_tools` and folders,
+    the five file tools of `run` below over `rrotor.files` (a PDF cannot be read here yet: an MCP tool's answer
+    carries no document, and the image has no PDF library); and `run_script {plugin, script, args?, stdin?}` when
+    a plugin's `code` names scripts. A name of rrotor's own is never taken by a server tool.
+  - **Nothing else exists.** The session is given `tools=[]` (`["Skill"]` for a bot with skills), every tool of
+    Claude Code's named in `disallowed_tools` as well, `strict_mcp_config` and `setting_sources=[]` (no MCP server,
+    settings file, CLAUDE.md, hook or plugin of the machine is read), a `PreToolUse` hook that denies any tool
+    that is not one of this run's own (or `Skill`, for a bot with skills), and `permission_mode="default"` with
+    `can_use_tool`. Claude Code's environment is the sandbox's with every `GLYPHH_*` and `RROTOR_*` variable
+    blanked, its `HOME` and `CLAUDE_CONFIG_DIR` in the run's folder, the key, and updates and telemetry off. The
+    program's tests prove the options carry no built-in tool and that the MCP server lists exactly the run's.
+  - **The server decides before anything acts.** A tool that is not `read_only` passes `can_use_tool` first, and
+    there the server's tool address is called: the server holds the bot's permissions and its Ada decisions.
+    `{result}` or `{error}` is kept and the call allowed, so the tool's own call hands that answer on and the
+    server is asked once. `{ask: true}` means the server stopped the run with its question: the call is denied
+    with `interrupt`, the turn ends, and the Result is `needs_input` (the prompt the server's `question` when it
+    sends one). A read-only tool is in `allowed_tools` and calls the server directly; should the server ask
+    about one, the turn is interrupted the same way. A write or a move of a file is worked out first with
+    nothing touched, then the server's `file_change` is asked as in `run`: `{allowed: true}` makes it,
+    `{allowed: false}` stops the run with the question rrotor makes ("Write Notes/Summary.md?", `yes` or `no`,
+    `data.approval` true, `data.file` the change), and only a change the server allowed is ever made.
+  - **`run_script`** runs one file of a plugin that the plugin's `code` names, by its path in the plugin, and
+    nothing else: there is no command line to give. The file's type picks what runs it (`.py` the sandbox's
+    Python, `.sh` `/bin/sh`, `.js` and `.mjs` the image's node), as a child of the run's worker, so inside the same
+    sandbox, with the run's folders, its working folder the run's own, an environment of `PATH`, `HOME` and the
+    proxy only (no key, no token), at most 64 arguments, 1 MB of standard input, 120 seconds, and 64 KB of stdout
+    and of stderr given back. The server is asked first (`{tool: "run_script", input: {plugin, script, args}}`,
+    never the standard input): `{result: {allowed: true}}` runs it, `{ask: true}` stops the run to ask, anything
+    else refuses it.
+  - **Waiting and carrying on.** The session's transcript stays on this machine: the run's folder,
+    `/data/programs/glyphh_bot/files/agent-runs/<key>/` (`key` from the server's tool address, which names the
+    server's run), holds Claude Code's config folder (the transcript), the plugins written from the call, and
+    `state.json` (the session's id, the tokens so far, the tools used and the files named). `continue {run_id,
+    answer}` resumes the same session (`resume=<session id>`) with `answer` as the message (the server's words;
+    `{"approved": bool}` becomes a yes or a no). A fresh `call` with `resume: true` (the rrotor's run expired)
+    finds the same folder and resumes with `message`; with no transcript left the turn starts again from
+    `message`. The folder is dropped when the run ends `done` or `failed`; one nobody answered is swept after
+    seven days.
+  - **Limits.** `turns` is the SDK's `max_turns`; `seconds` a go's time (300 when not given, 1500 at most), past
+    which the turn is interrupted and the run fails saying so; `tokens` the whole run's, input and output, checked
+    when each go ends and before one carries on.
+  - **The Result** is `done`, `needs_input` or `failed` (step `agent`, `data.reason`) with `data` `{output,
+    steps, files, tokens}`: the agent's final words, the tools it used (`[{tool, ok}]`, by the server's names),
+    the files it read and changed (names only) and the tokens of the whole run so far (input counts new input and
+    input written to and read from the cache). What a tool answered, what a script printed and what is in a file
+    go to Claude and nowhere else.
+- **`glyphh_bot`, `run`** (a server that still walks a bot's loop of steps): one go of a bot, the Glyphh SDK's
+  runner (`glyphh.bots.remote.go`, SDK 3.12) here.
   Inputs `{package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort, file_tools}`: `package` the
   bot's files by path (bot.json, agent.md, skills/; no code), `state` the runner's runs.sqlite (base64) the last go
   left (null for a bot's first), `given` what the run works on, `answer` an answer to the run waiting in `state`
@@ -962,7 +1028,8 @@ with each `call` of `glyphh_bot`). The run then has exactly those, and nothing e
   program asks the person, or refuses. Bounded: 8 MB read a run, 4 MB a file, 1 MB written a file, 50 matches a
   search. `touched` names what was read and changed (`[{name, did}]`), never what is in it. The sandbox is the hard
   wall (the mounts above); this check is the polite one, which says why. `glyphh_bot` builds a bot's file tools on
-  it ([5.10](#510-glyphhs-own-programs-bots-and-projects)).
+  it, for its agent (0.9.0: the same five tools as MCP tools of the agent's turn, `agent_tools.py`) and for the
+  loop of steps before it ([5.10](#510-glyphhs-own-programs-bots-and-projects)).
 - **The picker.** `GET /v1/folders` lists the roots (those that exist); `GET /v1/folders?under=<path>` the folders
   directly inside `under`, itself a root or inside one, by name: `{folders: [{path, name}]}`. Folders only: no
   file, no hidden folder, no symlink, at most 1,000; nothing of what is in them. The same refusals as a call's.
@@ -1239,7 +1306,7 @@ carries none.
 
 | Job | What |
 |---|---|
-| `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the sample programs' tests, the built-in programs' tests (`programs/`, with the Glyphh SDK they need) |
+| `checks` | ruff (lint and format), mypy strict, pytest with 100% line and branch coverage of `rrotor` and `rrotord`, the sample programs' tests, the built-in programs' tests (`programs/`, with the Glyphh SDK and the Claude Agent SDK they need; the agent's tests fake the SDK's client, so no Claude Code runs) |
 | `deploy` | Compose (the air-gapped overlay, the cluster file and the per-node file, which refuses to render without its node's settings) from `.env.example`, the Caddyfiles, `helm lint --strict` and `helm template` with each `ci/` values file (one replica, and two clusters of three), `terraform fmt -check` and `validate` for both modules and their examples (one node and a cluster). Nothing is started |
 | `image` | Builds the base (with the vendors' CLIs, their downloads checked against `image/clis.json`) and runs the sandbox tests inside it (each vendor CLI deployed as at boot and run in the sandbox; their sign-ins reach the vendors only with `RROTOR_VENDOR_SIGN_IN=1`); starts the daemon in `local` mode and checks every sandbox layer is ready; starts it self-hosted and air-gapped and checks it answers at its public host only (421 elsewhere), its link `off`; with the secret `CI_CLUSTER_LICENSE_KEY` (a key with cluster sync), brings up the three-node Compose cluster and checks every node ready, `rrotor-0` the head of three |
 | `image-hosted` (main, `PUBLISH_IMAGES=true`) | The `hosted` target with the release public key baked in: to `registry.fly.io/<FLY_RUNTIME_APP>` (amd64, which the server's machines run) and to `ghcr.io/glyphh-ai/rrotor:<version>` and `:latest` (amd64 and arm64, public) |

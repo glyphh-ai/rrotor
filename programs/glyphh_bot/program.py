@@ -14,6 +14,13 @@ run read and changed (`data.files`, names only) and, at such a question, the cha
 
     run(ctx, {package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort,
               file_tools})
+
+`agent` (rrotor 0.9.0) is a bot's run as the server now makes it: not a loop of steps but one Claude Agent SDK
+conversation turn (agent_loop.py), with the server-side tools, the folders' files and a plugin's scripts as its only
+tools (agent_tools.py). `run` stays for a server that still walks a bot's loop.
+
+    agent(ctx, {system, message, tools, plugins, skills, model, effort, limits, resume, tool_url, tool_token,
+                claude, file_tools})
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import agent_loop
 from claude_api import Messages
 from file_agent import FileClaude
 
@@ -220,3 +228,10 @@ def run(ctx: Ctx, inputs: dict[str, Any]) -> Result:
     if left["status"] == "failed":
         return Result.failed(str(left.get("step") or "bot"), str(data.get("reason") or "the bot failed"), data)
     return Result.done(data)
+
+
+def agent(ctx: Ctx, inputs: dict[str, Any]) -> Result:
+    """A bot's run as one Claude Agent SDK turn (agent_loop.py): `needs_input` at each question the server stops it
+    with, a `continue` carrying the same session on; at the end `done` (`data.output` the agent's words, `steps`,
+    `files`, `tokens`) or `failed` (`data.reason`)."""
+    return agent_loop.run(ctx, inputs)

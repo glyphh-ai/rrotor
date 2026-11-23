@@ -39,13 +39,15 @@ jobs:
           for example in daily_sales hubspot_pipeline; do
             uv run pytest "examples/$example/tests" -o addopts="" -p no:cacheprovider --import-mode=importlib
           done
-      # glyphh_bot runs the Glyphh SDK's glyphh.bots.remote (3.12): the version image/sdk.lock carries.
+      # glyphh_bot runs the Glyphh SDK's glyphh.bots.remote (3.12): the version image/sdk.lock carries. Its agent
+      # runs the Claude Agent SDK: the version image/agent-sdk.in pins (its client is faked: no Claude Code runs).
       - name: The built-in programs' tests (programs/)
         env:
           GLYPHH_SDK: "glyphh==3.12.0"
+          AGENT_SDK: "claude-agent-sdk==0.2.187"
         run: |
           for program in glyphh_bot glyphh_swarm; do
-            uv run --with "$GLYPHH_SDK" pytest "programs/$program/tests" -o addopts="" -p no:cacheprovider --import-mode=importlib
+            uv run --with "$GLYPHH_SDK" --with "$AGENT_SDK" pytest "programs/$program/tests" -o addopts="" -p no:cacheprovider --import-mode=importlib
           done
 
   # The self-hosting packages (deploy/, docs/self-hosting/): each is checked as written, nothing is started.

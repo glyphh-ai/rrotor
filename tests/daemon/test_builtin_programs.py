@@ -36,10 +36,18 @@ def test_each_builtin_program_has_a_manifest_rrotor_takes_and_a_vendor(name):
 def test_glyphh_bot_reads_the_orgs_key_only_when_set_and_runs_claude():
     found = m.read(PROGRAMS / "glyphh_bot")
     assert found.optional() == {"ANTHROPIC_API_KEY"} and found.clis == ["claude"]
-    assert set(found.functions) == {"run"} and found.functions["run"].writes
+    assert set(found.functions) == {"run", "agent"} and all(f.writes for f in found.functions.values())
+    assert found.limits.memory_mb == 4096  # Claude Code, a child of the agent's worker, has the worker's limit
     swarm = m.read(PROGRAMS / "glyphh_swarm")
     assert set(swarm.functions) == {"turn", "pick", "merge", "reject"} and swarm.data and swarm.optional() == set()
     assert all(f.writes for f in swarm.functions.values())
+
+
+@pytest.mark.parametrize("name", ["glyphh_bot", "glyphh_swarm"])
+def test_the_image_carries_every_module_of_a_builtin_program(name):
+    dockerfile = (PROGRAMS.parent / "image" / "Dockerfile").read_text()
+    for module in (PROGRAMS / name).glob("*.py"):
+        assert f"programs/{name}/{module.name}" in dockerfile, f"image/Dockerfile does not copy {module.name}"
 
 
 def test_a_builtin_programs_files_leave_out_its_tests_caches_and_dotfiles(tmp_path):

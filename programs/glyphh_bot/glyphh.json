@@ -1,6 +1,6 @@
 {
   "name": "glyphh_bot",
-  "description": "One of the Glyphh server's hosted bots, run on this rrotor: the Glyphh SDK's runner, its agent steps on the org's Anthropic key (or Claude Code signed in here), its gates in Ada, its tools at the server. Called by the server over the link.",
+  "description": "One of the Glyphh server's hosted bots, run on this rrotor. agent: one Claude Agent SDK conversation turn on the org's Anthropic key, its tools the server's, the folders' files and its plugins' scripts. run (older servers): the Glyphh SDK's runner walking the bot's loop. Called by the server over the link.",
   "python": "3.13",
   "functions": {
     "run": {
@@ -25,6 +25,73 @@
         },
         "additionalProperties": false
       }
+    },
+    "agent": {
+      "writes": true,
+      "description": "A bot's run as one Claude Agent SDK conversation turn (rrotor 0.9.0): the agent's only tools are the server-side tools named here, the files of the folders given and a plugin's declared scripts; a question the server stops it with waits as needs_input, and a continue (or a call with resume) carries the same session on; the Result is the agent's final words, the tools it used, the files it named and its tokens",
+      "inputs": {
+        "type": "object",
+        "required": ["system", "message", "tool_url", "tool_token"],
+        "properties": {
+          "system": { "type": "string", "minLength": 1, "description": "The bot's own system prompt" },
+          "message": { "type": "string", "minLength": 1, "description": "What the person typed, the bot's standing task, or (with resume) the words that say what they answered" },
+          "tools": {
+            "type": "array",
+            "description": "The server-side tools: each call is POST tool_url {tool, input}, answered {result}, {error} or {ask: true} (the server stopped the run with its question)",
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "description": { "type": "string" },
+                "input_schema": { "type": "object" },
+                "read_only": { "type": "boolean", "description": "true: called without asking first" }
+              }
+            }
+          },
+          "plugins": {
+            "type": "array",
+            "description": "The bot's Claude plugins, written into the run's folder: its files by path, and the scripts of it the agent may run with run_script",
+            "items": {
+              "type": "object",
+              "required": ["name", "files"],
+              "properties": {
+                "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$" },
+                "files": { "type": "object", "additionalProperties": { "type": "string" } },
+                "code": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["scripts"],
+                    "properties": {
+                      "skill": { "type": "string" },
+                      "scripts": { "type": "array", "items": { "type": "string" } },
+                      "why": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "skills": { "type": "array", "items": { "type": "string" }, "description": "The bot's skills, each <plugin>:<skill>" },
+          "model": { "type": ["string", "null"], "description": "opus, sonnet, haiku or a model id" },
+          "effort": { "enum": ["low", "medium", "high", "xhigh", "max", null] },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "turns": { "type": "integer", "minimum": 1 },
+              "seconds": { "type": "integer", "minimum": 1, "description": "A go's time; 1500 at most" },
+              "tokens": { "type": "integer", "minimum": 1, "description": "The whole run's tokens, input and output" }
+            }
+          },
+          "resume": { "type": "boolean", "description": "true: the run waited and was answered; carried on from the session kept on this rrotor when it is still here, else begun again from message" },
+          "tool_url": { "type": "string", "pattern": "^https://" },
+          "tool_token": { "type": "string", "minLength": 1 },
+          "claude": { "enum": ["api"], "description": "api: Claude Code on the secret ANTHROPIC_API_KEY" },
+          "file_tools": { "type": "boolean", "description": "true: with folders given, the agent has the files of those folders (list, read, search, write, move), a change made only on the server's word (its tool file_change)" }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "hosts": ["*.glyphh.ai", "api.anthropic.com"],
@@ -32,5 +99,5 @@
   "optional_secrets": ["ANTHROPIC_API_KEY"],
   "clis": ["claude"],
   "folders": true,
-  "limits": { "seconds": 1800, "memory_mb": 1024 }
+  "limits": { "seconds": 1800, "memory_mb": 4096 }
 }
