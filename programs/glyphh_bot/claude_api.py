@@ -1,7 +1,9 @@
 """The Claude API's Messages endpoint as glyphh.bots.ApiClaude uses it (`client.messages.stream(...)` and
 `get_final_message()`), over the run's `ctx.http`: the image carries no `anthropic` package, and every request goes
-through the run's egress proxy to api.anthropic.com. One request a step (not streamed: a bot's step has no tools, so
-it is one turn); an overloaded or rate-limited API is asked again, twice."""
+through the run's egress proxy to api.anthropic.com. Each request is sent whole and answered whole (not streamed):
+one a step, or one for each turn of a step's loop of tool use (file_agent.py), whose `tools`, `tool_use` and
+`tool_result` blocks are the API's own and pass through as they are; an overloaded or rate-limited API is asked
+again, twice. A message's `usage` carries the cache's input counts too."""
 
 from __future__ import annotations
 
@@ -74,5 +76,10 @@ def _message(body: dict[str, Any]) -> Any:
         content=blocks,
         stop_reason=body.get("stop_reason"),
         model=body.get("model"),
-        usage=SimpleNamespace(input_tokens=usage.get("input_tokens", 0), output_tokens=usage.get("output_tokens", 0)),
+        usage=SimpleNamespace(
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+            cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+        ),
     )

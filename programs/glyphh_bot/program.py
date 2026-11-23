@@ -6,9 +6,14 @@ bot's connections and fetches for it). Each question the bot asks is the run's `
 `continue` carries the answer and the bot goes on in the same run. What the run leaves goes back as the Result: its
 state among it, for the server to keep. `effort` is how hard Claude works on the agent steps (the Claude API's
 `output_config.effort`). The call may carry the machine's folders the bot's owner chose (the link's `folders`,
-rrotord/folders.py): rrotor mounts exactly those in this run's sandbox, and `ctx.folders` names them.
+rrotord/folders.py): rrotor mounts exactly those in this run's sandbox, and `ctx.folders` names them. With
+`file_tools` (and folders, on the Claude API) each agent step is a loop of tool use over those folders' files
+(file_agent.py): it lists, reads, searches, writes and moves, a change made only on the server's word (its
+`file_change`: at once, or by taking the person's yes, for which the run asks). The Result then names the files the
+run read and changed (`data.files`, names only) and, at such a question, the change it asks about (`data.file`).
 
-    run(ctx, {package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort})
+    run(ctx, {package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort,
+              file_tools})
 """
 
 from __future__ import annotations
@@ -21,8 +26,10 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from claude_api import Messages
+from file_agent import FileClaude
 
 from rrotor import CliError, Ctx, ProgramError, Result
+from rrotor.files import FileRefused
 
 NEEDS = (3, 12)  # the Glyphh SDK this program needs: glyphh.bots.remote, HttpProgram, RunResult.to_result
 KEY = "ANTHROPIC_API_KEY"  # the org's Anthropic API key, a secret of this program (optional: claude "cli" needs none)
@@ -52,9 +59,11 @@ def make_ada(base: str, key: str) -> Any:
     return Ada(base, key)
 
 
-def claude_of(ctx: Ctx, inputs: dict[str, Any]) -> Any:
+def claude_of(ctx: Ctx, inputs: dict[str, Any], program: Any = None, kept: Any = None, said: Any = None) -> Any:
     """The bot's Claude: the API on the org's key from the vault (`api`, the default), or Claude Code signed in on
-    this rrotor (`cli`: `claude -p`, by ctx.cli)."""
+    this rrotor (`cli`: `claude -p`, by ctx.cli). On the API, with `file_tools` and folders given, its steps use
+    those folders' files (FileClaude): `program` is where the server is asked about a change, `kept` what the last
+    go of this run left and `said` the person's answer to it."""
     from glyphh.bots import ApiClaude, BotError, Claude
 
     model = str(inputs.get("model") or "opus")
@@ -75,7 +84,28 @@ def claude_of(ctx: Ctx, inputs: dict[str, Any]) -> Any:
             "(PUT /v1/programs/glyphh_bot/secrets/ANTHROPIC_API_KEY or secret_set), or call it with "
             '"claude": "cli" to use Claude Code signed in here.'
         )
-    return ApiClaude(model=model, client=Effort(Messages(ctx.http, key), inputs.get("effort")))
+    client = Effort(Messages(ctx.http, key), inputs.get("effort"))
+    if inputs.get("file_tools") is True and ctx.folders:
+        return FileClaude(
+            client, model, ctx.folders, may_change(program), task=inputs.get("given"), kept=kept, said=said
+        )
+    return ApiClaude(model=model, client=client)
+
+
+def may_change(program: Any) -> Any:
+    """Whether a change to a file may be made now, by the server's word (its tool `file_change`, given the change's
+    action and names): True at once when the bot acts on its own, or once the person's yes to this very change is
+    taken; False when the person is to be asked. The server refusing or out of reach refuses the change."""
+    from glyphh.bots import ToolError
+
+    def grant(change: dict[str, str]) -> bool:
+        try:
+            said = program.call("file_change", change)
+        except ToolError as err:
+            raise FileRefused(f"The change was not made: {err}.") from None
+        return isinstance(said, dict) and said.get("allowed") is True
+
+    return grant
 
 
 # The Claude models that take `output_config.effort`, and the levels each takes (the Claude API's own): a model not
@@ -124,18 +154,23 @@ def answer_of(said: Any) -> Any:
     return said
 
 
-def leg(ctx: Ctx, inputs: dict[str, Any], state: str | None, answer: Any, spent: dict[str, int]) -> dict[str, Any]:
+def leg(
+    ctx: Ctx, inputs: dict[str, Any], state: str | None, answer: Any, spent: dict[str, int], kept: Any = None
+) -> dict[str, Any]:
     """One go of the bot's runner: from its first step (no answer), or the waiting run carried on with `answer`.
-    Answers its Result as JSON (RunResult.to_result), its tokens counted with what this run spent before."""
+    Answers its Result as JSON (RunResult.to_result), its tokens counted with what this run spent before. A bot
+    with its folders' files: `data.files` names those it read and changed so far, `data.file` the change it stopped
+    to ask about, and `kept` (beside `data`, so never sent up) is what its next go needs (`kept`, from the last)."""
     remote = sdk()
     from glyphh.bots import BotError, HttpProgram
 
     try:
         program = HttpProgram(str(inputs["tool_url"]), str(inputs["tool_token"]), post=tool_post(ctx))
+        claude = claude_of(ctx, inputs, program, kept, answer)
         ran = remote.go(
             inputs["package"],
             ada=make_ada(str(inputs["ada_base"]), str(inputs["ada_key"])),
-            claude=claude_of(ctx, inputs),
+            claude=claude,
             program=program,
             state=state,
             given=inputs.get("given"),
@@ -149,8 +184,14 @@ def leg(ctx: Ctx, inputs: dict[str, Any], state: str | None, answer: Any, spent:
             "data": {"reason": err.message, "problems": err.problems, "state": state, "tokens": spent},
         }
     used = ran.tokens or {}
-    ran.tokens = {k: spent.get(k, 0) + int(used.get(k, 0)) for k in ("input_tokens", "output_tokens")}
+    held = claude.spent if isinstance(claude, FileClaude) else {}  # of a step that stopped to ask
+    ran.tokens = {k: spent.get(k, 0) + int(used.get(k, 0)) + held.get(k, 0) for k in ("input_tokens", "output_tokens")}
     out: dict[str, Any] = ran.to_result()
+    if isinstance(claude, FileClaude):
+        out["kept"] = claude.keep()
+        out["data"]["files"] = out["kept"]["files"]
+        if claude.asked and out["status"] != "failed":
+            out["data"]["file"] = claude.asked
     return out
 
 
@@ -172,7 +213,7 @@ def run(ctx: Ctx, inputs: dict[str, Any]) -> Result:
 
         def carry(before: dict[str, Any] = before, said: Any = said) -> dict[str, Any]:
             got = before["data"]
-            return leg(ctx, inputs, got.get("state"), answer_of(said), got.get("tokens") or zero)
+            return leg(ctx, inputs, got.get("state"), answer_of(said), got.get("tokens") or zero, before.get("kept"))
 
         left = ctx.checkpoint(f"leg-{n}", carry)
     data = left["data"]

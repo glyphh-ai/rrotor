@@ -20,7 +20,8 @@
           "tool_token": { "type": "string", "minLength": 1 },
           "model": { "type": "string", "description": "opus, sonnet, haiku or a model id; agent.md's own wins" },
           "claude": { "enum": ["api", "cli"], "description": "api (the default): the Claude API on the secret ANTHROPIC_API_KEY; cli: Claude Code signed in on this rrotor" },
-          "effort": { "enum": ["low", "medium", "high", "xhigh", "max"], "description": "How hard Claude works on its agent steps (the Claude API's output_config.effort; api only): left out, or on a model that takes none, the model's own default" }
+          "effort": { "enum": ["low", "medium", "high", "xhigh", "max"], "description": "How hard Claude works on its agent steps (the Claude API's output_config.effort; api only): left out, or on a model that takes none, the model's own default" },
+          "file_tools": { "type": "boolean", "description": "true: with folders given (the call's folders) and claude api, each agent step works with those folders' files in a loop of tool use (list, read, search, write, move; no delete, no shell), a change made only on the server's word (its tool file_change); the Result names the files read and changed (data.files) and never what is in them" }
         },
         "additionalProperties": false
       }
