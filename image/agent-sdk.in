@@ -1,0 +1,11 @@
+# The Claude Agent SDK glyphh_bot's `agent` runs a bot's turn with (docs/architecture.md, 5.10), for the sandbox:
+# installed beside the Glyphh SDK under /usr/local/lib/rrotor-sdk (image/Dockerfile). image/agent-sdk.lock is this
+# file resolved with every dependency pinned and hashed:
+#
+#   uv pip compile image/agent-sdk.in --generate-hashes --python-version 3.13 \
+#     --python-platform x86_64-manylinux_2_28 -o image/agent-sdk.lock
+#
+# (the lock is the same for aarch64: each pin carries the hashes of all its wheels). The wheel bundles a copy of the
+# Claude Code binary, which the image drops: the agent runs the image's own `claude` (image/clis.json), pinned to
+# the version this SDK was built with (claude_agent_sdk/_cli_version.py).
+claude-agent-sdk==0.2.187

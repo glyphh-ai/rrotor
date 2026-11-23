@@ -12,13 +12,16 @@ COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /usr/local/bin/uv
 # The vendors' agent CLIs (Claude Code, Codex, Gemini, Cursor, Grok, Copilot), pinned in image/clis.json by version
 # and the SHA-256 of each architecture's download, checked before anything is unpacked; each with its built-in
 # manifest beside it, which rrotord deploys at boot (docs/architecture.md, 5.7). The Glyphh SDK (image/sdk.lock, hashed)
-# under /usr/local/lib/rrotor-sdk, for every program and the built-in glyphh CLI.
+# under /usr/local/lib/rrotor-sdk, for every program and the built-in glyphh CLI; beside it the Claude Agent SDK and
+# what it imports (image/agent-sdk.lock, hashed), for glyphh_bot's agent, without the copy of Claude Code its wheel
+# bundles (about 360 MB): the agent runs the image's own `claude`, pinned in image/clis.json to the version that SDK
+# ships. What is added is about 32 MB.
 FROM os AS clis
 ARG TARGETARCH
-COPY image/clis.json image/clis.py image/sdk.lock /tmp/
+COPY image/clis.json image/clis.py image/sdk.lock image/agent-sdk.lock /tmp/
 RUN uv pip install -q --no-cache --target /clis/usr/local/lib/rrotor-sdk --python /usr/bin/python3 \
-      --require-hashes --only-binary :all: --no-deps -r /tmp/sdk.lock \
- && rm -rf /clis/usr/local/lib/rrotor-sdk/bin \
+      --require-hashes --only-binary :all: --no-deps -r /tmp/sdk.lock -r /tmp/agent-sdk.lock \
+ && rm -rf /clis/usr/local/lib/rrotor-sdk/bin /clis/usr/local/lib/rrotor-sdk/claude_agent_sdk/_bundled/claude \
  && python3 /tmp/clis.py /tmp/clis.json /clis "${TARGETARCH}"
 
 FROM os AS build
@@ -46,7 +49,10 @@ COPY --from=clis /clis/ /
 # Glyphh's own programs (programs/: glyphh_bot and glyphh_swarm, which the server calls over the link), deployed at boot
 # as built-ins after the CLIs they run (docs/architecture.md, 5.10): their code and manifests, not their tests.
 COPY programs/glyphh_bot/glyphh.json programs/glyphh_bot/vendor.json programs/glyphh_bot/program.py \
-     programs/glyphh_bot/claude_api.py /usr/local/lib/rrotor-programs/glyphh_bot/
+     programs/glyphh_bot/claude_api.py programs/glyphh_bot/file_agent.py programs/glyphh_bot/agent_loop.py \
+     programs/glyphh_bot/agent_tools.py programs/glyphh_bot/agent_run.py programs/glyphh_bot/agent_plugins.py \
+     programs/glyphh_bot/code_step.py \
+     /usr/local/lib/rrotor-programs/glyphh_bot/
 COPY programs/glyphh_swarm/glyphh.json programs/glyphh_swarm/vendor.json programs/glyphh_swarm/program.py \
      programs/glyphh_swarm/swarm_turns.py programs/glyphh_swarm/terminal.py \
      /usr/local/lib/rrotor-programs/glyphh_swarm/

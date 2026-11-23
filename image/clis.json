@@ -4,17 +4,17 @@
     "claude": {
       "vendor": "Anthropic",
       "title": "Claude Code",
-      "version": "2.1.316",
+      "version": "2.1.330",
       "command": "claude",
       "builds": {
         "amd64": {
-          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.316.tgz",
-          "sha256": "745e1b196eb475161a185a00f5e1144d7324ec6094e21149eae719fa42481000",
+          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.330.tgz",
+          "sha256": "40ff30c5768723958032132065e6fcdd1e2dc3a2b3ff9a0bf36c6620ef1c40ef",
           "entry": "package/claude"
         },
         "arm64": {
-          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.316.tgz",
-          "sha256": "3a948e45a0c79d1b41e5e40bb4163b5f9e4a193c16ed72c949d8e5f55e9d875d",
+          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.330.tgz",
+          "sha256": "5460d42c696670f4fd2a7ec619719edda14a576b28ee3c289b348ade96efbf6d",
           "entry": "package/claude"
         }
       },

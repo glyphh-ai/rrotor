@@ -1,7 +1,7 @@
 """glyphh_bot: one of the server's hosted bots, run on this rrotor (docs/architecture.md, 5.10). The server holds the
 bot (its package and its runner's state) and sends `call` over the link; this program runs the Glyphh SDK's runner
 (glyphh.bots) here: its agent steps on Claude (the API on the org's own key from this rrotor's vault, or Claude Code
-signed in here), its gates in Ada with the bot's own key, its tools at the server (HttpProgram: the server calls the
+signed in here), its decisions in Ada with the bot's own key, its tools at the server (HttpProgram: the server calls the
 bot's connections and fetches for it). Each question the bot asks is the run's `needs_input`; the server's
 `continue` carries the answer and the bot goes on in the same run. What the run leaves goes back as the Result: its
 state among it, for the server to keep. `effort` is how hard Claude works on the agent steps (the Claude API's
@@ -14,6 +14,19 @@ run read and changed (`data.files`, names only) and, at such a question, the cha
 
     run(ctx, {package, state, given, answer, ada_base, ada_key, tool_url, tool_token, model, claude, effort,
               file_tools})
+
+`agent` (rrotor 0.9.0) is a bot's run as the server now makes it: not a loop of steps but one Claude Agent SDK
+conversation turn (agent_loop.py), with the server-side tools, the folders' files and a plugin's scripts as its only
+tools (agent_tools.py). `run` stays for a server that still walks a bot's loop.
+
+    agent(ctx, {system, message, tools, plugins, skills, model, effort, limits, resume, tool_url, tool_token,
+                claude, file_tools})
+
+`code` (rrotor 0.10.0) is one `code` step of a program the server walks (its docs/specs/programs.md): a function of
+the program's `program.py`, run here in this run's sandbox with the step's input, none of this program's secrets
+given to it (code_step.py). The server walks every other step itself; only code comes here.
+
+    code(ctx, {source, function, given})
 """
 
 from __future__ import annotations
@@ -25,6 +38,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import agent_loop
+import code_step
 from claude_api import Messages
 from file_agent import FileClaude
 
@@ -220,3 +235,19 @@ def run(ctx: Ctx, inputs: dict[str, Any]) -> Result:
     if left["status"] == "failed":
         return Result.failed(str(left.get("step") or "bot"), str(data.get("reason") or "the bot failed"), data)
     return Result.done(data)
+
+
+def agent(ctx: Ctx, inputs: dict[str, Any]) -> Result:
+    """A bot's run as one Claude Agent SDK turn (agent_loop.py): `needs_input` at each question the server stops it
+    with, a `continue` carrying the same session on; at the end `done` (`data.output` the agent's words, `steps`,
+    `files`, `tokens`) or `failed` (`data.reason`)."""
+    return agent_loop.run(ctx, inputs)
+
+
+def code(ctx: Ctx, inputs: dict[str, Any]) -> Result:
+    """A program's code step: `function` of `source` (its program.py) called with `given`; `done` with
+    `data.result` (what it returned) and `data.printed`, or `failed` saying why."""
+    work = ctx.files / "code"
+    work.mkdir(parents=True, exist_ok=True)
+    ok, data = code_step.run(inputs.get("source"), inputs.get("function"), inputs.get("given"), work)
+    return Result.done(data) if ok else Result.failed("code", str(data["reason"]), data)
