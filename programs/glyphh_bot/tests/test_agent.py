@@ -345,7 +345,7 @@ def test_an_action_asks_the_server_first_and_the_run_waits_then_carries_on(loop,
     assert claude.clis[1].sent == ["The person said yes to Send a message in Slack. Carry on."]
     assert claude.options.resume == SID
     assert seen["sent"] == {"text": '{"ok": true}', "error": False}
-    assert len(server.asked("slack-send-message")) == 2  # asked once in the gate, not again by the tool
+    assert len(server.asked("slack-send-message")) == 2  # asked once in the permission callback, not again by the tool
     assert done.data["steps"] == [
         {"tool": "gmail-find-email", "ok": True},
         {"tool": "slack-send-message", "ok": True},
@@ -557,11 +557,11 @@ def test_a_change_the_server_stops_the_run_for_and_one_never_allowed(loop, monke
     tools = sys.modules["agent_tools"]
 
     async def script(cli: Cli) -> AsyncIterator[Any]:
-        gate = cli.options.can_use_tool.__self__
-        kind = gate.specs["mcp__bot__write_file"].kind
-        # a write the gate never allowed is not made, whoever calls the tool
-        seen["bare"] = kind.run(gate.specs["mcp__bot__write_file"], {"path": f"{notes}/Bare.md", "content": "x"})
-        seen["reads"] = kind.check(gate.specs["mcp__bot__read_file"], {"path": "x"})  # a read is never asked about
+        permits = cli.options.can_use_tool.__self__
+        kind = permits.specs["mcp__bot__write_file"].kind
+        # a write the permits never allowed is not made, whoever calls the tool
+        seen["bare"] = kind.run(permits.specs["mcp__bot__write_file"], {"path": f"{notes}/Bare.md", "content": "x"})
+        seen["reads"] = kind.check(permits.specs["mcp__bot__read_file"], {"path": "x"})  # a read is never asked about
         monkeypatch.setattr(tools.os, "makedirs", lambda *a, **k: (_ for _ in ()).throw(OSError(28, "No space")))
         seen["full"] = await cli.use("mcp__bot__write_file", {"path": f"{notes}/Full.md", "content": "x"})
         monkeypatch.undo()
@@ -658,8 +658,8 @@ def test_run_script_runs_a_declared_script_and_nothing_else(loop, monkeypatch, t
         seen["big"] = await cli.use(RUN, script_call("echo.py", stdin="x" * (1024 * 1024 + 1)))
         seen["no"] = await cli.use(RUN, script_call("echo.py", args=["no"]))
         seen["refused"] = await cli.use(RUN, script_call("echo.py", args=["refused"]))
-        gate = cli.options.can_use_tool.__self__
-        spec = gate.specs[RUN]
+        permits = cli.options.can_use_tool.__self__
+        spec = permits.specs[RUN]
         seen["bare"] = spec.kind.run(spec, script_call("echo.py"))  # never allowed: never run
         seen["bare_bad"] = spec.kind.run(spec, script_call("hidden.py"))
         monkeypatch.setitem(tools.RUNNERS, ".js", ["/nonexistent/node"])

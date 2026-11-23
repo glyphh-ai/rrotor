@@ -1,7 +1,7 @@
 """glyphh_bot: one of the server's hosted bots, run on this rrotor (docs/architecture.md, 5.10). The server holds the
 bot (its package and its runner's state) and sends `call` over the link; this program runs the Glyphh SDK's runner
 (glyphh.bots) here: its agent steps on Claude (the API on the org's own key from this rrotor's vault, or Claude Code
-signed in here), its gates in Ada with the bot's own key, its tools at the server (HttpProgram: the server calls the
+signed in here), its decisions in Ada with the bot's own key, its tools at the server (HttpProgram: the server calls the
 bot's connections and fetches for it). Each question the bot asks is the run's `needs_input`; the server's
 `continue` carries the answer and the bot goes on in the same run. What the run leaves goes back as the Result: its
 state among it, for the server to keep. `effort` is how hard Claude works on the agent steps (the Claude API's

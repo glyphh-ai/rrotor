@@ -26,7 +26,7 @@ from typing import Any
 
 import agent_plugins
 from agent_run import STEPS, Kept, sweep
-from agent_tools import FileTools, Gate, ScriptTools, Server, ServerTools
+from agent_tools import FileTools, Permits, ScriptTools, Server, ServerTools
 from file_agent import GUIDE
 
 from rrotor import Ctx, ProgramError, Result
@@ -139,7 +139,9 @@ def system_of(inputs: dict[str, Any], files: FileTools | None) -> str:
     return str(inputs["system"]) + GUIDE.format(folders=given)
 
 
-def options_of(sdk: Any, inputs: dict[str, Any], kept: Kept, gate: Gate, key: str, files: FileTools | None) -> Any:
+def options_of(
+    sdk: Any, inputs: dict[str, Any], kept: Kept, permits: Permits, key: str, files: FileTools | None
+) -> Any:
     """The turn's options: the bot's prompt, model and limits, its tools as the one MCP server `bot`, its plugins
     and skills, and the lock (this module's docstring)."""
     skills = [str(s) for s in inputs.get("skills") or []]
@@ -148,14 +150,14 @@ def options_of(sdk: Any, inputs: dict[str, Any], kept: Kept, gate: Gate, key: st
     return sdk.ClaudeAgentOptions(
         system_prompt=system_of(inputs, files),
         tools=["Skill"] if skills else [],
-        allowed_tools=gate.allowed(),
+        allowed_tools=permits.allowed(),
         disallowed_tools=list(BUILT_IN),
-        mcp_servers={"bot": sdk.create_sdk_mcp_server("bot", tools=gate.tools())},
+        mcp_servers={"bot": sdk.create_sdk_mcp_server("bot", tools=permits.tools())},
         strict_mcp_config=True,
         setting_sources=[],
         permission_mode="default",
-        can_use_tool=gate.can_use,
-        hooks={"PreToolUse": [sdk.HookMatcher(hooks=[gate.wall])]},
+        can_use_tool=permits.can_use,
+        hooks={"PreToolUse": [sdk.HookMatcher(hooks=[permits.wall])]},
         skills=skills or None,
         plugins=[{"type": "local", "path": str(p)} for p in plugins],
         model=str(inputs["model"]) if inputs.get("model") else None,
@@ -187,15 +189,15 @@ class Heard:
             self.result, self.session = got, got.session_id or self.session
 
 
-async def turn(sdk: Any, options: Any, message: str, seconds: float, gate: Gate, heard: Heard) -> bool:
+async def turn(sdk: Any, options: Any, message: str, seconds: float, permits: Permits, heard: Heard) -> bool:
     """One turn: the message sent, every message read until the turn's result. True when it ran out of time (the
     turn interrupted, and given GRACE seconds to say what it used)."""
 
     async def read(client: Any) -> None:
         async for got in client.receive_response():
             heard.note(got)
-            if gate.interrupt:
-                gate.interrupt = False
+            if permits.interrupt:
+                permits.interrupt = False
                 await client.interrupt()
 
     async with make_client(sdk, options) as client:
@@ -277,7 +279,7 @@ def go(ctx: Ctx, inputs: dict[str, Any], message: str, resume: bool) -> dict[str
         return left(kept, "failed", reason=said)
     server = Server(ctx.http, str(inputs["tool_url"]), str(inputs["tool_token"]))
     kinds, files = kinds_of(ctx, inputs, server, kept)
-    gate = Gate(sdk, kinds, kept.steps, skills=inputs.get("skills") or [])
+    permits = Permits(sdk, kinds, kept.steps, skills=inputs.get("skills") or [])
     heard = Heard(sdk, kept.session)
     seconds = min(limits.get("seconds", SECONDS), SECONDS_MAX)
     try:
@@ -285,8 +287,8 @@ def go(ctx: Ctx, inputs: dict[str, Any], message: str, resume: bool) -> dict[str
             # the read-only tools are in allowed_tools on purpose: they never ask (the SDK warns that they skip
             # can_use_tool); the hook still stands in front of them
             warnings.simplefilter("ignore", sdk.CanUseToolShadowedWarning)
-            options = options_of(sdk, inputs, kept, gate, key, files)
-            late = asyncio.run(turn(sdk, options, message, seconds, gate, heard))
+            options = options_of(sdk, inputs, kept, permits, key, files)
+            late = asyncio.run(turn(sdk, options, message, seconds, permits, heard))
     except sdk.ClaudeSDKError as err:
         return left(kept, "failed", reason=f"Claude Code failed: {type(err).__name__}: {str(err)[:300]}")
     kept.session = heard.session
@@ -295,8 +297,8 @@ def go(ctx: Ctx, inputs: dict[str, Any], message: str, resume: bool) -> dict[str
         kept.files, kept.read_bytes = files.named(), files.files.read_bytes
     if said := over(kept, limits):
         return left(kept, "failed", reason=said)
-    if gate.asked is not None and not late:
-        ask = gate.asked
+    if permits.asked is not None and not late:
+        ask = permits.asked
         return left(kept, "needs_input", ask.prompt, options=ask.options, **ask.detail)
     if said := why(heard.result, late, limits, seconds):
         return left(kept, "failed", reason=said)

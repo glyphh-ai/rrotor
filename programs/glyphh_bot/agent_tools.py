@@ -1,15 +1,16 @@
-"""The tools of a bot's agent turn, and the gate every call of one passes (docs/architecture.md, 5.10). The agent
-has exactly these, as one in-process MCP server named `bot`; Claude Code's own tools do not exist in the session.
+"""The tools of a bot's agent turn, and the permissions every call of one goes by (docs/architecture.md, 5.10). The
+agent has exactly these, as one in-process MCP server named `bot`; Claude Code's own tools do not exist in the session.
 
-    ServerTools   the server-side tools (the connections', decide, fetch, ...): each call is a POST of {tool, input}
-                  to the server's tool address, answered {result}, {error} or {ask: true}
+    ServerTools   the server-side tools (the connections', decide, ask_person, fetch, ...): each call is a POST of
+                  {tool, input} to the server's tool address, answered {result}, {error} or {ask: true}
     FileTools     the files of the folders the run was given (rrotor.files): list, read, search, write, move; a
                   change is made only on the server's word (its `file_change`)
     ScriptTools   run_script: one script a plugin of the bot declares, run in this run's sandbox; no other command
 
-A tool that is not read-only is asked about first (`Gate.can_use`, the Agent SDK's permission callback): the server
-is called there, and it decides. `{ask: true}` means it stopped the run with its question: the turn is interrupted
-and the run waits (`Gate.asked`). A result is kept and handed to the tool's own call, so the server is asked once.
+A tool that is not read-only is asked about first (`Permits.can_use`, the Agent SDK's permission callback): the
+server is called there, and it decides. `{ask: true}` means it stopped the run with its question (an approval, or the
+bot's own `ask_person`): the turn is interrupted and the run waits (`Permits.asked`). A result is kept and handed to
+the tool's own call, so the server is asked once.
 
 Nothing a tool answered is kept here or sent up: `steps` names the tools used and whether each worked, `files`
 the files read and changed."""
@@ -133,7 +134,7 @@ class ServerTools:
 
     def __init__(self, server: Server, tools: list[dict[str, Any]]) -> None:
         self._server = server
-        self._kept: dict[str, list[dict[str, Any]]] = {}  # answers the gate got, for the tool's own call
+        self._kept: dict[str, list[dict[str, Any]]] = {}  # answers the permission callback got, for the tool's own call
         self._tools = tools
 
     def specs(self) -> list[Spec]:
@@ -309,7 +310,7 @@ class ScriptTools:
         return json.dumps(said), done.returncode == 0
 
 
-class Gate:
+class Permits:
     """Every tool of the turn and the two walls in front of them: `can_use` (the Agent SDK's `can_use_tool`) and
     `wall` (a PreToolUse hook). `sdk` is the claude_agent_sdk module, `kinds` whose tools they are (the first to
     name a tool keeps the name), `steps` the run's list of the tools it used, `skills` the bot's own skills
