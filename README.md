@@ -78,3 +78,8 @@ path.
 - [`benchmarks/issues/`](benchmarks/issues/README.md): free-text issue triage, the counter-example.
 - [`benchmarks/bots/`](benchmarks/bots/README.md): a web session, person or robot, from how it behaves; the gate
   at glyphh.ai's edge and what its first probe said.
+
+
+## License
+
+Apache-2.0. See LICENSE and NOTICE. Copyright 2026 Chris Timmerman / Glyphh AI LLC. More about it: https://glyphh.ai/projects/rrotor
